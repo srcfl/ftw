@@ -300,19 +300,19 @@ func setupPerPhaseSite(phases int, voltage float64, aggGridW float64, l1A, l2A, 
 func TestPerPhaseClampScalesChargingOnImbalance(t *testing.T) {
 	// Isolate the per-phase case: aggregate predicted (7000 + 4000 =
 	// 11000 W) is under the 11040 W fuse, so the legacy aggregate
-	// branch wouldn't fire. But L1 alone is at 18 A × 230 V = 4140 W
-	// (over the 16 A fuse on that phase) — only the per-phase clamp
-	// can catch it.
-	store, state, _ := setupPerPhase(7000, 18, 12, 8, 0.6, 10000)
+	// branch wouldn't fire. But the 4000 W charge adds 4000 / 690 =
+	// 5.8 A to each phase, which takes L1 from 13 A to 18.8 A, over the
+	// 15 A working limit (16 A fuse less 1 A) — only the per-phase
+	// clamp can catch it.
+	store, state, _ := setupPerPhase(7000, 13, 12, 8, 0.6, 10000)
 	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
 	guarded := applyFuseGuard(targets, store, state, 11040)
 	if !guarded[0].Clamped {
 		t.Errorf("Clamped flag must mark per-phase response")
 	}
-	// Per-phase overage = (18 − 16) × 230 = 460 W on the worst phase.
-	// Balanced-3Φ assumption ⇒ 460 × 3 = 1380 W of total battery
-	// reduction needed. Charge 4000 → 4000 − 1380 = 2620 W.
-	expected := 2620.0
+	// L1 has (15 − 13) × 690 = 1380 W of room for a balanced-3Φ
+	// charge. Charge 4000 → 1380 W.
+	expected := 1380.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("charge after per-phase clamp = %.0f W, want %.0f W",
 			guarded[0].TargetW, expected)
@@ -333,9 +333,9 @@ func TestPerPhaseClampFiresFuseSaverFromIdle(t *testing.T) {
 	if out[0].TargetW >= 0 {
 		t.Errorf("expected discharge target, got %.0f W", out[0].TargetW)
 	}
-	// Same math as the charging test: 460 W × 3 = 1380 W. From idle
-	// (target 0), full discharge of 1380 W.
-	expected := -1380.0
+	// L1 is (18 − 15) A over the working limit: 3 × 690 = 2070 W of
+	// discharge from idle.
+	expected := -2070.0
 	if math.Abs(out[0].TargetW-expected) > 1 {
 		t.Errorf("forced discharge = %.0f W, want %.0f W", out[0].TargetW, expected)
 	}
@@ -365,13 +365,14 @@ func TestPerPhaseClampDisabledWhenSiteFuseAmpsZero(t *testing.T) {
 // huge imbalance, per-phase × 3 dominates.
 func TestPerPhaseClampDominatesAggregateWhenLarger(t *testing.T) {
 	// Aggregate over by 500 W (predicted = 11540 vs 11040). But L1 is
-	// at 22 A → over by 6 A × 230 = 1380 W per-phase × 3 = 4140 W.
+	// at 22 A → over the 15 A working limit by 7 A × 230 = 1610 W
+	// per-phase × 3 = 4830 W.
 	store, state, caps := setupPerPhase(11540, 22, 14, 8, 0.6, 10000)
 	out := fuseSaverFromLivePower(store, state, caps, 11040)
 	if out == nil {
 		t.Fatalf("expected discharge, got nil")
 	}
-	expected := -4140.0
+	expected := -4830.0
 	if math.Abs(out[0].TargetW-expected) > 1 {
 		t.Errorf("forced discharge = %.0f W, want %.0f W (per-phase × 3)",
 			out[0].TargetW, expected)
@@ -384,11 +385,12 @@ func TestPerPhaseClampDominatesAggregateWhenLarger(t *testing.T) {
 // trigger forceFuseDischarge, which would push more power out and
 // worsen the over-current phase. Regression for PR #219 review S1.
 func TestPerPhaseClampFiresOnExportImbalance(t *testing.T) {
-	// Aggregate gridW = -7000 W (heavy export). Phases (magnitude):
-	// L2 = 18 A (over the 16 A fuse), L1 = 12, L3 = 8. Per-phase
-	// overage = (18 − 16) × 230 × 3 = 1380 W of discharge to shrink.
-	// Battery is currently discharging −5000 W; the target reduces
-	// magnitude to bring L2 back under fuse.
+	// Aggregate gridW = -7000 W (heavy export). Phases (magnitude, no
+	// phase power, so they take the total's direction): L2 = 18 A (over
+	// the 15 A working limit), L1 = 12, L3 = 8. Per-phase overage =
+	// (18 − 15) × 230 × 3 = 2070 W of discharge to shrink. Battery is
+	// currently discharging −5000 W; the target reduces magnitude to
+	// bring L2 back under the limit.
 	store, state, _ := setupPerPhase(-7000, 12, 18, 8, 0.6, 10000)
 	// Set the live battery reading so applyFuseGuard's "predicted"
 	// reflects the current discharge state.
@@ -401,8 +403,8 @@ func TestPerPhaseClampFiresOnExportImbalance(t *testing.T) {
 	if !guarded[0].Clamped {
 		t.Errorf("export-side per-phase overage must clamp the discharge target")
 	}
-	// New discharge magnitude: 5000 − 1380 = 3620 W → target = −3620 W.
-	expected := -3620.0
+	// New discharge magnitude: 5000 − 2070 = 2930 W → target = −2930 W.
+	expected := -2930.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("discharge after export-side per-phase clamp = %.0f W, want %.0f W",
 			guarded[0].TargetW, expected)
@@ -460,43 +462,42 @@ func TestForceFuseDischargeIgnoresExportSidePerPhase(t *testing.T) {
 // inverter's own per-phase limiter trips first and causes a flap).
 // Regression for PR #219 — the bug class motivating the safety margin.
 func TestPerPhaseClampHonorsSafetyMargin(t *testing.T) {
-	// Phases (15.5, 12, 8). MaxAmps = 16, SafetyA = 1.0 → effective
-	// threshold = 15 A. L1 at 15.5 A is OVER the effective threshold
-	// (under the raw 16 A). Per-phase overage = (15.5 − 15) × 230 × 3
-	// = 345 W of charge to shrink.
-	store, state, _ := setupPerPhase(7000, 15.5, 12, 8, 0.6, 10000)
-	state.SiteFuseSafetyA = 1.0
+	// Phases (10, 7, 5). MaxAmps = 16, SafetyA = 2.0 → effective
+	// threshold = 14 A, below the 1 A working margin's 15 A. The
+	// 4000 W charge adds 5.8 A per phase, so L1 reaches 15.8 A: over
+	// 14 A by 1.8 A, 1240 W of charge to shrink. Without the margin it
+	// would be 550 W.
+	store, state, _ := setupPerPhase(5000, 10, 7, 5, 0.6, 10000)
+	state.SiteFuseSafetyA = 2.0
 	state.SiteFusePhases = 3
 	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
 	guarded := applyFuseGuard(targets, store, state, 11040)
 	if !guarded[0].Clamped {
-		t.Errorf("safety margin should pull the threshold under L1 = 15.5 A")
+		t.Errorf("safety margin should pull the threshold under L1")
 	}
-	// Aggregate effFuseW = 11040 − 1.0×230×3 = 10350. Predicted =
-	// 7000 + 4000 − 0 = 11000 → aggregate overage = 11000 − 10350 = 650.
-	// Per-phase overage × 3 = 345. Aggregate wins (650 > 345).
-	// Buffer = half-margin = 0.5×1×230×3 = 345 W (post-fix headroom).
-	// Charge 4000 − 650 − 345 = 3005.
-	expected := 3005.0
+	// Aggregate effFuseW = 11040 − 2×230×3 = 9660. Predicted =
+	// 5000 + 4000 − 0 = 9000 → no aggregate overage. Per-phase wins.
+	// Buffer = half-margin = 0.5×2×230×3 = 690 W (post-fix headroom).
+	// Charge 4000 − 1240 − 690 = 2070.
+	expected := 2070.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("charge after safety-margin clamp = %.0f W, want %.0f W",
 			guarded[0].TargetW, expected)
 	}
 }
 
-// SafetyMarginA = 0 must produce identical output to the pre-PR
-// behaviour (locks the back-compat contract every existing per-phase
-// test relies on by leaving the field unset).
+// SafetyMarginA = 0 keeps the 1 A working margin the car uses (every
+// existing per-phase test relies on it by leaving the field unset).
 func TestPerPhaseClampSafetyMarginZeroIsBackCompat(t *testing.T) {
-	store, state, _ := setupPerPhase(7000, 18, 12, 8, 0.6, 10000)
+	store, state, _ := setupPerPhase(7000, 13, 12, 8, 0.6, 10000)
 	state.SiteFuseSafetyA = 0
 	state.SiteFusePhases = 3
 	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
 	guarded := applyFuseGuard(targets, store, state, 11040)
 	// Same math as TestPerPhaseClampScalesChargingOnImbalance.
-	expected := 2620.0
+	expected := 1380.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
-		t.Errorf("safety_margin_a=0 must match pre-PR behaviour: got %.0f W, want %.0f W",
+		t.Errorf("safety_margin_a=0 must keep the 1 A working margin: got %.0f W, want %.0f W",
 			guarded[0].TargetW, expected)
 	}
 }
@@ -508,9 +509,9 @@ func TestPerPhaseClampSafetyMarginZeroIsBackCompat(t *testing.T) {
 // phase count, and on a 1Φ site the aggregate meter and the single
 // phase are the same wire — relief there is 1 × the overage, not 3 ×.
 //
-// A 1Φ site at 24 A on a 16 A fuse (0.5 A margin ⇒ 15.5 A threshold,
-// 230 V): fuse budget 3680 W, aggregate ceiling 3565 W, meter at
-// 5520 W. Worst-phase overage = (24 − 15.5) × 230 = 1955 W, which on
+// A 1Φ site at 24 A on a 16 A fuse (1 A margin ⇒ 15 A threshold,
+// 230 V): fuse budget 3680 W, aggregate ceiling 3450 W, meter at
+// 5520 W. Worst-phase overage = (24 − 15) × 230 = 2070 W, which on
 // this site is also exactly the aggregate overage — the two numbers
 // must agree when there is only one phase.
 
@@ -518,21 +519,21 @@ func TestPerPhaseClampSafetyMarginZeroIsBackCompat(t *testing.T) {
 // once, and leaves the meter on the import side of zero.
 func TestPerPhaseReliefMatchesSinglePhaseSiteOnImport(t *testing.T) {
 	store, state, caps := setupPerPhaseSite(1, 230, 5520, 24, 0, 0, 0.6, 10000)
-	state.SiteFuseSafetyA = 0.5
+	state.SiteFuseSafetyA = 1
 	fuseMaxW := 16 * 230.0 * 1
 
 	out := fuseSaverFromLivePower(store, state, caps, fuseMaxW)
 	if out == nil {
 		t.Fatalf("1Φ site at 24 A on a 16 A fuse: expected a forced discharge")
 	}
-	expected := -1955.0
+	expected := -2070.0
 	if math.Abs(out[0].TargetW-expected) > 1 {
 		t.Fatalf("forced discharge = %.0f W, want %.0f W (overage × 1 phase, "+
 			"not × 3)", out[0].TargetW, expected)
 	}
 	// The site has one phase, so the post-dispatch meter is that
-	// phase. Demanding 3 × 1955 W would have driven 5520 W of import
-	// to 345 W of export: relief the site never needed, pushing the
+	// phase. Demanding 3 × 2070 W would have driven 5520 W of import
+	// to 690 W of export: relief the site never needed, pushing the
 	// same breaker up the other way.
 	if postGridW := 5520 + out[0].TargetW; postGridW < 0 {
 		t.Errorf("post-dispatch grid = %.0f W: relief overshot through zero "+
@@ -547,7 +548,7 @@ func TestPerPhaseReliefMatchesSinglePhaseSiteOnExport(t *testing.T) {
 	// Meter magnitudes mirror the import case: 5520 W out, 24 A on the
 	// one phase. Pixii-style signed per-phase amps, so L1 reads −24.
 	store, state, _ := setupPerPhaseSite(1, 230, -5520, -24, 0, 0, 0.6, 10000)
-	state.SiteFuseSafetyA = 0.5
+	state.SiteFuseSafetyA = 1
 	fuseMaxW := 16 * 230.0 * 1
 
 	// The battery is already discharging what the meter shows, and the
@@ -560,10 +561,10 @@ func TestPerPhaseReliefMatchesSinglePhaseSiteOnExport(t *testing.T) {
 	if !guarded[0].Clamped {
 		t.Fatalf("export-side per-phase overage must clamp the discharge target")
 	}
-	// Discharge 5000 − overage 1955 − buffer (half the 115 W margin)
-	// = 2987.5 W. Demanding 1955 × 3 leaves nothing: the discharge is
+	// Discharge 5000 − overage 2070 − buffer (half the 230 W margin)
+	// = 2815 W. Demanding 2070 × 3 leaves nothing: the discharge is
 	// zeroed and the site swings to 520 W of import.
-	expected := -2987.5
+	expected := -2815.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("discharge after 1Φ export clamp = %.1f W, want %.1f W",
 			guarded[0].TargetW, expected)
@@ -599,15 +600,15 @@ func TestPerPhaseClampReadsConfiguredPhasesOnly(t *testing.T) {
 // Per-phase watts come from the configured voltage, the same source
 // fuseSafetyMarginW uses. A 240 V site converts its amps at 240 V.
 func TestPerPhaseClampUsesConfiguredVoltage(t *testing.T) {
-	store, state, _ := setupPerPhaseSite(3, 240, 7000, 18, 12, 8, 0.6, 10000)
+	store, state, _ := setupPerPhaseSite(3, 240, 7000, 13, 12, 8, 0.6, 10000)
 	targets := []DispatchTarget{{Driver: "bat", TargetW: 4000}}
 	guarded := applyFuseGuard(targets, store, state, 16*240.0*3)
 	if !guarded[0].Clamped {
-		t.Fatalf("L1 at 18 A on a 16 A fuse must clamp")
+		t.Fatalf("a 4000 W charge on L1 at 13 A on a 16 A fuse must clamp")
 	}
-	// (18 − 16) × 240 = 480 W per phase × 3 = 1440 W of relief.
-	// Charge 4000 → 2560. At the old hardcoded 230 V it would be 2620.
-	expected := 2560.0
+	// L1 has (15 − 13) A of room below the working limit: 2 × 240 × 3
+	// = 1440 W of charge. At the old hardcoded 230 V it would be 1380.
+	expected := 1440.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("charge after per-phase clamp on a 240 V site = %.0f W, "+
 			"want %.0f W", guarded[0].TargetW, expected)
@@ -914,9 +915,10 @@ func TestDeadbandExitDefendsPerPhaseBreaker(t *testing.T) {
 		t.Fatalf("L1 at 18 A on a 16 A fuse inside the aggregate deadband: " +
 			"expected a forced discharge, got no targets")
 	}
-	// Per-phase overage = (18 − 16) × 230 = 460 W on the worst phase,
-	// × 3 under the balanced-3Φ assumption = 1380 W from idle.
-	expected := -1380.0
+	// Per-phase overage = (18 − 15) × 230 = 690 W over the working
+	// limit on the worst phase, × 3 under the balanced-3Φ assumption
+	// = 2070 W from idle.
+	expected := -2070.0
 	if math.Abs(out[0].TargetW-expected) > 1 {
 		t.Errorf("forced discharge = %.0f W, want %.0f W", out[0].TargetW, expected)
 	}
@@ -932,7 +934,7 @@ func TestDeadbandExitPerPhaseReliefPreservesLiveDischarge(t *testing.T) {
 	const (
 		liveBatteryW = -5000.0
 		liveWorstA   = 18.0
-		fuseA        = 16.0
+		fuseA        = 15.0 // 16 A fuse less the 1 A working margin
 		phases       = 3.0
 		voltage      = 230.0
 	)
@@ -969,7 +971,7 @@ func TestDeadbandExitPerPhaseReliefStartsFromLiveCharge(t *testing.T) {
 	const (
 		liveBatteryW = 5000.0
 		liveWorstA   = 18.0
-		fuseA        = 16.0
+		fuseA        = 15.0 // 16 A fuse less the 1 A working margin
 		phases       = 3.0
 		voltage      = 230.0
 	)
@@ -1380,7 +1382,7 @@ func TestDeadbandExitUsesOnlyRemainingPerPhaseReliefAfterChargeCap(t *testing.T)
 		liveBatteryW = 5000.0
 		maxChargeW   = 4500.0
 		liveWorstA   = 18.0
-		fuseA        = 16.0
+		fuseA        = 15.0 // 16 A fuse less the 1 A working margin
 		phaseReliefW = (liveWorstA - fuseA) * 230 * 3
 	)
 	store, state, caps := setupPerPhase(0, liveWorstA, 4, 4, 0.6, 10000)

@@ -17,7 +17,7 @@ import (
 // Meters report phase magnitudes, so the mean uses |aggregate|. Phases
 // flowing in opposite directions make the gap look smaller than it is; the
 // per-phase fuse guards still act on a real overage. A single-phase battery
-// or charger is outside this model, as it is for perPhaseReliefW.
+// or charger is outside this model, as it is for phaseFuseReliefW.
 func phaseImbalanceA(r *telemetry.DerReading, state *State) (float64, bool) {
 	if state == nil || state.SiteFuseAmps <= 0 || state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 1 {
 		return 0, false

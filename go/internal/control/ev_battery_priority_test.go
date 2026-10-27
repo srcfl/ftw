@@ -47,7 +47,10 @@ func TestIssue1868BatteryChargeYieldsBeforeTheCar(t *testing.T) {
 				if target.TargetW > 3931.001 {
 					t.Fatalf("%s left the car's relief in the battery: %+v", mode, target)
 				}
-				if mode == ModeCharge && target.TargetW < 3800 {
+				// Charge mode asks for a raise. The fuse guard caps it at L1's
+				// working limit less half the margin (3758.5 W), and the car's
+				// headroom then takes the same 69 W again.
+				if mode == ModeCharge && target.TargetW < 3600 {
 					t.Fatalf("small overage needlessly stopped battery charging: %+v", target)
 				}
 			}
