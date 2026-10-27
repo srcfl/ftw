@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -188,7 +189,15 @@ func (m Manager) Select() (path, tag string, trial bool, err error) {
 			// A damaged current release would fail every start. Run the
 			// previous one once as a trial; it commits as any trial does.
 			if previous := m.fallbackCandidateLocked(state); previous != "" {
-				state.LastFailed = state.Current
+				slog.Warn("current release is damaged; starting the previous release once",
+					"current", state.Current, "previous", previous, "err", readErr)
+				// Keep a release that already failed marked, such as a
+				// trial that just crashed, so updates do not offer it again.
+				// A fallback that dies marks the previous release through
+				// the trial branch above, so it runs only once.
+				if state.LastFailed == "" {
+					state.LastFailed = state.Current
+				}
 				state.Trial = previous
 				if writeErr := m.writeLocked(state); writeErr != nil {
 					return writeErr

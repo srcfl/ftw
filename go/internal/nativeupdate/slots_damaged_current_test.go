@@ -76,6 +76,42 @@ func TestSelectDoesNotFallBackWithoutCurrentReceipt(t *testing.T) {
 	}
 }
 
+// A trial that crashed while current was damaged stays marked after the
+// fallback starts, so the update check does not offer it again.
+func TestSelectFallbackKeepsTheCrashedTrialMarked(t *testing.T) {
+	clock := &testClock{t: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
+	m := committed(t, clock)
+	clock.t = clock.t.Add(48 * time.Hour)
+	release(t, m.Root, "v0.133.0")
+	if err := m.Prepare("v0.133.0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, tag, trial, err := m.Select(); err != nil || tag != "v0.133.0" || !trial {
+		t.Fatalf("trial start %s trial=%v %v", tag, trial, err)
+	}
+	if err := os.Remove(filepath.Join(m.Root, "releases", "v0.132.0", "web", "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	// The v0.133.0 trial exits before it commits.
+	_, tag, trial, err := m.Select()
+	if err != nil || tag != "v0.131.0" || !trial {
+		t.Fatalf("fallback %s trial=%v %v", tag, trial, err)
+	}
+	state, err := m.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Trial != "v0.131.0" || state.LastFailed != "v0.133.0" {
+		t.Fatalf("slots after fallback: %+v", state)
+	}
+	if err := m.Commit("v0.131.0"); err != nil {
+		t.Fatal(err)
+	}
+	if state, _ = m.Read(); state.Current != "v0.131.0" || state.LastFailed != "v0.133.0" {
+		t.Fatalf("slots after commit: %+v", state)
+	}
+}
+
 func TestSelectDoesNotFallBackAcrossSchemas(t *testing.T) {
 	clock := &testClock{t: time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)}
 	m := committed(t, clock)
