@@ -359,38 +359,123 @@ func TestInvariantsLeverAndFaults(t *testing.T) {
 	}
 }
 
-// R8, C1: once the inverter and Core are back, a battery FTW does not
-// dispatch leaves its forced mode within 10 s.
+// forcedCase is an R8 run: the inverter's register holds a forced command
+// from the start until forcedTo, and FTW dispatches the battery from
+// dispatchFrom (0: never). An outage of the inverter (offline: it stops; a
+// silence: it runs but does not answer) or a Core restart may come first.
+type forcedCase struct {
+	name         string
+	outage       string  // "offline", "silence" or ""
+	outFrom      float64 // the outage, from outFrom
+	outFor       float64 // for outFor
+	readAt       float64 // Core's polls of the inverter fail from outFrom until here
+	stop, up     float64 // a Core restart (SIGTERM at stop), if up > 0
+	cmd          float64 // 187 discharge, 170 charge
+	setW         float64
+	forcedTo     float64
+	dispatchFrom float64
+	want         bool
+}
+
+func (c forcedCase) run() *runData {
+	// FTW dispatched the battery until the outage or the stop.
+	lead := c.outFrom
+	if c.up > 0 && (c.outage == "" || c.stop < lead) {
+		lead = c.stop
+	}
+	d := randomRun(1201, 16, 5, func(i int, r *sample) {
+		t := float64(i)
+		if t < c.forcedTo {
+			r.Bat.EMSMode, r.Bat.EMSCmd, r.Bat.EMSSetW = 2, c.cmd, c.setW
+		} else {
+			r.Bat.EMSCmd = 204
+		}
+		if c.outage == "offline" && t >= c.outFrom && t < c.outFrom+c.outFor {
+			off := false
+			r.Bat.Running = &off
+		}
+		if c.up > 0 && t >= c.stop && t <= c.up {
+			return // Core is down: no reading
+		}
+		errs := 0
+		if c.outage != "" && t >= c.outFrom && t < c.readAt {
+			errs = 1 + int(t-c.outFrom)/2
+		}
+		r.Status = &ftwStatus{Drivers: map[string]ftwDriver{inverterDriver: {Status: "ok", ConsecutiveErrors: &errs}}}
+		if t < lead || (c.dispatchFrom > 0 && t >= c.dispatchFrom) {
+			r.Status.Dispatch = []ftwDispatch{{Driver: inverterDriver, TargetW: -c.setW}}
+		}
+	})
+	if c.outage != "" {
+		d.events = []houseEventLine{{T: c.outFrom, Event: houseEvent{Do: c.outage, Device: "inverter", ForS: c.outFor}}}
+	}
+	if c.up > 0 {
+		d.allMarks = []markLine{{T: c.stop, Label: "ftw:restart"}, {T: c.up, Label: "ftw:up"}}
+	}
+	return d
+}
+
+// R8, C1, on the shapes of the nightly seeds on master 83c2b24c. Once Core
+// has the inverter back, a battery FTW does not dispatch leaves its forced
+// mode within 10 s, plus the registry's 30 s default retry until #1915
+// (C11) lands. The Modbus reconnect backoff between the inverter's return
+// and Core's first good read is Core's to take.
 func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
 	const forced = "no forced battery mode FTW does not dispatch"
-	for _, c := range []struct {
-		name    string
-		forcedS int     // the register holds 187 / 3 kW until here
-		orderW  float64 // FTW's dispatch; 0: none
-		down    bool    // Core, not the inverter, is away from 10 to 40 s
-		want    bool
-	}{
-		{"8 s after the inverter is back", 48, 0, false, true},
-		{"30 s after the inverter is back", 70, 0, false, false},
-		{"FTW dispatches the discharge", 120, -3000, false, true},
-		{"8 s after Core is back", 48, 0, true, true},
-		{"30 s after Core is back", 70, 0, true, false},
+	for _, c := range []forcedCase{
+		// 207533: offline 576.6-644.7 s, Core reads 9 s later, 187 /
+		// 2668 W until FTW dispatches again 236 s after the return (C1).
+		{name: "207533: held until Core's 5 min retry", outage: "offline", outFrom: 100, outFor: 68, readAt: 177,
+			cmd: 187, setW: 2668, forcedTo: 1201, dispatchFrom: 404, want: false},
+		// 207535: the same with a forced charge, 170 / 2632 W, for 235 s.
+		{name: "207535: a forced charge held", outage: "offline", outFrom: 100, outFor: 69, readAt: 177,
+			cmd: 170, setW: 2632, forcedTo: 404, want: false},
+		// 207537: the inverter runs but does not answer for 46.4 s; Core
+		// reads 19.8 s after it answers again, the discharge holds 264 s.
+		{name: "207537: held after a silence", outage: "silence", outFrom: 100, outFor: 46, readAt: 166,
+			cmd: 187, setW: 3854, forcedTo: 1201, dispatchFrom: 410, want: false},
+		// 207538: Core reads 2 s after the return; held to the run's end.
+		{name: "207538: held to the end", outage: "offline", outFrom: 100, outFor: 39, readAt: 141,
+			cmd: 187, setW: 4674, forcedTo: 1201, want: false},
+		// The same outages once C1 is fixed: the default goes out within
+		// 10 s of Core's first good read.
+		{name: "default 8 s after Core reads again", outage: "offline", outFrom: 100, outFor: 68, readAt: 177,
+			cmd: 187, setW: 2668, forcedTo: 185, want: true},
+		// 207539: offline 508.5-590.0 s, the Modbus backoff holds Core's
+		// first good read back 55.7 s, and FTW dispatches 20 s after it.
+		// Inside Core's timers; it fails once #1915 (C11) lands.
+		{name: "207539: Core's reconnect backoff and default retry", outage: "offline", outFrom: 100, outFor: 82, readAt: 238,
+			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 258, want: true},
+		{name: "past the registry's 30 s retry", outage: "offline", outFrom: 100, outFor: 82, readAt: 238,
+			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 285, want: false},
+		// Core never reads the inverter again: the count starts 60 s after
+		// the return all the same.
+		{name: "Core never reads it again", outage: "offline", outFrom: 100, outFor: 82, readAt: 1201,
+			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 290, want: false},
+		{name: "FTW dispatches the discharge", cmd: 187, setW: 3000, forcedTo: 1201, dispatchFrom: 1, want: true},
+		{name: "forced with no dispatch and no outage", cmd: 187, setW: 3000, forcedTo: 1201, dispatchFrom: 500, want: false},
+		// Item 10, 207538's restart at 625.5 s: SIGTERM, the driver's
+		// cleanup writes 204 within a second, Core is back 14.6 s later
+		// and dispatches 6 s after that.
+		{name: "207538: SIGTERM restart writes the default", stop: 100, up: 115, cmd: 187, setW: 868,
+			forcedTo: 101, dispatchFrom: 121, want: true},
+		// The same stop as SIGKILL: no cleanup, the discharge runs on
+		// while Core is down.
+		{name: "restart without cleanup", stop: 100, up: 115, cmd: 187, setW: 868,
+			forcedTo: 121, dispatchFrom: 121, want: false},
+		// 207530: Core stops while the inverter is offline (888.7-916.4
+		// s), so no cleanup can land. The inverter is back 2.8 s before
+		// Core (here 13 s), and the default lands as Core starts.
+		{name: "207530: restart while the inverter is offline", outage: "offline", outFrom: 90, outFor: 12, readAt: 116,
+			stop: 100, up: 115, cmd: 170, setW: 2983, forcedTo: 116, dispatchFrom: 125, want: true},
+		// A Core that starts fresh has no default retry to wait for: 10 s
+		// from its first good read, not the 40 s an outage gets.
+		{name: "forced 8 s after Core starts", stop: 100, up: 101, cmd: 187, setW: 868,
+			forcedTo: 1201, dispatchFrom: 110, want: true},
+		{name: "forced 23 s after Core starts", stop: 100, up: 101, cmd: 187, setW: 868,
+			forcedTo: 1201, dispatchFrom: 125, want: false},
 	} {
-		d := randomRun(121, 16, 5, func(i int, r *sample) {
-			r.Status = &ftwStatus{}
-			if c.orderW != 0 {
-				r.Status.Dispatch = []ftwDispatch{{Driver: "sungrow", TargetW: c.orderW}}
-			}
-			if i < c.forcedS {
-				r.Bat.EMSMode, r.Bat.EMSCmd, r.Bat.EMSSetW = 2, 187, 3000
-			}
-		})
-		if c.down {
-			d.allMarks = []markLine{{T: 10, Label: "ftw:restart"}, {T: 40, Label: "ftw:up"}}
-		} else {
-			d.events = []houseEventLine{{T: 10, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 30}}}
-		}
-		if got := judged(d)[forced]; got != c.want {
+		if got := judged(c.run())[forced]; got != c.want {
 			t.Errorf("%s: %q = %v, want %v", c.name, forced, got, c.want)
 		}
 	}

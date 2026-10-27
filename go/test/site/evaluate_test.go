@@ -70,8 +70,9 @@ type ftwDispatch struct {
 }
 
 type ftwDriver struct {
-	Status      string   `json:"status"`
-	EVSessionWh *float64 `json:"ev_session_wh"` // a charger's session energy
+	Status            string   `json:"status"`
+	EVSessionWh       *float64 `json:"ev_session_wh"`      // a charger's session energy
+	ConsecutiveErrors *int     `json:"consecutive_errors"` // failed polls in a row; 0 once a poll reads
 }
 
 type ftwLoadpoint struct {
