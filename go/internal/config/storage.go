@@ -64,6 +64,7 @@ func decodeStored(c state.Configuration, database, baseDir string) (*Config, err
 	}
 	_ = json.Unmarshal(c.Document, &legacyControl)
 	cfg.applyRetiredControl(legacyControl.Config)
+	cfg.noteOldFuseMargin()
 	// This is the same typed config that was validated on save. Do not apply new
 	// defaults during a storage-only reload: nil, false and zero stay distinct.
 	if err := cfg.Validate(); err != nil {

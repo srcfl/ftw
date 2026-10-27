@@ -83,7 +83,7 @@ func (s *simSite) boot() {
 	s.state = NewState(0, 42, "meter")
 	s.state.clock = func() time.Time { return s.p.Now }
 	s.state.SlewRateW, s.state.MinDispatchIntervalS = 3000, 2
-	s.state.SiteFuseAmps, s.state.SiteFuseVoltage, s.state.SiteFusePhases, s.state.SiteFuseSafetyA = s.p.Fuse.RatingA, s.p.Voltage, 3, .5
+	s.state.SiteFuseAmps, s.state.SiteFuseVoltage, s.state.SiteFusePhases, s.state.SiteFuseSafetyA = s.p.Fuse.RatingA, s.p.Voltage, 3, 0
 	if b := s.p.Battery; b != nil {
 		s.state.DriverLimits = map[string]PowerLimits{"battery": {MaxChargeW: b.MaxChargeW, MaxDischargeW: b.MaxDischargeW}}
 	}
@@ -604,6 +604,24 @@ func simScenarios() []simScenario {
 			c.AllowedStepsW = append(steps, c.AllowedStepsW[1:]...)
 		}
 	}
+	replay1761 := simScenario{name: "#1761 replay", run: 20 * time.Minute,
+		plant: func(p *sitesim.Plant) {
+			p.HouseW, p.Car.MaxW = houseA(1, 1, 1), 4200
+			p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 9400, MaxDischargeW: 9400, CapacityWh: 20000, SoC: .3, Latency: 3 * time.Second}
+			p.Events = []sitesim.Event{{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }}}
+		},
+		lp: func(c *loadpoint.Config) {
+			c.MaxChargeW, c.AllowedStepsW = 10350, c.AllowedStepsW[:len(c.AllowedStepsW)-1]
+		},
+		setup: planBatteryCharge(9400),
+		expect: []simExpect{{9*time.Minute + 50*time.Second, func(s *simSite) error {
+			p := s.p
+			offerW := p.EVSE.OfferA * p.Voltage * float64(p.EVSE.OfferPhases)
+			if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || math.Abs(p.Battery.W-9400) > 200 {
+				return fmt.Errorf("not the #1761 state before the car takes its offer: offer %.0f W, car %.0f W, battery %.0f W", offerW, p.EVSE.DrawW, p.Battery.W)
+			}
+			return nil
+		}}}}
 	return []simScenario{
 		{name: "export start", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW = houseA(2, 2, 2), -22*690 }},
@@ -622,24 +640,8 @@ func simScenarios() []simScenario {
 			plant: slowCharger(time.Minute)},
 		{name: "slow cloud charger 120 s", run: 15 * time.Minute,
 			plant: slowCharger(2 * time.Minute)},
-		{name: "#1761 replay", run: 20 * time.Minute,
-			plant: func(p *sitesim.Plant) {
-				p.HouseW, p.Car.MaxW = houseA(1, 1, 1), 4200
-				p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 9400, MaxDischargeW: 9400, CapacityWh: 20000, SoC: .3, Latency: 3 * time.Second}
-				p.Events = []sitesim.Event{{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }}}
-			},
-			lp: func(c *loadpoint.Config) {
-				c.MaxChargeW, c.AllowedStepsW = 10350, c.AllowedStepsW[:len(c.AllowedStepsW)-1]
-			},
-			setup: planBatteryCharge(9400),
-			expect: []simExpect{{9*time.Minute + 50*time.Second, func(s *simSite) error {
-				p := s.p
-				offerW := p.EVSE.OfferA * p.Voltage * float64(p.EVSE.OfferPhases)
-				if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || math.Abs(p.Battery.W-9400) > 200 {
-					return fmt.Errorf("not the #1761 state before the car takes its offer: offer %.0f W, car %.0f W, battery %.0f W", offerW, p.EVSE.DrawW, p.Battery.W)
-				}
-				return nil
-			}}}},
+		replay1761,
+		withSafetyMarginA(replay1761, .5),
 		{name: "meter every 30 s after a cut", known: "a meter slower than evSettle makes every reading a gap, ev_fuse_budget.go:141", run: 10 * time.Minute,
 			plant: func(p *sitesim.Plant) {
 				p.HouseW = houseA(3, 3, 3)
@@ -759,6 +761,20 @@ func simScenarios() []simScenario {
 			expect: []simExpect{{10*time.Minute - time.Second, carPhasesUnknown}}},
 		{name: "a day", start: time.Date(2026, 10, 21, 0, 0, 0, 0, time.Local), run: 24 * time.Hour, plant: simDay},
 	}
+}
+
+// withSafetyMarginA runs sc with an opt-in fuse.safety_margin_a. The
+// default is 0; a site that keeps the old 0.5 A must still pass.
+func withSafetyMarginA(sc simScenario, a float64) simScenario {
+	setup := sc.setup
+	sc.name = fmt.Sprintf("%s, safety_margin_a %.1f A", sc.name, a)
+	sc.setup = func(s *simSite) {
+		if setup != nil {
+			setup(s)
+		}
+		s.state.SiteFuseSafetyA = a
+	}
+	return sc
 }
 
 // runSimScenario runs sc from start and returns the site, with the first

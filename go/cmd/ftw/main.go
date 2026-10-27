@@ -1164,8 +1164,8 @@ func main() {
 		ctrl.SiteFuseAmps = newCfg.Fuse.MaxAmps
 		ctrl.SiteFuseVoltage = newCfg.Fuse.Voltage
 		ctrl.SiteFusePhases = newCfg.Fuse.Phases
-		// Mirror the startup-path default semantics — nil → 0.5,
-		// explicit 0 → disabled. See EffectiveSafetyMarginA.
+		// Mirror the startup path: nil → 0 (work to the fuse rating), an
+		// explicit value wins. See EffectiveSafetyMarginA.
 		ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 		ctrl.MaxExportW = newCfg.Site.MaxExportW
 		// Lowering the fuse can strand a peak limit that was legal when it

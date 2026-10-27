@@ -1083,11 +1083,15 @@ func (s *State) SetPeakLimit(w float64) error {
 		return fmt.Errorf("peak_limit_w must be ≥ 0, got %.0f W", w)
 	}
 	if ceiling := s.peakLimitCeilingW(); ceiling > 0 && w > ceiling {
+		margin := ""
+		if s.SiteFuseSafetyA > 0 {
+			margin = fmt.Sprintf(", less a %.1f A safety margin", s.SiteFuseSafetyA)
+		}
 		return fmt.Errorf(
 			"peak_limit_w %.0f W is above the site's import ceiling %.0f W "+
-				"(fuse %.0f A × %.0f V × %d phases, less a %.1f A safety margin) "+
+				"(fuse %.0f A × %.0f V × %d phases%s) "+
 				"— a peak limit above the fuse can never bind",
-			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, s.SiteFuseSafetyA)
+			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, margin)
 	}
 	s.PeakLimitW = w
 	return nil
