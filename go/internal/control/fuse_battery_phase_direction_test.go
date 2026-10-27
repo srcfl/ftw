@@ -224,6 +224,49 @@ func TestPhaseReliefSkipsOfflineMeter(t *testing.T) {
 	}
 }
 
+// The batteries' move counts only power read live from the store, in the
+// same reading the rest of the decision used. A battery that went offline,
+// moved on to a newer reading or has no reading leaves its power in the
+// phases unknown: no phase relief, as #1876's stop relief did. Before,
+// the cached reading's RawW drove the relief.
+func TestPhaseReliefNeedsTheBatteryReadingItUses(t *testing.T) {
+	data := map[string]any{"l1_a": 15.0, "l2_a": 6.0, "l3_a": 5.1, "l1_w": 3450.0, "l2_w": 1380.0, "l3_w": 1173.0}
+	st := phaseDirectionState(0)
+	stop := []DispatchTarget{{Driver: "bat", TargetW: 0}}
+	seed := func() (*telemetry.Store, map[string]*telemetry.DerReading, phaseSample) {
+		store := phaseDirectionStore(t, 6003, -3000, data)
+		meter := store.Get("meter", telemetry.DerMeter)
+		return store, map[string]*telemetry.DerReading{"bat": store.Get("bat", telemetry.DerBattery)}, livePhaseSample(store, "meter", meter)
+	}
+
+	_, readings, phases := seed()
+	// Stopping 3000 W puts L1 at 15 + 4.35 A; 3.35 A over 16 A is 2310 W.
+	if imp, _ := phaseReliefForTargets(phases, st, stop, readings); math.Abs(imp-2310) > 1 {
+		t.Fatalf("live readings: relief %.0f W, want 2310 W", imp)
+	}
+
+	store, readings, phases := seed()
+	store.DriverHealthMut("bat").SetOffline()
+	if imp, exp := phaseReliefForTargets(phases, st, stop, readings); imp != 0 || exp != 0 {
+		t.Errorf("offline battery: relief %.0f/%.0f W, want none", imp, exp)
+	}
+
+	store, readings, phases = seed()
+	time.Sleep(time.Millisecond)
+	soc := 0.6
+	store.Update("bat", telemetry.DerBattery, -3000, &soc, nil)
+	if imp, exp := phaseReliefForTargets(phases, st, stop, readings); imp != 0 || exp != 0 {
+		t.Errorf("newer battery reading: relief %.0f/%.0f W, want none", imp, exp)
+	}
+
+	// Counted from 0 W, a 2000 W charge would read as L1 at 17.9 A.
+	_, _, phases = seed()
+	charge := []DispatchTarget{{Driver: "bat", TargetW: 2000}}
+	if imp, exp := phaseReliefForTargets(phases, st, charge, map[string]*telemetry.DerReading{}); imp != 0 || exp != 0 {
+		t.Errorf("no battery reading: relief %.0f/%.0f W, want none", imp, exp)
+	}
+}
+
 // The battery's working limit on each phase is L = In − safety_margin_a,
 // in both directions, with no floor under the margin. A phase at L needs no
 // relief, 0.1 A past it needs exactly 0.1 A, and a target that lands a
