@@ -42,6 +42,7 @@ type Controller struct {
 	commandTimeout  time.Duration
 	wallboxCycleSeq atomic.Uint64
 	resumeOffers    map[string]*resumeOffer // owned by the dispatch tick
+	unpluggedSince  map[string]time.Time    // owned by the dispatch tick
 	energySamples   map[string]*meteredEnergy
 
 	// fuseEVMax is this tick's EV share of the site fuse. nil means no cap.
@@ -1342,7 +1343,9 @@ func (c *Controller) observeTick(now time.Time, cfg Config, sample EVSample, dis
 	c.manager.SetSurplusWithheld(cfg.ID, wasSurplus && enteringSurplusPaused)
 	c.manager.ObserveSample(cfg.ID, sample)
 	c.observePhases(cfg, sample, now)
-	c.restoreManualHoldForSession(cfg.ID)
+	if !c.holdInUnplugGrace(cfg.ID, sample.Connected, now) {
+		c.restoreManualHoldForSession(cfg.ID)
+	}
 	c.evaluateBatteryBoost(cfg.ID, now, sample.Connected, dispatchAllowed && !sample.PowerUnavailable)
 }
 
@@ -1432,8 +1435,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		// Release any manual override when the vehicle unplugs. A
 		// persistent "Start" hold (zero ExpiresAt) would otherwise
 		// survive the session and silently re-apply to the next car;
-		// "until Stop or unplug" is the operator's mental model.
-		c.ClearManualHold(lpCfg.ID)
+		// "until Stop or unplug" is the operator's mental model. One
+		// reading is not an unplug: the cable must stay out for
+		// UnplugGrace, as the cars runtime counts it.
+		if since, seen := c.unpluggedSince[lpCfg.ID]; !seen || now.Sub(since) >= UnplugGrace {
+			c.ClearManualHold(lpCfg.ID)
+		}
 		return
 	}
 	if !wasPlugged {

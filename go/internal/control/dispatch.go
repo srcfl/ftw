@@ -154,6 +154,10 @@ const MaxCommandW = 5000
 // elsewhere in this package for sign decisions.
 const evActiveThresholdW = 100.0
 
+// holdoffToleranceS is how much earlier than MinDispatchIntervalS a
+// dispatch may run. It absorbs jitter in the work before each tick.
+const holdoffToleranceS = 0.25
+
 type vehiclePowerFlow struct {
 	Live          bool
 	EVChargeW     float64
@@ -405,6 +409,9 @@ type State struct {
 	// meterClampLogged records that the live-meter clamp was already
 	// reported, so it is logged when it engages rather than every tick.
 	meterClampLogged bool
+	// dispatchMeterAt is the UpdatedAt of the last site-meter sample the
+	// battery dispatch acted on. See siteMeterHeld.
+	dispatchMeterAt time.Time
 
 	// Slew + holdoff
 	SlewRateW float64
@@ -414,6 +421,7 @@ type State struct {
 	// the operator-facing rationale.
 	SlewEnabled          bool
 	MinDispatchIntervalS int
+	ControlIntervalS     int // tick period; no holdoff when MinDispatchIntervalS <= it
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
 	batteryChargeFull    map[string]bool
@@ -1430,9 +1438,12 @@ func ComputeDispatch(
 	// Manual holds bypass the holdoff: the operator just installed a
 	// setpoint and expects immediate effect, not a 5 s wait. The fuse
 	// guard at the end of the cycle still protects the site.
-	if !manualHoldActive && state.LastDispatch != nil {
+	// The ticker is fixed, but the work before each dispatch varies, so
+	// two ticks can land just under the interval apart. The 0.25 s
+	// tolerance keeps that jitter from skipping every other tick.
+	if !manualHoldActive && state.LastDispatch != nil && state.MinDispatchIntervalS > state.ControlIntervalS {
 		elapsed := state.now().Sub(*state.LastDispatch).Seconds()
-		if elapsed < float64(state.MinDispatchIntervalS) {
+		if elapsed < float64(state.MinDispatchIntervalS)-holdoffToleranceS {
 			// Holdoff suppresses normal re-dispatch, but the
 			// fuse-saver overrides — an overflow can't wait 5 s for
 			// the next eligible tick.
@@ -1452,6 +1463,7 @@ func ComputeDispatch(
 	if siteMeter != nil {
 		rawGridW = siteMeter.SmoothedW
 	}
+	meterHeld := state.siteMeterHeld(siteMeter)
 	// Live EV/V2X charger readings override the manual slider on each tick —
 	// hardware truth beats guesses. Positive V2X is a vehicle charging load;
 	// negative V2X is kept separate so the default controller does not
@@ -1771,6 +1783,24 @@ func ComputeDispatch(
 		//     already handled above)
 		//   - planner_cheap / planner_arbitrage when UseEnergyDispatch=false
 
+		// A battery doing what a limit forbids. The deadband exit below
+		// and the held-meter exit both fall through to cut it.
+		batteryBreaksLimit := (noSelfDischarge && anyBatteryDischarging(onlineBats)) ||
+			anyExplicitZeroDischargeViolation(onlineBats) ||
+			anyBlockedBatteryCharging(onlineBats, noSelfCharge)
+
+		// The PI acts on the meter alone. A held sample carries no new
+		// error, so hold the targets and do not integrate it again. When
+		// a battery breaks a limit, skip the PI with no correction; the
+		// clamps, holdTowardZero and the safety pipeline then cut it.
+		if meterHeld {
+			if !batteryBreaksLimit {
+				return fuseSaverEarlyExit(store, state, driverCapacities, fuseMaxW)
+			}
+			totalCorrection = 0
+			break
+		}
+
 		// Surplus-only EV reserve (legacy/reactive path): when an EV
 		// under a surplus_only loadpoint is connected, bias the grid
 		// signal so the PI leaves `reserveRemaining` of export untouched
@@ -1859,10 +1889,7 @@ func ComputeDispatch(
 		// full pipeline ends in the same forceFuseDischarge the
 		// early exit's fuse-saver would have run.
 		surplusActive := state.EVSurplusOnlyReserveW > 0 && effectiveMode == ModeSelfConsumption
-		if !surplusActive && math.Abs(errW) < state.GridToleranceW &&
-			!(noSelfDischarge && anyBatteryDischarging(onlineBats)) &&
-			!anyExplicitZeroDischargeViolation(onlineBats) &&
-			!anyBlockedBatteryCharging(onlineBats, noSelfCharge) {
+		if !surplusActive && math.Abs(errW) < state.GridToleranceW && !batteryBreaksLimit {
 			// A small grid error is not a statement that the site is
 			// safe. errW compares one aggregate number against one
 			// aggregate target; two protections bind on numbers this
@@ -2232,6 +2259,9 @@ func ComputeDispatch(
 	// per-driver cap (DriverLimits, falling back to MaxCommandW) so we
 	// never issue a command outside safe bounds.
 	raw = clampTargetsToPowerLimits(raw, state.DriverLimits)
+	if meterHeld {
+		raw = holdTowardZero(raw, state.PrevTargets)
+	}
 
 	// ---- Fuse guard (bidirectional, #145) ----
 	return applyDispatchSafetyPipeline(raw, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
@@ -4085,6 +4115,40 @@ func fuseSaverEarlyExit(
 	now := state.now()
 	state.LastDispatch = &now
 	return out
+}
+
+// siteMeterHeld reports whether the site meter has no sample newer than the
+// one the last dispatch acted on. A failed poll keeps the old reading and its
+// UpdatedAt, and the dispatch gate passes it until the watchdog expires. Acting
+// on it again moves the battery one more held error each tick: a held +2 kW
+// import wound a battery to -10 kW in ten ticks while the site exported 8 kW.
+// A failed read does not count by itself: a poll that emits and then errors
+// still delivers a new sample.
+// The EV fuse limit follows the same rule (ev_fuse_budget.go).
+func (s *State) siteMeterHeld(meter *telemetry.DerReading) bool {
+	if meter == nil {
+		return false
+	}
+	if !meter.UpdatedAt.After(s.dispatchMeterAt) {
+		return true
+	}
+	s.dispatchMeterAt = meter.UpdatedAt
+	return false
+}
+
+// holdTowardZero keeps each target between 0 and the last command sent to
+// that battery. Without a new meter sample, dispatch may stop or reduce a
+// battery but must not raise one. A battery with no earlier command gets 0.
+func holdTowardZero(targets []DispatchTarget, prev map[string]float64) []DispatchTarget {
+	for i := range targets {
+		p := prev[targets[i].Driver]
+		w := math.Max(math.Min(targets[i].TargetW, math.Max(p, 0)), math.Min(p, 0))
+		if w != targets[i].TargetW {
+			targets[i].TargetW = w
+			targets[i].Clamped = true
+		}
+	}
+	return targets
 }
 
 // holdFleetAtZero builds the forced-idle command set: 0 W for every battery

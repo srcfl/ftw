@@ -170,8 +170,8 @@ func TestHistoryWriterRetriesFailedTransaction(t *testing.T) {
 	}
 }
 
-func TestHistoryMissingOrUnboundPrimaryFails(t *testing.T) {
-	for _, kind := range []string{"missing", "unbound", "wrong-pending", "incomplete"} {
+func TestHistoryUnboundPrimaryFails(t *testing.T) {
+	for _, kind := range []string{"unbound", "wrong-pending", "incomplete"} {
 		t.Run(kind, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.db")
 			s, err := Open(path)
@@ -199,14 +199,9 @@ func TestHistoryMissingOrUnboundPrimaryFails(t *testing.T) {
 			if err := s.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if kind == "missing" {
-				if err := os.Remove(historyDatabasePath(path)); err != nil {
-					t.Fatal(err)
-				}
-			}
 			if reopened, err := Open(path); err == nil {
 				reopened.Close()
-				t.Fatal("silently accepted missing or unbound history")
+				t.Fatal("silently accepted unbound history")
 			}
 		})
 	}

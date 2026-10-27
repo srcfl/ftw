@@ -219,27 +219,37 @@ func TestHeatPumpDoesNotClearAOnePhaseCar(t *testing.T) {
 	}
 }
 
-// Review M3: after a Core restart the order is out and the car draws before
-// the first reading. With no baseline, a one-phase car still shows its whole
-// draw on one phase and less than a third on the others; a three-phase car
-// never does.
-func TestOnePhaseCarMarkedAfterARestart(t *testing.T) {
+// After a Core restart the order is out and the car draws before the first
+// reading, so there is no baseline. No car is marked from one reading: a
+// house load on L1 and solar on L2/L3 look the same as a one-phase car. The
+// next rise marks a one-phase car.
+func TestOnePhaseCarMarkedOnTheRiseAfterARestart(t *testing.T) {
+	still := func(a [3]float64) func(time.Duration) [3]float64 { return func(time.Duration) [3]float64 { return a } }
+	draw := func(w float64) func(time.Duration) float64 { return func(time.Duration) float64 { return w } }
 	for _, c := range []struct {
 		name  string
 		amps  [3]float64
 		drawW float64
-		want  int
 	}{
-		{"one-phase car at 16 A on L1, house 3/1/1 A", [3]float64{19, 1, 1}, 3680, 1},
-		{"three-phase car at 16 A, house 3/1/1 A", [3]float64{19, 17, 17}, 11040, 0},
-		{"two-phase car at 16 A, house 3/1/1 A", [3]float64{19, 17, 1}, 7360, 0},
+		{"one-phase car at 16 A on L1, house 3/1/1 A", [3]float64{19, 1, 1}, 3680},
+		{"three-phase car at 16 A, house 3/1/1 A", [3]float64{19, 17, 17}, 11040},
+		{"two-phase car at 16 A, house 3/1/1 A", [3]float64{19, 17, 1}, 7360},
 	} {
 		r := newPhaseRig()
 		r.order(11040)
-		r.run(0, 60*time.Second, func(time.Duration) [3]float64 { return c.amps }, func(time.Duration) float64 { return c.drawW })
-		if got := r.carPhases(); got != c.want {
-			t.Errorf("%s: car phases %d, want %d", c.name, got, c.want)
+		r.run(0, 60*time.Second, still(c.amps), draw(c.drawW))
+		if got := r.carPhases(); got != 0 {
+			t.Errorf("%s: marked %d-phase with no rise", c.name, got)
 		}
+	}
+	r := newPhaseRig()
+	r.order(6 * 690)
+	r.run(0, 60*time.Second, still([3]float64{9, 1, 1}), draw(6*230))
+	r.order(8 * 690)
+	r.run(65*time.Second, 70*time.Second, still([3]float64{9, 1, 1}), draw(6*230))
+	r.run(75*time.Second, 200*time.Second, still([3]float64{11, 1, 1}), draw(8*230))
+	if got := r.carPhases(); got != 1 {
+		t.Fatalf("a 2 A rise on L1 alone after a restart: car phases %d, want 1", got)
 	}
 }
 
