@@ -323,6 +323,7 @@ type evMeterLimit struct {
 	overOffers     map[string]float64       // each charger's offer when that run began
 	idleWh         float64                  // import since roomSince, for the ceiling's start test
 	byImport       bool                     // the hour's import limit, not the fuse, left less room at readingAt
+	batteryYield   evBatteryYield
 }
 
 type evPool struct {
@@ -346,7 +347,7 @@ type evPool struct {
 // stay at or below fuseHourFactor (unshownOrders).
 // EVFusePhaseRoomA gives the same room per phase to the split between cars.
 // An idle pool starts only after the meter has kept showing
-// room for its minimum plus a step. Each reading acts once, so a silent
+// room for its minimum below the working limit. Each reading acts once, so a silent
 // meter can never raise or restart a charge.
 func EVFuseBudget(store *telemetry.Store, state *State, points []loadpoint.State, configs []loadpoint.Config, fuseMaxW float64) (float64, bool) {
 	if store == nil || state == nil || !finiteFuseValue(fuseMaxW) || fuseMaxW <= 0 {
@@ -372,12 +373,12 @@ func EVFuseBudget(store *telemetry.Store, state *State, points []loadpoint.State
 	}
 	state.recordEVOffers(store, points)
 	if !lim.set || meter.UpdatedAt.After(lim.readingAt) {
-		state.stepEVMeterLimit(meter, gridW, pool, fuseMaxW)
+		state.stepEVMeterLimit(store, meter, gridW, pool, fuseMaxW)
 	}
 	return lim.capW, true
 }
 
-func (s *State) stepEVMeterLimit(meter *telemetry.DerReading, gridW float64, pool evPool, fuseMaxW float64) {
+func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerReading, gridW float64, pool evPool, fuseMaxW float64) {
 	lim, now, at := &s.evLimit, s.now(), meter.UpdatedAt
 	first, prevAt := !lim.set, lim.readingAt
 	gap := first || at.Sub(prevAt) > evSettle
@@ -397,6 +398,10 @@ func (s *State) stepEVMeterLimit(meter *telemetry.DerReading, gridW float64, poo
 	r := s.evMeterRoom(meter, gridW, pool.phases, fuseMaxW, s.withBatteryOrders(s.pendingLoad(at), pending))
 	_, fresh := qualifiedFuseObservation(meter, now)
 	fresh = fresh && r.measured
+	lim.batteryYield.active = false
+	if fresh && !r.overLimit && r.limitW >= 0 {
+		lim.batteryYield = evBatteryYield{}
+	}
 	lim.phaseRoomA, lim.phaseRoomKnown = 0, r.phaseRoomKnown
 	if fresh {
 		lim.phaseRoomA = r.phaseRoomA
@@ -457,6 +462,13 @@ func (s *State) stepEVMeterLimit(meter *telemetry.DerReading, gridW float64, poo
 		}
 	}
 	if over {
+		requiredW := math.Max(0, latestW-capW)
+		if !byImport && pool.phases > 0 {
+			requiredW *= float64(s.SiteFusePhases) / pool.phases
+		}
+		if s.yieldBatteryBeforeEVCut(store, meter, r, pool, requiredW, gridW, pending, rise, fresh) {
+			capW = latestW // Keep the existing car order while the battery yields.
+		}
 		lim.byImport = byImport
 		lim.capW, lim.roomSince = math.Min(prev, math.Max(0, capW)), time.Time{}
 		if lim.capW < prev {
@@ -490,11 +502,17 @@ func (s *State) stepEVMeterLimit(meter *telemetry.DerReading, gridW float64, poo
 		// One step at most, and a step of room stays free.
 		lim.capW = math.Max(lim.capW, math.Min(lim.capW+step, peakW+room-step))
 	}
+	// The battery leaves room for the car's demand, not a further unused
+	// step. Let the last step use that measured room below the working
+	// limit, or concurrent battery charge can keep the car short forever.
+	if remaining := pool.wantW - peakW; s.hasBatteryCharge() && remaining > 0 && remaining <= step && room+1e-6 >= remaining && now.Sub(lim.cutAt) >= evSettle {
+		lim.capW = math.Max(lim.capW, pool.wantW)
+	}
 }
 
 // stepEVIdleStart starts an idle pool once the meter has kept showing room
-// for evRestartDwell: room on every reading for its minimum plus a step
-// below the fuse. Under a measured hour, the ceiling's part is judged on the
+// for evRestartDwell: room on every reading for its minimum below the
+// fuse's working limit. Under a measured hour, the ceiling's part is judged on the
 // dwell's mean import, the house's load rather than one reading of it, and
 // the minimum needs no step of margin there: a short overage waits.
 func (s *State) stepEVIdleStart(r evMeterRoom, gridW float64, pool evPool, first, gap, fresh bool, at, prevAt time.Time, pending, step float64) {
@@ -513,7 +531,11 @@ func (s *State) stepEVIdleStart(r evMeterRoom, gridW float64, pool evPool, first
 	if fresh {
 		room = math.Max(0, perReadingW) // r holds our battery orders.
 	}
-	if room < pool.minW+step {
+	minimumRoom := pool.minW
+	if !r.hourly && r.riseW < r.startW {
+		minimumRoom += step // Keep the hour's separate rise margin.
+	}
+	if room+1e-6 < minimumRoom {
 		lim.roomSince = time.Time{}
 		return
 	}
@@ -530,7 +552,7 @@ func (s *State) stepEVIdleStart(r evMeterRoom, gridW float64, pool evPool, first
 	if dwell < evRestartDwell {
 		return
 	}
-	lim.capW = room - step
+	lim.capW = math.Max(pool.minW, room-step)
 	if !r.hourly {
 		return
 	}

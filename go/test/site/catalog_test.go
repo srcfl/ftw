@@ -20,6 +20,7 @@ var provenance = map[string]struct {
 	catalog []string
 	sources []string
 }{
+	"s18-16":    {nil, []string{"https://github.com/srcfl/ftw/issues/1868"}},
 	"s0-25":     {[]string{"home-070", "ocpp-011", "ocpp-013", "ui-052"}, []string{"https://github.com/srcfl/ftw/pull/1779", "https://github.com/srcfl/ftw/pull/1790"}},
 	"s0b-25":    {[]string{"home-070", "ocpp-011", "ocpp-013", "ui-052"}, []string{"https://github.com/srcfl/ftw/pull/1790"}},
 	"s1-16":     {nil, []string{"simulator test before beta 0.155.0, 21 Oct 2026"}},

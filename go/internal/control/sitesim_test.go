@@ -361,7 +361,9 @@ func (s *simSite) check() {
 		s.fail("over Core's limit for more than %v (heat %.1f A, limit %.0f A)", allow, math.Sqrt(max(s.heat[0], s.heat[1], s.heat[2])), limitA)
 	}
 	// (b) With the meter on schedule, room for the car's minimum and a car
-	// that asks, the car draws within a minute plus the charger's delay.
+	// that asks, the car draws within a minute plus the charger's delay
+	// and the battery-command settling window. A battery raise may still
+	// occupy that window even after the physical meter shows it.
 	if !s.wantsCharge() {
 		s.needSince = time.Time{}
 	} else if s.needSince.IsZero() {
@@ -369,7 +371,7 @@ func (s *simSite) check() {
 	}
 	if !s.needSince.IsZero() && p.EVSE.DrawW <= 0 {
 		s.idleWithRoom += sitesim.Step
-		if wait := time.Minute + p.EVSE.Delay; now.Sub(s.needSince) > wait {
+		if wait := time.Minute + p.EVSE.Delay + evSettle; now.Sub(s.needSince) > wait {
 			s.fail("the car is idle after %v with room for it", wait)
 		}
 	}
@@ -386,6 +388,11 @@ func (s *simSite) check() {
 func (s *simSite) wantsCharge() bool {
 	p, e := s.p, s.p.EVSE
 	if p.Car == nil || !p.Car.Plugged || p.Offline("evse") || !s.downUntil.IsZero() || p.Now.Sub(s.meterAt) > max(p.Meter.Every, sitesim.Step)+sitesim.Step {
+		return false
+	}
+	// After a real overload, an idle car must wait for the fuse to cool.
+	// Its recovery deadline starts when that heat no longer blocks a start.
+	if e.DrawW <= 0 && max(s.heat[0], s.heat[1], s.heat[2]) > math.Pow(p.Fuse.RatingA-evPhaseMarginA, 2) {
 		return false
 	}
 	phases := min(e.Phases, p.Car.Phases)

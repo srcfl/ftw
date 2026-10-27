@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -13,94 +14,98 @@ import (
 )
 
 func TestJoinedEVWaitsForMeasuredBatteryBackoffThenResumes(t *testing.T) {
-	now := time.Now().Truncate(time.Second)
-	const houseW, desiredEVW = 5000.0, 10350.0
-	actualBattery, actualEV := 8000.0, 0.0
-	config := loadpoint.Config{ID: "garage", DriverName: "charger", MinChargeW: 4140, MaxChargeW: desiredEVW,
-		PhaseMode: "3p", AllowedStepsW: []float64{0, 4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350}}
-	mgr := loadpoint.NewManager()
-	mgr.Load([]loadpoint.Config{config})
-	store := telemetry.NewStore()
-	dir := SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: 2500, Strategy: "arbitrage"}
-	st := newStateWithEnergyDispatch(dir, "meter")
-	st.clock = func() time.Time { return now }
-	st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases, st.SiteFuseSafetyA = 25, 230, 3, 1
-	st.SlewEnabled = false
-	st.DriverLimits = map[string]PowerLimits{"pixii": {MaxChargeW: 10000, MaxDischargeW: 10000}}
-	var sampledPhaseA float64
-	controller := loadpoint.NewController(mgr,
-		func(time.Time) (loadpoint.Directive, bool) { return loadpoint.Directive{}, false },
-		func(string) (loadpoint.EVSample, bool) {
-			return loadpoint.EVSample{Connected: true, RequestActive: true, PowerW: actualEV, PowerAt: now, SessionWhUnavailable: true}, true
-		},
-		func(_ context.Context, _ string, payload []byte) error {
-			var cmd struct {
-				Action string  `json:"action"`
-				PowerW float64 `json:"power_w"`
+	for _, desiredEVW := range []float64{4140, 10350} {
+		t.Run(fmt.Sprintf("%.0fW", desiredEVW), func(t *testing.T) {
+			now := time.Now().Truncate(time.Second)
+			const houseW = 5000.0
+			actualBattery, actualEV := 8000.0, 0.0
+			config := loadpoint.Config{ID: "garage", DriverName: "charger", MinChargeW: 4140, MaxChargeW: desiredEVW,
+				PhaseMode: "3p", AllowedStepsW: []float64{0, 4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350}}
+			mgr := loadpoint.NewManager()
+			mgr.Load([]loadpoint.Config{config})
+			store := telemetry.NewStore()
+			dir := SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: 2500, Strategy: "arbitrage"}
+			st := newStateWithEnergyDispatch(dir, "meter")
+			st.clock = func() time.Time { return now }
+			st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases, st.SiteFuseSafetyA = 25, 230, 3, 1
+			st.SlewEnabled = false
+			st.DriverLimits = map[string]PowerLimits{"pixii": {MaxChargeW: 10000, MaxDischargeW: 10000}}
+			var sampledPhaseA float64
+			controller := loadpoint.NewController(mgr,
+				func(time.Time) (loadpoint.Directive, bool) { return loadpoint.Directive{}, false },
+				func(string) (loadpoint.EVSample, bool) {
+					return loadpoint.EVSample{Connected: true, RequestActive: true, PowerW: actualEV, PowerAt: now, SessionWhUnavailable: true}, true
+				},
+				func(_ context.Context, _ string, payload []byte) error {
+					var cmd struct {
+						Action string  `json:"action"`
+						PowerW float64 `json:"power_w"`
+					}
+					if err := json.Unmarshal(payload, &cmd); err != nil {
+						return err
+					}
+					if cmd.Action == "ev_set_current" {
+						actualEV = cmd.PowerW
+						// The physical battery may ignore a reduction. Check this at
+						// the EV send, before a later battery command can conceal it.
+						if phase := (houseW + actualBattery + actualEV) / 690; phase > 24.001 {
+							t.Fatalf("EV spent unmeasured battery relief: %.1f A", phase)
+						}
+					}
+					return nil
+				})
+			controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
+			controller.SetManualHold(config.ID, loadpoint.ManualHold{PowerW: desiredEVW, PhaseMode: "3p", Persistent: true})
+			controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(store, st, mgr.States(), controller.FuseConfigs(), 17250) })
+			controller.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(st) })
+			emit := func(driver string, kind telemetry.DerType, watts float64) {
+				d := map[string]any{"control_power_available": true, "control_power_observed_at": now.Format(time.RFC3339Nano)}
+				if kind == telemetry.DerMeter {
+					d["l1_a"], d["l2_a"], d["l3_a"] = sampledPhaseA, sampledPhaseA, sampledPhaseA
+				}
+				if kind == telemetry.DerEV {
+					d["power_max_age_s"] = 5 // A local charger that answers within seconds.
+				}
+				data, _ := json.Marshal(d)
+				soc := .5
+				store.Update(driver, kind, watts, &soc, data)
+				store.Get(driver, kind).UpdatedAt = now
+				store.RecordDriverSuccess(driver)
 			}
-			if err := json.Unmarshal(payload, &cmd); err != nil {
-				return err
-			}
-			if cmd.Action == "ev_set_current" {
-				actualEV = cmd.PowerW
-				// The physical battery may ignore a reduction. Check this at
-				// the EV send, before a later battery command can conceal it.
-				if phase := (houseW + actualBattery + actualEV) / 690; phase > 24.001 {
-					t.Fatalf("EV spent unmeasured battery relief: %.1f A", phase)
+			var obeyedAt, resumedAt time.Time
+			for tick := 0; tick < 30; tick++ {
+				now = now.Add(5 * time.Second)
+				if tick == 3 {
+					actualBattery, obeyedAt = 0, now // Only now does the battery obey.
+				}
+				sampledPhaseA = (houseW + actualBattery + actualEV) / 690
+				emit("pixii", telemetry.DerBattery, actualBattery)
+				emit(config.DriverName, telemetry.DerEV, actualEV)
+				emit("meter", telemetry.DerMeter, houseW+actualBattery+actualEV)
+				controller.TickWithDispatch(context.Background(), now, true)
+				st.SetEVCommanded(mgr.States())
+				st.SetEVFuseDemands(controller.FuseDemands())
+				targets := ComputeDispatch(store, st, caps(map[string]float64{"pixii": 15000}), 17250)
+				if len(targets) != 1 || targets[0].TargetW > 16560-houseW-desiredEVW+.001 {
+					t.Fatalf("tick %d: battery did not yield to the EV: %+v", tick, targets)
+				}
+				if actualEV > 0 && resumedAt.IsZero() {
+					resumedAt = now
+				}
+				if !obeyedAt.IsZero() {
+					actualBattery = math.Max(0, targets[0].TargetW)
+				}
+				if (houseW+actualBattery+actualEV)/690 > 24.001 {
+					t.Fatalf("tick %d: battery took the EV's headroom: EV %.0f battery %.0f W", tick, actualEV, actualBattery)
 				}
 			}
-			return nil
+			if resumedAt.IsZero() || resumedAt.Sub(obeyedAt) < evRestartDwell {
+				t.Fatalf("EV resumed at %v, battery obeyed at %v: want a %v dwell on measured room", resumedAt, obeyedAt, evRestartDwell)
+			}
+			if actualEV < desiredEVW {
+				t.Fatalf("EV stuck at %.0f W after recovery", actualEV)
+			}
 		})
-	controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	controller.SetManualHold(config.ID, loadpoint.ManualHold{PowerW: desiredEVW, PhaseMode: "3p", Persistent: true})
-	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(store, st, mgr.States(), controller.FuseConfigs(), 17250) })
-	controller.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(st) })
-	emit := func(driver string, kind telemetry.DerType, watts float64) {
-		d := map[string]any{"control_power_available": true, "control_power_observed_at": now.Format(time.RFC3339Nano)}
-		if kind == telemetry.DerMeter {
-			d["l1_a"], d["l2_a"], d["l3_a"] = sampledPhaseA, sampledPhaseA, sampledPhaseA
-		}
-		if kind == telemetry.DerEV {
-			d["power_max_age_s"] = 5 // A local charger that answers within seconds.
-		}
-		data, _ := json.Marshal(d)
-		soc := .5
-		store.Update(driver, kind, watts, &soc, data)
-		store.Get(driver, kind).UpdatedAt = now
-		store.RecordDriverSuccess(driver)
-	}
-	var obeyedAt, resumedAt time.Time
-	for tick := 0; tick < 30; tick++ {
-		now = now.Add(5 * time.Second)
-		if tick == 3 {
-			actualBattery, obeyedAt = 0, now // Only now does the battery obey.
-		}
-		sampledPhaseA = (houseW + actualBattery + actualEV) / 690
-		emit("pixii", telemetry.DerBattery, actualBattery)
-		emit(config.DriverName, telemetry.DerEV, actualEV)
-		emit("meter", telemetry.DerMeter, houseW+actualBattery+actualEV)
-		controller.TickWithDispatch(context.Background(), now, true)
-		st.SetEVCommanded(mgr.States())
-		st.SetEVFuseDemands(controller.FuseDemands())
-		targets := ComputeDispatch(store, st, caps(map[string]float64{"pixii": 15000}), 17250)
-		if len(targets) != 1 || targets[0].TargetW > 1210.001 {
-			t.Fatalf("tick %d: battery did not yield to the EV: %+v", tick, targets)
-		}
-		if actualEV > 0 && resumedAt.IsZero() {
-			resumedAt = now
-		}
-		if !obeyedAt.IsZero() {
-			actualBattery = math.Max(0, targets[0].TargetW)
-		}
-		if (houseW+actualBattery+actualEV)/690 > 24.001 {
-			t.Fatalf("tick %d: battery took the EV's headroom: EV %.0f battery %.0f W", tick, actualEV, actualBattery)
-		}
-	}
-	if resumedAt.IsZero() || resumedAt.Sub(obeyedAt) < evRestartDwell {
-		t.Fatalf("EV resumed at %v, battery obeyed at %v: want a %v dwell on measured room", resumedAt, obeyedAt, evRestartDwell)
-	}
-	if actualEV < 9660 {
-		t.Fatalf("EV stuck at %.0f W after recovery", actualEV)
 	}
 }
 

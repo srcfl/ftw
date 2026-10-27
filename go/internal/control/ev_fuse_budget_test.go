@@ -727,7 +727,7 @@ func TestEVHardLimitStopsOnlyWhenOverageExceedsOfferLessMinimum(t *testing.T) {
 	}
 }
 
-// An idle car starts with a step of margin under the measured room, and a
+// An idle car's minimum must fit below the working limit, and a
 // single-phase or auto car may land its whole offer on the worst phase.
 func TestEVHardLimitIdleStartNeedsRoomOnDeclaredPhases(t *testing.T) {
 	for _, tc := range []struct {
@@ -739,7 +739,8 @@ func TestEVHardLimitIdleStartNeedsRoomOnDeclaredPhases(t *testing.T) {
 		{"legacy_default", "", 5, (24 - 5 - 1) * 690},
 		{"1p_room", "1p", 5, (24 - 5 - 1) * 230},
 		{"auto_room", "auto", 5, (24 - 5 - 1) * 230},
-		{"3p_below_minimum", "3p", 21.5, 0}, // 1,725 W < 1,380 + 690 W
+		{"3p_minimum_fits", "3p", 21.5, 1380},
+		{"3p_below_minimum", "3p", 22.5, 0}, // 1,035 W < 1,380 W
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store, state, points, configs := evMeterBudgetFixture(t, tc.worstA*690, []float64{tc.worstA, tc.worstA, tc.worstA}, 0, tc.phase)

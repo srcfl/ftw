@@ -30,6 +30,8 @@ type scenario struct {
 }
 
 var scenarios = []scenario{
+	{name: "s18-16", dir: "s18-car-first-battery-charge-16A", minutes: 8, short: true,
+		run: s18, judge: judgeS18},
 	{name: "s0-25", dir: "s0-idle-charger-25A", minutes: 5.1, short: true,
 		run: func(c *runCtx) (map[string]any, error) { return s0(c, 25, 60) }, judge: judgeS0},
 	{name: "s0b-25", dir: "s0b-idle-charger-default-hb-25A", minutes: 5.1,

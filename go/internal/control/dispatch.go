@@ -2392,6 +2392,7 @@ func applyDispatchSafetyPipeline(
 	}
 	targets = floorMissingSoCDischarge(targets, store)
 	targets = clampEVBatteryHeadroom(targets, store, state, fuseMaxW)
+	targets = state.applyEVBatteryYield(targets)
 	targets = state.floorFullBatteryCharge(targets)
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
