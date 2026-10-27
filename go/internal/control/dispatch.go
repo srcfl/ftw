@@ -394,6 +394,11 @@ type State struct {
 	// batteryCommands and evLimit.offers are our own recent commands, the
 	// only device input the EV hard limit and the EV/battery split use.
 	batteryCommands map[string]commandLog
+	// batteryFuseRelief is the discharge the fuse guard added to each
+	// battery's last dispatched command (forceFuseDischarge). It ends once
+	// the site fits without it, so an EV rise or start never counts it as
+	// room (evFuseReliefW).
+	batteryFuseRelief map[string]float64
 
 	// PI controller (outer, site-level)
 	PI *PIController
@@ -2382,6 +2387,7 @@ func applyDispatchSafetyPipeline(
 	// forceFuseDischarge runs after the normal policy rails. A fuse overflow can
 	// demand a battery target far beyond what slew would allow in one tick;
 	// slew-limiting that response would leave the fuse violated for multiple ticks.
+	beforeRelief := append([]DispatchTarget(nil), targets...)
 	targets = forceFuseDischarge(targets, store, state, driverCapacities, fuseMaxW)
 	// Keep the hardware direction contract last. forceFuseDischarge already
 	// allocates within the discharge cap, but this final check also covers any
@@ -2395,7 +2401,34 @@ func applyDispatchSafetyPipeline(
 	targets = state.floorFullBatteryCharge(targets)
 	republishFuseEVCapAfterFuseDischarge(targets, store, state, fuseMaxW)
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
+	if opts.recordDispatch {
+		state.recordFuseRelief(beforeRelief, targets)
+	}
 	return targets
+}
+
+// recordFuseRelief keeps, per battery, the discharge in the final command
+// that the fuse guard added: below both the command before forceFuseDischarge
+// and 0 W. Planner or operator discharge is not relief.
+func (s *State) recordFuseRelief(before, after []DispatchTarget) {
+	if s == nil {
+		return
+	}
+	pre := make(map[string]float64, len(before))
+	for _, t := range before {
+		pre[t.Driver] += t.TargetW
+	}
+	post := make(map[string]float64, len(after))
+	for _, t := range after {
+		post[t.Driver] += t.TargetW
+	}
+	relief := make(map[string]float64)
+	for driver, w := range post {
+		if r := math.Min(pre[driver]-w, -w); r > 0 {
+			relief[driver] = r
+		}
+	}
+	s.batteryFuseRelief = relief
 }
 
 // Unknown battery energy cannot support a discharge command, even during
@@ -4067,6 +4100,16 @@ func fuseSaverEarlyExit(
 	if out == nil || state == nil {
 		return out
 	}
+	// The early path starts from live power, so relief is discharge below
+	// what each battery reads now. Without a command the last one stands,
+	// and so does its relief.
+	live := make([]DispatchTarget, 0, len(out))
+	for _, t := range out {
+		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+			live = append(live, DispatchTarget{Driver: t.Driver, TargetW: r.SmoothedW})
+		}
+	}
+	state.recordFuseRelief(live, out)
 	state.LastTargets = out
 	now := state.now()
 	state.LastDispatch = &now

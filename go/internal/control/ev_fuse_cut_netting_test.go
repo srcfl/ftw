@@ -60,14 +60,16 @@ func TestEVFuseSlowChargerCutCoversItsOverage(t *testing.T) {
 }
 
 // cutRig feeds EVFuseBudget site readings one second apart and applies its
-// cap to the charger's offer, in 1 A steps, as the controller does.
+// cap to the charger's offer, in 1 A steps, as the controller does, or on
+// the charger's step table when snap is set.
 type cutRig struct {
 	t      *testing.T
 	store  *telemetry.Store
 	state  *State
 	now    time.Time
 	offerW float64
-	phases int // the phases the offer lands on
+	phases int                     // the phases the offer lands on
+	snap   func(w float64) float64 // nil: whole amps on three phases
 }
 
 func newCutRig(t *testing.T, offerW, declaredS float64) *cutRig {
@@ -103,6 +105,9 @@ func (r *cutRig) deliver(gridW float64, data []byte) float64 {
 	capW, _ := EVFuseBudget(r.store, r.state, points, configs, 17250)
 	if capW < r.offerW {
 		r.offerW = math.Floor(capW/690) * 690
+		if r.snap != nil {
+			r.offerW = r.snap(capW)
+		}
 	}
 	return capW
 }
@@ -276,6 +281,40 @@ func TestEVFuseWithoutPhaseCurrentsCoversForSettle(t *testing.T) {
 	}
 	if r.offerW >= 7590 || again < int(evSettle/time.Second) {
 		t.Fatalf("second cut after %d s to %.0f W, want one after evSettle", again, r.offerW)
+	}
+}
+
+// The 22 Oct field site's Easee offers on a step table that is not whole
+// amps (fieldNightLoadpoint). With L1 0.6 A over a hot 25 A line, the first
+// cut takes 6,200 W to the 5,500 W step. While that cut travels to a slow
+// charger it covers the overage, so the offer it left stays: rounding to
+// whole amps applies to a new cut, not to an offer kept. Rounding the kept
+// offer down took the car 6,200 -> 5,500 -> 4,800 -> 0 W in 3 s.
+func TestEVFuseCoveredCutKeepsAStepTableOffer(t *testing.T) {
+	table := []float64{4800, 5500, 6200, 6900, 7600, 8300, 9000, 9700, 10400, 11100}
+	r := newCutRig(t, 6200, 180)
+	r.state.SiteFuseSafetyA = 0
+	r.snap = func(w float64) float64 {
+		best := 0.0
+		for _, step := range table {
+			if step <= w+1e-9 {
+				best = step
+			}
+		}
+		return best
+	}
+	for range 300 {
+		r.read([3]float64{25, 20, 20}) // heat at the line
+	}
+	var offers []float64
+	for range 90 {
+		r.read([3]float64{25.6, 20, 20})
+		if len(offers) == 0 || offers[len(offers)-1] != r.offerW {
+			offers = append(offers, r.offerW)
+		}
+	}
+	if len(offers) != 2 || offers[1] != 5500 {
+		t.Fatalf("offers %v, want one cut to 5,500 W held while it travels", offers)
 	}
 }
 

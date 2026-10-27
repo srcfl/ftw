@@ -475,11 +475,18 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	}
 	over, capW, byImport := r.fuseOverW > 0, math.Inf(1), false
 	if over {
-		capW = latestW - math.Max(0, fuseCutW)
-		if r.perPhase {
-			// A charger rounds to the nearest amp, so a cut that leaves
-			// half an amp would round back up and stay over the line.
-			capW = wholeStepsW(capW, step)
+		capW = latestW
+		if fuseCutW > 0 {
+			capW -= fuseCutW
+			if r.perPhase {
+				// A charger rounds to the nearest amp, so a cut that leaves
+				// half an amp would round back up and stay over the line.
+				// Only a new cut rounds. When cuts on their way cover the
+				// overage, the offer stays as it is, whole amps or not (a
+				// step table, a PV surplus); rounding it would lower it
+				// again on every reading.
+				capW = wholeStepsW(capW, step)
+			}
 		}
 	}
 	if r.limitW >= 0 {
@@ -520,6 +527,12 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	// An increase needs a fresh reading and room below the level increases
 	// may reach, left after our own battery commands that the meter may not
 	// show yet (in r). Between that level and the import limit the cap holds.
+	// Battery discharge the fuse guard added ends once the site fits without
+	// it, so it is no room: a car that took it would keep the battery
+	// feeding the car at the line.
+	if reliefW := s.evFuseReliefW(store); reliefW > 0 {
+		r = s.evMeterRoom(meter, gridW, pool.phases, fuseMaxW, s.withBatteryOrders(s.pendingLoad(at), pending+reliefW))
+	}
 	fuseRoom, importRoom := 0.0, 0.0
 	if fresh {
 		fuseRoom, importRoom = math.Max(0, r.fuseW), math.Max(0, r.riseW)
@@ -556,6 +569,18 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	if s.hasBatteryCharge() && remaining > 0 && remaining <= step && room+1e-6 >= remaining && now.Sub(lim.cutAt) >= evSettle {
 		lim.capW = math.Max(lim.capW, pool.wantW)
 	}
+}
+
+// evFuseReliefW is the fuse guard's battery relief the meter may show now:
+// each battery's recorded relief, at most the discharge it reads.
+func (s *State) evFuseReliefW(store *telemetry.Store) float64 {
+	var w float64
+	for driver, relief := range s.batteryFuseRelief {
+		if r := store.Get(driver, telemetry.DerBattery); r != nil && finiteFuseValue(r.RawW) {
+			w += math.Min(relief, math.Max(0, -r.RawW))
+		}
+	}
+	return w
 }
 
 // wholeStepsW rounds w down to whole charger amps on the pool's phases, one

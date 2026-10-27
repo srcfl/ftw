@@ -58,7 +58,9 @@ EVs once that filtered current passes the same limit, and at once above
 only when that step fits under the limit, and not within 20 s of a cut. Its
 rise reads the higher of the reading and that filtered current. An idle
 car's start reads each phase as it is, plus its new current; the filtered
-current holds it back only while it is over the limit. Where the meter
+current holds it back only while it is over the limit. Neither counts
+battery discharge that the fuse guard added as room: that relief ends once
+the site fits without it. Where the meter
 reports phase currents, they replace total import as the EVs' fuse check; a
 tariff import ceiling still applies.
 

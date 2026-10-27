@@ -225,14 +225,14 @@ func testFuseLineIdleStart(t *testing.T, inA float64, phases int, marginA, lineA
 	}
 }
 
-// fitScenario runs a 3 × 16 A site, safety margin 0.5 A, with 3.5 A of
-// house on each phase: twelve steps of the car fit exactly under the 15.5 A
-// line. The car asks for 16 A.
-func fitScenario(noise func() float64) *simSite {
-	sc := simScenario{name: "exact fit", run: 30 * time.Minute,
+// fitScenario runs a 3 × 16 A site, safety margin 0.5 A, with houseLoadA of
+// house on each phase. At 3.5 A twelve steps of the car fit exactly under
+// the 15.5 A line. The car asks for 16 A.
+func fitScenario(houseLoadA float64, run time.Duration, noise func() float64) *simSite {
+	sc := simScenario{name: "exact fit", run: run,
 		plant: func(p *sitesim.Plant) {
 			p.Fuse.RatingA = 16
-			p.HouseW = houseA(3.5, 3.5, 3.5)
+			p.HouseW = houseA(houseLoadA, houseLoadA, houseLoadA)
 		},
 		setup: func(s *simSite) { s.meterNoise = noise }}
 	return runSimScenario(sc, simStart)
@@ -240,7 +240,7 @@ func fitScenario(noise func() float64) *simSite {
 
 // Closed loop: the car climbs to the line and stays there for 30 min.
 func TestSiteSimCarEndsAtTheLine(t *testing.T) {
-	s := fitScenario(nil)
+	s := fitScenario(3.5, 30*time.Minute, nil)
 	if s.failure != "" {
 		t.Fatal(s.failure)
 	}
@@ -259,41 +259,77 @@ func TestSiteSimCarEndsAtTheLine(t *testing.T) {
 	}
 }
 
-// Closed loop with 0.1 A of meter noise on each phase: the car steps at
-// most once per settle time plus the heat's cooling, no phase passes
-// 1.2 × In, and the plant's gG fuse holds.
-func TestSiteSimNoisyLineDoesNotHunt(t *testing.T) {
-	rng := rand.New(rand.NewPCG(1, 0))
-	s := fitScenario(func() float64 { return .1 * rng.NormFloat64() })
-	if s.failure != "" {
-		t.Fatal(s.failure)
+// Closed loop with meter noise, two hours a case, house load constant.
+// Every case: no phase passes the line or 1.2 × In, the plant's gG fuse
+// holds, the car never stops, every rise is one step at least evSettle
+// after a cut, and the car stays within dropSteps of the top it climbed to.
+//
+// With part of a step left under the line, the car holds still. With
+// exactly whole steps left, the car sits at the line and zero-mean noise
+// reads over it about half the time. The heat over the line then cuts a
+// step, and the car rises back once the heat has cooled to a step of room:
+// a slow cycle, three to five cuts an hour. A reading 1 A over the line,
+// as 0.2 A of noise gives now and then, cuts two steps. That cycle is the
+// cost of holding no amps back below the line (owner rule of 27 Oct);
+// timers and the heat model set its pace. This test pins that pace, so a
+// faster hunt fails.
+func TestSiteSimNoisyLineCyclesSlowly(t *testing.T) {
+	for _, tc := range []struct {
+		houseA, sigma float64
+		cutsPerHour   float64 // the most allowed after the climb
+		dropSteps     float64 // the furthest below the top
+	}{
+		{3.25, .1, 0, 0}, {3.75, .2, 0, 0}, // part of a step left
+		{3.5, .03, 5, 1}, {3.5, .1, 5, 1}, {3.5, .2, 5, 2}, // exact fit
+	} {
+		t.Run(fmt.Sprintf("house_%.2fA/noise_%.2fA", tc.houseA, tc.sigma), func(t *testing.T) {
+			rng := rand.New(rand.NewPCG(1, 0))
+			s := fitScenario(tc.houseA, 2*time.Hour, func() float64 { return tc.sigma * rng.NormFloat64() })
+			if s.failure != "" {
+				t.Fatal(s.failure)
+			}
+			lineA := s.state.fuseLineA()
+			if s.peakA > lineA+1e-6 || s.peakA > fuseInstantFactor*s.p.Fuse.RatingA || s.p.Fuse.AnyBlown() {
+				t.Fatalf("peak phase %.2f A on the %.1f A line, fuse %+v", s.peakA, lineA, s.p.Fuse)
+			}
+			var moves []simCommand
+			last := 0.0
+			for _, c := range s.commands {
+				if c.device == "evse" && c.w != last {
+					moves, last = append(moves, c), c.w
+				}
+			}
+			// The start, then the climb to the line: one step per reading.
+			climb := 0
+			for climb+1 < len(moves) && moves[climb+1].w > moves[climb].w {
+				climb++
+			}
+			top, after := moves[climb].w, moves[climb+1:]
+			cuts := 0
+			for i, c := range after {
+				prev := moves[climb]
+				if i > 0 {
+					prev = after[i-1]
+				}
+				switch {
+				case c.w < top-tc.dropSteps*690:
+					t.Fatalf("cut to %.0f W, more than %.0f steps below %.0f W: %v", c.w, tc.dropSteps, top, after)
+				case c.w < prev.w:
+					cuts++
+				case c.w-prev.w != 690:
+					t.Fatalf("rose from %.0f W to %.0f W, want one step: %v", prev.w, c.w, after)
+				case c.at.Sub(prev.at) < evSettle:
+					t.Fatalf("rose %v after a cut: %v then %v", c.at.Sub(prev.at), prev, c)
+				}
+			}
+			perHour := float64(cuts) / s.p.Now.Sub(moves[climb].at).Hours()
+			if perHour > tc.cutsPerHour {
+				t.Fatalf("%d cuts after the climb (%.1f an hour, limit %.0f): %v", cuts, perHour, tc.cutsPerHour, after)
+			}
+			t.Logf("car %.0f W, peak phase %.2f A, %d cuts in %v after the climb",
+				s.p.EVSE.DrawW, s.peakA, cuts, s.p.Now.Sub(moves[climb].at).Round(time.Minute))
+		})
 	}
-	if s.peakA > fuseInstantFactor*s.p.Fuse.RatingA || s.p.Fuse.AnyBlown() {
-		t.Fatalf("peak phase %.2f A, fuse %+v", s.peakA, s.p.Fuse)
-	}
-	var moves []simCommand
-	last := 0.0
-	for _, c := range s.commands {
-		if c.device == "evse" && c.w != last {
-			moves, last = append(moves, c), c.w
-		}
-	}
-	// The start, then the climb to the line: one step per reading.
-	climb := 0
-	for climb+1 < len(moves) && moves[climb+1].w > moves[climb].w {
-		climb++
-	}
-	after := moves[climb+1:]
-	perHour := float64(len(after)) / s.p.Now.Sub(moves[climb].at).Hours()
-	if limit := time.Hour.Seconds() / (evSettle + fuseHeatTau).Seconds(); perHour > limit {
-		t.Fatalf("%d moves after the climb (%.0f an hour, limit %.0f): %v", len(after), perHour, limit, after)
-	}
-	for i := 1; i < len(after); i++ {
-		if after[i].w > after[i-1].w && after[i].at.Sub(after[i-1].at) < evSettle {
-			t.Fatalf("rose %v after a cut: %v then %v", after[i].at.Sub(after[i-1].at), after[i-1], after[i])
-		}
-	}
-	t.Logf("car %.0f W, peak phase %.2f A, %d moves after the climb", s.p.EVSE.DrawW, s.peakA, len(after))
 }
 
 // With no safety margin, battery charge may fill a phase to exactly the
