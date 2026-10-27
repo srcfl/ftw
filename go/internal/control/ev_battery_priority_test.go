@@ -26,6 +26,7 @@ func issue1868Site(t *testing.T) (*telemetry.Store, *State, []loadpoint.State, [
 	a, n := st.offerPhaseA(4140, 3)
 	st.evLimit.offers = map[string]chargerOffers{"rav4": {log: commandLog{{at: st.now().Add(-evUnknownSettle - time.Second), w: 4140, a: a, n: n}}}}
 	sent(st, "battery", 4000)
+	lastingFuseHeat(tel, st) // The overage has lasted, as in the field.
 	points := []loadpoint.State{{ID: "rav4", DriverName: "car", PluggedIn: true, CommandedKnown: true, CommandedW: 4140, CommandedPhases: 3}}
 	configs := []loadpoint.Config{{ID: "rav4", DriverName: "car", PhaseMode: "3p", MinChargeW: 4140, MaxChargeW: 4140, AllowedStepsW: []float64{0, 4140}}}
 	return tel, st, points, configs

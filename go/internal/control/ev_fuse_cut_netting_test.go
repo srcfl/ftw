@@ -297,9 +297,9 @@ func TestEVFusePhaseChangeCoversNothing(t *testing.T) {
 }
 
 // After a restart, the offer Core finds in force is one it did not send in
-// this run. A cut takes it as shown: the first reading over the limit trims
-// the overage from it, and while that cut travels to a slow charger no
-// further reading counts the found offer as a raise on its way.
+// this run. A cut takes it as shown: the first reading that spends the heat
+// trims the overage from it, and while that cut travels to a slow charger
+// no further reading counts the found offer as a raise on its way.
 func TestEVFuseRestartTakesFoundOfferAsShown(t *testing.T) {
 	s := fuseHeatSite(t)
 	s.chargerDelay, s.chargerMaxAgeS = time.Minute, 180
@@ -307,8 +307,8 @@ func TestEVFuseRestartTakesFoundOfferAsShown(t *testing.T) {
 	s.run(30 * time.Second)
 	s.boot()
 	bootAt := s.now
-	if took, offer := s.firstCut(5 * time.Second); took != 0 || offer != 8970 {
-		t.Fatalf("restart at 26 A cut after %v to %.0f W, want the first reading to 8,970 W", took, offer)
+	if took, offer := s.firstCut(5 * time.Second); took != time.Second || offer != 8970 {
+		t.Fatalf("restart at 26 A cut after %v to %.0f W, want the second reading to 8,970 W", took, offer)
 	}
 	s.run(50 * time.Second)
 	if cuts := offerWatts(s.cutsSince(bootAt)); len(cuts) != 1 {

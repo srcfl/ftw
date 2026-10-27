@@ -27,14 +27,32 @@ const fuseInstantFactor = 1.2
 //
 // A reading stands for the time until the next one. A meter gap counts at
 // the last current seen: the reading after it neither fills the gap with its
-// own current nor erases an overload from before it. A Core restart starts
-// the model at the first reading's current, with no memory of the minutes
-// before.
+// own current nor erases an overload from before it.
+//
+// A Core restart loses the model, but not the fuse's heat: a fuse cools over
+// minutes and a restart takes seconds. The model starts at the first
+// reading's current, at most the working limit (start). Starting cold would
+// grant a full fresh budget to an overload already under way: from cold,
+// 1.15 × In takes about 85 s to reach In. Starting at the line, the first
+// reading over it spends the budget at once, and a sustained overload is cut
+// on the next reading. One reading cannot show that an overage has lasted,
+// so it is not charged as if it had; its current still counts for the time
+// until the next reading, and the instant cut above fuseInstantFactor
+// applies to it as to any other.
 type fuseHeat struct {
 	set  bool
 	at   time.Time  // the last reading
 	amps [3]float64 // its phase currents, held until the next
 	sq   [3]float64 // filtered I² per phase up to at, A²
+}
+
+// start seeds the model from the first reading after Core starts: each
+// phase at its current, at most lineA.
+func (h *fuseHeat) start(at time.Time, amps []float64, lineA float64) {
+	h.step(at, amps)
+	for i, sq := range h.sq {
+		h.sq[i] = math.Min(sq, lineA*lineA)
+	}
 }
 
 // step folds the time since the last reading into the model at that
@@ -117,9 +135,15 @@ func (s *State) stepFuseHeat(meter *telemetry.DerReading, totalW float64) {
 	if s.fuseHeat.set && !meter.UpdatedAt.After(s.fuseHeat.at) {
 		return
 	}
-	if amps, _, valid := phaseCurrentsA(meter, s, totalW); valid {
-		s.fuseHeat.step(meter.UpdatedAt, amps)
+	amps, _, valid := phaseCurrentsA(meter, s, totalW)
+	if !valid {
+		return
 	}
+	if !s.fuseHeat.set {
+		s.fuseHeat.start(meter.UpdatedAt, amps, math.Max(0, s.SiteFuseAmps-evPhaseMarginA)) // evMeterRoom's limitA
+		return
+	}
+	s.fuseHeat.step(meter.UpdatedAt, amps)
 }
 
 // phaseCurrentsA reads the site's configured phases, import positive. A

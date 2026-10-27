@@ -704,10 +704,11 @@ func evMeterBudgetFixture(t *testing.T, gridW float64, phaseA []float64, offerW 
 }
 
 // A 3p car offered 15 A beside 11 A of house load on L1: 26 A on a 24 A
-// working limit. With no earlier reading the fuse heat starts at 26 A, so
-// two amps on three phases come off the offer at once.
+// working limit, long enough to spend the heat budget, so two amps on three
+// phases come off the offer.
 func TestEVHardLimitTrimsPhaseOverageFromOffer(t *testing.T) {
 	store, state, points, configs := evMeterBudgetFixture(t, 8280, []float64{26, 20, 20}, 10350, "3p")
+	lastingFuseHeat(store, state)
 	got, known := EVFuseBudget(store, state, points, configs, 17250)
 	if !known || math.Abs(got-8970) > .01 {
 		t.Fatalf("cap %.1f W, want 10,350 - 2 A x 690 = 8,970 W", got)
