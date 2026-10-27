@@ -76,12 +76,37 @@ func energyDispatchEnabled(cfg *config.Config) bool {
 // and weighted split equally because nothing set its weights.
 var removedModes = map[string]bool{"priority": true, "weighted": true}
 
-// restoreStoredMode applies the mode saved in state.db. A removed mode becomes
-// manual self-consumption and is saved back, so the stored mode matches what
-// the site runs. Any other unknown value keeps the default mode, as before.
-func restoreStoredMode(ctrl *control.State, st *state.Store) {
+// restoreStoredMode keeps durable modes, but never resumes forced Charge.
+// Charge returns to the planner, or Idle if planning is disabled. Removed
+// modes become self-consumption; unknown values keep the default mode.
+func restoreStoredMode(ctrl *control.State, st *state.Store, cfg *config.Config) {
 	v, ok := st.LoadConfig("mode")
 	if !ok {
+		return
+	}
+	if control.Mode(v) == control.ModeCharge {
+		next := control.ModeIdle
+		values := map[string]string{}
+		if cfg != nil && cfg.Planner != nil && cfg.Planner.Enabled {
+			export := config.BatteryExportUnknown
+			if e, valid := config.ParseBatteryExport(cfg.Planner.BatteryExport); valid {
+				export = e
+			}
+			storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
+			if e, valid := config.ParseBatteryExport(storedExport); valid {
+				export = e
+			}
+			next = control.Mode(export.PlannerModeKey())
+			// Keep unknown as unknown. Otherwise the later preference
+			// migration would infer a refusal from the new passive mode.
+			values[config.StateKeyBatteryExport] = string(export)
+		}
+		ctrl.Mode = next
+		values["mode"] = string(next)
+		if err := st.SaveConfigValues(values); err != nil {
+			slog.Warn("could not save the mode after ending manual Charge at restart", "mode", next, "err", err)
+		}
+		slog.Info("manual Charge ended at restart", "previous_mode", v, "mode", next)
 		return
 	}
 	if m := control.Mode(v); control.IsValidMode(m) {
