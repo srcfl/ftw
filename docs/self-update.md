@@ -128,7 +128,7 @@ duration; in a log or script it is one line per step. Core records every
 finished step with its own timing, so a step that ends between two reads is
 still shown. `ftw update` waits through the restart, including a history
 migration, and reports the version and health that result. A trial only
-becomes current after readiness;
+becomes current after its first control tick;
 a failed trial falls back to the previous Core, and `ftw update` names the
 Core that runs. Already current exits 0, so a script can run the step
 unattended; a failed step exits 1. The same steps are Core API calls. A

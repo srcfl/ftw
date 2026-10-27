@@ -55,8 +55,8 @@ func beginNativeTrial(root, tag, version string) (*nativeTrial, error) {
 	return trial, nil
 }
 
-// Complete only after the full API replaces the boot handler. At this point
-// state and drivers are open and the HTTP listener has bound successfully.
+// Complete only after the first control tick has finished. By then state,
+// drivers and the full API are up, and the control loop runs.
 func (trial *nativeTrial) complete(checker *selfupdate.Checker) error {
 	if trial == nil {
 		return nil
