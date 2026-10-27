@@ -20,7 +20,7 @@ import (
 // HealEvent records a corruption-recovery action taken at boot, for surfacing
 // on /api/health. Zero events means a clean boot.
 type HealEvent struct {
-	Tier   string `json:"tier"`   // "state" | "cache"
+	Tier   string `json:"tier"`   // "state" | "cache" | "history"
 	Action string `json:"action"` // "rebuilt" | "restored"
 	Detail string `json:"detail"`
 	AtMs   int64  `json:"at_ms"`
@@ -29,6 +29,8 @@ type HealEvent struct {
 const (
 	tierState = "state"
 	tierCache = "cache"
+	// history.db has no snapshot; a damaged file is rebuilt empty (history_sqlite.go).
+	tierHistory = "history"
 
 	healRebuilt  = "rebuilt"
 	healRestored = "restored"

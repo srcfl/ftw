@@ -784,7 +784,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// storage: surface DB corruption-recovery events from this boot so a
 	// corrupt database is never a silent, blank-dashboard failure again.
 	if s.deps.State != nil {
-		storage := map[string]any{"state": "ok", "cache": "ok"}
+		storage := map[string]any{"state": "ok", "cache": "ok", "history": "ok"}
 		for _, ev := range s.deps.State.HealEvents() {
 			storage[ev.Tier] = ev.Action // "rebuilt" | "restored"
 			storage["last_event_ms"] = ev.AtMs

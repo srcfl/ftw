@@ -205,8 +205,11 @@ have no DuckDB dependency. The [FTWDB experiment is retired](ftwdb-shadow.md).
 State schema 5 added aggregate history and binds state.db to a specific
 history.db generation. Portable backups export a SQLite read snapshot with row
 counts and hashes checked, plus any Parquet files still on the box. A
-config-only snapshot cannot recover missing history. To return to an older
-Core across a state-schema change, stop Core and restore a verified full backup
+config-only snapshot cannot recover missing history. If history.db is damaged or
+missing at startup, Core moves it aside as `history.db.corrupt-<ms>`, starts an
+empty history bound to a new generation and reports the loss on `/api/health`.
+A readable history.db from another generation is still refused.
+To return to an older Core across a state-schema change, stop Core and restore a verified full backup
 with its matching version; rolling back the program alone across that boundary
 is refused.
 

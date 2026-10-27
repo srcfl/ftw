@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"modernc.org/sqlite"
 )
 
 const HistoryFilename = "history.db"
@@ -37,9 +39,59 @@ func ensureHistorySchema(exec func(string) error) error {
 	return nil
 }
 
+var errHistoryMissing = errors.New("primary SQLite history is missing")
+
+// historyDamage marks a history.db that SQLite cannot read.
+type historyDamage struct{ err error }
+
+func (e *historyDamage) Error() string { return e.err.Error() }
+func (e *historyDamage) Unwrap() error { return e.err }
+
+// openHistory heals a damaged or missing history.db instead of refusing to
+// start: history holds charts and the ledger, never control state. The old
+// files move aside as .corrupt-<ms>, a fresh file binds a new generation and
+// /api/health reports the loss. A readable file with another generation is
+// still refused, because that is a wrong file from a restore.
+func (s *Store) openHistory() error {
+	err := s.openHistoryOnce()
+	var damage *historyDamage
+	detail := "history.db was missing — started an empty history (charts and energy totals lost)"
+	switch {
+	case errors.As(err, &damage):
+		detail = "history.db was damaged — moved aside and started an empty history (charts and energy totals lost)"
+	case !errors.Is(err, errHistoryMissing):
+		return err
+	}
+	nowMs := time.Now().UnixMilli()
+	slog.Error("state: "+detail, "path", s.historyPath, "err", err)
+	if err := quarantine(s.historyPath, nowMs); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`DELETE FROM config WHERE key IN ('history_sqlite_generation','history_sqlite_pending_generation')`); err != nil {
+		return err
+	}
+	s.healEvents = append(s.healEvents, HealEvent{Tier: tierHistory, Action: healRebuilt, Detail: detail, AtMs: nowMs})
+	return s.openHistoryOnce()
+}
+
+// historyCorrupt reports whether err, or a quick_check after it, shows that
+// SQLite cannot read the file. Busy, full or read-only errors are not damage.
+func historyCorrupt(db *sql.DB, err error) bool {
+	if sqliteCorrupt(err) {
+		return true
+	}
+	ok, qerr := quickCheck(db)
+	return (qerr == nil && !ok) || sqliteCorrupt(qerr)
+}
+
+func sqliteCorrupt(err error) bool {
+	var e *sqlite.Error
+	return errors.As(err, &e) && (e.Code()&0xff == 11 || e.Code()&0xff == 26) // SQLITE_CORRUPT, SQLITE_NOTADB
+}
+
 // The beta converter publishes a verified SQLite file before selecting its
 // generation. Never reopen the frozen pre-beta tables as current history.
-func (s *Store) openHistory() error {
+func (s *Store) openHistoryOnce() error {
 	s.historyPath = historyDatabasePath(s.mainDBPath)
 	active, err := s.historyConfig("history_sqlite_generation")
 	if err != nil {
@@ -61,7 +113,7 @@ func (s *Store) openHistory() error {
 		return errors.New("beta history needs conversion: stop Core and run ftw-history-migrate; keep history.duckdb and history-hot.db")
 	}
 	if _, err := os.Stat(s.historyPath); errors.Is(err, os.ErrNotExist) && active != "" && restore == "" {
-		return errors.New("primary SQLite history is missing; restore a full backup")
+		return errHistoryMissing
 	}
 	db, err := openDurableHistory(s.historyPath)
 	if err != nil {
@@ -75,20 +127,26 @@ func (s *Store) openHistory() error {
 			s.history = nil
 		}
 	}()
+	damaged := func(err error) error {
+		if restore == "" && historyCorrupt(db, err) {
+			return &historyDamage{err}
+		}
+		return err
+	}
 	var sourceTables int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('history_source_energy','history_source_cursor','history_source_periods')`).Scan(&sourceTables); err != nil {
-		return err
+		return damaged(err)
 	}
 	if sourceTables != 0 && sourceTables != 3 {
 		return errors.New("incomplete history source tables; restore a verified full backup")
 	}
 	if err := ensureHistorySchema(func(stmt string) error { _, err := db.Exec(stmt); return err }); err != nil {
-		return fmt.Errorf("history schema: %w", err)
+		return damaged(fmt.Errorf("history schema: %w", err))
 	}
 	var generation string
 	err = db.QueryRow(`SELECT name FROM history_migrations WHERE name LIKE 'generation:%'`).Scan(&generation)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return damaged(err)
 	}
 	generation = strings.TrimPrefix(generation, "generation:")
 	if restore != "" && generation != "" && generation != restore {
