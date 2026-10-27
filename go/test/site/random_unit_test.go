@@ -186,27 +186,37 @@ func TestInvariantsJudgeBetweenFuseAndInstantByHeat(t *testing.T) {
 // R6, seeds 207533, 207536 and 207539: during Charge now an idle car with
 // room is allowed Core's 35 s dwell, the charger's command and startup time
 // and a tick, plus 5 s (72 s here, with a 30 s startup). The grace starts
-// again on each Charge now that changes the request, on each cut FTW sends
-// and when Core answers after a restart. A fault of the meter or the
-// charger excuses the car; an inverter outage does not.
+// again on each Charge now that changes the request and on each cut FTW
+// had to send, over the fuse or with no room; a cut with room does not.
+// While Core is down the count stops. A fault of the meter or the charger
+// excuses the car; an inverter outage does not.
 func TestInvariantsChargeNowGrace(t *testing.T) {
 	for _, c := range []struct {
 		name   string
-		startS int // the car draws from here; 0: never
+		startS int    // the car draws from here; 0: never
+		overS  [2]int // the car draws 16 A, 21 A on the 16 A fuse, in [from, to)
 		marks  []markLine
 		frames []frame
 		events []houseEventLine
 		want   bool
 	}{
-		{"starts after 70 s", 71, nil, nil, nil, true},
-		{"starts after 80 s", 81, nil, nil, nil, false},
-		{"a changed Charge now at 60 s", 121, []markLine{{T: 60, Label: "ftw:charge_now"}}, nil, nil, true},
-		{"FTW cuts at 60 s", 121, nil, []frame{profileAt(0, 16), profileAt(60, 0)}, nil, true},
-		{"Core restarts at 50 s and answers at 60 s", 121,
+		{"starts after 70 s", 71, [2]int{}, nil, nil, nil, true},
+		{"starts after 80 s", 81, [2]int{}, nil, nil, nil, false},
+		{"a changed Charge now at 60 s", 121, [2]int{}, []markLine{{T: 60, Label: "ftw:charge_now"}}, nil, nil, true},
+		{"FTW cuts the car over the fuse at 60 s", 121, [2]int{10, 61}, nil,
+			[]frame{profileAt(0, 16), profileAt(60, 0)}, nil, true},
+		{"FTW cuts an idle car with room at 60 s", 121, [2]int{}, nil,
+			[]frame{profileAt(0, 16), profileAt(60, 0)}, nil, false},
+		{"FTW hunts 6 A, 0 A, 6 A with room", 0, [2]int{}, nil,
+			[]frame{profileAt(0, 6), profileAt(15, 0), profileAt(30, 6), profileAt(45, 0),
+				profileAt(60, 6), profileAt(75, 0), profileAt(90, 6), profileAt(105, 0),
+				profileAt(120, 6), profileAt(135, 0), profileAt(150, 6), profileAt(165, 0),
+				profileAt(180, 6), profileAt(195, 0)}, nil, false},
+		{"Core restarts at 50 s and answers at 60 s", 121, [2]int{},
 			[]markLine{{T: 50, Label: "ftw:restart"}, {T: 60, Label: "ftw:up"}}, nil, nil, true},
-		{"the meter late for 40 s from 10 s", 140, nil, nil,
+		{"the meter late for 40 s from 10 s", 140, [2]int{}, nil, nil,
 			[]houseEventLine{{T: 10, Event: houseEvent{Do: "meter_late", ForS: 40}}}, true},
-		{"the inverter offline for 40 s from 10 s", 140, nil, nil,
+		{"the inverter offline for 40 s from 10 s", 140, [2]int{}, nil, nil,
 			[]houseEventLine{{T: 10, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 40}}}, false},
 	} {
 		// 16 A fuse, a 5 A house: 11 A of room. Charge now at 1 s.
@@ -214,6 +224,10 @@ func TestInvariantsChargeNowGrace(t *testing.T) {
 			if c.startS > 0 && i >= c.startS {
 				r.CarW[0] = 6900
 				r.PhaseA = [3]float64{15, 15, 15}
+			}
+			if i >= c.overS[0] && i < c.overS[1] {
+				r.CarW[0] = 11040
+				r.PhaseA = [3]float64{21, 21, 21}
 			}
 		})
 		withCharger(t, d, 0, 30)
@@ -253,6 +267,131 @@ func TestInvariantsFloorJudgesFTWsOrders(t *testing.T) {
 		})
 		if got := judged(d)[atFloor]; got != c.want {
 			t.Errorf("%s: %q = %v, want %v", c.name, atFloor, got, c.want)
+		}
+	}
+}
+
+// An over-limit stretch no outside change explains is FTW's own, whichever
+// way the current flows and however it is cut up: FTW's discharge pushing
+// export over the fuse, and a warm fuse held over its rating with a 1 s dip
+// every 7 s. Both fail after 3 s.
+func TestInvariantsAStretchWithNoStepIsFTWsOwn(t *testing.T) {
+	export := randomRun(121, 16, -10, func(i int, r *sample) {
+		w := 0.0
+		if i >= 47 {
+			w, r.BatW = -5000, -5000
+		}
+		r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: w}}}
+		if i >= 50 && i < 56 {
+			r.PhaseA = [3]float64{-21, -21, -21}
+		}
+	})
+	dips := randomRun(601, 25, 25.5, func(i int, r *sample) {
+		if i%7 == 6 {
+			r.PhaseA = [3]float64{24.9, 24.9, 24.9}
+		}
+	})
+	for name, d := range map[string]*runData{"export 6 s at 1.31 x In": export, "600 s on a warm fuse, with dips": dips} {
+		withCharger(t, d, 5, 0)
+		if v := judged(d); v[limitOwn] {
+			t.Errorf("%s: %q passed", name, limitOwn)
+		}
+	}
+}
+
+// A window that opens inside FTW's own raise does not turn it into a step:
+// FTW raises the car at 45 s and the phases sit at 31 A (1.24 x 25 A) from
+// 50 to 60 s; PV rising at 51 s changes nothing. The battery is at its
+// floor, so the 40 s charger would be a step's lever.
+func TestInvariantsAnEventInsideFTWsRaiseLeavesItOwn(t *testing.T) {
+	for _, withEvent := range []bool{false, true} {
+		d := randomRun(121, 25, 10, func(i int, r *sample) {
+			r.Bat.SoCPct = 6
+			if i >= 50 && i < 60 {
+				r.PhaseA = [3]float64{31, 31, 31}
+			}
+		})
+		withCharger(t, d, 40, 0)
+		d.frames = []frame{profileAt(40, 0), profileAt(45, 16)}
+		if withEvent {
+			d.events = []houseEventLine{{T: 51, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+		}
+		if v := judged(d); v[limitOwn] {
+			t.Errorf("event %v: FTW's raise held 10 s at 1.24 x In and passed", withEvent)
+		}
+	}
+}
+
+// The battery is the 2 s lever for import only above the floor the floor
+// check uses (the planner's 10 % here), and never while its inverter is
+// out; a charger outage delays the charger. Only a meter fault adds its
+// length to a step's time. 16 A fuse, a 5 s charger, 20 A on L1 (1.25 x).
+func TestInvariantsLeverAndFaults(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		socPct   float64
+		from, to int // 20 A on L1 in [from, to)
+		events   []houseEventLine
+		want     bool
+	}{
+		{"a step at 8 %: the charger answers", 8, 50, 59, nil, true},
+		{"a step at 11 %: the battery answers", 11, 50, 59, nil, false},
+		{"a step while the inverter is offline", 50, 50, 59,
+			[]houseEventLine{{T: 30, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 40}}}, true},
+		{"the inverter offline 40 s, 15 s over", 50, 50, 65,
+			[]houseEventLine{{T: 45, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 40}}}, false},
+		{"the meter late 40 s, 15 s over", 50, 50, 65,
+			[]houseEventLine{{T: 45, Event: houseEvent{Do: "meter_late", ForS: 40}}}, true},
+		{"the charger away 20 s, 18 s over", 8, 50, 68,
+			[]houseEventLine{{T: 45, Event: houseEvent{Do: "reconnect", Device: "garage", ForS: 20}}}, true},
+	} {
+		d := randomRun(121, 16, 8, func(i int, r *sample) {
+			r.Bat.SoCPct = c.socPct
+			if i >= c.from && i < c.to {
+				r.PhaseA = [3]float64{20, 12, 12}
+			}
+		})
+		withCharger(t, d, 5, 0)
+		d.events = append([]houseEventLine{{T: 49.5, Event: houseEvent{Do: "loads"}}}, c.events...)
+		if got := judged(d)[limitStep]; got != c.want {
+			t.Errorf("%s: %q = %v, want %v", c.name, limitStep, got, c.want)
+		}
+	}
+}
+
+// R8, C1: once the inverter and Core are back, a battery FTW does not
+// dispatch leaves its forced mode within 10 s.
+func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
+	const forced = "no forced battery mode FTW does not dispatch"
+	for _, c := range []struct {
+		name    string
+		forcedS int     // the register holds 187 / 3 kW until here
+		orderW  float64 // FTW's dispatch; 0: none
+		down    bool    // Core, not the inverter, is away from 10 to 40 s
+		want    bool
+	}{
+		{"8 s after the inverter is back", 48, 0, false, true},
+		{"30 s after the inverter is back", 70, 0, false, false},
+		{"FTW dispatches the discharge", 120, -3000, false, true},
+		{"8 s after Core is back", 48, 0, true, true},
+		{"30 s after Core is back", 70, 0, true, false},
+	} {
+		d := randomRun(121, 16, 5, func(i int, r *sample) {
+			r.Status = &ftwStatus{}
+			if c.orderW != 0 {
+				r.Status.Dispatch = []ftwDispatch{{Driver: "sungrow", TargetW: c.orderW}}
+			}
+			if i < c.forcedS {
+				r.Bat.EMSMode, r.Bat.EMSCmd, r.Bat.EMSSetW = 2, 187, 3000
+			}
+		})
+		if c.down {
+			d.allMarks = []markLine{{T: 10, Label: "ftw:restart"}, {T: 40, Label: "ftw:up"}}
+		} else {
+			d.events = []houseEventLine{{T: 10, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 30}}}
+		}
+		if got := judged(d)[forced]; got != c.want {
+			t.Errorf("%s: %q = %v, want %v", c.name, forced, got, c.want)
 		}
 	}
 }

@@ -301,15 +301,18 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	charger := math.Max(2, h.commandS) // the charger answers in its own time, never under 2 s
 	orders := d.offers()
 
-	// Windows in which an over-limit second is the house's doing.
+	// Windows in which an over-limit second is the house's doing. Only a
+	// meter fault adds its length to the time FTW may take: it blinds FTW.
+	// An inverter outage takes the battery lever away; a charger outage
+	// delays the charger lever (chargerLever).
 	var windows []stepWindow
-	var faults, chargerFaults, inverterOut []eventWindow
+	var faults, chargerFaults, inverterOut, chargerOut []eventWindow
 	for _, ev := range d.events {
 		w := stepWindow{from: ev.T}
 		until := 0.0
 		switch ev.Event.Do {
 		case "meter_late", "silence", "offline", "reconnect":
-			w.extraS, until = ev.Event.ForS, ev.T+ev.Event.ForS
+			until = ev.T + ev.Event.ForS
 		case "meter_glitch":
 			until = ev.T + 5
 		}
@@ -317,14 +320,27 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			f := eventWindow{ev.T, until}
 			faults = append(faults, f)
 			switch ev.Event.Device {
-			case "", "meter", "garage":
+			case "", "meter":
 				chargerFaults = append(chargerFaults, f)
+				w.extraS = ev.Event.ForS
+			case "garage":
+				chargerFaults = append(chargerFaults, f)
+				chargerOut = append(chargerOut, f)
 			case "inverter":
 				inverterOut = append(inverterOut, f)
 				w.noBattery = true
 			}
 		}
 		windows = append(windows, w)
+	}
+	// The battery's floor: the higher of the inverter's own floor and the
+	// planner's soc_min. FTW may not discharge it there (check 6), so there
+	// it is no lever for import either.
+	floorPct := h.floorPct
+	if p := d.metaF("planner_floor_pct"); p > 0 {
+		floorPct = math.Max(floorPct, p)
+	} else {
+		floorPct = math.Max(floorPct, plannerFloorPct)
 	}
 	for _, mk := range d.allMarks {
 		if mk.Label == "ftw:restart" {
@@ -357,21 +373,35 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	}
 	m["car_starts_ftw_did_not_order"] = carStarts
 
+	// chargerLever is how long the charger takes to answer from t: its own
+	// time, after the rest of any outage it is in.
+	chargerLever := func(t float64) float64 {
+		left := 0.0
+		for _, w := range chargerOut {
+			if t >= w.from && t <= w.to {
+				left = math.Max(left, w.to-t)
+			}
+		}
+		return charger + left
+	}
 	// lever is how long FTW's fastest lever takes, from t, to take overA off
-	// the worst phase: the battery, in 2 s, while its inverter runs, it is
-	// above its floor and its spare power covers the overage; otherwise the
-	// charger.
+	// the worst phase: the battery, in 2 s, while its inverter runs and its
+	// spare power covers the overage; otherwise the charger. At its floor
+	// the battery may only charge less, never discharge more.
 	lever := func(t, overA float64, export bool) float64 {
 		r := d.at(t)
-		if r == nil || within(inverterOut, t, 0) || (r.Bat.Running != nil && !*r.Bat.Running) || r.Bat.SoCPct <= h.floorPct+1 {
-			return charger
+		if r == nil || within(inverterOut, t, 0) || (r.Bat.Running != nil && !*r.Bat.Running) {
+			return chargerLever(t)
 		}
 		spare := rigBatteryMaxW + r.BatW // discharge more, or charge less
-		if export {
+		switch {
+		case export:
 			spare = rigBatteryMaxW - r.BatW
+		case r.Bat.SoCPct <= floorPct:
+			spare = math.Max(0, r.BatW)
 		}
 		if spare < overA*3*volt {
-			return charger
+			return chargerLever(t)
 		}
 		return 2
 	}
@@ -380,39 +410,15 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			return w.untilT
 		}
 		lv := w.leverS
-		if lv == 0 {
-			lv = charger
-			if !w.noBattery {
-				lv = lever(math.Max(w.from, at), overA, export)
-			}
+		switch {
+		case lv > 0:
+			lv += chargerLever(w.from) - charger
+		case w.noBattery:
+			lv = chargerLever(w.from)
+		default:
+			lv = lever(math.Max(w.from, at), overA, export)
 		}
 		return w.from + w.extraS + lv + 2 + 3
-	}
-	// ownRise is whether FTW raised what a stretch from s can come from: its
-	// last change to the car's order was a rise, sent within the time the
-	// charger takes to apply it, or a battery order moved toward import in
-	// the last 10 s.
-	ownRise := func(s float64) bool {
-		changedAt, rose, prev := math.Inf(-1), false, 0.0
-		for _, p := range orders {
-			if p.T > s {
-				break
-			}
-			if w := p.offerW(); math.Abs(w-prev) > 1 {
-				changedAt, rose, prev = p.T, w > prev, w
-			}
-		}
-		if rose && changedAt >= s-(h.commandS+h.startupS+10) {
-			return true
-		}
-		lo := math.Inf(1)
-		for _, r := range d.window(s-10, s) {
-			if w, ok := dispatchW(r); ok {
-				lo = math.Min(lo, w)
-			}
-		}
-		w, ok := dispatchW(d.at(s))
-		return ok && w > lo+100
 	}
 
 	// 1, 2: the fuse holds; over the limit only as long as an outside step
@@ -453,23 +459,20 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 				to, explained = math.Max(to, x), true
 			}
 		}
-		switch {
-		case explained:
-		case ownRise(s):
+		if !explained { // no change outside FTW: its own, import or export
 			own, to = true, c+3
-		default: // nothing FTW raised: a change outside it
-			to = s + lever(s, overA, export) + 2 + 3
 		}
 		if !own && c > s { // Core answers once the heat says so
 			to = math.Max(to, c+lever(c, overA, export)+2+3)
 		}
-		// Every window that opens inside the stretch while it is still
+		// Every window that opens inside a step's stretch while it is still
 		// allowed extends it: a second step, an outage or a Core restart.
-		for grown := true; grown; {
+		// FTW's own raise stays its own.
+		for grown := !own; grown; {
 			grown = false
 			for _, w := range windows {
 				if x := until(w, w.from, overA, export); w.from >= s && w.from <= math.Min(end, to) && x > to {
-					to, own, grown = x, false, true
+					to, grown = x, true
 				}
 			}
 		}
@@ -559,9 +562,12 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	// 4: during Charge now the car charges when there is room for it. With
 	// room, Core waits evRestartDwell before it starts a stopped car, then
 	// the charger takes its own time, and a tick. The count of idle seconds
-	// with room starts again on each Charge now that changes the request,
-	// on each cut FTW sends and when Core answers after a restart. Only a
-	// fault of the meter or of the charger excuses an idle car.
+	// with room starts again on each Charge now that changes the request.
+	// A cut FTW had to send needs no new start: the count runs only while
+	// the car is idle with room, so it starts when the cut car stops. A
+	// cut with room is FTW's doing and starts nothing. While Core is down
+	// the count stops. Only a fault of the meter or of the charger excuses
+	// an idle car.
 	var holds []eventWindow
 	var graceFrom []float64
 	var holdFrom float64
@@ -584,13 +590,10 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			}
 		}
 	}
-	for i := 1; i < len(orders); i++ {
-		if orders[i].offerW() < orders[i-1].offerW()-1 {
-			graceFrom = append(graceFrom, orders[i].T)
-		}
-	}
-	// While Core is down nothing can start the car; it starts the grace
-	// again when it answers.
+	// roomA is the room below the fuse for the car, Core's line; 6 A is
+	// the car's minimum on three phases.
+	roomA := func(r *sample) float64 { return fuse - (maxAbsI(r) - carW(r, 0)/(3*volt)) }
+	// While Core is down nothing can start the car.
 	var down []eventWindow
 	for i, mk := range d.allMarks {
 		if mk.Label != "ftw:restart" {
@@ -604,7 +607,6 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			}
 		}
 		down = append(down, eventWindow{mk.T, up})
-		graceFrom = append(graceFrom, up)
 	}
 	// The car may stand idle with room for Core's dwell, the charger's
 	// command and startup time and a tick, plus the 2 s for the meter and
@@ -626,10 +628,7 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			if i > 0 && regrace(ws[i-1].T, r.T) {
 				run4 = 0
 			}
-			// Room below the fuse, the car's line in Core; 6 A is the car's
-			// minimum on three phases.
-			roomA := fuse - (maxAbsI(r) - carW(r, 0)/(3*volt))
-			bad := carW(r, 0) < 0.5*1380 && roomA >= 6 && !within(chargerFaults, r.T, 30) && !within(down, r.T, 0)
+			bad := carW(r, 0) < 0.5*1380 && roomA(r) >= 6 && !within(chargerFaults, r.T, 30) && !within(down, r.T, 0)
 			if bad && i > 0 {
 				run4 += r.T - ws[i-1].T
 				idle = math.Max(idle, run4)
@@ -653,16 +652,9 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	}
 	m["offers_over_rating"] = over
 
-	// 6: FTW does not ask the battery to discharge at its floor: the higher
-	// of the inverter's own floor and the planner's soc_min. FTW's orders
-	// are judged, not the inverter's register, which can hold an order from
-	// before an outage.
-	floorPct := h.floorPct
-	if p := d.metaF("planner_floor_pct"); p > 0 {
-		floorPct = math.Max(floorPct, p)
-	} else {
-		floorPct = math.Max(floorPct, plannerFloorPct)
-	}
+	// 6: FTW does not ask the battery to discharge at its floor (floorPct).
+	// FTW's orders are judged, not the inverter's register, which can hold
+	// an order from before an outage; check 8 judges that.
 	floorS := 0.0
 	for _, r := range run {
 		if w, ok := dispatchW(r); ok && w < -50 && r.Bat.SoCPct <= floorPct {
@@ -690,6 +682,27 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		}
 	}
 	m["raises_on_a_stale_meter"] = raises
+
+	// 8: a battery FTW does not dispatch is back in its own mode within
+	// 10 s: no forced charge or discharge left in the inverter's register
+	// once the inverter and Core are both up again (R8, C1). The 10 s
+	// count starts when both are back.
+	forcedS, run8 := 0.0, 0.0
+	for i, r := range run {
+		w, ok := dispatchW(r)
+		stray := r.Status != nil && (!ok || math.Abs(w) <= 50) && math.Abs(batOrder(r)) > 50 &&
+			!within(inverterOut, r.T, 0) && !within(down, r.T, 0)
+		if stray && i > 0 {
+			run8 += r.T - run[i-1].T
+			forcedS = math.Max(forcedS, run8)
+			if run8 > 10 {
+				note("forced battery", r.T)
+			}
+		} else {
+			run8 = 0
+		}
+	}
+	m["battery_forced_without_dispatch_s"] = round(forcedS, 1)
 	// The first second an invariant broke, from the start, per invariant:
 	// a kept seed is cut a minute after the one it failed on.
 	firsts := map[string]float64{}
@@ -706,6 +719,7 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		crit("no offer above the charger's rating", over == 0),
 		crit("no discharge asked at the battery's floor", floorS <= 10),
 		crit("no raise on a stale meter", raises == 0),
+		crit("no forced battery mode FTW does not dispatch", forcedS <= 10),
 	}
 }
 
@@ -758,6 +772,7 @@ var invariantKey = map[string]string{
 	"no offer above the charger's rating":                  "rating",
 	"no discharge asked at the battery's floor":            "floor",
 	"no raise on a stale meter":                            "stale meter",
+	"no forced battery mode FTW does not dispatch":         "forced battery",
 }
 
 // keepFailure writes a failing random run as a case to keep: its plan with

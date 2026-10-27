@@ -107,10 +107,9 @@ func TestRandomPlansAreSeeded(t *testing.T) {
 }
 
 // An over-limit stretch right after an outside step is the house's; the
-// same stretch right after FTW raised the car's order is FTW's own and
-// fails after 3 s. With neither before it, it counts as a step FTW did not
-// take (R4) and gets the step's time. 31 A is over 1.2 x the 25 A fuse, so
-// the heat gives no budget.
+// same stretch with no step before it is FTW's own and fails after 3 s,
+// whether or not the record shows FTW raising anything. 31 A is over
+// 1.2 x the 25 A fuse, so the heat gives no budget.
 func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 	mk := func(withStep, withRise bool) *runData {
 		d := &runData{marks: map[string]float64{"start": 0, "end": 100}, meta: map[string]any{"fuse": 25.0}}
@@ -141,12 +140,11 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 	if _, cs := judgeInvariants(mk(true, false)); len(failed(cs)) != 0 {
 		t.Fatalf("after a step: %v", failed(cs))
 	}
-	if _, cs := judgeInvariants(mk(false, false)); len(failed(cs)) != 0 {
-		t.Fatalf("after nothing FTW raised: %v", failed(cs))
-	}
-	_, cs := judgeInvariants(mk(false, true))
-	if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
-		t.Fatalf("after FTW's raise: %v", f)
+	for _, withRise := range []bool{false, true} {
+		_, cs := judgeInvariants(mk(false, withRise))
+		if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
+			t.Fatalf("with no step, FTW's raise %v: %v", withRise, f)
+		}
 	}
 }
 
