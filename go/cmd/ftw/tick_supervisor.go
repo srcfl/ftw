@@ -17,7 +17,14 @@ import (
 // driver its default mode. Once it is older than tickExitAfter, it exits the
 // process so the service manager restarts Core; startup sends defaults again,
 // and a native probation counts the exit as a crash.
+//
+// Ages use the monotonic clock. A Pi without an RTC boots on a stale clock and
+// NTP steps it forward, often while the loop already runs; a wall-clock age
+// would then trip a healthy Core, and a backward step would hide a stall.
 type tickSupervisor struct {
+	// base carries a monotonic reading when it comes from time.Now.
+	// lastNs is the time from base to the last completed tick.
+	base       time.Time
 	lastNs     atomic.Int64
 	intervalNs atomic.Int64
 
@@ -29,7 +36,7 @@ const tickStallFloor = 10 * time.Second
 const tickExitFloor = 60 * time.Second
 
 func newTickSupervisor(now time.Time, interval time.Duration) *tickSupervisor {
-	s := &tickSupervisor{}
+	s := &tickSupervisor{base: now}
 	s.beat(now, interval)
 	return s
 }
@@ -37,7 +44,7 @@ func newTickSupervisor(now time.Time, interval time.Duration) *tickSupervisor {
 // beat records a completed tick and the control interval it ran at.
 func (s *tickSupervisor) beat(now time.Time, interval time.Duration) {
 	s.intervalNs.Store(int64(interval))
-	s.lastNs.Store(now.UnixNano())
+	s.lastNs.Store(int64(now.Sub(s.base)))
 }
 
 func tickStallAfter(interval time.Duration) time.Duration {
@@ -52,7 +59,7 @@ func tickExitAfter(interval time.Duration) time.Duration {
 // per stall; exit stays true while the stall lasts past tickExitAfter.
 func (s *tickSupervisor) check(now time.Time) (sendDefaults, exit bool, age time.Duration) {
 	interval := time.Duration(s.intervalNs.Load())
-	age = now.Sub(time.Unix(0, s.lastNs.Load()))
+	age = now.Sub(s.base) - time.Duration(s.lastNs.Load())
 	if age < tickStallAfter(interval) {
 		if s.stalled {
 			slog.Info("control tick recovered", "age", age)
