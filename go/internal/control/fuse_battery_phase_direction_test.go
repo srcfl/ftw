@@ -144,3 +144,78 @@ func TestPerPhaseFuseReliefHoldsWhileOverloadPersists(t *testing.T) {
 		}
 	}
 }
+
+// chargeLoop repeats a 4000 W charge request against house loads of
+// 13/7/5 A on a 0 A margin, with a three-phase battery that follows each
+// order. dispatch returns the battery's next target.
+func chargeLoop(t *testing.T, ticks int, dispatch func(*telemetry.Store, *State) float64) (targets, l1 []float64) {
+	t.Helper()
+	st := phaseDirectionState(0)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	st.clock = func() time.Time { return now }
+	store := telemetry.NewStore()
+	batW := 0.0
+	for tick := 0; tick < ticks; tick++ {
+		a := [3]float64{13, 7, 5}
+		for i := range a {
+			a[i] += batW / 690
+		}
+		raw, _ := json.Marshal(map[string]any{"l1_a": a[0], "l2_a": a[1], "l3_a": a[2],
+			"l1_w": a[0] * 230, "l2_w": a[1] * 230, "l3_w": a[2] * 230})
+		store.Update("meter", telemetry.DerMeter, (a[0]+a[1]+a[2])*230, nil, raw)
+		store.DriverHealthMut("meter").RecordSuccess()
+		soc := 0.5
+		store.Update("bat", telemetry.DerBattery, batW, &soc, nil)
+		store.DriverHealthMut("bat").RecordSuccess()
+		batW = dispatch(store, st)
+		targets = append(targets, math.Round(batW))
+		l1 = append(l1, math.Round(a[0]*100)/100)
+		now = now.Add(5 * time.Second)
+	}
+	return targets, l1
+}
+
+// The fuse hold caps the request before the guard reads the phases, so the
+// hold's cut is not taken off again. The charge settles at 1380 W with L1
+// at 15 A instead of switching between 1380 W and 0 W.
+func TestFuseGuardHeldChargeHoldsSteady(t *testing.T) {
+	assertSteady := func(name string, targets, l1 []float64) {
+		t.Helper()
+		for i := 1; i < len(targets); i++ {
+			if math.Abs(targets[i]-targets[i-1]) > 50 || l1[i] > 15.01 {
+				t.Fatalf("%s: tick %d charge %v -> %v W; targets %v, L1 %v", name, i, targets[i-1], targets[i], targets, l1)
+			}
+		}
+	}
+	targets, l1 := chargeLoop(t, 10, func(store *telemetry.Store, st *State) float64 {
+		return applyFuseGuard([]DispatchTarget{{Driver: "bat", TargetW: 4000}}, store, st, 16*230*3)[0].TargetW
+	})
+	assertSteady("applyFuseGuard", targets, l1)
+
+	targets, l1 = chargeLoop(t, 12, func(store *telemetry.Store, st *State) float64 {
+		st.Mode = ModeCharge
+		st.DriverLimits = map[string]PowerLimits{"bat": {MaxChargeW: 4000, MaxDischargeW: 4000}}
+		for _, o := range ComputeDispatch(store, st, map[string]float64{"bat": 15200}, 16*230*3) {
+			if o.Driver == "bat" {
+				return o.TargetW
+			}
+		}
+		return 0
+	})
+	assertSteady("Charge mode", targets, l1)
+}
+
+// A watchdog-offline meter's cached phases are not the site: they drive no
+// phase relief.
+func TestPhaseReliefSkipsOfflineMeter(t *testing.T) {
+	store := phaseDirectionStore(t, 20*230, 0, map[string]any{"l1_a": 20.0, "l2_a": 0.0, "l3_a": 0.0,
+		"l1_w": 4600.0, "l2_w": 0.0, "l3_w": 0.0})
+	meter := store.Get("meter", telemetry.DerMeter)
+	if imp, _ := phaseFuseReliefW(livePhaseSample(store, "meter", meter), phaseDirectionState(0), 0); imp <= 0 {
+		t.Fatalf("online meter: import relief %.0f W, want > 0 for L1 at 20 A", imp)
+	}
+	store.DriverHealthMut("meter").SetOffline()
+	if imp, exp := phaseFuseReliefW(livePhaseSample(store, "meter", meter), phaseDirectionState(0), 0); imp != 0 || exp != 0 {
+		t.Fatalf("offline meter: relief %.0f/%.0f W, want none", imp, exp)
+	}
+}

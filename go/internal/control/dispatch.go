@@ -3622,48 +3622,26 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	// reflected in currentGrid; subtracting them here without adding a
 	// replacement target would double-remove their contribution and miss
 	// fuse overages.
-	seenBat := make(map[string]struct{}, len(targets))
-	var currentBat, rawBat float64
+	batteries := make(map[string]*telemetry.DerReading, len(targets))
+	var currentBat float64
 	for _, t := range targets {
-		if _, seen := seenBat[t.Driver]; seen {
+		if _, seen := batteries[t.Driver]; seen {
 			continue
 		}
-		seenBat[t.Driver] = struct{}{}
-		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
+		r := store.Get(t.Driver, telemetry.DerBattery)
+		batteries[t.Driver] = r
+		if r != nil {
 			currentBat += r.SmoothedW
-			rawBat += r.RawW
 		}
 	}
 	var currentGrid float64
-	var meter *telemetry.DerReading
+	var phases phaseSample
 	if siteMeter != "" {
-		if meter = store.Get(siteMeter, telemetry.DerMeter); meter != nil {
+		if meter := store.Get(siteMeter, telemetry.DerMeter); meter != nil {
 			currentGrid = meter.SmoothedW
+			phases = livePhaseSample(store, siteMeter, meter)
 		}
 	}
-	var sumTarget float64
-	for _, t := range targets {
-		sumTarget += t.TargetW
-	}
-	predicted := currentGrid - currentBat + sumTarget
-
-	// Per phase, each way, once the targets replace the batteries' power
-	// in the same raw reading.
-	phaseImportW, phaseExportW := phaseFuseReliefW(meter, state, sumTarget-rawBat)
-	// Aggregate budget honours the safety margin too — keep dispatch
-	// commands strictly inside the breaker envelope so the inverter's
-	// own per-phase limiter doesn't fire first and cause a flap.
-	//
-	// Import ceiling is the tighter of (fuse − safety margin) and the
-	// clock hour's import limit; export ceiling is the tighter of (fuse −
-	// safety margin) and the operator's max_export_w protection limit —
-	// set when an inverter trips on sustained export below the breaker
-	// (recurring Ferroamp 0x8030 fault). Both share one enforcement surface.
-	effImportW := state.effectiveImportCeilingW(fuseMaxW)
-	effExportW := state.effectiveExportCeilingW(fuseMaxW)
-	importOverage := math.Max(predicted-effImportW, phaseImportW)
-	exportOverage := math.Max(-effExportW-predicted, phaseExportW)
-
 	out := make([]DispatchTarget, len(targets))
 	copy(out, targets)
 
@@ -3715,6 +3693,32 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		state.FuseHoldMaxChargeW = 0
 		state.FuseHoldUntil = time.Time{}
 	}
+
+	// Predict from the held targets. Relief taken from the request would
+	// count the hold's cut a second time, and a charge limited by one phase
+	// would switch between the cap and 0 on every dispatch.
+	var sumTarget float64
+	for _, t := range out {
+		sumTarget += t.TargetW
+	}
+	predicted := currentGrid - currentBat + sumTarget
+
+	// Per phase, each way, once the targets replace the batteries' power
+	// in the same raw reading.
+	phaseImportW, phaseExportW := phaseFuseReliefW(phases, state, phaseMoveW(out, batteries))
+	// Aggregate budget honours the safety margin too — keep dispatch
+	// commands strictly inside the breaker envelope so the inverter's
+	// own per-phase limiter doesn't fire first and cause a flap.
+	//
+	// Import ceiling is the tighter of (fuse − safety margin) and the
+	// clock hour's import limit; export ceiling is the tighter of (fuse −
+	// safety margin) and the operator's max_export_w protection limit —
+	// set when an inverter trips on sustained export below the breaker
+	// (recurring Ferroamp 0x8030 fault). Both share one enforcement surface.
+	effImportW := state.effectiveImportCeilingW(fuseMaxW)
+	effExportW := state.effectiveExportCeilingW(fuseMaxW)
+	importOverage := math.Max(predicted-effImportW, phaseImportW)
+	exportOverage := math.Max(-effExportW-predicted, phaseExportW)
 
 	if importOverage <= 0 && exportOverage <= 0 {
 		return out
@@ -3853,30 +3857,70 @@ func (s *State) effectiveExportCeilingW(fuseMaxW float64) float64 {
 	return eff
 }
 
+// phaseSample is one meter reading's phase currents with the raw total of
+// the same reading. The zero value has no phases.
+type phaseSample struct {
+	meter  *telemetry.DerReading
+	totalW float64
+}
+
+// livePhaseSample pairs meter with its raw total while the meter still
+// reports. A watchdog-offline meter gives no phases, since its cached
+// currents are no longer the site. So does a store that has moved on to a
+// newer reading, since its total no longer matches meter's currents.
+func livePhaseSample(store *telemetry.Store, driver string, meter *telemetry.DerReading) phaseSample {
+	if store == nil || meter == nil {
+		return phaseSample{}
+	}
+	totalW, at, ok := store.OnlineMeterW(driver)
+	if !ok || !at.Equal(meter.UpdatedAt) {
+		return phaseSample{}
+	}
+	return phaseSample{meter: meter, totalW: totalW}
+}
+
+// phaseMoveW is the batteries' change from the raw power their readings hold
+// to the targets. The phase currents are raw, so the move is too.
+func phaseMoveW(targets []DispatchTarget, batteries map[string]*telemetry.DerReading) float64 {
+	var moveW float64
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		moveW += t.TargetW
+		if r := batteries[t.Driver]; r != nil && !seen[t.Driver] {
+			moveW -= r.RawW
+		}
+		seen[t.Driver] = true
+	}
+	return moveW
+}
+
 // phaseFuseReliefW is the aggregate battery move that brings every phase
 // inside the working limit: the fuse less the car's 1 A margin, or less
 // safety_margin_a when that is larger. importW asks for less charge or more
 // discharge, exportW for the reverse. moveW is the batteries' change from
-// the power this reading already holds; like the relief, it spreads evenly
-// over the site's phases.
+// the power this reading already holds (phaseMoveW); like the relief, it
+// spreads evenly over the site's phases.
 //
 // The phases are the meter's signed currents (phaseCurrentsA). When no
 // phase reads as export while the total does, the meter gives no direction
 // per phase, and the phases take the total's. When no move fits every
-// phase, the move leaves the worst phase least over, so a move never
-// raises the current on the phase it protects. 0, 0 without usable phase
-// currents.
-func phaseFuseReliefW(meter *telemetry.DerReading, state *State, moveW float64) (importW, exportW float64) {
-	if meter == nil || state == nil {
+// phase, the move leaves the worst phase least over, so on a meter that
+// gives each phase's direction a move never raises the current on the phase
+// it protects. Two limits remain: a meter without phase power that mixes
+// directions under an exporting total, where an importing phase is read as
+// export, and a battery on one phase, which is read as balanced. 0, 0
+// without usable phase currents.
+func phaseFuseReliefW(p phaseSample, state *State, moveW float64) (importW, exportW float64) {
+	if p.meter == nil || state == nil {
 		return 0, 0
 	}
-	amps, _, valid := phaseCurrentsA(meter, state, meter.RawW)
+	amps, _, valid := phaseCurrentsA(p.meter, state, p.totalW)
 	if !valid || len(amps) == 0 {
 		return 0, 0
 	}
 	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases) // aggregate W per phase ampere
 	limitA := math.Max(0, state.SiteFuseAmps-math.Max(evPhaseMarginA, state.SiteFuseSafetyA))
-	exports := meter.RawW < 0
+	exports := p.totalW < 0
 	for _, a := range amps {
 		exports = exports && a >= 0
 	}
@@ -4399,7 +4443,8 @@ func fuseSaverFromLivePower(
 	// site is safe. Preserve the deadband in that case: this early-return path
 	// exists to answer a fuse condition, not to take control of an externally
 	// moved battery merely because its reading sits outside a command cap.
-	requiredRelief := fuseReliefFromSnapshot(rawLive, batteryReadings, meter, state, fuseMaxW)
+	phases := livePhaseSample(store, state.SiteMeterDriver, meter)
+	requiredRelief := fuseReliefFromSnapshot(rawLive, batteryReadings, meter, phases, state, fuseMaxW)
 	if requiredRelief <= 0 {
 		return nil
 	}
@@ -4417,7 +4462,7 @@ func fuseSaverFromLivePower(
 	if len(safeBaseline) == 0 {
 		return nil
 	}
-	out := forceFuseDischargeWithSnapshot(safeBaseline, batteryReadings, meter, state, driverCapacities, fuseMaxW)
+	out := forceFuseDischargeWithSnapshot(safeBaseline, batteryReadings, meter, phases, state, driverCapacities, fuseMaxW)
 	rawByDriver := make(map[string]DispatchTarget, len(rawLive))
 	for _, t := range rawLive {
 		rawByDriver[t.Driver] = t
@@ -4440,6 +4485,7 @@ func fuseReliefFromSnapshot(
 	targets []DispatchTarget,
 	batteryReadings map[string]*telemetry.DerReading,
 	meter *telemetry.DerReading,
+	phases phaseSample,
 	state *State,
 	fuseMaxW float64,
 ) float64 {
@@ -4447,7 +4493,7 @@ func fuseReliefFromSnapshot(
 		return 0
 	}
 
-	_, sumTarget, predicted := predictedGridFromSnapshot(targets, batteryReadings, meter)
+	_, _, predicted := predictedGridFromSnapshot(targets, batteryReadings, meter)
 
 	// The fuse acts on every reading. The hour's import limit is a budget:
 	// the part of its overage that an EV cut we sent will remove waits for
@@ -4459,16 +4505,7 @@ func fuseReliefFromSnapshot(
 	if ceilingW := state.effectiveImportCeilingW(fuseMaxW); ceilingW < fuseW {
 		overage = math.Max(overage, predicted-ceilingW-state.pendingEVCutW())
 	}
-	// The phases are raw, so the batteries' move is from their raw power.
-	moveW := sumTarget
-	seen := make(map[string]bool, len(targets))
-	for _, t := range targets {
-		if r := batteryReadings[t.Driver]; r != nil && !seen[t.Driver] {
-			moveW -= r.RawW
-		}
-		seen[t.Driver] = true
-	}
-	phaseW, _ := phaseFuseReliefW(meter, state, moveW)
+	phaseW, _ := phaseFuseReliefW(phases, state, phaseMoveW(targets, batteryReadings))
 	return math.Max(overage, phaseW)
 }
 
@@ -4521,7 +4558,7 @@ func forceFuseDischarge(
 		readings[target.Driver] = store.Get(target.Driver, telemetry.DerBattery)
 	}
 	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
-	return forceFuseDischargeWithSnapshot(targets, readings, meter, state, driverCapacities, fuseMaxW)
+	return forceFuseDischargeWithSnapshot(targets, readings, meter, livePhaseSample(store, state.SiteMeterDriver, meter), state, driverCapacities, fuseMaxW)
 }
 
 // forceFuseDischargeWithSnapshot keeps all math for one decision on the same
@@ -4531,6 +4568,7 @@ func forceFuseDischargeWithSnapshot(
 	targets []DispatchTarget,
 	batteryReadings map[string]*telemetry.DerReading,
 	meter *telemetry.DerReading,
+	phases phaseSample,
 	state *State,
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
@@ -4538,7 +4576,7 @@ func forceFuseDischargeWithSnapshot(
 	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
 		return targets
 	}
-	overage := fuseReliefFromSnapshot(targets, batteryReadings, meter, state, fuseMaxW)
+	overage := fuseReliefFromSnapshot(targets, batteryReadings, meter, phases, state, fuseMaxW)
 	if overage <= 0 {
 		return targets
 	}
