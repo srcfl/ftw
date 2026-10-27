@@ -408,3 +408,58 @@ func TestDriverRefusingAfterOutageKeepsRetryWindowWhileOnline(t *testing.T) {
 		t.Fatal("retry window elapsed and the driver was not let back in")
 	}
 }
+
+// Rig seeds 207533 and 207536 (27 Oct 2026): the command hit the dead link
+// before a poll did, so the last read had succeeded when the driver was
+// excluded. In 207536 the outage lasted 29 s, under the 60 s watchdog, and
+// the inverter held 187 / 3000 W for the full retry window after it came
+// back. A failed read before any good one since the exclusion is the same
+// outage.
+func TestDriverExcludedJustBeforeShortOutageGetsDefaultWhenItReadsAgain(t *testing.T) {
+	blocked := errors.Join(
+		errors.New("driver command may have run: force command write failed: connection refused"),
+		errors.Join(drivers.ErrControlBlocked, errors.New("driver_default_mode returned false")),
+	)
+	payload := []byte(`{"action":"battery","power_w":-3000}`)
+	for _, tc := range []struct {
+		name    string
+		exclude func(*driverActuationTracker, time.Time)
+	}{
+		{"control blocked", func(tracker *driverActuationTracker, now time.Time) {
+			tracker.recordCommandOutcomeFor("sungrow", "battery", blocked, now)
+		}},
+		{"refused three times", func(tracker *driverActuationTracker, now time.Time) {
+			sender := refusingSender("force command write failed: connection refused")
+			for i := 0; i < driverRefusalLimit; i++ {
+				tracker.dispatchCommand(context.Background(), sender, "driver send", "sungrow", payload, time.Second, now)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := pollingStore(t, "sungrow")
+			tracker := newDriverActuationTracker(tel)
+			now := time.Now()
+			tc.exclude(tracker, now)
+			assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+
+			// Polls fail for 30 s, under the watchdog timeout.
+			for i := 1; i <= 6; i++ {
+				tel.RecordDriverError("sungrow", "driver_poll: none of 17 modbus reads returned data")
+				tel.WatchdogScan(time.Minute)
+				if pending := tracker.update(now.Add(time.Duration(i)*5*time.Second), nil); len(pending) != 0 {
+					t.Fatalf("default sent while reads fail: %v", pending)
+				}
+				if tel.DriverHealth("sungrow").IsOnline() {
+					t.Fatal("driver back in dispatch while reads fail")
+				}
+			}
+
+			now = now.Add(35 * time.Second)
+			tel.RecordDriverSuccess("sungrow")
+			assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+			if !tel.DriverHealth("sungrow").IsOnline() {
+				t.Fatalf("driver back from a short outage waits out the %v window", driverRefusalRetryInterval)
+			}
+		})
+	}
+}
