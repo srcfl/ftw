@@ -2471,6 +2471,7 @@ func applyDispatchSafetyPipeline(
 	}
 	targets = floorBlockedCharge(targets, opts.noSelfCharge, opts.chargeBlocked)
 	targets = floorBelowStaleFloorDischarge(targets, opts.floorBlocked)
+	targets = floorBlockedDischarge(targets, store, state, driverCapacities, fuseMaxW)
 
 	// A battery-boost lease may never draw the stationary fleet below its
 	// explicit reserve. Apply this immediately before forceFuseDischarge:
@@ -3497,7 +3498,7 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 // toward charge after noSelfCharge set 0. The snap-to-zero list inside
 // slew never grew the later charge gates, which is how an idle slot
 // commanded +1500 W. This only moves a target toward zero. Discharge
-// stays out: the fuse saver may need it.
+// has its own twin, floorBlockedDischarge, which yields to the fuse.
 func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlocked map[string]bool) []DispatchTarget {
 	if !noSelfCharge && len(chargeBlocked) == 0 {
 		return targets
@@ -3512,6 +3513,161 @@ func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlock
 		}
 	}
 	return targets
+}
+
+// floorBlockedDischarge is the discharge twin of floorBlockedCharge. Slew
+// anchors on measured watts, so a pack the distributor parked at 0 W (SoC
+// below the floor, discharge_capable=false) is walked back toward its live
+// discharge. Stop it at 0 W. If the stop would put the site or one phase
+// over the fuse or import limit, the blocked packs keep only the discharge
+// the capable packs cannot cover, and never more than their slewed ramp.
+// forceFuseDischarge then takes the rest from the capable packs.
+func floorBlockedDischarge(
+	targets []DispatchTarget,
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	if store == nil || state == nil {
+		return targets
+	}
+	var out []DispatchTarget
+	var rampW float64 // discharge the slewed ramp still asks of blocked packs
+	blocked := make([]bool, len(targets))
+	readings := make(map[string]*telemetry.DerReading, len(targets))
+	for i, t := range targets {
+		r := store.Get(t.Driver, telemetry.DerBattery)
+		readings[t.Driver] = r
+		if t.TargetW >= 0 || r == nil {
+			continue
+		}
+		if !dischargeParked(r, state.DriverLimits[t.Driver]) {
+			continue
+		}
+		if out == nil {
+			out = append([]DispatchTarget(nil), targets...)
+		}
+		blocked[i] = true
+		rampW -= t.TargetW
+		out[i].TargetW = 0
+		out[i].Clamped = true
+	}
+	if out == nil {
+		return targets
+	}
+	if fuseMaxW <= 0 {
+		return out
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	keepW := blockedDischargeKeepW(store, out, blocked, readings, meter, state, driverCapacities, fuseMaxW)
+	if keepW <= 0 {
+		return out
+	}
+	if keepW >= rampW {
+		return targets
+	}
+	for i, t := range targets {
+		if blocked[i] {
+			out[i].TargetW = t.TargetW * keepW / rampW
+		}
+	}
+	return out
+}
+
+// dischargeParked reports whether the distributor parks a pack's discharge
+// at 0 W: no SoC, SoC under Core's 5 % floor, discharge_capable=false or a
+// zero discharge limit. The owner's soc_min is a planner rule; the stale-plan
+// floor applies it separately (floorBelowStaleFloorDischarge).
+func dischargeParked(r *telemetry.DerReading, lim PowerLimits) bool {
+	dischargeBlocked, _ := batteryDirectionBlocks(r.Data)
+	return r.SoC == nil || *r.SoC < dischargeFloorSoC || dischargeBlocked || lim.dischargeCap() == 0
+}
+
+// blockedDischargeKeepW is the discharge the blocked packs must keep after
+// floorBlockedDischarge set them to 0 W. forceFuseDischarge covers the
+// aggregate overage from capable packs, so only the part beyond their room
+// stays with the blocked packs. forceFuseDischarge reads phase currents from
+// the meter as they are, not as the stop leaves them, so a phase that only
+// the stop puts over the fuse is covered by the blocked packs alone.
+func blockedDischargeKeepW(
+	store *telemetry.Store,
+	out []DispatchTarget,
+	blocked []bool,
+	readings map[string]*telemetry.DerReading,
+	meter *telemetry.DerReading,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) float64 {
+	reliefW := math.Max(0, fuseReliefFromSnapshot(out, readings, meter, state, fuseMaxW, false))
+	if phaseW := stopPhaseReliefW(store, out, readings, meter, state); phaseW > reliefW {
+		return phaseW
+	}
+	var roomW float64
+	for i, t := range out {
+		r := readings[t.Driver]
+		if blocked[i] || r == nil || driverCapacities[t.Driver] <= 0 {
+			continue
+		}
+		lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver])
+		roomW += math.Max(0, t.TargetW-lower)
+	}
+	_, _, predicted := predictedGridFromSnapshot(out, readings, meter)
+	roomW = math.Min(roomW, math.Max(0, predicted+state.effectiveExportCeilingW(fuseMaxW)))
+	return reliefW - roomW
+}
+
+// stopPhaseReliefW is the aggregate import relief that keeps the worst phase
+// inside the per-phase fuse once the targets replace the batteries' raw
+// power. A battery spreads its move evenly over the site's phases. 0 without
+// usable phase currents, or when the meter or a battery has gone offline or
+// moved on from the readings the rest of the decision used.
+func stopPhaseReliefW(
+	store *telemetry.Store,
+	targets []DispatchTarget,
+	readings map[string]*telemetry.DerReading,
+	meter *telemetry.DerReading,
+	state *State,
+) float64 {
+	if store == nil || meter == nil {
+		return 0
+	}
+	totalW, at, ok := store.OnlineMeterW(state.SiteMeterDriver)
+	if !ok || !at.Equal(meter.UpdatedAt) {
+		return 0
+	}
+	amps, _, valid := phaseCurrentsA(meter, state, totalW)
+	if !valid || len(amps) == 0 {
+		return 0
+	}
+	moveW := 0.0
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		moveW += t.TargetW
+		if r := readings[t.Driver]; r != nil && !seen[t.Driver] {
+			rawW, at, ok := store.OnlineRawW(t.Driver, telemetry.DerBattery)
+			if !ok || !at.Equal(r.UpdatedAt) {
+				return 0
+			}
+			moveW -= rawW
+		}
+		seen[t.Driver] = true
+	}
+	exports := totalW < 0
+	for _, a := range amps {
+		exports = exports && a >= 0
+	}
+	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases)
+	hiA := math.Inf(-1)
+	for _, a := range amps {
+		if exports {
+			a = -a // unsigned phases take the total's direction
+		}
+		hiA = math.Max(hiA, a+moveW/perA)
+	}
+	limitA := math.Max(0, state.SiteFuseAmps-state.SiteFuseSafetyA)
+	return math.Max(0, hiA-limitA) * perA
 }
 
 // coverLoadChargeSlot reports whether the current plan slot is a charge-from-
