@@ -67,6 +67,7 @@ func (h *handlerV201) OnBootNotification(id string, req *provisioning.BootNotifi
 	h.setVersion(id, Version201)
 	h.noteIdentity(id)
 	h.telHealth(id)
+	h.maybeSendBootLimit(id)
 
 	return provisioning.NewBootNotificationResponse(
 		types201.NewDateTime(time.Now()),

@@ -16,12 +16,6 @@ func ocppApprovedIDs(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
-	lua := make(map[string]struct{}, len(cfg.Drivers))
-	for _, d := range cfg.Drivers {
-		if d.Name != "" {
-			lua[d.Name] = struct{}{}
-		}
-	}
 	seen := make(map[string]struct{})
 	var out []string
 	add := func(id string) {
@@ -39,11 +33,30 @@ func ocppApprovedIDs(cfg *config.Config) []string {
 			add(c.ID)
 		}
 	}
+	for _, id := range ocppManagedIDs(cfg) {
+		add(id)
+	}
+	return out
+}
+
+// ocppManagedIDs is the OCPP chargers a loadpoint names: the ones FTW orders.
+// An id listed only under ocpp.chargers is approved but never ordered.
+func ocppManagedIDs(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	lua := make(map[string]struct{}, len(cfg.Drivers))
+	for _, d := range cfg.Drivers {
+		if d.Name != "" {
+			lua[d.Name] = struct{}{}
+		}
+	}
+	var out []string
 	for _, lp := range cfg.Loadpoints {
-		if _, isLua := lua[lp.DriverName]; isLua {
+		if _, isLua := lua[lp.DriverName]; isLua || lp.DriverName == "" {
 			continue
 		}
-		add(lp.DriverName)
+		out = append(out, lp.DriverName)
 	}
 	return out
 }

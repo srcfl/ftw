@@ -46,6 +46,22 @@ func TestOCPPApprovedIDsSkipLuaLoadpointNames(t *testing.T) {
 	}
 }
 
+// Only a loadpoint's charger gets FTW's orders, so only it may start at 0 A.
+func TestOCPPManagedIDsAreLoadpointChargersOnly(t *testing.T) {
+	cfg := &config.Config{
+		Drivers: []config.Driver{{Name: "easee", Lua: "drivers/easee.lua"}},
+		Loadpoints: []config.Loadpoint{
+			{ID: "cloud", DriverName: "easee"},
+			{ID: "garage", DriverName: "garage"},
+		},
+		OCPP: &config.OCPP{Enabled: true, Chargers: []config.OCPPCharger{{ID: "wallbox", Password: "own"}}},
+	}
+	got := ocppManagedIDs(cfg)
+	if len(got) != 1 || got[0] != "garage" {
+		t.Fatalf("managed %v, want garage only", got)
+	}
+}
+
 func containsID(ids []string, want string) bool {
 	for _, id := range ids {
 		if id == want {

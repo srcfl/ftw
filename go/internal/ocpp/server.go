@@ -137,6 +137,8 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (_ *Server, e
 	s := &Server{cfg: cfg, cs: cs, handler: h, sockets: sockets, done: make(chan struct{})}
 	h.identityProbe = s.requestBootNotification
 	h.later = sockets.later
+	h.SetManagedIDs(cfg.ManagedIDs)
+	h.bootLimit = s.sendBootLimit
 
 	// OCPP 2.0.1 on its own port, when configured. Same handler and therefore
 	// the same charger state and telemetry — only the message encoding differs.

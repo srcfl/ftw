@@ -30,6 +30,13 @@ type Handler struct {
 	// no driver health, no metrics — so it cannot influence dispatch. See
 	// SetApprovedIDs.
 	approved map[string]bool
+
+	// managed is the approved chargers a loadpoint names, which FTW orders.
+	// bootLimit, set by the Server, holds each at 0 A from its boot until
+	// FTW's first order. See boot_limit.go.
+	managed   map[string]bool
+	bootLimit func(id string)
+
 	nextTxID int
 
 	// vehicleIdentified, when set, fires once per new vehicle identity seen
@@ -487,6 +494,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	h.noteIdentity(id)
 	h.telHealth(id)
 	h.maybeProbeCapability(id)
+	h.maybeSendBootLimit(id)
 	return core.NewBootNotificationConfirmation(
 		types.NewDateTime(time.Now()),
 		h.heartbeatIntervalS,

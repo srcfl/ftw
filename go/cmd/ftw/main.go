@@ -1305,6 +1305,7 @@ func main() {
 		// and one whose entry was removed goes back to pending.
 		if ocppSrv != nil {
 			ocppSrv.Handler().SetApprovedIDs(ocppApprovedIDs(newCfg))
+			ocppSrv.Handler().SetManagedIDs(ocppManagedIDs(newCfg))
 			// A charger adopted by this save booted long ago and will not
 			// boot again just because we changed our mind, so its device
 			// row has to be written here rather than waiting for one.
@@ -1475,6 +1476,7 @@ func main() {
 			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
 			ChargerSecrets:     cfg.OCPP.ChargerSecrets(),
 			ApprovedIDs:        approved,
+			ManagedIDs:         ocppManagedIDs(cfg),
 		}
 		if t := cfg.OCPP.TLS; t != nil {
 			ocppCfg.TLS = &ocpp.TLSConfig{
