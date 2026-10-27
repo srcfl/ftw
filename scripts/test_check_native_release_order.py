@@ -32,6 +32,36 @@ class NativeReleaseOrderTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             release_order.check("v0.131.0-beta.3", pages)
 
+    def test_newer_beta_does_not_block_tested_stable(self):
+        release_order.check("v0.158.0", [[
+            {"tag_name": "v0.159.0-beta.1", "draft": False},
+            {"tag_name": "v0.158.0-beta.3", "draft": False},
+        ]])
+        release_order.check("v0.157.2", [[
+            {"tag_name": "v0.157.3-beta.1", "draft": False},
+            {"tag_name": "v0.157.2-beta.1", "draft": False},
+        ]])
+        release_order.check("v0.158.1", [[
+            {"tag_name": "v0.159.0-beta.1", "draft": False},
+            {"tag_name": "v0.158.0", "draft": False},
+            {"tag_name": "v0.158.1-beta.1", "draft": False},
+        ]])
+
+    def test_rejects_stable_older_than_published_stable(self):
+        pages = [[
+            {"tag_name": "v0.159.0", "draft": False},
+            {"tag_name": "v0.158.1-beta.1", "draft": False},
+        ]]
+        for tag in ("v0.158.1", "v0.158.0-beta.4"):
+            with self.subTest(tag=tag), self.assertRaises(ValueError):
+                release_order.check(tag, pages)
+
+    def test_rejects_beta_older_than_published_beta(self):
+        with self.assertRaises(ValueError):
+            release_order.check("v0.158.1-beta.1", [[
+                {"tag_name": "v0.159.0-beta.1", "draft": False},
+            ]])
+
     def test_drafts_do_not_block_recovery(self):
         release_order.check("v0.131.0-beta.1", [[
             {"tag_name": "v0.131.0-beta.2", "draft": True},

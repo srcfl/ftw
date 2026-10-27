@@ -200,12 +200,19 @@ Native 0.x path:
    week, with no open `release-blocker`.
 4. Dispatch the same workflow for `v0.X.Y` stable, naming the tested beta.
    The workflow checks the source commit and release assets, and keeps GitHub
-   `releases/latest` on the old 2.x line.
+   `releases/latest` on the old 2.x line. Newer betas may ship while the
+   sites test the candidate; the workflow refuses a stable only when a newer
+   stable exists.
 5. Promote the signed driver channel for installs that read `drivers-stable`:
    `gh workflow run ftw-drivers-release.yml -R srcfl/device-drivers --ref main -f channel=stable`.
    It promotes the driver commit already published as `drivers-beta`. If it
    refuses because `main` has moved past `drivers-beta`, publish beta first
    (`-f channel=beta`), then promote.
+
+The workflow runs only from `master`, and a beta tag must match
+`package.json` there. So there is no patch branch for an older line: fix a
+stable on `master`, publish the next beta and promote it by the steps above.
+The site check starts again with that beta.
 
 The old lines are retired: no further 2.x or 3.x releases, including safety
 hotfixes or betas. All new Core releases use the new 0.x path. Do not recommend
