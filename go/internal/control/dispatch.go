@@ -3457,7 +3457,7 @@ func floorBlockedDischarge(
 		return out
 	}
 	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
-	keepW := blockedDischargeKeepW(out, blocked, readings, meter, state, driverCapacities, fuseMaxW)
+	keepW := blockedDischargeKeepW(store, out, blocked, readings, meter, state, driverCapacities, fuseMaxW)
 	if keepW <= 0 {
 		return out
 	}
@@ -3479,6 +3479,7 @@ func floorBlockedDischarge(
 // the meter as they are, not as the stop leaves them, so a phase that only
 // the stop puts over the fuse is covered by the blocked packs alone.
 func blockedDischargeKeepW(
+	store *telemetry.Store,
 	out []DispatchTarget,
 	blocked []bool,
 	readings map[string]*telemetry.DerReading,
@@ -3488,7 +3489,7 @@ func blockedDischargeKeepW(
 	fuseMaxW float64,
 ) float64 {
 	reliefW := math.Max(0, fuseReliefFromSnapshot(out, readings, meter, state, fuseMaxW, false))
-	if phaseW := stopPhaseReliefW(out, readings, meter, state); phaseW > reliefW {
+	if phaseW := stopPhaseReliefW(store, out, readings, meter, state); phaseW > reliefW {
 		return phaseW
 	}
 	var roomW float64
@@ -3508,17 +3509,23 @@ func blockedDischargeKeepW(
 // stopPhaseReliefW is the aggregate import relief that keeps the worst phase
 // inside the per-phase fuse once the targets replace the batteries' raw
 // power. A battery spreads its move evenly over the site's phases. 0 without
-// usable phase currents.
+// usable phase currents, or when the meter or a battery has gone offline or
+// moved on from the readings the rest of the decision used.
 func stopPhaseReliefW(
+	store *telemetry.Store,
 	targets []DispatchTarget,
 	readings map[string]*telemetry.DerReading,
 	meter *telemetry.DerReading,
 	state *State,
 ) float64 {
-	if meter == nil {
+	if store == nil || meter == nil {
 		return 0
 	}
-	amps, _, valid := phaseCurrentsA(meter, state, meter.RawW)
+	totalW, at, ok := store.OnlineMeterW(state.SiteMeterDriver)
+	if !ok || !at.Equal(meter.UpdatedAt) {
+		return 0
+	}
+	amps, _, valid := phaseCurrentsA(meter, state, totalW)
 	if !valid || len(amps) == 0 {
 		return 0
 	}
@@ -3527,11 +3534,15 @@ func stopPhaseReliefW(
 	for _, t := range targets {
 		moveW += t.TargetW
 		if r := readings[t.Driver]; r != nil && !seen[t.Driver] {
-			moveW -= r.RawW
+			rawW, at, ok := store.OnlineRawW(t.Driver, telemetry.DerBattery)
+			if !ok || !at.Equal(r.UpdatedAt) {
+				return 0
+			}
+			moveW -= rawW
 		}
 		seen[t.Driver] = true
 	}
-	exports := meter.RawW < 0
+	exports := totalW < 0
 	for _, a := range amps {
 		exports = exports && a >= 0
 	}
