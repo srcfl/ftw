@@ -3665,10 +3665,19 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 
 // driverLimitsFrom gives dispatch the same per-driver power limits and charge
 // ceilings as the planner. Each battery's soc_max overrides the planner's.
+// The SoC floor is the higher of the battery's and the running planner's
+// soc_min, with the planner's 10 % default.
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery, planner *config.Planner) map[string]control.PowerLimits {
 	ceiling := 1.0
 	if planner != nil && planner.SoCMax > 0 {
 		ceiling = planner.SoCMax
+	}
+	floor := 0.0
+	if planner != nil && planner.Enabled {
+		floor = planner.SoCMin
+		if floor <= 0 {
+			floor = 0.10
+		}
 	}
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
@@ -3678,6 +3687,10 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 			if b := batteries[d.Name]; b.SoCMax != nil {
 				limits.SoCMax = *b.SoCMax
 				limits.SoCMaxSet = true
+			}
+			limits.SoCMin = floor
+			if b := batteries[d.Name]; b.SoCMin != nil && *b.SoCMin > floor {
+				limits.SoCMin = *b.SoCMin
 			}
 			out[d.Name] = limits
 		}

@@ -66,3 +66,32 @@ func TestSoCMaxConfigPrecedenceAndReload(t *testing.T) {
 	ctrl.DriverLimits = driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries, cfg.Planner)
 	check(.5, false) // An explicit zero is not an absent limit.
 }
+
+// Dispatch keeps the higher of the battery's and the running planner's
+// soc_min. The planner's unset soc_min means its 10 % default.
+func TestSoCMinReachesDispatch(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	for _, tc := range []struct {
+		name    string
+		battery *float64
+		planner *config.Planner
+		want    float64
+	}{
+		{"no planner, no battery floor", nil, nil, 0},
+		{"planner off", nil, &config.Planner{SoCMin: 0.2}, 0},
+		{"planner default", nil, &config.Planner{Enabled: true}, 0.10},
+		{"planner set", nil, &config.Planner{Enabled: true, SoCMin: 0.15}, 0.15},
+		{"battery higher", f(0.25), &config.Planner{Enabled: true, SoCMin: 0.15}, 0.25},
+		{"planner higher", f(0.05), &config.Planner{Enabled: true, SoCMin: 0.15}, 0.15},
+		{"battery only", f(0.2), nil, 0.2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := parseBatteryLimitConfig(t, "", "    max_charge_w: 5000\n")
+			cfg.Batteries = map[string]config.Battery{"battery": {SoCMin: tc.battery}}
+			got := driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries, tc.planner)["battery"].SoCMin
+			if got != tc.want {
+				t.Fatalf("SoCMin = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
