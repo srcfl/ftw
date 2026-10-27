@@ -100,19 +100,21 @@ func (f *forecastCurtailment) PendingDrivers(currentNames []string) []string {
 	if f == nil {
 		return nil
 	}
-	f.mu.Lock()
-	hasIDs := len(f.ids) > 0
-	f.mu.Unlock()
 	identities := make(map[string]string, len(currentNames))
-	for _, name := range currentNames {
-		if hasIDs && f.store != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// With no persisted identity there is nothing to map, so keep f.mu held:
+	// dropping it would let persist move an active entry into f.ids after
+	// the lookups were skipped, and that driver would go missing.
+	if len(f.ids) > 0 && f.store != nil {
+		f.mu.Unlock()
+		for _, name := range currentNames {
 			if device := f.store.LookupDeviceByDriverName(name); device != nil {
 				identities[name] = device.DeviceID
 			}
 		}
+		f.mu.Lock()
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	seen := make(map[string]bool, len(currentNames))
 	var pending []string
 	for _, name := range currentNames {
