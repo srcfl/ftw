@@ -507,7 +507,7 @@ func fieldNightLoadpoint(c *loadpoint.Config) {
 
 // carPhasesUnknown checks that the session's car was never marked one-phase.
 func carPhasesUnknown(s *simSite) error {
-	if st, _ := s.mgr.State(s.lp.ID); st.CarPhases != 0 {
+	if st, _ := s.mgr.State(s.lp.ID); st.CarPhases == 1 {
 		return fmt.Errorf("car marked one-phase on L%d; car draws %.0f W on %d phases", st.CarPhase, s.p.EVSE.DrawW, s.p.EVSE.DrawPhases)
 	}
 	return nil

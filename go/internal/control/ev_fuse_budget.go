@@ -3,6 +3,7 @@ package control
 import (
 	"log/slog"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -178,13 +179,14 @@ type chargerOffers struct {
 	// charger as 0 before it; a cut takes it as shown, since the reading is
 	// all Core knows of it.
 	found sentCommand
-	// carPhase is the phase a car on one phase draws on, 1-3, as the
-	// loadpoint saw it on the site meter; 0 when unknown.
-	carPhase int
-	// shownA is the current per phase of the charger's offers that the
+	// carPhases is how many phases the car draws on, as the loadpoint saw
+	// it on the site meter: 1 or 3, or 0 when unknown. carPhase is the phase
+	// a car on one phase draws on, 1-3.
+	carPhases, carPhase int
+	// shownA is the current on each phase of the charger's offers that the
 	// site meter shows, as far as it can tell (seeOffers); unsure while it
 	// cannot.
-	shownA float64
+	shownA [3]float64
 	unsure bool
 }
 
@@ -224,10 +226,14 @@ func chargerMoveA(prev, now []float64) (alikeA, oneA float64, phase int) {
 // seeOffers reads a new site reading against the last one. With one charger
 // in the pool and no change of phases in its log, a move shaped like an
 // order landing (chargerMoveA) moves the current the meter shows of the
-// charger (shownA): a drop of either shape, and a rise in a shape the
-// offers can take on the meter: on the car's phase for a car the loadpoint
-// has seen draw on one phase, on one phase for a one-phase order, and
-// otherwise on every phase alike or, for a car not yet seen, on one.
+// charger on each phase (shownA), in a shape the offers can take there. A
+// car the loadpoint has seen draw on one phase, or a one-phase order, is
+// one level on every phase: every phase dropping alike moves it, and so
+// does a move on the car's phase alone, or on any one phase while that
+// phase is not known. A three-phase order moves every phase alike; for a
+// car not yet seen on three phases, a phase that moves alone moves only
+// its own level, since a one-phase car would draw there. A house load on
+// one phase then never moves the level of the other two.
 // The shown current moves only toward the latest offer, and stays within
 // the offers the reading may show. While our own battery order moves, a
 // move of every phase alike may be the battery's, so no reading counts;
@@ -249,28 +255,41 @@ func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
 	}
 	for id, c := range lim.offers {
 		if read && c.readable() {
-			moveA := math.Min(0, alikeA) + math.Min(0, oneA)
+			var moveA [3]float64
 			switch {
-			case c.carPhase > 0:
-				if c.carPhase == phase {
-					moveA += math.Max(0, oneA)
+			case c.carPhase > 0 || c.log[0].n == 1:
+				// One car on one phase: one level, moved by a drop of
+				// either shape or by its phase alone.
+				m := math.Min(0, alikeA)
+				if c.carPhase == 0 || c.carPhase == phase {
+					m += oneA
 				}
-			case c.log[0].n == 1:
-				moveA += math.Max(0, oneA)
+				moveA = [3]float64{m, m, m}
 			default:
-				moveA += math.Max(0, alikeA) + math.Max(0, oneA)
+				// A three-phase order moves every phase alike. A car not
+				// yet seen may draw on one phase: a phase that moves alone
+				// moves only its own level.
+				moveA = [3]float64{alikeA, alikeA, alikeA}
+				if c.carPhases != 3 && phase > 0 {
+					moveA[phase-1] += oneA
+				}
 			}
 			// The charger moves toward its latest offer, never past it.
-			if latestA := c.log[len(c.log)-1].a; moveA < 0 && c.shownA > latestA {
-				c.shownA = math.Max(latestA, c.shownA+moveA)
-			} else if moveA > 0 && c.shownA < latestA {
-				c.shownA = math.Min(latestA, c.shownA+moveA)
+			latestA := c.log[len(c.log)-1].a
+			for i, m := range moveA {
+				if m < 0 && c.shownA[i] > latestA {
+					c.shownA[i] = math.Max(latestA, c.shownA[i]+m)
+				} else if m > 0 && c.shownA[i] < latestA {
+					c.shownA[i] = math.Min(latestA, c.shownA[i]+m)
+				}
 			}
 		} else {
 			c.unsure = true
 		}
 		low, high := c.offerRangeA(lim.readingAt)
-		c.shownA = math.Min(high, math.Max(low, c.shownA))
+		for i := range c.shownA {
+			c.shownA[i] = math.Min(high, math.Max(low, c.shownA[i]))
+		}
 		c.unsure = c.unsure && low < high
 		lim.offers[id] = c
 	}
@@ -376,12 +395,12 @@ func (s *State) pendingLoad(at time.Time) pendingLoad {
 // it covers no phase.
 //
 // Where the meter tells what it shows of the charger (seeOffers), a cut
-// covers no more than the meter has still to show: a cut the meter shows
-// covers no overage that comes after it. aheadA is then the rise per phase
-// the meter has still to show of the latest offers, which a raise's own
-// trigger reads (stepEVMeterLimit), and rise counts at least that much.
-// Elsewhere aheadA is 0.
-func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingLoad, aheadA, latestW float64) {
+// covers no more than the meter has still to show on each phase: a cut the
+// meter shows covers no overage that comes after it. aheadA is then the
+// rise on each phase the meter has still to show of the latest offers,
+// which a raise's own trigger reads (stepEVMeterLimit), and rise counts at
+// least that much. Elsewhere aheadA is 0.
+func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingLoad, aheadA [3]float64, latestW float64) {
 	lim := &s.evLimit
 	for _, c := range lim.offers {
 		w, a := c.log.toCome(at.Add(-c.settle), at, c.found)
@@ -402,21 +421,24 @@ func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingL
 		if latest.n == 1 && len(lim.offers) > 1 {
 			coverA = 0
 		}
-		riseA, ahead := math.Max(0, a), 0.0
+		riseA := math.Max(0, a)
+		phaseCoverA, phaseRiseA, ahead := [3]float64{coverA, coverA, coverA}, [3]float64{riseA, riseA, riseA}, [3]float64{}
 		if perPhase && lim.phasesSeen && len(lim.offers) == 1 && s.SiteFusePhases >= 2 && c.readable() && !c.unsure {
 			low, high := c.offerRangeA(at)
-			toComeA := latest.a - math.Min(high, math.Max(low, c.shownA))
-			coverA = math.Min(coverA, math.Max(0, -toComeA))
-			ahead = math.Max(0, toComeA)
-			riseA = math.Max(riseA, ahead)
+			for i := range min(s.SiteFusePhases, len(ahead)) {
+				toComeA := latest.a - math.Min(high, math.Max(low, c.shownA[i]))
+				phaseCoverA[i] = math.Min(coverA, math.Max(0, -toComeA))
+				ahead[i] = math.Max(0, toComeA)
+				phaseRiseA[i] = math.Max(riseA, ahead[i])
+			}
 		}
 		rise.w += math.Max(0, w)
 		cover.w += math.Max(0, math.Min(-w, -runW))
 		for i := range rise.phaseA {
-			rise.phaseA[i] += riseA
-			cover.phaseA[i] += coverA
+			rise.phaseA[i] += phaseRiseA[i]
+			cover.phaseA[i] += phaseCoverA[i]
+			aheadA[i] += ahead[i]
 		}
-		aheadA += ahead
 		latestW += latest.w
 	}
 	return rise, cover, aheadA, latestW
@@ -438,7 +460,7 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 			continue
 		}
 		c := s.evLimit.offers[point.ID]
-		c.settle, c.declared, c.carPhase = evUnknownSettle, false, point.CarPhase
+		c.settle, c.declared, c.carPhases, c.carPhase = evUnknownSettle, false, point.CarPhases, point.CarPhase
 		if r := store.Get(point.DriverName, telemetry.DerEV); r != nil {
 			if declared := telemetry.DeclaredPowerMaxAge(r.Data); declared > 0 {
 				c.settle, c.declared = max(evSettle, declared), true
@@ -449,7 +471,7 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 		sent := sentCommand{at: now, w: w, a: a, n: phases}
 		if n := len(c.log); n == 0 || c.log[n-1].w != sent.w || c.log[n-1].a != sent.a || c.log[n-1].n != sent.n {
 			if n == 0 && !s.evLimit.set {
-				c.found, c.shownA = sent, sent.a
+				c.found, c.shownA = sent, [3]float64{sent.a, sent.a, sent.a}
 			}
 			c.log = c.log.keep(sent, read.Add(-c.settle))
 		}
@@ -625,14 +647,15 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	fuseCutW, over := r.fuseOverW+rise.w-cover.w, r.fuseOverW > 0
 	if r.perPhase && lim.phasesSeen {
 		// A single-phase order may land on any phase, so the cut takes the
-		// most a rise adds to a phase and the least a cut takes off one.
-		// Past the current a gG fuse carries for an hour, nothing on its
-		// way holds back a cut.
-		coverA := min(cover.phaseA[0], cover.phaseA[1], cover.phaseA[2])
+		// most a rise adds to a phase. A cut covers each phase by what it
+		// takes off there, the same on every phase unless the meter tells
+		// the phases apart (unshownOrders). Past the current a gG fuse
+		// carries for an hour, nothing on its way holds back a cut.
+		coverA := cover.phaseA
 		if s.fuseHeat.worstA() > fuseHourFactor*s.SiteFuseAmps {
-			coverA = 0
+			coverA = [3]float64{}
 		}
-		if coverA <= 0 {
+		if slices.Max(coverA[:s.SiteFusePhases]) <= 0 {
 			lim.cutForSet = false
 		}
 		riseA := max(rise.phaseA[0], rise.phaseA[1], rise.phaseA[2])
@@ -642,9 +665,9 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 			// sent for. A phase that has risen since by more than noise
 			// carries an overage that came later: they cover only the
 			// part of it that phase had then.
-			phaseCoverA := coverA
+			phaseCoverA, aheadA := coverA[i], aheadA[i]
 			if lim.cutForSet && a > lim.cutForA[i]+evMoveA {
-				phaseCoverA = math.Min(coverA, math.Max(0, lim.cutForA[i]-lineA))
+				phaseCoverA = math.Min(phaseCoverA, math.Max(0, lim.cutForA[i]-lineA))
 			}
 			// Where the heat budget is spent, the overage the meter shows
 			// comes off with our rise on its way. Elsewhere our own rise on

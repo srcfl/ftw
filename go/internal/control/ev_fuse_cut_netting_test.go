@@ -70,6 +70,9 @@ type cutRig struct {
 	offerW float64
 	phases int                     // the phases the offer lands on
 	snap   func(w float64) float64 // nil: whole amps on three phases
+	// carPhases is the loadpoint's verdict on the car: 0 unknown, 1 one
+	// phase, 3 three phases.
+	carPhases int
 }
 
 func newCutRig(t *testing.T, offerW, declaredS float64) *cutRig {
@@ -101,7 +104,7 @@ func (r *cutRig) deliver(gridW float64, data []byte) float64 {
 	r.store.Update("meter", telemetry.DerMeter, gridW, nil, data)
 	r.store.Get("meter", telemetry.DerMeter).UpdatedAt = r.now
 	_, _, points, configs := evMeterBudgetFixture(r.t, 0, nil, r.offerW, "3p")
-	points[0].CommandedPhases = r.phases
+	points[0].CommandedPhases, points[0].CarPhases = r.phases, r.carPhases
 	capW, _ := EVFuseBudget(r.store, r.state, points, configs, 17250)
 	if capW < r.offerW {
 		r.offerW = math.Floor(capW/690) * 690
@@ -410,4 +413,72 @@ func TestEVFuseRaiseOnItsWayThatNoLongerFitsCutsAtOnce(t *testing.T) {
 	if r.read([3]float64{15.7, 9, 6}); r.offerW != 4140 {
 		t.Fatalf("offer %.0f W with L1 at 15.7 A and 10 A on its way, want 4,140 W", r.offerW)
 	}
+}
+
+// The C4 case as the triage wrote it, with only L1 moving, for a car the
+// loadpoint has seen draw on three phases. A house step on L1 alone is then
+// not the raise landing: the raise would take L1 to 25.7 A, over 1.2 x In,
+// so it comes off on that reading. For a car not yet seen, a step on one
+// phase may be a one-phase car taking the raise; the meter judges it then.
+func TestEVFuseRaiseOnItsWayCutsForACarSeenOnThreePhases(t *testing.T) {
+	r := newCutRig(t, 4140, 40)
+	r.state.SiteFuseAmps, r.carPhases = 16, 3
+	for range 60 {
+		r.read([3]float64{6, 6, 6})
+	}
+	r.offerW = 11040 // 6 -> 16 A
+	for range 30 {
+		r.read([3]float64{6, 6, 6})
+	}
+	if r.read([3]float64{15.7, 6, 6}); r.offerW > 4140 {
+		t.Fatalf("offer %.0f W with L1 at 15.7 A and 10 A on its way, want 4,140 W or less", r.offerW)
+	}
+}
+
+// A house load that moves on one phase alone is not a three-phase cut
+// landing. While a cut travels to a charger that declares 40 s, such a move
+// must not take the cut's cover off the phase it was sent for. Before, a
+// 3 A load switching off on L2 read as the cut landing: Core cut again to
+// 7,590 W and left L1 2 A under the line for over 2 min. A 1.5 A load
+// cycling on L2 gave three cuts and two rises; one cut is enough.
+func TestEVFuseOnePhaseHouseMoveIsNotTheCutLanding(t *testing.T) {
+	t.Run("drop_on_L2", func(t *testing.T) {
+		s := fuseHeatSite(t)
+		s.chargerDelay, s.chargerMaxAgeS = 40*time.Second, 40
+		s.addHouseA(0, 3, 0) // L2 23 A
+		s.run(2 * time.Minute)
+		stepAt := s.now
+		s.addHouseA(6, 0, 0) // L1 26 A
+		if took, offer := s.firstCut(2 * time.Minute); took < 0 || offer != 8970 {
+			t.Fatalf("first cut after %v to %.0f W, want 8,970 W", took, offer)
+		}
+		s.run(10 * time.Second)
+		s.addHouseA(0, -3, 0)
+		s.run(5 * time.Minute)
+		if cuts := offerWatts(s.cutsSince(stepAt)); len(cuts) != 1 || s.offer() != 8970 {
+			t.Fatalf("cuts %v, offer %.0f W after; want one cut to 8,970 W", cuts, s.offer())
+		}
+	})
+	t.Run("cycling_on_L2", func(t *testing.T) {
+		s := fuseHeatSite(t)
+		s.chargerDelay, s.chargerMaxAgeS = 40*time.Second, 40
+		s.run(time.Minute)
+		stepAt := s.now
+		s.addHouseA(5, 0, 0) // L1 25 A on the 24 A line
+		for i := range 20 * 60 {
+			if i%7 == 0 {
+				s.addHouseA(0, []float64{1.5, -1.5}[i/7%2], 0)
+			}
+			s.step()
+		}
+		var offers []float64
+		for _, o := range s.offersSince(stepAt) {
+			if n := len(offers); n == 0 || o.w != offers[n-1] {
+				offers = append(offers, o.w)
+			}
+		}
+		if len(offers) != 2 || offers[1] != 9660 {
+			t.Fatalf("offers %v, want one cut to 9,660 W and no rise", offers)
+		}
+	})
 }
