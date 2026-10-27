@@ -363,6 +363,20 @@ func TestJudgeR5aJudgesAtTheFuse(t *testing.T) {
 	if v[over] {
 		t.Error("25.1 A for 9 s once under the fuse passes")
 	}
+	// The 3 s clock starts at the first sample at or under the fuse, not
+	// under fuse - 0.5 A: 24.8 A at 80 s, then 26 A from 85 to 94 s, fails.
+	v = judge(func(i int) float64 {
+		switch {
+		case i < 85:
+			return 24.8
+		case i < 95:
+			return 26
+		}
+		return 24
+	})
+	if !v[under] || v[over] {
+		t.Errorf("a dip to 24.8 A, then 26 A for 10 s: %v", v)
+	}
 	if v := judge(func(int) float64 { return 25.1 }); v[under] {
 		t.Error("held at 25.1 A after Core answers passes")
 	}
