@@ -367,9 +367,10 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	for _, hw := range holds {
 		run4 = 0
 		for i, r := range d.window(hw.from+grace, hw.to) {
-			// Room below fuse - 1 A, the car's line in Core.
-			roomA := fuse - 1 - (maxAbsI(r) - carW(r, 0)/(3*volt))
-			bad := carW(r, 0) < 0.5*1380 && roomA >= 7 && !inFault(r.T) && !nearRestart(r.T)
+			// Room below the fuse, the car's line in Core; 6 A is the car's
+			// minimum on three phases.
+			roomA := fuse - (maxAbsI(r) - carW(r, 0)/(3*volt))
+			bad := carW(r, 0) < 0.5*1380 && roomA >= 6 && !inFault(r.T) && !nearRestart(r.T)
 			if bad && i > 0 {
 				run4++
 				idle = math.Max(idle, run4)

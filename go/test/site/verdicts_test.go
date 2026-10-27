@@ -45,8 +45,9 @@ func judgeS1(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
 	target := maxW
 	if fuse < 25 {
-		// Room on a 16 A fuse: fuse - 1 A margin - house, in 1 A steps.
-		target = math.Min(maxW, math.Floor(fuse-1-d.metaF("house_a"))*volt*3)
+		// Room on a 16 A fuse: fuse - house, in 1 A steps. Core works to
+		// the rating; safety_margin_a is a site's opt-in and the rig sets 0.
+		target = math.Min(maxW, math.Floor(fuse-d.metaF("house_a"))*volt*3)
 	}
 	m := d.carSummary(t0, t1, target)
 	m["target_w"] = target

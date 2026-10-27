@@ -558,7 +558,9 @@ func (st *stack) ftwConfig() (string, error) {
 	cfg := map[string]any{
 		"site": map[string]any{"name": "rig", "control_interval_s": 2, "grid_target_w": 0,
 			"grid_tolerance_w": 42, "watchdog_timeout_s": 60},
-		"fuse": map[string]any{"max_amps": st.spec.fuseA, "phases": 3, "voltage": 230},
+		// safety_margin_a pinned at 0 so the rig judges Core at the rating
+		// whatever the default.
+		"fuse": map[string]any{"max_amps": st.spec.fuseA, "phases": 3, "voltage": 230, "safety_margin_a": 0},
 		"drivers": []map[string]any{
 			{"name": "meter", "lua": "drivers/sdm630.lua", "is_site_meter": true, "capabilities": modbus("meter")},
 			{"name": "sungrow", "lua": "drivers/sungrow.lua", "battery_capacity_wh": 10000, "capabilities": modbus("inverter")},
