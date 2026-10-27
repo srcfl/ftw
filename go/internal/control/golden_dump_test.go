@@ -331,7 +331,12 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 
 	// Pre-dispatch attribution reads (pure).
 	intent := planSignIntent(st)
-	perPhase := perPhaseOverageW(store, st)
+	// The worst phase's overage either way, in watts on that phase.
+	var perPhase float64
+	importW, exportW := phaseFuseReliefW(store.Get(st.SiteMeterDriver, telemetry.DerMeter), st, 0)
+	if st.SiteFusePhases > 0 {
+		perPhase = math.Max(importW, exportW) / float64(st.SiteFusePhases)
+	}
 	effImp := st.effectiveImportCeilingW(sc.Inputs.FuseMaxW)
 	effExp := st.effectiveExportCeilingW(sc.Inputs.FuseMaxW)
 

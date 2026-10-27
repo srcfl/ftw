@@ -3623,7 +3623,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	// replacement target would double-remove their contribution and miss
 	// fuse overages.
 	seenBat := make(map[string]struct{}, len(targets))
-	var currentBat float64
+	var currentBat, rawBat float64
 	for _, t := range targets {
 		if _, seen := seenBat[t.Driver]; seen {
 			continue
@@ -3631,12 +3631,14 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		seenBat[t.Driver] = struct{}{}
 		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
 			currentBat += r.SmoothedW
+			rawBat += r.RawW
 		}
 	}
 	var currentGrid float64
+	var meter *telemetry.DerReading
 	if siteMeter != "" {
-		if r := store.Get(siteMeter, telemetry.DerMeter); r != nil {
-			currentGrid = r.SmoothedW
+		if meter = store.Get(siteMeter, telemetry.DerMeter); meter != nil {
+			currentGrid = meter.SmoothedW
 		}
 	}
 	var sumTarget float64
@@ -3645,22 +3647,9 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	}
 	predicted := currentGrid - currentBat + sumTarget
 
-	// Per-phase relief: the worst single-phase amperage above the fuse
-	// trip threshold (less the safety margin), converted by
-	// perPhaseReliefW into the AGGREGATE battery action needed to bring
-	// it back — the site's configured phase count does that conversion.
-	//
-	// This guard uses relief in BOTH directions. `perPhaseOverageW` is
-	// direction-agnostic — phase amps from the meter are absolute
-	// magnitudes. Attribute to whichever side the AGGREGATE METER is
-	// currently flowing (currentGrid), not to the post-target
-	// `predicted`. Per-phase amps and currentGrid are read from the
-	// same DerMeter sample, so they're internally consistent;
-	// `predicted` mixes in `sumTarget` (a hypothetical future state)
-	// and can swing across 0 on a large planner request, attributing
-	// a current-export overage to the import path (or vice versa) and
-	// pushing the grid further into the violating direction.
-	perPhase := perPhaseReliefW(store, state)
+	// Per phase, each way, once the targets replace the batteries' power
+	// in the same raw reading.
+	phaseImportW, phaseExportW := phaseFuseReliefW(meter, state, sumTarget-rawBat)
 	// Aggregate budget honours the safety margin too — keep dispatch
 	// commands strictly inside the breaker envelope so the inverter's
 	// own per-phase limiter doesn't fire first and cause a flap.
@@ -3672,19 +3661,8 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 	// (recurring Ferroamp 0x8030 fault). Both share one enforcement surface.
 	effImportW := state.effectiveImportCeilingW(fuseMaxW)
 	effExportW := state.effectiveExportCeilingW(fuseMaxW)
-	importOverage := predicted - effImportW
-	exportOverage := -effExportW - predicted
-	if perPhase > 0 {
-		if currentGrid >= 0 {
-			if perPhase > importOverage {
-				importOverage = perPhase
-			}
-		} else {
-			if perPhase > exportOverage {
-				exportOverage = perPhase
-			}
-		}
-	}
+	importOverage := math.Max(predicted-effImportW, phaseImportW)
+	exportOverage := math.Max(-effExportW-predicted, phaseExportW)
 
 	out := make([]DispatchTarget, len(targets))
 	copy(out, targets)
@@ -3875,106 +3853,55 @@ func (s *State) effectiveExportCeilingW(fuseMaxW float64) float64 {
 	return eff
 }
 
-// perPhaseOverageW returns the wattage by which the worst single phase
-// exceeds the per-phase fuse amperage (less the safety margin). 0 when
-// within limits, when per-phase data isn't available, or when the
-// per-phase clamp is disabled (state.SiteFuseAmps == 0). The meter
-// driver must emit l1_a / l2_a / l3_a in DerReading.Data — Pixii,
-// Ferroamp, and Sungrow all do this today.
+// phaseFuseReliefW is the aggregate battery move that brings every phase
+// inside the working limit: the fuse less the car's 1 A margin, or less
+// safety_margin_a when that is larger. importW asks for less charge or more
+// discharge, exportW for the reverse. moveW is the batteries' change from
+// the power this reading already holds; like the relief, it spreads evenly
+// over the site's phases.
 //
-// Only the configured phases are read, in L1/L2/L3 order, matching
-// sitePhaseCurrentsAt in cmd/ftw: a 1Φ site has no L2, so a stray
-// l2_a in the meter payload is not a breaker this site owns.
-//
-// Same law as fuseSafetyMarginW: amps become watts only through the
-// configured per-phase voltage. No hardcoded 230 V here — a site whose
-// fuse description is incomplete gets no per-phase clamp rather than an
-// invented one. Config fills both fields (fuse.voltage defaults to 230,
-// fuse.phases to 3, and validation rejects <= 0), so this only affects
-// harnesses that wire SiteFuseAmps alone.
-//
-// Direction-agnostic: phase amps from the meter are absolute magnitudes,
-// so this function reports overage regardless of whether the breaker is
-// being approached on the import or export side. The caller attributes
-// the overage to whichever direction the aggregate grid is flowing.
-func perPhaseOverageW(store *telemetry.Store, state *State) float64 {
-	if state == nil || state.SiteFuseAmps <= 0 || state.SiteMeterDriver == "" {
-		return 0
+// The phases are the meter's signed currents (phaseCurrentsA). When no
+// phase reads as export while the total does, the meter gives no direction
+// per phase, and the phases take the total's. When no move fits every
+// phase, the move leaves the worst phase least over, so a move never
+// raises the current on the phase it protects. 0, 0 without usable phase
+// currents.
+func phaseFuseReliefW(meter *telemetry.DerReading, state *State, moveW float64) (importW, exportW float64) {
+	if meter == nil || state == nil {
+		return 0, 0
 	}
-	r := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
-	return perPhaseOverageReadingW(r, state)
-}
-
-// perPhaseOverageReadingW is the snapshot form used when one control decision
-// must keep the aggregate reading and its phase data from the same meter sample.
-func perPhaseOverageReadingW(r *telemetry.DerReading, state *State) float64 {
-	if state == nil || state.SiteFuseAmps <= 0 || state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 0 {
-		return 0
+	amps, _, valid := phaseCurrentsA(meter, state, meter.RawW)
+	if !valid || len(amps) == 0 {
+		return 0, 0
 	}
-	if r == nil || len(r.Data) == 0 {
-		return 0
+	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases) // aggregate W per phase ampere
+	limitA := math.Max(0, state.SiteFuseAmps-math.Max(evPhaseMarginA, state.SiteFuseSafetyA))
+	exports := meter.RawW < 0
+	for _, a := range amps {
+		exports = exports && a >= 0
 	}
-	var d struct {
-		L1A *float64 `json:"l1_a"`
-		L2A *float64 `json:"l2_a"`
-		L3A *float64 `json:"l3_a"`
-	}
-	if err := json.Unmarshal(r.Data, &d); err != nil {
-		return 0
-	}
-	// Use absolute magnitude — drivers like Pixii decode per-phase amps
-	// as signed i16, so export shows up as negative numbers and a naive
-	// `*p > maxA` walk starting from 0 leaves maxA = 0 (no fire) even
-	// when a phase is at -17 A. The fuse trips on current magnitude
-	// regardless of direction, and the caller attributes the overage
-	// to the active aggregate-grid direction.
-	phaseAmps := [...]*float64{d.L1A, d.L2A, d.L3A}
-	phases := state.SiteFusePhases
-	if phases > len(phaseAmps) {
-		phases = len(phaseAmps)
-	}
-	maxA := 0.0
-	for i := 0; i < phases; i++ {
-		p := phaseAmps[i]
-		if p == nil {
-			continue
+	hi, lo := math.Inf(-1), math.Inf(1)
+	for _, a := range amps {
+		if exports {
+			a = -a
 		}
-		a := math.Abs(*p)
-		if a > maxA {
-			maxA = a
-		}
+		a += moveW / perA
+		hi, lo = math.Max(hi, a), math.Min(lo, a)
 	}
-	threshold := state.SiteFuseAmps - state.SiteFuseSafetyA
-	if threshold < 0 {
-		threshold = 0
+	// The smallest shift that keeps every phase inside, or the middle one.
+	shiftA := math.Max(-limitA-lo, math.Min(0, limitA-hi))
+	if -limitA-lo > limitA-hi {
+		shiftA = -(hi + lo) / 2
 	}
-	if maxA <= threshold {
-		return 0
+	importW, exportW = math.Max(0, -shiftA)*perA, math.Max(0, shiftA)*perA
+	// A target that fills the limit exactly can land a rounding error past it.
+	if importW < 1 {
+		importW = 0
 	}
-	return (maxA - threshold) * state.SiteFuseVoltage
-}
-
-// perPhaseReliefW converts a worst-phase overage into the AGGREGATE
-// battery action needed to clear it. One conversion, one law: a battery
-// spreads its action evenly across the site's phases, so each watt of
-// aggregate action relieves 1/SiteFusePhases watts on the worst phase,
-// and an overage of N watts needs N × SiteFusePhases watts of action.
-//
-// The phase count is the site's, from config — not the constant 3 the
-// two call sites used to carry separately. On a 1Φ site the aggregate
-// meter and the single phase are the same wire, so demanding 3 × N
-// there overshoots by 2 × N and can push the grid through zero into a
-// violation on the opposite side.
-//
-// Conservative for a 1Φ battery on a 3Φ site (Pixii Home etc.): it
-// over-corrects on the phases it does not sit on — less import/export
-// there, still safe.
-func perPhaseReliefW(store *telemetry.Store, state *State) float64 {
-	overage := perPhaseOverageW(store, state)
-	if overage <= 0 {
-		return 0
+	if exportW < 1 {
+		exportW = 0
 	}
-	return overage * float64(state.SiteFusePhases)
+	return importW, exportW
 }
 
 // applyPlanSignFloor enforces "executed battery total must agree in sign
@@ -4472,7 +4399,7 @@ func fuseSaverFromLivePower(
 	// site is safe. Preserve the deadband in that case: this early-return path
 	// exists to answer a fuse condition, not to take control of an externally
 	// moved battery merely because its reading sits outside a command cap.
-	requiredRelief := fuseReliefFromSnapshot(rawLive, batteryReadings, meter, state, fuseMaxW, false)
+	requiredRelief := fuseReliefFromSnapshot(rawLive, batteryReadings, meter, state, fuseMaxW)
 	if requiredRelief <= 0 {
 		return nil
 	}
@@ -4490,7 +4417,7 @@ func fuseSaverFromLivePower(
 	if len(safeBaseline) == 0 {
 		return nil
 	}
-	out := forceFuseDischargeWithSnapshot(safeBaseline, batteryReadings, meter, state, driverCapacities, fuseMaxW, true)
+	out := forceFuseDischargeWithSnapshot(safeBaseline, batteryReadings, meter, state, driverCapacities, fuseMaxW)
 	rawByDriver := make(map[string]DispatchTarget, len(rawLive))
 	for _, t := range rawLive {
 		rawByDriver[t.Driver] = t
@@ -4515,45 +4442,34 @@ func fuseReliefFromSnapshot(
 	meter *telemetry.DerReading,
 	state *State,
 	fuseMaxW float64,
-	accountPhaseTargetDelta bool,
 ) float64 {
 	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
 		return 0
 	}
 
-	currentBat, sumTarget, predicted := predictedGridFromSnapshot(targets, batteryReadings, meter)
-	currentGrid := 0.0
-	if meter != nil {
-		currentGrid = meter.SmoothedW
-	}
+	_, sumTarget, predicted := predictedGridFromSnapshot(targets, batteryReadings, meter)
 
 	// The fuse acts on every reading. The hour's import limit is a budget:
 	// the part of its overage that an EV cut we sent will remove waits for
 	// that cut while the meter may not show it yet. Relief for the same watts
 	// would discharge the battery into export once the cut lands (#1674).
-	// Per-phase relief remains fuse-only and may act only while the matching
-	// aggregate meter sample is on the import side.
+	// Per-phase relief is fuse-only.
 	fuseW := math.Max(0, fuseMaxW-state.fuseSafetyMarginW())
 	overage := predicted - fuseW
 	if ceilingW := state.effectiveImportCeilingW(fuseMaxW); ceilingW < fuseW {
 		overage = math.Max(overage, predicted-ceilingW-state.pendingEVCutW())
 	}
-	if currentGrid >= 0 {
-		relief := perPhaseOverageReadingW(meter, state) * float64(state.SiteFusePhases)
-		if relief > 0 && accountPhaseTargetDelta {
-			// The early fuse baseline can only hold or reduce each included
-			// target. Count that import reduction against the raw phase relief so
-			// a command-cap clamp is not followed by the same correction twice.
-			relief += sumTarget - currentBat
-			if relief < 0 {
-				relief = 0
-			}
+	// The phases are raw, so the batteries' move is from their raw power.
+	moveW := sumTarget
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		if r := batteryReadings[t.Driver]; r != nil && !seen[t.Driver] {
+			moveW -= r.RawW
 		}
-		if relief > overage {
-			overage = relief
-		}
+		seen[t.Driver] = true
 	}
-	return overage
+	phaseW, _ := phaseFuseReliefW(meter, state, moveW)
+	return math.Max(overage, phaseW)
 }
 
 // predictedGridFromSnapshot holds non-targeted site power constant and replaces
@@ -4605,7 +4521,7 @@ func forceFuseDischarge(
 		readings[target.Driver] = store.Get(target.Driver, telemetry.DerBattery)
 	}
 	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
-	return forceFuseDischargeWithSnapshot(targets, readings, meter, state, driverCapacities, fuseMaxW, false)
+	return forceFuseDischargeWithSnapshot(targets, readings, meter, state, driverCapacities, fuseMaxW)
 }
 
 // forceFuseDischargeWithSnapshot keeps all math for one decision on the same
@@ -4618,12 +4534,11 @@ func forceFuseDischargeWithSnapshot(
 	state *State,
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
-	accountPhaseTargetDelta bool,
 ) []DispatchTarget {
 	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
 		return targets
 	}
-	overage := fuseReliefFromSnapshot(targets, batteryReadings, meter, state, fuseMaxW, accountPhaseTargetDelta)
+	overage := fuseReliefFromSnapshot(targets, batteryReadings, meter, state, fuseMaxW)
 	if overage <= 0 {
 		return targets
 	}

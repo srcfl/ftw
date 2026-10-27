@@ -1,7 +1,7 @@
 {
   "family": "slew_limiter",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "15f9edc3b973d7b9151e88d63575a9b7d615a0b3",
+  "ftw_commit": "83c2b24ccdb730278a9c4e6ef778bab5f9499167",
   "record_count": 127,
   "records": [
     {
@@ -3225,7 +3225,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2760,
+          "target_w": -1949.9999999999995,
           "clamped": true
         }
       ],
@@ -3242,7 +3242,7 @@
         "fuse_hold_latched": true,
         "fuse_hold_max_charge_w": 0,
         "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 920,
+        "per_phase_overage_w": 1150,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
@@ -3250,9 +3250,9 @@
       },
       "site_totals": {
         "battery_current_w": 1500,
-        "battery_target_sum_w": -2760,
+        "battery_target_sum_w": -1949.9999999999995,
         "raw_grid_w": 1000,
-        "projected_grid_w": -3260
+        "projected_grid_w": -2449.9999999999995
       }
     },
     {
