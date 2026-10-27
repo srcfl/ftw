@@ -460,7 +460,7 @@ func (s *simSite) coreEvery() time.Duration {
 
 func (s *simSite) declaredMaxAge() time.Duration {
 	if s.field == nil {
-		return 0
+		return s.evMaxAge
 	}
 	return s.field.c.timing.declared
 }
@@ -468,6 +468,9 @@ func (s *simSite) declaredMaxAge() time.Duration {
 // evData is what a charger driver adds to its reading.
 func (s *simSite) evData() map[string]any {
 	if s.field == nil {
+		if s.evMaxAge > 0 {
+			return map[string]any{"power_max_age_s": s.evMaxAge.Seconds()}
+		}
 		return nil
 	}
 	d := map[string]any{"connected": s.ev.Plugged, "control_power_confirmed": true}
