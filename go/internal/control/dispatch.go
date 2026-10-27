@@ -154,6 +154,10 @@ const MaxCommandW = 5000
 // elsewhere in this package for sign decisions.
 const evActiveThresholdW = 100.0
 
+// holdoffToleranceS is how much earlier than MinDispatchIntervalS a
+// dispatch may run. It absorbs jitter in the work before each tick.
+const holdoffToleranceS = 0.25
+
 type vehiclePowerFlow struct {
 	Live          bool
 	EVChargeW     float64
@@ -410,6 +414,7 @@ type State struct {
 	// the operator-facing rationale.
 	SlewEnabled          bool
 	MinDispatchIntervalS int
+	ControlIntervalS     int // tick period; no holdoff when MinDispatchIntervalS <= it
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
 	batteryChargeFull    map[string]bool
@@ -1426,9 +1431,12 @@ func ComputeDispatch(
 	// Manual holds bypass the holdoff: the operator just installed a
 	// setpoint and expects immediate effect, not a 5 s wait. The fuse
 	// guard at the end of the cycle still protects the site.
-	if !manualHoldActive && state.LastDispatch != nil {
+	// The ticker is fixed, but the work before each dispatch varies, so
+	// two ticks can land just under the interval apart. The 0.25 s
+	// tolerance keeps that jitter from skipping every other tick.
+	if !manualHoldActive && state.LastDispatch != nil && state.MinDispatchIntervalS > state.ControlIntervalS {
 		elapsed := state.now().Sub(*state.LastDispatch).Seconds()
-		if elapsed < float64(state.MinDispatchIntervalS) {
+		if elapsed < float64(state.MinDispatchIntervalS)-holdoffToleranceS {
 			// Holdoff suppresses normal re-dispatch, but the
 			// fuse-saver overrides — an overflow can't wait 5 s for
 			// the next eligible tick.
