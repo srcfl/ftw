@@ -4008,47 +4008,131 @@ func livePhaseSample(store *telemetry.Store, driver string, meter *telemetry.Der
 // batteries. false when a targeted battery has no reading, has gone
 // offline or has moved on to a newer reading: its power in the phases is
 // then unknown.
-func (p phaseSample) moveW(targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (float64, bool) {
+//
+// sentW is the same change from the command each battery got in the last
+// dispatch, for a battery that got one, and from its reading otherwise.
+func (p phaseSample) moveW(state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (moveW, sentW float64, ok bool) {
 	if p.store == nil {
-		return 0, false
+		return 0, 0, false
 	}
-	var moveW float64
 	seen := make(map[string]bool, len(targets))
 	for _, t := range targets {
 		moveW += t.TargetW
+		sentW += t.TargetW
 		if seen[t.Driver] {
 			continue
 		}
 		seen[t.Driver] = true
 		r := batteries[t.Driver]
 		if r == nil {
-			return 0, false
+			return 0, 0, false
 		}
 		rawW, at, ok := p.store.OnlineRawW(t.Driver, telemetry.DerBattery)
 		if !ok || !at.Equal(r.UpdatedAt) {
-			return 0, false
+			return 0, 0, false
 		}
 		moveW -= rawW
+		if w, sent := state.lastDispatchedW(t.Driver); sent {
+			sentW -= w
+		} else {
+			sentW -= rawW
+		}
 	}
-	return moveW, true
+	return moveW, sentW, true
 }
 
-// phaseReliefForTargets is phaseFuseReliefW for targets replacing the
-// batteries' power in the phases. 0, 0 when that power is unknown.
+// lastDispatchedW is the command driver got in the last dispatch, if it
+// got one.
+func (s *State) lastDispatchedW(driver string) (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	log := s.batteryCommands[driver]
+	if len(log) == 0 || s.LastDispatch == nil || !log[len(log)-1].at.Equal(*s.LastDispatch) {
+		return 0, false
+	}
+	return log[len(log)-1].w, true
+}
+
+// phaseReliefForTargets is the relief that keeps every phase inside
+// fuseLineA once the targets replace the batteries' power. 0, 0 when that
+// power is unknown.
+//
+// The relief counts the batteries' move from their readings
+// (phaseFuseReliefW). A reading can lag the meter: the meter already shows
+// the battery at its last command while the reading still holds the power
+// before it. The phase then sits at the line, the reading shows no relief
+// in force, and the relief is taken back; on the next tick the reading
+// shows it and the relief goes on top of it. The order runs further out
+// each time. So a move from the last command may not pass the room the
+// meter shows either (phaseSentReliefW).
 func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (importW, exportW float64) {
-	moveW, ok := p.moveW(targets, batteries)
+	moveW, sentW, ok := p.moveW(state, targets, batteries)
 	if !ok {
 		return 0, 0
 	}
-	return phaseFuseReliefW(p, state, moveW)
+	importW, exportW = phaseFuseReliefW(p, state, moveW)
+	sentImportW, sentExportW := phaseSentReliefW(p, state, sentW)
+	return math.Max(importW, sentImportW), math.Max(exportW, sentExportW)
+}
+
+// phaseSentReliefW is the relief that keeps sentW, the batteries' move from
+// their last commands, inside the room the meter shows on each phase. A
+// phase already over the line has no room; its overage is
+// phaseFuseReliefW's. So this relief never asks for more than to stay at
+// the last command, and a battery that cannot reach its command does not
+// wind the relief up.
+func phaseSentReliefW(p phaseSample, state *State, sentW float64) (importW, exportW float64) {
+	amps, ok := p.signedA(state)
+	if !ok {
+		return 0, 0
+	}
+	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases)
+	limitA := state.fuseLineA()
+	hi, lo := math.Inf(-1), math.Inf(1)
+	for _, a := range amps {
+		a = math.Max(-limitA, math.Min(limitA, a)) + sentW/perA
+		hi, lo = math.Max(hi, a), math.Min(lo, a)
+	}
+	importW, exportW = math.Max(0, hi-limitA)*perA, math.Max(0, -limitA-lo)*perA
+	if importW < 1 {
+		importW = 0
+	}
+	if exportW < 1 {
+		exportW = 0
+	}
+	return importW, exportW
+}
+
+// signedA is the phase currents, + import, from phaseCurrentsA. When no
+// phase reads as export while the total does, the meter gives no direction
+// per phase, and the phases take the total's.
+func (p phaseSample) signedA(state *State) ([]float64, bool) {
+	if p.meter == nil || state == nil {
+		return nil, false
+	}
+	amps, _, valid := phaseCurrentsA(p.meter, state, p.totalW)
+	if !valid || len(amps) == 0 {
+		return nil, false
+	}
+	exports := p.totalW < 0
+	for _, a := range amps {
+		exports = exports && a >= 0
+	}
+	if exports {
+		for i := range amps {
+			amps[i] = -amps[i]
+		}
+	}
+	return amps, true
 }
 
 // phaseFuseReliefW is the aggregate battery move that brings every phase
 // inside the working limit, fuseLineA: the fuse less safety_margin_a, the
 // same line the car uses. importW asks for less charge or more
 // discharge, exportW for the reverse. moveW is the batteries' change from
-// the power this reading already holds (phaseMoveW); like the relief, it
-// spreads evenly over the site's phases.
+// the power this reading already holds (phaseSample.moveW); like the
+// relief, it spreads evenly over the site's phases.
 //
 // The phases are the meter's signed currents (phaseCurrentsA). When no
 // phase reads as export while the total does, the meter gives no direction
@@ -4060,24 +4144,14 @@ func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget
 // export, and a battery on one phase, which is read as balanced. 0, 0
 // without usable phase currents.
 func phaseFuseReliefW(p phaseSample, state *State, moveW float64) (importW, exportW float64) {
-	if p.meter == nil || state == nil {
-		return 0, 0
-	}
-	amps, _, valid := phaseCurrentsA(p.meter, state, p.totalW)
-	if !valid || len(amps) == 0 {
+	amps, ok := p.signedA(state)
+	if !ok {
 		return 0, 0
 	}
 	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases) // aggregate W per phase ampere
 	limitA := state.fuseLineA()
-	exports := p.totalW < 0
-	for _, a := range amps {
-		exports = exports && a >= 0
-	}
 	hi, lo := math.Inf(-1), math.Inf(1)
 	for _, a := range amps {
-		if exports {
-			a = -a
-		}
 		a += moveW / perA
 		hi, lo = math.Max(hi, a), math.Min(lo, a)
 	}
