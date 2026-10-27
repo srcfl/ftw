@@ -1,7 +1,7 @@
 {
   "family": "seeded_siblings",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "b3af71859a912dcae3a512f6c1ca79a21c2bb631",
+  "ftw_commit": "c41dc64bb5a70b8c838e50225566995f3331fa70",
   "record_count": 60,
   "records": [
     {
@@ -3774,13 +3774,14 @@
         },
         {
           "driver": "sungrow",
-          "target_w": -3200,
-          "clamped": false
+          "target_w": -5000,
+          "clamped": true
         }
       ],
       "clamp_attributions": {
         "clamped_drivers": [
-          "ferroamp"
+          "ferroamp",
+          "sungrow"
         ],
         "all_targets_zero_clamped": false,
         "plan_sign_intent": -1,
@@ -3799,9 +3800,9 @@
       },
       "site_totals": {
         "battery_current_w": -1969,
-        "battery_target_sum_w": -3200,
+        "battery_target_sum_w": -5000,
         "raw_grid_w": 5401,
-        "projected_grid_w": 4170
+        "projected_grid_w": 2370
       }
     },
     {
