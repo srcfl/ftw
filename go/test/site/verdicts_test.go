@@ -670,11 +670,13 @@ func judgeR3(d *runData) (metrics, []criterion) {
 	}
 	minSoC := minOf(run, func(r *sample) float64 { return r.Bat.SoCPct })
 	// Core may work up to the fuse rating; safety_margin_a is a site's
-	// opt-in, so the overage that counts is above the fuse.
-	over, _ := d.runsOver(tCN, t1, fuse)
+	// opt-in, so the overage that counts is above the fuse. Between the
+	// fuse and 1.2 x the fuse Core's 60 s heat is the budget (heatOver).
+	overInstant, _ := d.runsOver(tCN, t1, fuse)
+	over := d.heatRunsOver(tCN, t1, fuse)
 	allowed := delay + 7
 	m := metrics{"discharge_below_floor_samples": below, "battery_order_swing_last5min_w": math.Round(swing),
-		"soc_min_pct": round(minSoC, 2), "over_fuse_longest_s": over,
+		"soc_min_pct": round(minSoC, 2), "over_fuse_longest_s": overInstant, "over_fuse_heat_longest_s": over,
 		"allowed_over_s": allowed, "max_i": round(maxOf(run, maxAbsI), 2)}
 	return m, []criterion{
 		crit("the battery reached the planner floor", len(run) > 0 && minSoC <= floor+0.5), // the setup
@@ -739,7 +741,9 @@ func (d *runData) homeUseBack(t0 float64) *float64 {
 // judgeR5a: Core starting beside a car that already draws its maximum, with
 // the site over the fuse, brings the site under the limit within 30 s and
 // keeps it there. The limit is the fuse: Core may work up to the rating,
-// and safety_margin_a is a site's opt-in.
+// and safety_margin_a is a site's opt-in. Once under it, a reading between
+// the fuse and 1.2 x the fuse counts only while the 60 s heat is over the
+// fuse too (heatOver), as Core's cut does.
 func judgeR5a(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
 	tS, tUp, t1 := d.marks["ftw_start"], d.marks["ftw_up"], d.marks["end"]
@@ -748,7 +752,7 @@ func judgeR5a(d *runData) (metrics, []criterion) {
 	fit := d.firstT(tUp, func(r *sample) bool { return maxAbsI(r) <= fuse })
 	overAfter := 0.0
 	if fit != nil {
-		overAfter, _ = d.runsOver(tUp+*fit, t1, fuse)
+		overAfter = d.heatRunsOver(tUp+*fit, t1, fuse)
 	}
 	shown := d.homeUseBack(tUp)
 	m := metrics{"car_w_before_start": math.Round(pre), "under_limit_s": roundp(fit, 1), "over_after_that_longest_s": overAfter,

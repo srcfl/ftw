@@ -37,7 +37,7 @@ make siterig-judge DIR=/tmp/ftw-site-123  # judge a recorded run again
 | `FTW_SITE_DEVSIM_SRC` | a device-simulator checkout at the pinned commit; without it the test clones the pin into the user cache |
 | `FTW_SITE_FTW_BIN`, `FTW_SITE_DEVSIM_BIN` | prebuilt binaries |
 | `FTW_SITE_CATALOG` | the fault catalog, for `TestCatalogCoverage` |
-| `FTW_SITE_JUDGE` | a results directory: `TestJudge` judges its runs again with the criteria as they are now, and rewrites their `result.json` and the summary |
+| `FTW_SITE_JUDGE` | a results directory: `TestJudge` judges its runs again with the criteria as they are now, random seeds included (from each run's `plan.json`), and rewrites their `result.json` and the summary |
 
 Each run directory keeps `house/plant.jsonl` (the house once a second, with
 every event and mark), `house/ocpp-<charger>.jsonl` (every OCPP frame the
@@ -79,7 +79,9 @@ its sources (`provenance` in [catalog_test.go](catalog_test.go)).
 
 "Over the limit" is the worst phase above the fuse rating, measured through
 the fuse. A device's response time counts as 2 s, the meter and control
-tick as 2 s more.
+tick as 2 s more. The random cases, `r3` and `r5a` judge a phase between
+the fuse and 1.2 × the fuse as Core does: it counts only once its 60 s heat
+(I² filter) is above the fuse too.
 
 | Scenario | House and steps | Criteria | Short |
 |---|---|---|---|
