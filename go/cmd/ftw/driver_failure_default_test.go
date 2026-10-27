@@ -294,3 +294,117 @@ func TestRemovedDriverIsForgotten(t *testing.T) {
 		t.Error("removed driver left bookkeeping behind")
 	}
 }
+
+// excludeDuringOutage refuses driverRefusalLimit battery commands while the
+// device's reads are failing, the way a Sungrow refuses every write while it
+// is unreachable, and lets the tracker send its one default.
+func excludeDuringOutage(t *testing.T, tel *telemetry.Store, tracker *driverActuationTracker, sender driverCommandSender, now time.Time) {
+	t.Helper()
+	payload := []byte(`{"action":"battery","power_w":-3000}`)
+	tel.RecordDriverError("sungrow", "driver_poll: none of 17 modbus reads returned data")
+	for i := 0; i < driverRefusalLimit; i++ {
+		tracker.dispatchCommand(context.Background(), sender, "driver send", "sungrow", payload, time.Second, now)
+	}
+	if tel.DriverHealth("sungrow").IsOnline() {
+		t.Fatal("driver was not excluded")
+	}
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+}
+
+// Random rig seeds 207532–207539 (27 Oct 2026): an inverter outage made the
+// Sungrow refuse its battery command and its default, so it was excluded.
+// When it came back it still ran its last forced command (187 / 3854 W in
+// 207537, from 213 to 510 s) because Core neither resent the default nor
+// let a command through until driverRefusalRetryInterval had passed.
+func TestDriverExcludedDuringOutageGetsDefaultWhenItReadsAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		watchdog bool
+	}{
+		{"short outage, reads failing", false},
+		{"long outage, watchdog offline", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := pollingStore(t, "sungrow")
+			tracker := newDriverActuationTracker(tel)
+			now := time.Now()
+			excludeDuringOutage(t, tel, tracker, refusingSender("modbus reconnect backoff active"), now)
+
+			now = now.Add(10 * time.Second)
+			if tc.watchdog {
+				tel.WatchdogScan(time.Nanosecond)
+			}
+			if pending := tracker.update(now, nil); len(pending) != 0 {
+				t.Fatalf("unreachable driver got a second default: %v", pending)
+			}
+
+			// First fresh reading after the outage.
+			now = now.Add(20 * time.Second)
+			tel.RecordDriverSuccess("sungrow")
+			assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+			if !tel.DriverHealth("sungrow").IsOnline() {
+				t.Fatal("driver back from an outage still waits out the retry window")
+			}
+			if pending := tracker.update(now.Add(time.Second), nil); len(pending) != 0 {
+				t.Fatalf("returned driver got its default twice: %v", pending)
+			}
+		})
+	}
+}
+
+// A device that keeps refusing while it keeps dropping out is retried each
+// time it reads again. Once it refuses while reading fine, it waits the full
+// retry window like any device that answers and refuses.
+func TestDriverRefusingAfterOutageKeepsRetryWindowWhileOnline(t *testing.T) {
+	tel := pollingStore(t, "sungrow")
+	tracker := newDriverActuationTracker(tel)
+	sender := refusingSender("modbus write refused")
+	payload := []byte(`{"action":"battery","power_w":-3000}`)
+	now := time.Now()
+	excludeDuringOutage(t, tel, tracker, sender, now)
+
+	// Back, but the trial command is refused while reads fail again.
+	now = now.Add(5 * time.Second)
+	tel.RecordDriverSuccess("sungrow")
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+	tel.RecordDriverError("sungrow", "driver_poll: none of 17 modbus reads returned data")
+	tracker.dispatchCommand(context.Background(), sender, "driver send", "sungrow", payload, time.Second, now)
+	if tel.DriverHealth("sungrow").IsOnline() {
+		t.Fatal("refused trial command left the driver in dispatch")
+	}
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+
+	// Back again: retried at once, not after the window.
+	now = now.Add(5 * time.Second)
+	tel.RecordDriverSuccess("sungrow")
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+	if !tel.DriverHealth("sungrow").IsOnline() {
+		t.Fatal("driver back from a second outage waits out the retry window")
+	}
+
+	// Now it reads fine and refuses: that is the device's answer.
+	tracker.dispatchCommand(context.Background(), sender, "driver send", "sungrow", payload, time.Second, now)
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+	excludedAt := now
+	for i := 0; i < 5; i++ {
+		now = now.Add(time.Minute - time.Second)
+		// One failed read in between is not an outage.
+		if i == 2 {
+			tel.RecordDriverError("sungrow", "one modbus read timed out")
+			if pending := tracker.update(now, nil); len(pending) != 0 {
+				t.Fatalf("one failed read sent a default: %v", pending)
+			}
+		}
+		tel.RecordDriverSuccess("sungrow")
+		if pending := tracker.update(now, nil); len(pending) != 0 {
+			t.Fatalf("online refusing driver was defaulted again at %v: %v", now.Sub(excludedAt), pending)
+		}
+		if tel.DriverHealth("sungrow").IsOnline() {
+			t.Fatalf("online refusing driver let back in after %v", now.Sub(excludedAt))
+		}
+	}
+	tracker.update(excludedAt.Add(driverRefusalRetryInterval), nil)
+	if !tel.DriverHealth("sungrow").IsOnline() {
+		t.Fatal("retry window elapsed and the driver was not let back in")
+	}
+}

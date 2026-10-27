@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -105,6 +106,13 @@ type refusalState struct {
 	// excludedAt is when the driver was last put out of dispatch, and
 	// zero while it is still in. It dates the retry window.
 	excludedAt time.Time
+	// outage marks an exclusion that the device's own outage explains: its
+	// reads were failing when it was excluded, or the watchdog took it
+	// offline while it was out. Such a device kept the last command it
+	// accepted and every default write in between failed. When it reads
+	// again, update resends the default and lets one command through at
+	// once instead of waiting out driverRefusalRetryInterval.
+	outage bool
 }
 
 func newDriverActuationTracker(tel *telemetry.Store) *driverActuationTracker {
@@ -205,6 +213,7 @@ func (t *driverActuationTracker) recordCommandOutcomeFor(name, action string, er
 		st.excludedAction = action
 		if st.excludedAt.IsZero() {
 			st.excludedAt = now
+			st.outage = t.unreachable(name)
 		}
 		t.refusals[name] = st
 		t.tel.SetDriverCommandFault(name, true, st.reason)
@@ -225,9 +234,18 @@ func (t *driverActuationTracker) recordCommandOutcomeFor(name, action string, er
 	if st.consecutive[action] >= driverRefusalLimit && st.excludedAt.IsZero() {
 		st.excludedAction = action
 		st.excludedAt = now
+		st.outage = t.unreachable(name)
 		t.tel.SetDriverCommandFault(name, true, st.reason)
 	}
 	t.refusals[name] = st
+}
+
+// unreachable reports whether the device is out of reach right now: its
+// last poll failed or the watchdog has it offline. A refusal then says the
+// wire is down, not that the device turns commands away.
+func (t *driverActuationTracker) unreachable(name string) bool {
+	h := t.tel.DriverHealth(name)
+	return h != nil && (h.Status == telemetry.StatusOffline || h.LastReadFailed())
 }
 
 func dispatchAction(payload []byte) string {
@@ -245,7 +263,9 @@ func dispatchAction(payload []byte) string {
 
 // update walks every driver that cannot actuate to its autonomous default,
 // once per transition, and returns the names to send it to. It also ends the
-// retry window for drivers excluded long enough to deserve another try.
+// retry window for drivers excluded long enough to deserve another try, and
+// at once for a driver excluded during an outage that reads again; that
+// driver gets its default again too.
 //
 // observeOnly drivers are never returned. A telemetry-only driver must
 // receive no command at all, and that includes the safe one: core has no
@@ -259,33 +279,54 @@ func (t *driverActuationTracker) update(now time.Time, observeOnly map[string]bo
 	defer t.mu.Unlock()
 	health := t.tel.AllHealth()
 
+	// returned holds drivers back from an outage. Their default went out
+	// while the device could not take it, so it is sent again this tick.
+	var returned []string
 	for name, st := range t.refusals {
-		if _, known := health[name]; !known {
+		h, known := health[name]
+		if !known {
 			// Driver removed or restarted: its health record went with
 			// it, and so did the fault. Start it over clean.
 			delete(t.refusals, name)
 			delete(t.defaulted, name)
 			continue
 		}
-		if st.excludedAt.IsZero() || now.Sub(st.excludedAt) < driverRefusalRetryInterval {
+		if st.excludedAt.IsZero() {
 			continue
 		}
-		// Retry window is up. Let one command through: a single fresh
-		// refusal puts the driver straight back out, an accepted one
-		// clears the record entirely.
+		if h.Status == telemetry.StatusOffline && !st.outage {
+			st.outage = true
+			t.refusals[name] = st
+		}
+		// Only a watchdog offline marks an outage after the exclusion. A
+		// device that answers and refuses keeps the full window even if
+		// one of its reads fails meanwhile.
+		back := st.outage && h.Status != telemetry.StatusOffline && !h.LastReadFailed()
+		if !back && now.Sub(st.excludedAt) < driverRefusalRetryInterval {
+			continue
+		}
+		// Retry window is up, or the device is back. Let one command
+		// through: a single fresh refusal puts the driver straight back
+		// out, an accepted one clears the record entirely.
 		if st.consecutive == nil {
 			st.consecutive = map[string]int{}
 		}
 		st.consecutive[st.excludedAction] = driverRefusalLimit - 1
 		st.excludedAt = time.Time{}
+		st.outage = false
 		t.refusals[name] = st
 		t.tel.SetDriverCommandFault(name, false, "")
 		// health holds copies, so apply the release to this tick's
 		// snapshot too — otherwise the latch below reads the driver as
 		// still faulted and defaults a driver we just let back in.
-		if h, ok := health[name]; ok {
-			h.SetCommandFault(false, "")
-			health[name] = h
+		h.SetCommandFault(false, "")
+		health[name] = h
+		if back {
+			delete(t.defaulted, name)
+			returned = append(returned, name)
+			slog.Info("excluded driver reads again after an outage — resending its default and letting one command through",
+				"driver", name)
+			continue
 		}
 		slog.Info("driver exclusion retry window elapsed — letting one command through",
 			"driver", name, "window", driverRefusalRetryInterval)
@@ -325,6 +366,14 @@ func (t *driverActuationTracker) update(now time.Time, observeOnly map[string]bo
 		if known {
 			slog.Info("driver can actuate again — back in dispatch", "driver", name)
 		}
+	}
+
+	// A driver that also flags its own fault was already added above.
+	for _, name := range returned {
+		if observeOnly[name] || slices.Contains(pending, name) {
+			continue
+		}
+		pending = append(pending, name)
 	}
 
 	sort.Strings(pending)
