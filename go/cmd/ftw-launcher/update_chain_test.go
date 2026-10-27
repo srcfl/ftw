@@ -36,10 +36,10 @@ import (
 // It builds Core, so it only runs on request:
 //
 //	make update-chain                      # previous = the last three betas
-//	FTW_UPDATE_CHAIN=1 go test -run TestUpdateChain ./cmd/ftw-launcher/
+//	FTW_UPDATE_CHAIN=1 FTW_UPDATE_CHAIN_FROM=tree go test -run TestUpdateChain ./cmd/ftw-launcher/
 //
 // FTW_UPDATE_CHAIN_FROM lists git refs to update from, separated by spaces.
-// Each one is built from `git archive`; empty builds the previous release
+// Each one is built from `git archive`; "tree" builds the previous release
 // from this tree as well. FTW_UPDATE_CHAIN_TAG names the candidate.
 func TestUpdateChain(t *testing.T) {
 	if os.Getenv("FTW_UPDATE_CHAIN") != "1" {
@@ -47,6 +47,10 @@ func TestUpdateChain(t *testing.T) {
 	}
 	if runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
 		t.Skipf("native releases exist for arm64 and amd64, not %s", runtime.GOARCH)
+	}
+	refs, err := chainRefs(os.Getenv("FTW_UPDATE_CHAIN_FROM"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	_, file, _, _ := runtime.Caller(0)
 	repo := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
@@ -57,18 +61,10 @@ func TestUpdateChain(t *testing.T) {
 	mirror := newReleaseMirror(t)
 	mirror.add(t, repo, repo, candidateTag, candidate, launcher)
 
-	refs := strings.Fields(os.Getenv("FTW_UPDATE_CHAIN_FROM"))
-	if len(refs) == 0 {
-		refs = []string{""}
-	}
 	for _, ref := range refs {
-		name := ref
-		if name == "" {
-			name = "tree"
-		}
-		t.Run(name, func(t *testing.T) {
+		t.Run(ref, func(t *testing.T) {
 			previousTag, tree := "v0.998.0-beta.1", repo
-			if ref != "" {
+			if ref != chainTreeRef {
 				if nativeupdate.ValidTag(ref) {
 					previousTag = ref
 				}
@@ -79,6 +75,40 @@ func TestUpdateChain(t *testing.T) {
 			mirror.add(t, repo, tree, previousTag, previous, launcher)
 			runUpdateChain(t, launcher, mirror, previousTag, candidateTag)
 		})
+	}
+}
+
+// chainTreeRef in FTW_UPDATE_CHAIN_FROM builds the previous release from this
+// tree instead of a git ref.
+const chainTreeRef = "tree"
+
+// chainRefs reads FTW_UPDATE_CHAIN_FROM. An empty list is an error, not a
+// quiet fall back to "tree": a clone without beta tags would otherwise pass
+// by updating the candidate from its own source.
+func chainRefs(from string) ([]string, error) {
+	refs := strings.Fields(from)
+	if len(refs) == 0 {
+		return nil, fmt.Errorf("no previous release to update from: FTW_UPDATE_CHAIN_FROM is empty " +
+			"(make update-chain found no beta tags before HEAD; shallow clone or fork?). " +
+			"Run git fetch --tags, name refs in FTW_UPDATE_CHAIN_FROM, " +
+			"or set FTW_UPDATE_CHAIN_FROM=" + chainTreeRef + " to build the previous release from this tree")
+	}
+	return refs, nil
+}
+
+func TestChainRefs(t *testing.T) {
+	for _, from := range []string{"", "  ", "\n"} {
+		if refs, err := chainRefs(from); err == nil || !strings.Contains(err.Error(), "FTW_UPDATE_CHAIN_FROM="+chainTreeRef) {
+			t.Fatalf("chainRefs(%q) = %v, %v; want an error naming the tree opt-in", from, refs, err)
+		}
+	}
+	for from, want := range map[string]string{
+		"tree":                              "tree",
+		"v0.157.1-beta.1 v0.157.0-beta.1\n": "v0.157.1-beta.1 v0.157.0-beta.1",
+	} {
+		if refs, err := chainRefs(from); err != nil || strings.Join(refs, " ") != want {
+			t.Fatalf("chainRefs(%q) = %v, %v; want %s", from, refs, err, want)
+		}
 	}
 }
 

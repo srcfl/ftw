@@ -124,9 +124,11 @@ e2e: drivers-present
 
 # The native update chain with real builds: install, update through a release
 # mirror, three kills in probation, then a binary rollback. Run it before
-# every stable. UPDATE_CHAIN_FROM lists the releases to update from; by
-# default the last three betas before HEAD.
-UPDATE_CHAIN_FROM ?= $(shell git tag --list 'v0.*-beta.*' --merged HEAD --no-contains HEAD --sort=-v:refname 2>/dev/null | head -3)
+# every stable. UPDATE_CHAIN_FROM (or FTW_UPDATE_CHAIN_FROM) lists the
+# releases to update from; by default the last three betas before HEAD. With
+# no beta tags the test fails; UPDATE_CHAIN_FROM=tree builds the previous
+# release from this tree instead.
+UPDATE_CHAIN_FROM ?= $(or $(FTW_UPDATE_CHAIN_FROM),$(shell git tag --list 'v0.*-beta.*' --merged HEAD --no-contains HEAD --sort=-v:refname 2>/dev/null | head -3))
 .PHONY: update-chain
 update-chain:
 	cd go && FTW_UPDATE_CHAIN=1 FTW_UPDATE_CHAIN_FROM="$(UPDATE_CHAIN_FROM)" \
