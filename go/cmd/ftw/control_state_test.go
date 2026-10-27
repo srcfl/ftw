@@ -184,10 +184,15 @@ func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {
 // self-consumption and store it, not keep a mode no door accepts any more.
 func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 	for stored, want := range map[string]control.Mode{
-		"priority":          control.ModeSelfConsumption,
-		"weighted":          control.ModeSelfConsumption,
-		"planner_arbitrage": control.ModePlannerArbitrage,
-		"peak_shaving":      control.ModePeakShaving,
+		"priority":                  control.ModeSelfConsumption,
+		"weighted":                  control.ModeSelfConsumption,
+		"idle":                      control.ModeIdle,
+		"self_consumption":          control.ModeSelfConsumption,
+		"peak_shaving":              control.ModePeakShaving,
+		"planner_self":              control.ModePlannerSelf,
+		"planner_cheap":             control.ModePlannerCheap,
+		"planner_passive_arbitrage": control.ModePlannerPassiveArbitrage,
+		"planner_arbitrage":         control.ModePlannerArbitrage,
 	} {
 		t.Run(stored, func(t *testing.T) {
 			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
@@ -201,7 +206,7 @@ func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 			ctrl := control.NewState(0, 50, "meter")
 			ctrl.Mode = control.ModeIdle
 
-			restoreStoredMode(ctrl, st)
+			restoreStoredMode(ctrl, st, nil)
 
 			if ctrl.Mode != want {
 				t.Fatalf("mode = %q, want %q", ctrl.Mode, want)
@@ -225,7 +230,7 @@ func TestRestoreStoredModeLeavesAnUnknownValueAlone(t *testing.T) {
 	}
 	ctrl := control.NewState(0, 50, "meter")
 
-	restoreStoredMode(ctrl, st)
+	restoreStoredMode(ctrl, st, nil)
 
 	if ctrl.Mode != control.ModeSelfConsumption {
 		t.Fatalf("mode = %q, want the default", ctrl.Mode)

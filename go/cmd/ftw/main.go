@@ -598,11 +598,9 @@ func main() {
 
 	// ---- Control state ----
 	ctrl := newControlStateFromConfig(cfg)
-	// Restore persisted mode + target if present. The planner variants
-	// have to be listed too — without them the strategy the user picked in
-	// the UI (planner_self / planner_cheap / planner_arbitrage) is silently
-	// dropped on restart and the dashboard appears to forget the selection.
-	restoreStoredMode(ctrl, st)
+	// Restore durable modes and targets. Forced Charge ends at restart;
+	// the planner makes a fresh plan instead of resuming that override.
+	restoreStoredMode(ctrl, st, cfg)
 	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
 	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
 	storedSafetyK, _ := st.LoadConfig(config.StateKeySafetyK)
