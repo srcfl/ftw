@@ -9,19 +9,26 @@ the result as a GitHub commit status on the exact commit it tested:
 | `siterig/short` | the head of each open pull request from this repository that touches a watched path (below) | the short set |
 | `siterig/random` | once a night on `master` | that night's random seeds |
 
-The watched paths cover the way from a reading to a command, and the rig
-itself:
+The watched paths are the control packages, every internal package they
+import, and the rig itself:
 
 - `go/cmd/ftw` (control tick wiring)
 - `go/internal/{control,loadpoint,ocpp,telemetry}`
-- `go/internal/drivers` (driver host, command deadlines)
+- `go/internal/{drivers,mdnsresolve}` (driver host, command deadlines)
 - `go/internal/{mpc,optimizercontract}` (plans)
+- `go/internal/{gridcost,forecasting,sunpos}` (plan inputs)
 - `go/internal/{config,configreload}` (limits)
-- `go/internal/{cars,sitepower}`
+- `go/internal/units` (charge steps)
+- `go/internal/{cars,sitepower,events,state}`
 - `drivers/` and `optimizer/native/bundle/` (the bundled drivers and solver)
 - `go/test/site`
 
+`go/cmd/ftw` imports every package, the API and UI among them; only its own
+files are watched. A change to the API or UI alone does not run the rig.
+
 `watchedPaths` in `runner.go` is the list; `TestTouchesWatched` pins it.
+`TestWatchedPathsCoverImports` fails when a control package starts to
+import an internal package that is not on the list.
 
 A commit that already has the status is not run again. To run one again,
 post a new `pending` status or remove the result and wait a day. No GitHub

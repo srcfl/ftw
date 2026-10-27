@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,10 @@ func TestTouchesWatched(t *testing.T) {
 		{"go/internal/configreload/apply.go", true},
 		{"go/internal/cars/cars.go", true},
 		{"go/internal/sitepower/sitepower.go", true},
+		{"go/internal/units/charge_steps.go", true},
+		{"go/internal/gridcost/gridcost.go", true},
+		{"go/internal/state/store.go", true},
+		{"go/internal/events/bus.go", true},
 		{"drivers/sungrow.lua", true},
 		{"drivers/BUNDLED_SOURCE.json", true},
 		{"optimizer/native/bundle/manifest.json", true},
@@ -116,6 +121,33 @@ func TestTouchesWatched(t *testing.T) {
 	}
 	if !touchesWatched([]string{"README.md", "go/internal/mpc/plan.go"}) {
 		t.Error("one watched file among others: not watched")
+	}
+}
+
+// TestWatchedPathsCoverImports fails when a control package starts to
+// import an internal package that is not watched, so a change there would
+// skip the rig.
+func TestWatchedPathsCoverImports(t *testing.T) {
+	const module = "github.com/srcfl/ftw/go/internal/"
+	args := []string{"list", "-deps"}
+	for _, p := range controlPackages {
+		if !touchesWatched([]string{"go/internal/" + p + "/x.go"}) {
+			t.Errorf("control package %s is not watched", p)
+		}
+		args = append(args, module+p)
+	}
+	out, err := exec.Command("go", args...).Output()
+	if err != nil {
+		t.Fatalf("go list: %v", err)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		rest, ok := strings.CutPrefix(dep, module)
+		if !ok {
+			continue
+		}
+		if !touchesWatched([]string{"go/internal/" + rest + "/x.go"}) {
+			t.Errorf("%s imports %s, which is not watched", strings.Join(controlPackages, ", "), rest)
+		}
 	}
 }
 

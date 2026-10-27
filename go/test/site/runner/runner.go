@@ -15,17 +15,28 @@ const (
 )
 
 // watchedPaths are the parts of the tree whose changes get the short set on
-// a pull request: everything on the path from a reading to a command, and
-// the rig itself.
+// a pull request: the control packages, every internal package they import,
+// and the rig itself. TestWatchedPathsCoverImports keeps the imports in.
 var watchedPaths = []string{
 	"go/cmd/ftw/", // control tick wiring
 	"go/internal/control/", "go/internal/loadpoint/", "go/internal/ocpp/", "go/internal/telemetry/",
-	"go/internal/drivers/",                               // driver host, command deadlines
+	"go/internal/drivers/", "go/internal/mdnsresolve/", // driver host, command deadlines
 	"go/internal/mpc/", "go/internal/optimizercontract/", // plans
+	"go/internal/gridcost/", "go/internal/forecasting/", "go/internal/sunpos/", // plan inputs
 	"go/internal/config/", "go/internal/configreload/", // limits
+	"go/internal/units/", // charge steps
 	"go/internal/cars/", "go/internal/sitepower/",
+	"go/internal/events/", "go/internal/state/",
 	"drivers/", "optimizer/native/bundle/", // bundled drivers and solver
 	"go/test/site/",
+}
+
+// controlPackages are the watched packages whose imports must be watched
+// too. go/cmd/ftw is left out: it imports every package, the API and UI
+// among them.
+var controlPackages = []string{
+	"control", "loadpoint", "ocpp", "telemetry", "drivers", "mpc",
+	"optimizercontract", "config", "configreload", "cars", "sitepower",
 }
 
 // job is one run of the rig on one commit.
