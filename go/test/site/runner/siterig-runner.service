@@ -1,6 +1,7 @@
 # systemd unit for siterig-runner (README.md). Replace USER and the paths,
 # then: sudo cp siterig-runner.service /etc/systemd/system/ &&
 # sudo systemctl enable --now siterig-runner
+# README.md also shows how to run it as a user service.
 [Unit]
 Description=FTW site test runner (siterig/short, siterig/full commit statuses)
 After=network-online.target
