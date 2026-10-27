@@ -234,6 +234,12 @@ func New(cfg Config, store Store) *Checker {
 			} else if parsed, err := ParseChannel(persisted); err == nil {
 				channel = parsed
 			}
+		} else if isBetaTag(cfg.CurrentVersion) || isStableTag(cfg.CurrentVersion) {
+			// Save the channel this release implies. A beta box that later
+			// installs the stable its beta became must stay on beta.
+			if err := store.SaveConfig(channelKey, string(channel)); err != nil {
+				slog.Warn("selfupdate: could not save the update channel", "channel", channel, "err", err)
+			}
 		}
 	}
 	c := &Checker{cfg: cfg, store: store}
