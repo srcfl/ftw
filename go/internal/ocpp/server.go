@@ -65,6 +65,10 @@ type Server struct {
 	done     chan struct{}
 	doneV201 chan struct{}
 	stopOnce sync.Once
+	// profileSlots admits one unanswered charging profile per charger id;
+	// see attemptLimit.
+	profileMu    sync.Mutex
+	profileSlots map[string]chan struct{}
 }
 
 // Start brings up the OCPP CS on the configured bind:port. It returns once
@@ -132,6 +136,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (_ *Server, e
 
 	s := &Server{cfg: cfg, cs: cs, handler: h, sockets: sockets, done: make(chan struct{})}
 	h.identityProbe = s.requestBootNotification
+	h.later = sockets.later
 
 	// OCPP 2.0.1 on its own port, when configured. Same handler and therefore
 	// the same charger state and telemetry — only the message encoding differs.
