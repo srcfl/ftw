@@ -1,5 +1,7 @@
 package loadpoint
 
+import "time"
+
 type manualSessionBinding struct {
 	deviceID, sessionID  string
 	generation           uint64
@@ -135,5 +137,59 @@ func (c *Controller) restoreManualHoldForSession(id string) {
 	} else if hadPending {
 		delete(c.holds, id)
 		c.manager.SetManualRestoreUnconfirmed(id, false)
+	}
+}
+
+// UnplugGrace is how long a charger must say the cable is out before the
+// session ends and Charge now is cleared. The cars runtime uses it too.
+const UnplugGrace = 30 * time.Second
+
+// holdInUnplugGrace times the unplug and reports whether a hold waits out
+// UnplugGrace. An unplugged reading says nothing about the next car, so the
+// caller skips the session check. A cable back within the grace keeps the
+// hold for the same car; another device or session clears it.
+func (c *Controller) holdInUnplugGrace(id string, connected bool, now time.Time) bool {
+	if connected {
+		if _, pending := c.unpluggedSince[id]; pending {
+			delete(c.unpluggedSince, id)
+			c.rebindAfterUnplug(id)
+		}
+		return false
+	}
+	if c.unpluggedSince == nil {
+		c.unpluggedSince = map[string]time.Time{}
+	}
+	since, seen := c.unpluggedSince[id]
+	if !seen {
+		since = now
+		c.unpluggedSince[id] = now
+	}
+	c.holdMu.Lock()
+	_, held := c.holds[id]
+	c.holdMu.Unlock()
+	return held && now.Sub(since) < UnplugGrace
+}
+
+// rebindAfterUnplug compares the first reading after a short unplug with
+// the hardware the hold was bound to before it.
+func (c *Controller) rebindAfterUnplug(id string) {
+	current := c.manager.manualSessionBinding(id)
+	c.holdMu.Lock()
+	previous, bound := c.manualBindings[id]
+	_, held := c.holds[id]
+	other := bound && ((previous.deviceID != "" && current.deviceID != "" && previous.deviceID != current.deviceID) ||
+		otherSession(previous, current))
+	if held && bound && !other && current.deviceID != "" {
+		// The unplug may have moved the session generation. The same
+		// hardware and session keep the hold; a later session proof is
+		// checked against the one before the unplug.
+		if current.sessionID == "" {
+			current.sessionID = previous.sessionID
+		}
+		c.manualBindings[id] = current
+	}
+	c.holdMu.Unlock()
+	if held && other {
+		c.ClearManualHold(id)
 	}
 }

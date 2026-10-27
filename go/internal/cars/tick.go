@@ -177,8 +177,8 @@ func (r *Runtime) resumeSessionLocked(st loadpoint.State, s *session) {
 const bootWindow = 30 * time.Second
 
 // UnplugGrace is how long a charger must say the cable is out before the
-// session ends.
-const UnplugGrace = 30 * time.Second
+// session ends. The loadpoint clears Charge now on the same grace.
+const UnplugGrace = loadpoint.UnplugGrace
 
 // PrePlugMaxAge is how much older than the plug-in a level may be and still
 // start the session. An older one may predate a drive.
