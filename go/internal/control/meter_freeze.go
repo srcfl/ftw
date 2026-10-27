@@ -18,10 +18,12 @@ import (
 // orders move, the devices' own readings follow, and the meter still repeats
 // the same total and phase values long after that, the meter is frozen and
 // counts as stale. An order a device does not follow (a full battery, a car
-// that does not draw, a charger that has not applied it yet) does not count.
+// that does not draw, a charger that has not applied it yet) does not count,
+// and moves that cancel each other out do not count, since the meter sees
+// only their sum.
 const (
-	// meterFreezeMoveW is how far FTW's devices must move, by order and by
-	// their own readings, from where they stood when the meter last
+	// meterFreezeMoveW is how far FTW's devices must move in sum, by order
+	// and by their own readings, from where they stood when the meter last
 	// changed. Site meters resolve the total to 1-10 W and phase currents
 	// to 0.01-1 A (1 A is 230 W). Batteries follow an order to within tens
 	// of watts, and inverters ignore steps below about 100-200 W. 500 W is
@@ -30,10 +32,12 @@ const (
 	meterFreezeMoveW = 500.0
 	// meterFreezeAfter is how long a live meter may take to show that move.
 	// Swedish HAN and DSMR 4 meters send a reading every 10 s, so a driver
-	// polling every second sees up to 10 identical samples by design. The
-	// device readings already show the move, so only the meter's own
-	// refresh and a poll remain; 15 s covers both.
-	meterFreezeAfter = 15 * time.Second
+	// polling every second sees up to 10 identical samples by design. A
+	// telegram lost to a CRC error leaves the last values in place for 20 s,
+	// and FTW makes its large moves right after a telegram that shows a load
+	// step. 30 s is three telegram periods, so one lost telegram cannot trip
+	// it. Seed 207537's freeze is still caught before its EV rise at 38 s.
+	meterFreezeAfter = 30 * time.Second
 	// meterFreezeSamples is how many identical samples after the move the
 	// verdict needs, so a slow poller is judged on several answers.
 	meterFreezeSamples = 3
@@ -62,7 +66,7 @@ type meterFreeze struct {
 // last changed. Call it every control tick under the control lock, before
 // the dispatch gate reads SiteMeterFrozen. A quiet site whose devices do not
 // move is never frozen, and any change in the meter's values clears it.
-func (s *State) ObserveSiteMeterFreeze(store *telemetry.Store) {
+func (s *State) ObserveSiteMeterFreeze(store *telemetry.Store, now time.Time) {
 	if s == nil || store == nil {
 		return
 	}
@@ -88,18 +92,24 @@ func (s *State) ObserveSiteMeterFreeze(store *telemetry.Store) {
 		return
 	}
 	f.at = r.UpdatedAt
-	now := s.now()
+	if f.frozen {
+		return // only a change in the meter's values clears it
+	}
+	moved := devicesMovedW(f.devices, devices)
+	if math.Abs(moved) <= meterFreezeMoveW {
+		// Not moved, or moved back: a live meter may repeat itself here.
+		f.movedAt, f.repeats = time.Time{}, 0
+		return
+	}
 	if f.movedAt.IsZero() {
-		if devicesMovedW(f.devices, devices) > meterFreezeMoveW {
-			f.movedAt = now
-		}
+		f.movedAt = now
 		return
 	}
 	f.repeats++
-	if !f.frozen && f.repeats >= meterFreezeSamples && now.Sub(f.movedAt) >= meterFreezeAfter {
+	if f.repeats >= meterFreezeSamples && now.Sub(f.movedAt) >= meterFreezeAfter {
 		f.frozen = true
 		slog.Warn("site meter repeats one reading while FTW's devices moved; treating it as stale",
-			"site_meter", f.driver, "devices_moved_w", math.Round(devicesMovedW(f.devices, devices)),
+			"site_meter", f.driver, "devices_moved_w", math.Round(moved),
 			"since", now.Sub(f.movedAt).Round(time.Second), "samples", f.repeats)
 	}
 }
@@ -115,43 +125,45 @@ type ownDeviceKey struct {
 	name string
 }
 
-// ownDevice is one battery or charger FTW orders: its last order and its
-// own latest reading.
+// ownDevice is one battery or charger: FTW's last order to it and its own
+// latest reading.
 type ownDevice struct {
 	orderW, readW float64
-	read          bool
 }
 
-// ownDevices are the batteries and chargers FTW has sent orders to.
+// ownDevices are every battery and charger that reports a reading. One FTW
+// has no order for counts as ordered to 0 W: a battery before FTW's first
+// order after a start, a charger with no offer (unplugged, or its offer not
+// yet known). So a meter frozen from the start, or a car plugged in during
+// a freeze, is judged like any other move.
 func (s *State) ownDevices(store *telemetry.Store) map[ownDeviceKey]ownDevice {
-	out := make(map[ownDeviceKey]ownDevice, len(s.PrevTargets)+len(s.evCommanded))
-	add := func(name string, t telemetry.DerType, orderW float64) {
-		d := ownDevice{orderW: orderW}
-		if r := store.Get(name, t); r != nil {
-			d.readW, d.read = r.RawW, true
-		}
-		out[ownDeviceKey{t, name}] = d
+	out := make(map[ownDeviceKey]ownDevice)
+	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
+		out[ownDeviceKey{telemetry.DerBattery, r.Driver}] = ownDevice{orderW: s.PrevTargets[r.Driver], readW: r.RawW}
 	}
-	for name, w := range s.PrevTargets {
-		add(name, telemetry.DerBattery, w)
-	}
-	for name, w := range s.evCommanded {
-		add(name, telemetry.DerEV, w)
+	for _, r := range store.ReadingsByType(telemetry.DerEV) {
+		out[ownDeviceKey{telemetry.DerEV, r.Driver}] = ownDevice{orderW: s.evCommanded[r.Driver], readW: r.RawW}
 	}
 	return out
 }
 
-// devicesMovedW is how far FTW moved its devices between a and b. Each
-// device counts the smaller of its order's move and its reading's move, so
-// only an order the device followed counts.
+// devicesMovedW is the net power FTW moved its devices by between a and b,
+// in the site's sign, which is what the meter should show. Each device
+// counts the smaller of its order's move and its reading's move, in the
+// reading's direction, so only an order the device followed counts. A
+// device that moved against its order, or was absent from a, counts 0.
 func devicesMovedW(a, b map[ownDeviceKey]ownDevice) float64 {
 	moved := 0.0
 	for k, now := range b {
 		then, ok := a[k]
-		if !ok || !then.read || !now.read {
+		if !ok {
 			continue
 		}
-		moved += min(math.Abs(now.orderW-then.orderW), math.Abs(now.readW-then.readW))
+		order, read := now.orderW-then.orderW, now.readW-then.readW
+		if order*read <= 0 {
+			continue
+		}
+		moved += math.Copysign(min(math.Abs(order), math.Abs(read)), read)
 	}
 	return moved
 }

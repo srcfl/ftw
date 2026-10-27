@@ -81,12 +81,24 @@ func siteDispatchNow(
 		timeout = 60 * time.Second
 	}
 	ctrlMu.Lock()
-	siteMeter := ctrl.SiteMeterDriver
-	fuseAmps := ctrl.SiteFuseAmps
-	phases := ctrl.SiteFusePhases
-	frozen := ctrl.SiteMeterFrozen()
-	ctrlMu.Unlock()
-	return evaluateSiteDispatchFreshnessAt(tel, siteMeter, fuseAmps, phases, timeout, now).frozenMeter(frozen)
+	defer ctrlMu.Unlock()
+	return siteDispatchGateLocked(tel, ctrl, timeout, now)
+}
+
+// siteDispatchGateLocked is the pre-dispatch verdict the tick and
+// siteDispatchNow share: the site meter's age and phase currents, and
+// whether it repeats one reading while FTW's devices move. Call it with
+// ctrlMu held.
+func siteDispatchGateLocked(
+	tel *telemetry.Store,
+	ctrl *control.State,
+	timeout time.Duration,
+	now time.Time,
+) siteDispatchDecision {
+	ctrl.ObserveSiteMeterFreeze(tel, now)
+	return evaluateSiteDispatchFreshnessAt(
+		tel, ctrl.SiteMeterDriver, ctrl.SiteFuseAmps, ctrl.SiteFusePhases, timeout, now,
+	).frozenMeter(ctrl.SiteMeterFrozen())
 }
 
 // sitePhaseCurrentsAt returns the configured phases in L1/L2/L3 order.

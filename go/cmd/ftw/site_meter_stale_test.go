@@ -113,6 +113,46 @@ func TestFrozenSiteMeterClosesDispatchGate(t *testing.T) {
 	}
 }
 
+// The gate the tick and operator setpoints share watches the meter itself:
+// one repeated sample (seed 207537) while FTW winds the battery 3 kW closes
+// it as site_meter_stale, which sends drivers to default and chargers to
+// 0 W, before the rig's EV rise at 38 s. A changed value reopens it.
+func TestSiteDispatchGateClosesOnFrozenMeter(t *testing.T) {
+	tel := telemetry.NewStore()
+	cfg := &config.Config{Site: config.Site{WatchdogTimeoutS: 120}}
+	ctrl := control.NewState(0, 50, "meter")
+	cfgMu, ctrlMu := &sync.RWMutex{}, &sync.Mutex{}
+	frozen := []byte(`{"w":2667,"l1_a":2.4,"l2_a":5.5,"l3_a":-0.2,"l1_v":230,"l2_v":230,"l3_v":230}`)
+	soc := 0.5
+	tel.Update("bat", telemetry.DerBattery, 0, &soc, nil)
+
+	start := time.Now()
+	staleAt := -1
+	for s := 0; s <= 40; s++ {
+		if s == 2 { // FTW's order, and the battery follows it
+			ctrl.PrevTargets["bat"] = -3000
+			tel.Update("bat", telemetry.DerBattery, -3000, &soc, nil)
+		}
+		tel.Update("meter", telemetry.DerMeter, 2667, nil, frozen)
+		got := siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, start.Add(time.Duration(s)*time.Second))
+		if !got.Allowed() {
+			if got.Reason != siteDispatchMeterStale {
+				t.Fatalf("frozen meter reason = %q, want %q", got.Reason, siteDispatchMeterStale)
+			}
+			staleAt = s
+			break
+		}
+	}
+	if staleAt < 0 || staleAt >= 38 {
+		t.Fatalf("meter repeated one sample for 40 s while the battery moved 3 kW: stale at %d s, want before 38 s", staleAt)
+	}
+
+	tel.Update("meter", telemetry.DerMeter, 2654, nil, nil)
+	if got := siteDispatchNow(tel, cfg, cfgMu, ctrl, ctrlMu, start.Add(41*time.Second)); !got.Allowed() {
+		t.Fatalf("meter moving again stayed blocked: %q", got.Reason)
+	}
+}
+
 func TestStaleSiteDefaultTrackerIncludesOwnerOnceAndRearmsOnRecovery(t *testing.T) {
 	var tracker staleSiteDefaultTracker
 	names := []string{"ferroamp", "sungrow", "easee"}
