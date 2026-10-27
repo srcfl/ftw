@@ -35,8 +35,7 @@ func init() {
 		scenario{name: "r5a-25", dir: "r5a-start-car-charging-25A", minutes: 5, run: func(c *runCtx) (map[string]any, error) { return r5a(c, 25) },
 			judge: judgeR5a},
 		scenario{name: "r5b-25", dir: "r5b-start-stale-plan-25A", minutes: 27, run: func(c *runCtx) (map[string]any, error) { return r5b(c, 25) },
-			judge: judgeR5b,
-			known: map[string]string{"no positive EV order in the first 30 s without a fresh plan": "D6: the deadline reserve orders full power whatever the slack (deadline_need.go:11-40, #1718)"}},
+			judge: judgeR5b},
 		scenario{name: "r5c-25", dir: "r5c-start-new-session-25A", minutes: 15, run: func(c *runCtx) (map[string]any, error) { return r5c(c, 25) },
 			judge: judgeR5c},
 	)
@@ -88,8 +87,9 @@ func r1(c *runCtx, fuse float64) (map[string]any, error) {
 
 // r2 holds the battery at a 3 kW discharge under a 20 A house, so the car's
 // room rests on it, then takes the inverter off the site for 180 s: each
-// phase rises 4.3 A at once. The car takes at most 10 A, so its draw before
-// Core's first profile keeps the site under 1.25 x the fuse.
+// phase rises 4-6 A at once. The car takes at most 10 A, so the site stays
+// under 1.2 x the fuse, where Core's 60 s heat budget, not an instant cut,
+// decides when the car stops (control/fuse_heat.go).
 func r2(c *runCtx, fuse, delayS float64) (map[string]any, error) {
 	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(20), socPct: 60,
 		chargers: []charger{{delayS: delayS, carMaxA: 10}}}, func(st *stack) error {
@@ -158,7 +158,8 @@ func r3(c *runCtx, fuse float64) (map[string]any, error) {
 // 20 s; two minutes later the second lasts 120 s, and the house steps to
 // 16 A per phase while Core is gone. Like s7, the run first waits until the
 // day's Home use is known, and long enough after it that one restart stays
-// under the 10 % unknown-time rule.
+// under the 10 % unknown-time rule. Core holds a battery for at most
+// 1800 s, so the hold starts 300 s before the first kill and outlasts both.
 func r4(c *runCtx, fuse float64) (map[string]any, error) {
 	var serial string
 	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(12), socPct: 60}, func(st *stack) error {
@@ -166,9 +167,6 @@ func r4(c *runCtx, fuse float64) (map[string]any, error) {
 			return err
 		}
 		serial = st.serial(0)
-		if err := st.post("/api/battery/manual_hold", map[string]any{"direction": "discharge", "power_w": 3000, "hold_s": 3600}, nil); err != nil {
-			return err
-		}
 		st.mark("charge_now")
 		if err := st.chargeNow("garage", 16, "3p", 0); err != nil {
 			return err
@@ -179,7 +177,12 @@ func r4(c *runCtx, fuse float64) (map[string]any, error) {
 		}) {
 			st.mark("today_known")
 		}
-		sleepS(900)
+		sleepS(600)
+		st.mark("battery_hold")
+		if err := st.post("/api/battery/manual_hold", map[string]any{"direction": "discharge", "power_w": 3000, "hold_s": 1800}, nil); err != nil {
+			return err
+		}
+		sleepS(300)
 		st.mark("kill1")
 		st.stopFTW(syscall.SIGKILL)
 		sleepS(20)
@@ -211,21 +214,25 @@ func r4(c *runCtx, fuse float64) (map[string]any, error) {
 
 // r5a starts Core while the car charges on its own: plugged when the house
 // comes up, it starts a local transaction and draws all it can, 16 A on
-// 14 A of house load.
+// 14 A of house load. The battery sits at the inverter's 5 % floor, so it
+// cannot carry the car: the site runs 30 A per phase until Core acts.
 func r5a(c *runCtx, fuse float64) (map[string]any, error) {
-	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(14), socPct: 50, startAfterS: 60,
+	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(14), socPct: 5, startAfterS: 60,
 		chargers: []charger{{plugged: true}}}, func(st *stack) error {
 		st.mark("ftw_up")
 		sleepS(180)
 		st.mark("end")
 		return nil
 	})
-	return map[string]any{"scenario": "r5a", "fuse": fuse, "house_a": 14}, err
+	return map[string]any{"scenario": "r5a", "fuse": fuse, "house_a": 14, "soc_pct": 5}, err
 }
 
 // r5b saves a goal with hours of slack, so no fresh plan need charge now,
 // then stops Core for 20 min and starts it on the plan it saved. For the
-// first minute the rig asks for the plan once a second (plan.jsonl).
+// first minute the rig asks for the plan once a second (plan.jsonl). On
+// master it does not reach D6: the saved plan is younger than MaxPlanAge
+// (30 min) and a fresh one lands within seconds, so the deadline reserve
+// never acts. D6's proof is its unit repro; this run guards the start.
 func r5b(c *runCtx, fuse float64) (map[string]any, error) {
 	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(3), socPct: 50}, func(st *stack) error {
 		if err := st.plug(0); err != nil {

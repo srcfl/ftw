@@ -556,10 +556,17 @@ func judgeS11(d *runData) (metrics, []criterion) {
 
 // ---- R1-R5, the stable plan's P0 scenarios ----
 
+// fuseInstantFactor is Core's: above this multiple of the fuse it cuts the
+// car at once, with no heat budget (control/fuse_heat.go). mcbHourFactor is
+// the current a miniature circuit breaker carries for an hour without a
+// trip, the lower of the two ratings Core's heat model keeps under.
+const fuseInstantFactor, mcbHourFactor = 1.2, 1.13
+
 // judgeR1: while the meter is silent Core raises nothing and its battery
 // order only moves toward 0; within the 60 s watchdog and two ticks it
 // stands the charger down and hands the battery back; it never shows the
-// meter as live; Charge now returns after the meter does.
+// meter as live; Charge now returns after the meter does and runs until the
+// next event.
 func judgeR1(d *runData) (metrics, []criterion) {
 	tCN, tS, tB, t1 := d.marks["charge_now"], d.marks["silent"], d.marks["back"], d.marks["end"]
 	tOff, tOn := d.marks["offline"], d.marks["online"]
@@ -584,7 +591,7 @@ func judgeR1(d *runData) (metrics, []criterion) {
 	charging := func(r *sample) bool { return carW(r, 0) >= 0.95*minW }
 	standdown := d.firstOffer(tS, func(p profile) bool { return p.Limit == 0 })
 	handBack := d.firstT(tS, func(r *sample) bool { return !batForced(r) })
-	back1, back2 := d.firstT(tB, charging), d.firstT(tOn, charging)
+	back1, back2 := d.holdsFrom(tB, tOff, charging), d.holdsFrom(tOn, t1, charging)
 	rises := d.offerRises(tS, tB)
 	m := metrics{"battery_order_at_silence_w": math.Round(o0), "battery_wound_samples": wound,
 		"offer_rises_while_silent": rises, "standdown_s": roundp(standdown, 1), "battery_hand_back_s": roundp(handBack, 1),
@@ -596,20 +603,27 @@ func judgeR1(d *runData) (metrics, []criterion) {
 		crit("a 0 W charger order within 64 s of the silence", le(standdown, 64)),
 		crit("the battery back on its own within 64 s of the silence", le(handBack, 64)),
 		crit("the meter never shows live while it is silent or offline", live == 0),
-		crit("Charge now back at its minimum within 95 s of each return", le(back1, 95) && le(back2, 95)),
+		crit("Charge now back at its minimum within 95 s of each return, and held", le(back1, 95) && le(back2, 95)),
 		crit("fuse holds", !anyBlown(d.window(tCN, t1))),
 	}
 }
 
 // judgeR2: when the battery that carried the car's room drops out, the fuse
-// holds, the overage lasts no longer than the charger takes to answer, no
-// offer counts the battery's last -3 kW as room, and Home use says it is
-// estimated.
+// holds, no offer counts the battery's last -3 kW as room, and Home use says
+// it is estimated (the stable plan's R2). Under 1.2 x the fuse Core spends a
+// 60 s heat budget before it cuts the car (control/fuse_heat.go), so the
+// overage is judged by that contract: above 1.2 x it lasts no longer than
+// the charger takes to answer, and the 60 s heat stays under the 1.13 x a
+// miniature circuit breaker carries for an hour. How long the site stays
+// over fuse - 1 A and when Core sends the cut are recorded.
 func judgeR2(d *runData) (metrics, []criterion) {
 	fuse, delay := d.metaF("fuse"), d.metaF("charger_delay_s")
 	tCN, tOff, tOn, t1 := d.marks["charge_now"], d.marks["offline"], d.marks["online"], d.marks["end"]
 	pre := meanOf(d.window(tOff-30, tOff), batSigned)
-	over, _ := d.runsOver(tOff, tOn+60, fuse-1)
+	allowed := delay + 7
+	instant, _ := d.runsOver(tOff, tOn+60, fuseInstantFactor*fuse)
+	over1, _ := d.runsOver(tOff, tOn+60, fuse-1)
+	heatOver, heatPeak := d.i2Over(tOff-60, tOn+60, mcbHourFactor*fuse)
 	during := summarize(d.window(tOff+15, tOn))
 	marked := 0
 	for k, v := range during.LoadQuality {
@@ -617,15 +631,18 @@ func judgeR2(d *runData) (metrics, []criterion) {
 			marked += v
 		}
 	}
-	allowed := delay + 7
 	rises := d.offerRises(tOff, tOn)
-	m := metrics{"battery_w_before": math.Round(pre), "over_fuse_minus1_longest_s": over, "allowed_over_s": allowed,
+	cut := d.firstOffer(tOff, func(p profile) bool { return p.Limit == 0 })
+	m := metrics{"battery_w_before": math.Round(pre), "allowed_over_s": allowed,
+		"over_fuse_x1_2_longest_s": instant, "over_fuse_minus1_longest_s": over1,
+		"heat_peak_a": heatPeak, "heat_over_x1_13_s": heatOver, "cut_sent_s": roundp(cut, 1),
 		"offer_rises_while_offline": rises, "during": during,
 		"max_i_after_drop": round(maxOf(d.window(tOff, tOn+60), maxAbsI), 2)}
 	return m, []criterion{
 		crit("the battery discharged 2 kW or more before the drop", pre <= -2000), // the setup
 		crit("fuse holds", !anyBlown(d.window(tCN, t1))),
-		crit("over fuse - 1 A no longer than the charger's delay + 7 s after the drop", over <= allowed),
+		crit("over 1.2 x the fuse no longer than the charger's delay + 7 s after the drop", instant <= allowed),
+		crit("the 60 s heat stays under 1.13 x the fuse", heatOver == 0),
 		crit("no EV offer rises while the battery is offline", rises == 0),
 		crit("Home use shown as estimated throughout the outage",
 			during.Samples > 0 && during.LoadWShown == during.Samples && marked == during.Samples),
@@ -672,15 +689,17 @@ func judgeR3(d *runData) (metrics, []criterion) {
 	}
 }
 
-// judgeR4: after each hard kill Charge now is back within a minute, the
-// session energy counts again and state.db opens clean; the day's Home use
+// judgeR4: after each hard kill Charge now is back within a minute and runs
+// until the next kill or the end (a car still drawing from before the kill
+// and stopped later is not back), the session energy counts again and
+// state.db opens clean; the day's Home use
 // survives the first kill. The second outage's 120 s would break the 10 %
 // unknown-time rule on a run this short, so its day total is recorded only.
 func judgeR4(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
 	tCN, k1, u1, k2, u2, t1 := d.marks["charge_now"], d.marks["kill1"], d.marks["up1"], d.marks["kill2"], d.marks["up2"], d.marks["end"]
 	charging := func(r *sample) bool { return carW(r, 0) >= 0.95*minW }
-	back1, back2 := d.firstT(u1, charging), d.firstT(u2, charging)
+	back1, back2 := d.holdsFrom(u1, k2, charging), d.holdsFrom(u2, t1, charging)
 	before, after := todayLoadWh(d.window(k1-30, k1)), todayLoadWh(d.window(u1, k2))
 	nullAfter := 0
 	for _, r := range d.window(u1, k2) {
@@ -708,7 +727,7 @@ func judgeR4(d *runData) (metrics, []criterion) {
 		"session_wh_90s_after_ups": []float64{session(u1, u1+90), session(u2, u2+90)},
 		"recovery_log_lines":       len(recovery), "over_fuse_minus1_longest_after_up2_s": overAfter}
 	return m, []criterion{
-		crit("Charge now back at its minimum within 60 s of each restart", le(back1, 60) && le(back2, 60)),
+		crit("Charge now back at its minimum within 60 s of each restart, and held", le(back1, 60) && le(back2, 60)),
 		crit("the day's Home use kept within 1 % across the first kill", kept),
 		crit("session energy counts again after each restart", session(u1, u1+90) > 0 && session(u2, u2+90) > 0),
 		crit("state.db opens with no recovery error", len(recovery) == 0),
@@ -721,24 +740,28 @@ func (d *runData) homeUseBack(t0 float64) *float64 {
 	return d.firstT(t0, func(r *sample) bool { return status(r).LoadW != nil })
 }
 
-// judgeR5a: Core starting beside a car that already draws its maximum
-// brings the site under the limit within 30 s and keeps it there.
+// judgeR5a: Core starting beside a car that already draws its maximum, with
+// the site over the fuse, brings the site under the limit within 30 s and
+// keeps it there. Core holds the worst phase at its own line, between
+// fuse - 1 A and fuse - 0.5 A (see s3, r3), so the limit is fuse - 0.5 A.
 func judgeR5a(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
 	tS, tUp, t1 := d.marks["ftw_start"], d.marks["ftw_up"], d.marks["end"]
 	pre := meanOf(d.window(tS-20, tS), func(r *sample) float64 { return carW(r, 0) })
-	fit := d.firstT(tUp, func(r *sample) bool { return maxAbsI(r) <= fuse-1 })
+	preI := maxOf(d.window(tS-20, tS), maxAbsI)
+	fit := d.firstT(tUp, func(r *sample) bool { return maxAbsI(r) <= fuse-0.5 })
 	overAfter := 0.0
 	if fit != nil {
-		overAfter, _ = d.runsOver(tUp+*fit, t1, fuse-1)
+		overAfter, _ = d.runsOver(tUp+*fit, t1, fuse-0.5)
 	}
 	shown := d.homeUseBack(tUp)
 	m := metrics{"car_w_before_start": math.Round(pre), "under_limit_s": roundp(fit, 1), "over_after_that_longest_s": overAfter,
-		"home_use_shown_s": roundp(shown, 1), "max_i_before_start": round(maxOf(d.window(tS-20, tS), maxAbsI), 2)}
+		"home_use_shown_s": roundp(shown, 1), "max_i_before_start": round(preI, 2)}
 	return m, []criterion{
-		crit("the car charged before Core started", pre >= minW), // the setup
-		crit("under fuse - 1 A within 30 s of Core answering", le(fit, 30)),
-		crit("over fuse - 1 A at most 3 s once under it", fit != nil && overAfter <= 3),
+		crit("the car charged before Core started", pre >= minW),            // the setup
+		crit("the site was over the fuse before Core started", preI > fuse), // the setup
+		crit("under fuse - 0.5 A within 30 s of Core answering", le(fit, 30)),
+		crit("over fuse - 0.5 A at most 3 s once under it", fit != nil && overAfter <= 3),
 		crit("Home use shown within 30 s of Core answering", le(shown, 30)),
 		crit("fuse holds", !anyBlown(d.window(tS, t1))),
 	}

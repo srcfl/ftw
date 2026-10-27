@@ -345,6 +345,24 @@ func (d *runData) firstT(t0 float64, pred func(*sample) bool) *float64 {
 	return nil
 }
 
+// holdsFrom is the seconds from t0 to the start of the unbroken run of
+// samples satisfying pred that lasts until t1, or nil when the last sample
+// before t1 does not. A stop that begins after t0 resets it, so a car still
+// running at t0 and stopped later does not count as back.
+func (d *runData) holdsFrom(t0, t1 float64, pred func(*sample) bool) *float64 {
+	var from *float64
+	for _, r := range d.window(t0, t1) {
+		switch {
+		case !pred(r):
+			from = nil
+		case from == nil:
+			v := r.T - t0
+			from = &v
+		}
+	}
+	return from
+}
+
 // runsOver is the longest contiguous stretch and the total seconds with the
 // worst phase above limit.
 func (d *runData) runsOver(t0, t1, limit float64) (longest, total float64) {

@@ -200,7 +200,7 @@ func TestJudgeR4SessionEnergy(t *testing.T) {
 	if v := run(0); v["session energy counts again after each restart"] {
 		t.Fatal("session energy stuck at 0 after the restarts passes")
 	}
-	if v := run(150); !v["session energy counts again after each restart"] || !v["Charge now back at its minimum within 60 s of each restart"] {
+	if v := run(150); !v["session energy counts again after each restart"] || !v["Charge now back at its minimum within 60 s of each restart, and held"] {
 		t.Fatalf("session energy counting after the restarts: %v", v)
 	}
 }
@@ -224,5 +224,116 @@ func TestJudgeR5bAllowsChargingOnlyOnAFreshPlan(t *testing.T) {
 	}
 	if v := run([]frame{profileAt(112, 0), profileAt(120, 16)}); !v["no positive EV order in the first 30 s without a fresh plan"] {
 		t.Fatal("0 A until the fresh plan, then 16 A, fails")
+	}
+}
+
+func TestHoldsFromResetsOnALaterStop(t *testing.T) {
+	d := synth(100, nil, nil, func(i int, r *sample) {
+		if i < 20 || i >= 50 {
+			r.CarW[0] = 11040
+		}
+	})
+	charging := func(r *sample) bool { return carW(r, 0) >= 0.95*minW }
+	if p := d.holdsFrom(10, 100, charging); p == nil || *p != 40 {
+		t.Fatalf("charging at 10 s, stopped 20-49 s, back from 50 s: %v, want 40", p)
+	}
+	if p := d.holdsFrom(10, 40, charging); p != nil {
+		t.Fatalf("stopped at the window's end: %v, want nil", *p)
+	}
+}
+
+// The car still draws at the restart, then Core stops it 20 s later for
+// 50 s. A judge that takes the first charging sample calls it back at once.
+func TestJudgeR4SeesAStopAfterTheRestart(t *testing.T) {
+	marks := map[string]float64{"charge_now": 0, "kill1": 100, "up1": 130, "kill2": 250, "up2": 400, "end": 600}
+	wh := 150.0
+	d := synth(600, marks, map[string]any{"fuse": 25.0, "charger": "CP1"}, func(i int, r *sample) {
+		r.Status = &ftwStatus{Drivers: map[string]ftwDriver{"CP1": {Status: "ok", EVSessionWh: &wh}}}
+		if i < 150 || i >= 200 {
+			r.CarW[0] = 11040
+		}
+	})
+	m, cs := judgeR4(d)
+	if verdictsOf(cs)["Charge now back at its minimum within 60 s of each restart, and held"] {
+		t.Fatalf("a stop from 20 to 70 s after the restart passes: %v", m["charge_now_back_s"])
+	}
+}
+
+// r2Run is R2's record: the battery offline from 100 to 280 s, the site at
+// 24.015 A (Core's own line) before the drop and after the return, and
+// overA per phase for the first overS s of the drop, then 20 A.
+func r2Run(overA float64, overS int) *runData {
+	marks := map[string]float64{"charge_now": 0, "offline": 100, "online": 280, "end": 400}
+	d := synth(400, marks, map[string]any{"fuse": 25.0, "charger_delay_s": 0.0}, func(i int, r *sample) {
+		r.BatW = -3000
+		q, w := "measured", 5000.0
+		if i >= 100 && i < 280 {
+			q = "estimated"
+		}
+		r.Status = &ftwStatus{LoadQuality: &q, LoadW: &w}
+		switch {
+		case i >= 100 && i < 100+overS:
+			r.PhaseA = [3]float64{overA, overA, overA}
+		case i >= 100 && i < 280:
+			r.PhaseA = [3]float64{20, 20, 20}
+		default:
+			r.PhaseA = [3]float64{24.015, 24.015, 24.015}
+		}
+	})
+	d.frames = []frame{profileAt(50, 8), profileAt(float64(100+overS-2), 0), profileAt(285, 8)}
+	return d
+}
+
+func TestJudgeR2Overage(t *testing.T) {
+	const instant = "over 1.2 x the fuse no longer than the charger's delay + 7 s after the drop"
+	const heat = "the 60 s heat stays under 1.13 x the fuse"
+	// A short overage, then Core's own line after the return (the review's
+	// edge case), and the heat budget spent at 29.95 A for 18 s, as on
+	// master.
+	for _, c := range []struct {
+		a float64
+		s int
+	}{{28, 4}, {29.95, 18}} {
+		_, cs := judgeR2(r2Run(c.a, c.s))
+		if v := verdictsOf(cs); !v[instant] || !v[heat] {
+			t.Errorf("%.2f A for %d s, then Core's line: %v", c.a, c.s, v)
+		}
+	}
+	_, cs := judgeR2(r2Run(31, 12))
+	if verdictsOf(cs)[instant] {
+		t.Error("31 A, over 1.2 x 25 A, for 12 s passes")
+	}
+	_, cs = judgeR2(r2Run(29.95, 180))
+	if verdictsOf(cs)[heat] {
+		t.Error("a car never cut at 29.95 A for the whole outage passes")
+	}
+}
+
+// r5aRun is R5a's record: Core starts at 60 s and answers at 70 s; the site
+// runs preA per phase with the car at 16 A until 80 s, then Core's own line
+// with the car at 10 A.
+func r5aRun(preA float64) *runData {
+	marks := map[string]float64{"ftw_start": 60, "ftw_up": 70, "end": 250}
+	return synth(250, marks, map[string]any{"fuse": 25.0}, func(i int, r *sample) {
+		w := 3000.0
+		r.Status = &ftwStatus{LoadW: &w}
+		if i < 80 {
+			r.PhaseA, r.CarW[0] = [3]float64{preA, preA, preA}, 11040
+			return
+		}
+		r.PhaseA, r.CarW[0] = [3]float64{24.015, 24.015, 24.015}, 6900
+	})
+}
+
+func TestJudgeR5a(t *testing.T) {
+	_, cs := judgeR5a(r5aRun(30))
+	for name, ok := range verdictsOf(cs) {
+		if !ok {
+			t.Errorf("30 A cut to Core's own 24.015 A line 10 s after it answers: %q fails", name)
+		}
+	}
+	_, cs = judgeR5a(r5aRun(22.75))
+	if verdictsOf(cs)["the site was over the fuse before Core started"] {
+		t.Error("a site at 22.75 A before Core starts passes the setup: the run proves nothing")
 	}
 }
