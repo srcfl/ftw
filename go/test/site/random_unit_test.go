@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -474,10 +477,120 @@ func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
 			forcedTo: 1201, dispatchFrom: 110, want: true},
 		{name: "forced 23 s after Core starts", stop: 100, up: 101, cmd: 187, setW: 868,
 			forcedTo: 1201, dispatchFrom: 125, want: false},
+		// The inverter is back at 102 while Core, stopped at 100 during the
+		// outage, stays down until 150. Core's first read is at 151 and the
+		// default lands 7 s later. While Core is down nothing reads the
+		// inverter, so the count cannot start before 151.
+		{name: "inverter back while Core is down for 48 s", outage: "offline", outFrom: 90, outFor: 12, readAt: 151,
+			stop: 100, up: 150, cmd: 187, setW: 3000, forcedTo: 158, dispatchFrom: 170, want: true},
 	} {
 		if got := judged(c.run())[forced]; got != c.want {
 			t.Errorf("%s: %q = %v, want %v", c.name, forced, got, c.want)
 		}
+	}
+}
+
+// R8 with two inverter outages: the count after the second starts at its
+// own return and Core's first read after it, not the first outage's.
+func TestInvariantsForcedBatteryCountsFromTheLatestReturn(t *testing.T) {
+	const forced = "no forced battery mode FTW does not dispatch"
+	// Outage 1 100-120, Core reads at 125 and dispatches 130-300. Outage 2
+	// 300-340, Core reads at 380 and the default lands at 388.
+	run := func(forcedTo float64) *runData {
+		d := randomRun(601, 16, 5, func(i int, r *sample) {
+			tt := float64(i)
+			if tt < forcedTo {
+				r.Bat.EMSMode, r.Bat.EMSCmd, r.Bat.EMSSetW = 2, 187, 3000
+			} else {
+				r.Bat.EMSCmd = 204
+			}
+			if (tt >= 100 && tt < 120) || (tt >= 300 && tt < 340) {
+				off := false
+				r.Bat.Running = &off
+			}
+			errs := 0
+			if (tt >= 100 && tt < 125) || (tt >= 300 && tt < 380) {
+				errs = 3
+			}
+			r.Status = &ftwStatus{Drivers: map[string]ftwDriver{inverterDriver: {Status: "ok", ConsecutiveErrors: &errs}}}
+			if tt < 100 || (tt >= 130 && tt < 300) {
+				r.Status.Dispatch = []ftwDispatch{{Driver: inverterDriver, TargetW: -3000}}
+			}
+		})
+		d.events = []houseEventLine{
+			{T: 100, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 20}},
+			{T: 300, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 40}},
+		}
+		return d
+	}
+	if !judged(run(388))[forced] {
+		t.Errorf("default 8 s after Core reads again after the second outage: got fail, want pass")
+	}
+	if judged(run(1201))[forced] {
+		t.Errorf("forced to the end after the second outage: got pass, want fail")
+	}
+}
+
+// R8 forgives the seconds Core's reconnect backoff and default retry hold
+// its first write after a return (reconnectBackoffMaxS, defaultRetryMaxS).
+// The triage line is 10 s from the return, so the judge records what it
+// forgave beyond that line instead of hiding it.
+func TestInvariantsRecordForcedSecondsInsideCoreTimers(t *testing.T) {
+	// 207539's shape: back at 182, Core reads at 238 and dispatches at 245,
+	// inside the backoff alone. Forced 183-244 with no dispatch; past
+	// 182+10 that is 193-244.
+	c := forcedCase{outage: "offline", outFrom: 100, outFor: 82, readAt: 238,
+		cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 245}
+	m, _ := judgeInvariants(c.run())
+	if in, past := m["battery_forced_in_core_timers_s"], m["battery_forced_past_allowance_s"]; in != 52.0 || past != 0.0 {
+		t.Errorf("in Core's timers %v s, past the allowance %v s; want 52 and 0", in, past)
+	}
+	// Forced to 299: from 193 to the allowance's end inside the timers,
+	// the rest past them.
+	c.dispatchFrom = 300
+	m, _ = judgeInvariants(c.run())
+	end := 238 + defaultRetryMaxS + forcedBudgetS
+	if in, past := m["battery_forced_in_core_timers_s"], m["battery_forced_past_allowance_s"]; in != end-192 || past != 299-end {
+		t.Errorf("in Core's timers %v s, past the allowance %v s; want %v and %v", in, past, end-192, 299-end)
+	}
+}
+
+// R8's allowances are Core's own timers. Read them from Core's source so
+// they cannot drift. Once the registry retries a failed default on the
+// first good poll after an outage (#1915, C11), defaultRetryMaxS must be
+// 0: from then on the 30 s the judge gives today is no longer Core's.
+func TestForcedAllowancesMatchCore(t *testing.T) {
+	src := func(p string) string {
+		b, err := os.ReadFile(filepath.Join("..", "..", "internal", p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	seconds := func(code, name string) float64 {
+		m := regexp.MustCompile(name + `\s*=\s*(\d+)\s*\*\s*time\.Second`).FindStringSubmatch(code)
+		if m == nil {
+			t.Fatalf("no %s = N * time.Second in Core's source", name)
+		}
+		n, _ := strconv.Atoi(m[1])
+		return float64(n)
+	}
+	if got := seconds(src("modbus/client.go"), "reconnectBackoffMax"); got != reconnectBackoffMaxS {
+		t.Errorf("reconnectBackoffMaxS = %v, Core's reconnectBackoffMax is %v s", reconnectBackoffMaxS, got)
+	}
+	registry := src("drivers/registry.go")
+	// Today the registry sends the default on a failure and on its retry
+	// timer: two calls. #1915 adds a third, on the first good poll.
+	calls := strings.Count(registry, "attemptDefault()")
+	switch {
+	case calls == 2 && defaultRetryMaxS != seconds(registry, "defaultRetryMax"):
+		t.Errorf("defaultRetryMaxS = %v, Core's defaultRetryMax is %v s", defaultRetryMaxS, seconds(registry, "defaultRetryMax"))
+	case calls > 2 && defaultRetryMaxS != 0:
+		t.Errorf("Core's registry calls attemptDefault() in %d places, not 2. If it now retries "+
+			"the default on the first good poll after an outage (#1915, C11), set defaultRetryMaxS "+
+			"to 0 and turn the R8 cases that lean on it to fail. Otherwise update this check.", calls)
+	case calls < 2:
+		t.Errorf("Core's registry calls attemptDefault() in %d places; update this check", calls)
 	}
 }
 

@@ -225,15 +225,15 @@ func within(ws []eventWindow, t, afterS float64) bool {
 	return false
 }
 
-// inverterBackFrom gives, for a time t, when the R8 count may start after
-// the latest return before t: the inverter's from an outage (inverterOut)
-// or Core's from a restart (down). Core has the inverter back at its first
+// inverterBackFrom gives, for a time t, the latest return before t (at):
+// the inverter's from an outage (inverterOut) or Core's from a restart
+// (down), and when the R8 count may start after it (from). Core has the inverter back at its first
 // good read of it (no consecutive errors), which the Modbus reconnect
 // backoff may hold back up to reconnectBackoffMaxS. After an outage, a
 // default that failed while the inverter was away waits on the registry's
 // retry timer, up to defaultRetryMaxS more, until #1915 (C11) sends it on
 // the first good poll. A Core that starts fresh has no such wait.
-func (d *runData) inverterBackFrom(inverterOut, down []eventWindow) func(t float64) float64 {
+func (d *runData) inverterBackFrom(inverterOut, down []eventWindow) func(t float64) (at, from float64) {
 	type back struct {
 		at, from float64
 	}
@@ -257,14 +257,14 @@ func (d *runData) inverterBackFrom(inverterOut, down []eventWindow) func(t float
 	for _, w := range down {
 		add(w.to, false)
 	}
-	return func(t float64) float64 {
-		at, from := math.Inf(-1), math.Inf(-1)
+	return func(t float64) (at, from float64) {
+		at, from = math.Inf(-1), math.Inf(-1)
 		for _, b := range backs {
 			if b.at <= t && b.at >= at {
 				at, from = b.at, b.from
 			}
 		}
-		return from
+		return at, from
 	}
 }
 
@@ -750,9 +750,11 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	// restart the count starts once Core has the inverter back (backFrom).
 	// While Core is stopped with SIGTERM its driver cleanup writes the
 	// default, so a running inverter gets the same 10 s from the stop. One
-	// that comes back while Core is down has its outage's allowance.
+	// that comes back while Core is down has its outage's allowance. The
+	// triage's line is 10 s from the return itself; the seconds past that
+	// line that Core's timers excuse are recorded, not hidden.
 	backFrom := d.inverterBackFrom(inverterOut, down)
-	forcedS, pastS, run8, from8 := 0.0, 0.0, 0.0, 0.0
+	forcedS, pastS, timersS, run8, from8 := 0.0, 0.0, 0.0, 0.0, 0.0
 	for i, r := range run {
 		w, ok := dispatchW(r)
 		stray := math.Abs(batOrder(r)) > 50 && !within(inverterOut, r.T, 0)
@@ -768,13 +770,18 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		}
 		run8 += r.T - run[i-1].T
 		forcedS = math.Max(forcedS, run8)
-		if r.T > math.Max(from8, backFrom(r.T))+forcedBudgetS {
+		at, from := backFrom(r.T)
+		switch {
+		case r.T > math.Max(from8, from)+forcedBudgetS:
 			pastS += r.T - run[i-1].T
 			note("forced battery", r.T)
+		case r.T > math.Max(from8, at)+forcedBudgetS:
+			timersS += r.T - run[i-1].T
 		}
 	}
 	m["battery_forced_without_dispatch_s"] = round(forcedS, 1)
 	m["battery_forced_past_allowance_s"] = round(pastS, 1)
+	m["battery_forced_in_core_timers_s"] = round(timersS, 1)
 	// The first second an invariant broke, from the start, per invariant:
 	// a kept seed is cut a minute after the one it failed on.
 	firsts := map[string]float64{}
