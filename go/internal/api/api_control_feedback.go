@@ -35,27 +35,31 @@ type ControlFeedback struct {
 	SiteEvidence     *ControlComparison `json:"site_evidence,omitempty"`
 	ToleranceW       *float64           `json:"tolerance_w"`
 	// Internal steps of the verdict; the API exposes their result above.
-	State            string   `json:"-"`
-	VerificationTier *int     `json:"-"`
-	VerificationLost bool     `json:"-"`
-	Escalated        bool     `json:"-"` // not following long enough to be an alarm
-	Response         string   `json:"-"`
-	SiteBeforeW      *float64 `json:"-"`
-	SiteAfterW       *float64 `json:"-"`
-	SiteBeforeAtMs   int64    `json:"-"`
-	SiteAfterAtMs    int64    `json:"-"`
-	SiteDeltaW       *float64 `json:"-"`
-	DeviceDeltaW     *float64 `json:"-"`
-	VerifiedAtMs     int64    `json:"-"`
-	RequestedW       *float64 `json:"requested_w"`
-	SentW            *float64 `json:"sent_w"`
-	ReadbackW        *float64 `json:"readback_w"`
-	ActualW          *float64 `json:"actual_w"`
-	BatterySoC       *float64 `json:"battery_soc,omitempty"`
-	ChargeResumeSoC  *float64 `json:"charge_resume_soc,omitempty"`
-	RequestedA       *float64 `json:"requested_a"`
-	OfferedA         *float64 `json:"offered_a"`
-	DeviceLimitA     *float64 `json:"device_limit_a"`
+	State              string   `json:"-"`
+	VerificationTier   *int     `json:"-"`
+	VerificationLost   bool     `json:"-"`
+	Escalated          bool     `json:"-"` // not following long enough to be an alarm
+	Response           string   `json:"-"`
+	SiteBeforeW        *float64 `json:"-"`
+	SiteAfterW         *float64 `json:"-"`
+	SiteBeforeAtMs     int64    `json:"-"`
+	SiteAfterAtMs      int64    `json:"-"`
+	SiteDeltaW         *float64 `json:"-"`
+	DeviceDeltaW       *float64 `json:"-"`
+	VerifiedAtMs       int64    `json:"-"`
+	RequestedW         *float64 `json:"requested_w"`
+	SentW              *float64 `json:"sent_w"`
+	ReadbackW          *float64 `json:"readback_w"`
+	ActualW            *float64 `json:"actual_w"`
+	BatterySoC         *float64 `json:"battery_soc,omitempty"`
+	ChargeResumeSoC    *float64 `json:"charge_resume_soc,omitempty"`
+	RequestedA         *float64 `json:"requested_a"`
+	OfferedA           *float64 `json:"offered_a"`
+	DeviceLimitA       *float64 `json:"device_limit_a"`
+	PilotA             *float64 `json:"pilot_a"`
+	PilotObservedAt    string   `json:"pilot_observed_at,omitempty"`
+	PilotConfirmedAtMs int64    `json:"pilot_confirmed_at_ms,omitempty"`
+	DynamicLimitA      *float64 `json:"dynamic_limit_a"`
 	// LimitA is the current a charger lets the car take now, when its driver
 	// reports it below the order; LimitedBy names the cause when the driver
 	// shows it, and Make the charger for the sentence.
@@ -73,15 +77,19 @@ type ControlFeedback struct {
 }
 
 type feedbackReading struct {
-	SetpointW       *float64 `json:"setpoint_w"`
-	MaxA            *float64 `json:"max_a"`
-	DeviceLimitA    *float64 `json:"device_limit_a"`
-	DeviceLimitAgeS *float64 `json:"device_limit_age_s"`
-	Reason          string   `json:"reason_no_current_label"`
-	LimitA          *float64 `json:"current_limit_a"`
-	LimitedBy       string   `json:"current_limited_by"`
-	Connected       *bool    `json:"connected"`
-	Online          *bool    `json:"is_online"`
+	SetpointW          *float64 `json:"setpoint_w"`
+	MaxA               *float64 `json:"max_a"`
+	PilotA             *float64 `json:"pilot_a"`
+	PilotObservedAt    string   `json:"pilot_observed_at"`
+	PilotConfirmedAtMs *int64   `json:"pilot_confirmed_at_ms"`
+	DynamicLimitA      *float64 `json:"dynamic_limit_a"`
+	DeviceLimitA       *float64 `json:"device_limit_a"`
+	DeviceLimitAgeS    *float64 `json:"device_limit_age_s"`
+	Reason             string   `json:"reason_no_current_label"`
+	LimitA             *float64 `json:"current_limit_a"`
+	LimitedBy          string   `json:"current_limited_by"`
+	Connected          *bool    `json:"connected"`
+	Online             *bool    `json:"is_online"`
 }
 
 func watts(v float64) *float64 {
@@ -156,6 +164,16 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			var d feedbackReading
 			_ = json.Unmarshal(rd.Data, &d)
 			f.ReadbackW, f.OfferedA, f.DeviceReason = d.SetpointW, d.MaxA, d.Reason
+			f.DynamicLimitA = d.DynamicLimitA
+			pilotFresh := pilotReadingFresh(d, now)
+			if pilotFresh {
+				f.PilotA, f.PilotObservedAt, f.PilotConfirmedAtMs = d.PilotA, d.PilotObservedAt, *d.PilotConfirmedAtMs
+			}
+			// New pilot-aware drivers must provide usable evidence. Older
+			// drivers keep their existing normalized-limit contract.
+			if d.PilotConfirmedAtMs != nil && (!pilotFresh || *d.PilotA == 0) {
+				d.LimitA, d.LimitedBy = nil, ""
+			}
 			if d.LimitA != nil {
 				f.LimitA, f.LimitedBy = d.LimitA, d.LimitedBy
 				if s.deps.Registry != nil {
@@ -373,7 +391,7 @@ func setControlStatus(f *ControlFeedback) {
 		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
 		status = "following"
 	case "battery_full", "battery_nearly_full", "battery_nearly_empty", "core_limit",
-		"fuse_limit", "fuse_cooldown", "charger_limit", "load_balancer_limit", "one_phase":
+		"fuse_limit", "fuse_cooldown", "charger_limit", "load_balancer_limit", "charger_pilot_limit", "one_phase":
 		status = "limited"
 	case "import_limit":
 		status = "limited"
@@ -442,6 +460,8 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	set := func(state, reason, severity string) { f.State, f.Reason, f.Severity = state, reason, severity }
 	if !fresh {
 		f.ActualW, f.ReadbackW, f.OfferedA, f.DeviceLimitA, f.LimitA, f.LimitedBy, f.Make = nil, nil, nil, nil, nil, "", ""
+		f.PilotA, f.DynamicLimitA = nil, nil
+		f.PilotObservedAt, f.PilotConfirmedAtMs = "", 0
 		set("unknown", "telemetry_stale", "warning")
 		return
 	}
@@ -476,7 +496,7 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("warning", "no_power_response", "warning")
 		return
 	}
-	if f.RequestedA != nil && f.DeviceLimitA != nil && *f.RequestedA > *f.DeviceLimitA+0.5 {
+	if f.PilotA == nil && f.RequestedA != nil && f.DeviceLimitA != nil && *f.RequestedA > *f.DeviceLimitA+0.5 {
 		set("limited", "device_limit", "warning")
 		return
 	}
@@ -514,7 +534,7 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	// 2 A but at most 15 % of the limit. A car taking far less, nothing, or
 	// more keeps its verdict. A lower current whose cause the driver does
 	// not show still asks for a look.
-	if f.Kind == "ev" && f.SentW != nil && f.RequestedW != nil && f.RequestedA != nil && f.LimitA != nil && f.ActualW != nil &&
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" && f.SentW != nil && f.RequestedW != nil && f.RequestedA != nil && f.LimitA != nil && f.ActualW != nil &&
 		*f.SentW > 100 && *f.RequestedA > 0 && *f.LimitA > 0 && *f.LimitA+0.5 < *f.RequestedA && settled {
 		perA := *f.RequestedW / *f.RequestedA
 		limitW := *f.LimitA * perA
@@ -522,6 +542,12 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		if *f.ActualW >= limitW-math.Max(tolerance, math.Min(2*perA, 0.15*limitW)) && *f.ActualW <= limitW+tolerance && *f.ActualW < *f.SentW {
 			if f.LimitedBy == "load_balancer" {
 				set("limited", "load_balancer_limit", "info")
+			} else if f.PilotA != nil {
+				if f.DeviceLimitA != nil && math.Abs(*f.LimitA-*f.DeviceLimitA) <= 0.5 {
+					set("limited", "device_limit", "info")
+				} else {
+					set("limited", "charger_pilot_limit", "info")
+				}
 			} else {
 				set("limited", "offered_current_lower", "warning")
 			}
@@ -660,4 +686,13 @@ func (s *Server) loadpointsWithFeedback(states []loadpoint.State) []loadpointFee
 		out = append(out, view)
 	}
 	return out
+}
+
+func pilotReadingFresh(d feedbackReading, now time.Time) bool {
+	if d.PilotA == nil || d.PilotConfirmedAtMs == nil || math.IsNaN(*d.PilotA) || math.IsInf(*d.PilotA, 0) || *d.PilotA < 0 {
+		return false
+	}
+	confirmed := time.UnixMilli(*d.PilotConfirmedAtMs)
+	source, err := time.Parse(time.RFC3339Nano, d.PilotObservedAt)
+	return err == nil && *d.PilotConfirmedAtMs > 0 && !confirmed.After(now) && now.Sub(confirmed) <= 90*time.Second && !source.After(confirmed)
 }

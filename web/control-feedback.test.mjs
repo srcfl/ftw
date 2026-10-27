@@ -69,7 +69,7 @@ test('expected limits stay calm and explain themselves', () => {
   assert.equal(balanced.tone, 'neutral');
   assert.equal(controlStatus(row(lb)).text, 'The charger’s load balancing limits it to 13 A. FTW asked for 15 A; the car takes 8.8 kW.');
   assert.deepEqual(controlNumbers(row(lb)).filter(([label]) => /current|offer|limit|allows/i.test(label)), [
-    ['Requested current', '15 A'], ['Charger offer', '15 A'], ['Charger limit', '16 A'], ['Load balancing allows', '13 A']]);
+    ['Requested current', '15 A'], ['Reported current setting', '15 A'], ['Charger limit', '16 A'], ['Load balancing allows', '13 A']]);
   // A lower current with no cause shown says what the charger does, no more.
   const unexplained = {...lb, reason: 'offered_current_lower', severity: 'warning', limited_by: undefined};
   assert.equal(controlStatus(row(unexplained)).text, 'The charger lets the car take 13 A, below the 15 A FTW asked for.');
@@ -180,4 +180,17 @@ test('limited positive EV offer does not explain prolonged zero delivery', () =>
  assert.equal(hour.title,'Limited by the hourly import limit');
  assert.match(hour.text,/this hour’s grid import/);
  assert.doesNotMatch(hour.text,/fuse/);
+});
+
+test('a confirmed lower pilot is an explained restriction with separate current values', () => {
+  const r = row({kind:'ev',status:'limited',reason:'charger_pilot_limit',severity:'info',
+    requested_a:15,offered_a:15,dynamic_limit_a:15,pilot_a:13,actual_w:8850,sent_w:10350});
+  const words=controlStatus(r);
+  assert.match(words.title,/Limited by the charger/);
+  assert.match(words.text,/signals 13 A/);
+  assert.match(words.text,/internal limiting cause is unknown/);
+  const numbers=controlNumbers(r);
+  assert.ok(numbers.some(([label,value])=>label==='Actual pilot current'&&value==='13 A'));
+  assert.ok(numbers.some(([label,value])=>label==='Dynamic current setting'&&value==='15 A'));
+  assert.ok(!numbers.some(([label])=>label==='Charger offer'));
 });

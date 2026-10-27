@@ -66,7 +66,7 @@ const REASON_TITLES = {
   core_limit: 'Limited by FTW', fuse_limit: 'Limited by the main fuse', fuse_cooldown: 'Waiting after a site power limit',
   import_limit: 'Limited by the hourly import limit',
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
-  load_balancer_limit: 'Limited by the charger’s load balancing',
+  load_balancer_limit: 'Limited by the charger’s load balancing', charger_pilot_limit: 'Limited by the charger',
   one_phase: 'Charging on one phase',
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
   command_failed: 'Commands failing', command_unconfirmed: 'Command not confirmed', default_failed: 'Cannot hand back control',
@@ -103,6 +103,7 @@ function sentence(row) {
     case 'offered_current_lower': return num(row.limit_a) && !(num(row.offered_a) && num(row.requested_a) && row.offered_a + 0.5 < row.requested_a)
       ? `The charger lets the car take ${amps(row.limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`
       : `The charger offers ${amps(row.offered_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
+    case 'charger_pilot_limit': return `The charger signals ${amps(row.pilot_a)} to the car. FTW asked for ${amps(row.requested_a)}; measured charging is ${controlPower(actual)}. The internal limiting cause is unknown.`;
     case 'load_balancer_limit': return `${row.make ? `${row.make} limits the charger to ${amps(row.limit_a)} (its load balancing)`
       : `The charger’s load balancing limits it to ${amps(row.limit_a)}`}. FTW asked for ${amps(row.requested_a)}; the car takes ${controlPower(actual)}.`;
     case 'one_phase': return `The car charges on ${row.charging_phase || 'one phase'} only${num(row.charging_phase_max_w) ? `, at most ${controlPower(row.charging_phase_max_w)}` : ''}. FTW plans with what it takes.`;
@@ -142,6 +143,7 @@ function nextStep(row) {
     case 'site_meter_stale': case 'site_phase_currents_stale': return 'Check the grid meter’s connection.';
     case 'device_limit': return 'Raise the limit in the charger’s app if you want faster charging.';
     case 'offered_current_lower': return 'Check the charger’s load balancing and limits.';
+    case 'charger_pilot_limit': return 'Check Available energy in the charger’s app for the active limit.';
     case 'load_balancer_limit': return 'If this happens often, compare the charger’s load balancing settings with FTW’s main fuse setting.';
     case 'observe_only': return 'Turn on control in the device settings if you want FTW to steer it.';
     default: return '';
@@ -231,7 +233,9 @@ export function controlNumbers(row, live = true) {
   if (num(row.battery_soc)) values.push(['Battery charge', percent(row.battery_soc)]);
   if (num(row.tolerance_w)) values.push(['Response tolerance', `±${controlPower(row.tolerance_w)}`]);
   if (num(row.requested_a)) values.push(['Requested current', amps(row.requested_a)]);
-  if (num(row.offered_a)) values.push(['Charger offer', amps(row.offered_a)]);
+  if (num(row.pilot_a)) values.push(['Actual pilot current', amps(row.pilot_a)]);
+  if (num(row.dynamic_limit_a)) values.push(['Dynamic current setting', amps(row.dynamic_limit_a)]);
+  else if (num(row.offered_a)) values.push(['Reported current setting', amps(row.offered_a)]);
   if (num(row.device_limit_a)) values.push(['Charger limit', amps(row.device_limit_a)]);
   if (num(row.limit_a)) values.push([row.limited_by === 'load_balancer' ? 'Load balancing allows' : 'Charger lets the car take', amps(row.limit_a)]);
   const e = row.site_evidence;
