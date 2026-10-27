@@ -27,6 +27,23 @@ func (s *Service) withDeadlineReserve(now time.Time, d SlotDirective, accepted b
 	if !accepted {
 		d = SlotDirective{SlotStart: now, SlotEnd: now.Add(time.Minute), EVOnly: true}
 	}
+	// Each saved goal's hours at its own peak. Cars may share one fuse
+	// allowance, which the controller gives earliest deadline first, so a
+	// goal's latest start counts every goal due at or before it (#1718).
+	type goalHours struct {
+		due   time.Time
+		hours float64
+	}
+	var goals []goalHours
+	for _, st := range states {
+		if st.ID == "" || st.ManualActive || st.SurplusOnly {
+			continue
+		}
+		minW, maxW, steps := limits(st)
+		if need, peak, ok := loadpoint.DeadlineNeed(st, minW, maxW, steps); ok {
+			goals = append(goals, goalHours{due: st.TargetTime, hours: need / peak})
+		}
+	}
 	for _, st := range states {
 		if _, hasBudget := d.LoadpointEnergyWh[st.ID]; hasBudget && !st.ManualActive {
 			continue // An accepted zero budget is a price decision, too.
@@ -48,7 +65,8 @@ func (s *Service) withDeadlineReserve(now time.Time, d SlotDirective, accepted b
 		}
 		if !st.ManualActive {
 			// A goal with slack waits for its latest start: the time the
-			// remaining need takes at full power, plus an hourly price slot.
+			// remaining need of every goal due by its deadline takes at
+			// full power, one car after another, plus an hourly price slot.
 			// Before that the car holds 0 W, as at startup, so a missing
 			// plan does not start a car the next plan would pause (#1718).
 			// A running reserve keeps a second slot, so one SoC step does
@@ -57,7 +75,13 @@ func (s *Service) withDeadlineReserve(now time.Time, d SlotDirective, accepted b
 			if st.CommandedKnown && st.CommandedW > 0 {
 				margin *= 2
 			}
-			latestStart := st.TargetTime.Add(-time.Duration(need / peak * float64(time.Hour))).Add(-margin)
+			var hours float64
+			for _, g := range goals {
+				if !g.due.After(st.TargetTime) {
+					hours += g.hours
+				}
+			}
+			latestStart := st.TargetTime.Add(-time.Duration(hours * float64(time.Hour))).Add(-margin)
 			if now.Before(latestStart) {
 				continue
 			}
