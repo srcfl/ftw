@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -11,7 +12,7 @@ import (
 
 // The battery fuse paths read each phase with its direction and count the
 // batteries' own move. 16 A fuse, 230 V, 3 phases; the working limit is
-// 15 A.
+// the fuse less safety_margin_a (fuseLineA).
 
 func phaseDirectionStore(t *testing.T, gridW, batW float64, data map[string]any) *telemetry.Store {
 	t.Helper()
@@ -101,8 +102,9 @@ func TestFuseGuardChargeBalancesExportingAndImportingPhases(t *testing.T) {
 }
 
 // The relief counts the battery's own share of the phase it reads. A
-// battery that follows its order keeps L1 at the working limit on every
-// tick instead of returning to 0 W when the overage stops showing.
+// battery that follows its order keeps L1 at the working limit, 15.5 A on
+// a 0.5 A margin, on every tick instead of returning to 0 W when the
+// overage stops showing.
 func TestPerPhaseFuseReliefHoldsWhileOverloadPersists(t *testing.T) {
 	st := phaseDirectionState(0.5)
 	st.Mode = ModeIdle
@@ -138,9 +140,10 @@ func TestPerPhaseFuseReliefHoldsWhileOverloadPersists(t *testing.T) {
 		batW = w
 		now = now.Add(5 * time.Second)
 	}
+	line := st.fuseLineA()
 	for i := 1; i < len(l1); i++ {
-		if l1[i] > 15 {
-			t.Fatalf("tick %d: L1 %.1f A over the 15 A working limit while the overload persists; targets %v, L1 %v", i, l1[i], targets, l1)
+		if l1[i] > line || l1[i] < line-0.05 {
+			t.Fatalf("tick %d: L1 %.1f A, want the %.1f A working limit while the overload persists; targets %v, L1 %v", i, l1[i], line, targets, l1)
 		}
 	}
 }
@@ -176,14 +179,15 @@ func chargeLoop(t *testing.T, ticks int, dispatch func(*telemetry.Store, *State)
 }
 
 // The fuse hold caps the request before the guard reads the phases, so the
-// hold's cut is not taken off again. The charge settles at 1380 W with L1
-// at 15 A instead of switching between 1380 W and 0 W.
+// hold's cut is not taken off again. On a 0 A margin the charge holds
+// 2070 W with L1 at the 16 A rating on every repeat, instead of switching
+// between 2070 W and 0 W.
 func TestFuseGuardHeldChargeHoldsSteady(t *testing.T) {
 	assertSteady := func(name string, targets, l1 []float64) {
 		t.Helper()
-		for i := 1; i < len(targets); i++ {
-			if math.Abs(targets[i]-targets[i-1]) > 50 || l1[i] > 15.01 {
-				t.Fatalf("%s: tick %d charge %v -> %v W; targets %v, L1 %v", name, i, targets[i-1], targets[i], targets, l1)
+		for i := range targets {
+			if math.Abs(targets[i]-2070) > 1 || (i > 0 && math.Abs(l1[i]-16) > 0.01) {
+				t.Fatalf("%s: tick %d charge %v W, L1 %v A; want 2070 W and 16 A; targets %v, L1 %v", name, i, targets[i], l1[i], targets, l1)
 			}
 		}
 	}
@@ -217,5 +221,71 @@ func TestPhaseReliefSkipsOfflineMeter(t *testing.T) {
 	store.DriverHealthMut("meter").SetOffline()
 	if imp, exp := phaseFuseReliefW(livePhaseSample(store, "meter", meter), phaseDirectionState(0), 0); imp != 0 || exp != 0 {
 		t.Fatalf("offline meter: relief %.0f/%.0f W, want none", imp, exp)
+	}
+}
+
+// The battery's working limit on each phase is L = In − safety_margin_a,
+// in both directions, with no floor under the margin. A phase at L needs no
+// relief, 0.1 A past it needs exactly 0.1 A, and a target that lands a
+// phase exactly at L passes the guard unchanged.
+func TestBatteryFuseLineProperty(t *testing.T) {
+	const v = 230.0
+	for _, in := range []float64{16, 20, 25, 35} {
+		for _, phases := range []int{1, 3} {
+			for _, margin := range []float64{0, 0.5, 1.2} {
+				for _, dir := range []float64{1, -1} { // 1 import, -1 export
+					name := fmt.Sprintf("%gA/%dp/margin%g/dir%+g", in, phases, margin, dir)
+					st := NewState(0, 50, "meter")
+					st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases, st.SiteFuseSafetyA = in, v, phases, margin
+					st.DriverLimits = map[string]PowerLimits{"bat": {MaxChargeW: 50000, MaxDischargeW: 50000}}
+					line := in - margin
+					if got := st.fuseLineA(); got != line {
+						t.Fatalf("%s: fuseLineA %.2f A, want %.2f A", name, got, line)
+					}
+					perA := v * float64(phases)
+					fuseMaxW := in * perA
+					// store reads the worst phase at worstA and 2 A on the
+					// others, all flowing in dir, with phase power.
+					store := func(worstA float64) *telemetry.Store {
+						amps := []float64{worstA, 2, 2}[:phases]
+						data := map[string]any{}
+						var totalW float64
+						for i, a := range amps {
+							w := dir * a * v
+							data[fmt.Sprintf("l%d_a", i+1)] = a
+							data[fmt.Sprintf("l%d_w", i+1)] = w
+							totalW += w
+						}
+						return phaseDirectionStore(t, totalW, 0, data)
+					}
+					relief := func(worstA float64) (float64, float64) {
+						s := store(worstA)
+						meter := s.Get("meter", telemetry.DerMeter)
+						return phaseFuseReliefW(livePhaseSample(s, "meter", meter), st, 0)
+					}
+
+					if imp, exp := relief(line); imp != 0 || exp != 0 {
+						t.Errorf("%s: phase at the %.1f A line: relief %.1f/%.1f W, want none", name, line, imp, exp)
+					}
+
+					imp, exp := relief(line + 0.1)
+					want := 0.1 * perA
+					gotW, otherW := imp, exp
+					if dir < 0 {
+						gotW, otherW = exp, imp
+					}
+					if math.Abs(gotW-want) > 1 || otherW != 0 {
+						t.Errorf("%s: 0.1 A past the line: relief %.1f/%.1f W, want %.1f W on the flowing side", name, imp, exp, want)
+					}
+
+					// The battery moves the phase from line − 2 A to the line.
+					targetW := dir * 2 * perA
+					out := applyFuseGuard([]DispatchTarget{{Driver: "bat", TargetW: targetW}}, store(line-2), st, fuseMaxW)
+					if out[0].Clamped || math.Abs(out[0].TargetW-targetW) > 1e-6 || !st.FuseHoldUntil.IsZero() {
+						t.Errorf("%s: target %.0f W that lands at the %.1f A line: guard gave %+v, hold until %v", name, targetW, line, out[0], st.FuseHoldUntil)
+					}
+				}
+			}
+		}
 	}
 }

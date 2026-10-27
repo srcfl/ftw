@@ -58,8 +58,12 @@ func TestIssue1868BatteryChargeYieldsBeforeTheCar(t *testing.T) {
 				if target.TargetW > 3931.001 {
 					t.Fatalf("%s left the car's relief in the battery: %+v", mode, target)
 				}
-				// The import guard trims its own buffer as well (dispatch.go).
-				if mode == ModeCharge && target.TargetW < 3600 {
+				// Charge mode asks for a raise. No phase reaches the 15.5 A
+				// line, so only the hour's limit binds: the guard cuts the
+				// 69 W overage and half the margin (172.5 W) to 3758.5 W,
+				// and the car's headroom then takes the same 69 W again
+				// (3689.5 W).
+				if mode == ModeCharge && target.TargetW < 3689 {
 					t.Fatalf("small overage needlessly stopped battery charging: %+v", target)
 				}
 			}

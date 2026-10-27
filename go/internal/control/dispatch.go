@@ -3895,8 +3895,8 @@ func phaseMoveW(targets []DispatchTarget, batteries map[string]*telemetry.DerRea
 }
 
 // phaseFuseReliefW is the aggregate battery move that brings every phase
-// inside the working limit: the fuse less the car's 1 A margin, or less
-// safety_margin_a when that is larger. importW asks for less charge or more
+// inside the working limit, fuseLineA: the fuse less safety_margin_a, the
+// same line the car uses. importW asks for less charge or more
 // discharge, exportW for the reverse. moveW is the batteries' change from
 // the power this reading already holds (phaseMoveW); like the relief, it
 // spreads evenly over the site's phases.
@@ -3919,7 +3919,7 @@ func phaseFuseReliefW(p phaseSample, state *State, moveW float64) (importW, expo
 		return 0, 0
 	}
 	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases) // aggregate W per phase ampere
-	limitA := math.Max(0, state.SiteFuseAmps-math.Max(evPhaseMarginA, state.SiteFuseSafetyA))
+	limitA := state.fuseLineA()
 	exports := p.totalW < 0
 	for _, a := range amps {
 		exports = exports && a >= 0
