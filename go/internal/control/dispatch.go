@@ -370,7 +370,8 @@ type State struct {
 	EVCurtailHeadroomW float64
 	// BatteryCoversEV lets the battery discharge into the EV. Off, EV
 	// load is taken out of the meter before the PI so the battery does
-	// not feed the car.
+	// not feed the car. Either way the car comes before battery charge:
+	// the battery charges only from the surplus the car leaves.
 	BatteryCoversEV bool
 
 	// BatteryBoostEVChargingW is the live charging draw belonging to
@@ -1489,11 +1490,15 @@ func ComputeDispatch(
 	// discharge keeps its old opt-in guard so Self does not fill the home
 	// battery from a car by default.
 	gridW := rawGridW
-	if state.Mode != ModeSelfConsumption && !state.BatteryCoversEV {
-		gridW -= state.uncoveredEVChargingW()
-	}
 	if !state.BatteryCoversEV {
 		gridW -= vehicleFlow.V2XDischargeW
+	}
+	// The car comes before battery charge: charge comes only from what the
+	// meter shows left after the car. The car leaves the signal below so
+	// the battery never discharges for it.
+	chargeGridW := gridW
+	if state.Mode != ModeSelfConsumption && !state.BatteryCoversEV {
+		gridW -= state.uncoveredEVChargingW()
 	}
 
 	// ---- Gather online batteries ----
@@ -1566,6 +1571,14 @@ func ComputeDispatch(
 	var currentTotal float64
 	for _, b := range onlineBats {
 		currentTotal += b.currentW
+	}
+	// Without the car the meter may show export the car is using. Where
+	// the battery would charge, it sees the meter with the car instead:
+	// it charges only from the surplus after the car, and never turns to
+	// discharge for it.
+	noCarGridW := gridW
+	if gridW < chargeGridW {
+		gridW = math.Max(gridW, math.Min(chargeGridW, currentTotal))
 	}
 	surplus := newSurplusAccounting(rawGridW, gridW, currentTotal, state)
 
@@ -1749,14 +1762,18 @@ func ComputeDispatch(
 
 		// Leave PV for a surplus-only EV. A planned import of at least
 		// 100 W keeps its charge. Discharge is left alone.
-		if state.EVSurplusOnlyReserveW > 0 && targetTotalW > 0 {
-			deliberateGridCharge := currentDirective.HasPlannedGridW && currentDirective.PlannedGridW >= 100
-			if !deliberateGridCharge {
-				ceiling := surplus.chargeCeilingAfterEVReserveW()
-				if targetTotalW > ceiling {
-					targetTotalW = ceiling
-				}
+		deliberateGridCharge := currentDirective.HasPlannedGridW && currentDirective.PlannedGridW >= 100
+		if state.EVSurplusOnlyReserveW > 0 && targetTotalW > 0 && !deliberateGridCharge {
+			ceiling := surplus.chargeCeilingAfterEVReserveW()
+			if targetTotalW > ceiling {
+				targetTotalW = ceiling
 			}
+		}
+		// The car before battery charge: a charge the plan makes from PV
+		// takes only the surplus the car leaves.
+		pvCharge := currentDirective.HasPlannedGridW && !deliberateGridCharge
+		if targetTotalW > 0 && pvCharge && gridW > noCarGridW {
+			targetTotalW = math.Min(targetTotalW, currentTotal-gridW)
 		}
 
 		// Charge slots only. If PV drops, the energy budget would hold the
@@ -1765,7 +1782,8 @@ func ComputeDispatch(
 		// Below 100 W is meter noise.
 		if currentDirective.HasPlannedGridW && targetTotalW > 0 {
 			const planGridDeadband = 100.0
-			projectedGridW := gridW + (targetTotalW - currentTotal)
+			// The plan's grid leaves out the car the battery does not cover.
+			projectedGridW := noCarGridW + (targetTotalW - currentTotal)
 			gridErr := projectedGridW - currentDirective.PlannedGridW
 			if gridErr > planGridDeadband {
 				adjusted := targetTotalW - gridErr
@@ -1989,6 +2007,11 @@ func ComputeDispatch(
 				"mode", string(effectiveMode))
 		}
 		totalCorrection = allowed - currentTotal
+		// The house alone has surplus, so a discharge would feed the
+		// car. Stop it now rather than over several PI steps.
+		if gridW > noCarGridW && currentTotal+totalCorrection < 0 {
+			totalCorrection = -currentTotal
+		}
 
 		// Surplus-only EV reserve cap: stack on top of the meter clamp.
 		// Mirror the energy-path cap so the battery target on the
