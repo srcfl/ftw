@@ -284,3 +284,10 @@ fleet_ping:
 # price:
 #   demand_price_per_kw: 7000
 #   demand_top_n: 3
+
+# Tests and development only: read elprisetjustnu-format prices from another
+# server, with no Nord Pool fallback. The site rig serves pinned prices this
+# way (go/test/site/prices_test.go). Leave it unset on a real site.
+# price:
+#   provider: elprisetjustnu
+#   base_url: http://127.0.0.1:8099

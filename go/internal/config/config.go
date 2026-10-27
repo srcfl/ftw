@@ -1132,6 +1132,10 @@ type Price struct {
 	GridTariffOreKwh float64 `yaml:"grid_tariff_ore_kwh,omitempty" json:"grid_tariff_ore_kwh,omitempty"`
 	VATPercent       float64 `yaml:"vat_percent,omitempty" json:"vat_percent,omitempty"`
 	APIKey           string  `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	// BaseURL is for tests and development only. It points the
+	// elprisetjustnu provider at another server with the same API and
+	// turns off the Nord Pool fallback, so the site rig can pin prices.
+	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 
 	// Currency is the ISO code for pricing (default "SEK"). ENTSOE
 	// returns EUR/MWh; we convert using ECB daily FX rates.
