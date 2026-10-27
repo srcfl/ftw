@@ -86,6 +86,11 @@ func (c *Controller) restoreManualHoldForSession(id string) {
 			// A changed generation therefore means a counter reset or a new
 			// session, even when the earlier session ID was still unknown.
 			changed = changed || previous.generation != current.generation
+			if !changed && current.sessionID == "" {
+				// Keep the last proven session while the charger names none,
+				// as after an unplug, so a later proof is checked against it.
+				current.sessionID = previous.sessionID
+			}
 		}
 	}
 	// A Start before the first hardware reading binds here. Once bound, a
@@ -181,8 +186,9 @@ func (c *Controller) rebindAfterUnplug(id string) {
 		otherSession(previous, current))
 	if held && bound && !other && current.deviceID != "" {
 		// The unplug may have moved the session generation. The same
-		// hardware and session keep the hold; a later session proof is
-		// checked against the one before the unplug.
+		// hardware and session keep the hold. restoreManualHoldForSession
+		// keeps the carried session while the charger names none, so a
+		// later session proof is checked against the one before the unplug.
 		if current.sessionID == "" {
 			current.sessionID = previous.sessionID
 		}
