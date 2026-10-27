@@ -391,9 +391,8 @@ type State struct {
 	evLimit evMeterLimit
 	// fuseHeat is the main fuse's heat per phase, from site readings only.
 	fuseHeat fuseHeat
-	// evOffers and batteryCommands are our own recent commands, the only
-	// device input the EV hard limit and the EV/battery split use.
-	evOffers        commandLog
+	// batteryCommands and evLimit.offers are our own recent commands, the
+	// only device input the EV hard limit and the EV/battery split use.
 	batteryCommands map[string]commandLog
 
 	// PI controller (outer, site-level)
@@ -2475,7 +2474,6 @@ func recordDispatchTargets(targets []DispatchTarget, state *State, updatePrevTar
 		for _, t := range targets {
 			state.batteryCommands[t.Driver] = state.batteryCommands[t.Driver].add(now, t.TargetW)
 		}
-		state.evOffers = state.evOffers.add(now, math.Max(0, state.EVCommandedW))
 	}
 	if updatePrevTargets {
 		for _, t := range targets {
@@ -4644,12 +4642,8 @@ func forceFuseDischargeWithSnapshot(
 }
 
 // evInMeterW is EV load the meter is sure to contain: the operator's declared
-// load plus the lowest managed offer of the last evSettle. This tick's new
-// offer is not in it yet. Charger readings take no part in the fuse share.
+// load plus the managed offers already shown (evShownW). Charger readings
+// take no part in the fuse share.
 func (s *State) evInMeterW() float64 {
-	low, _, _, ok := s.evOffers.span(s.now())
-	if !ok {
-		low = 0
-	}
-	return s.ManualEVChargingW + math.Max(0, low)
+	return s.ManualEVChargingW + s.evShownW(s.now())
 }

@@ -187,6 +187,21 @@ type pendingLoad struct {
 	phaseA [3]float64 // on each phase
 }
 
+// evShownW is the EV load a reading taken at `at` surely shows: each
+// plugged charger's latest offer less what it may not show yet, kept for
+// its own response time (recordEVOffers). The battery side reads this, so
+// it waits for a slow charger's raise as long as the EV limit does.
+func (s *State) evShownW(at time.Time) float64 {
+	var w float64
+	for _, c := range s.evLimit.offers {
+		if n := len(c.log); n > 0 {
+			unshown, _ := c.log.unshown(at, c.settle)
+			w += math.Max(0, c.log[n-1].w-unshown)
+		}
+	}
+	return w
+}
+
 func (s *State) pendingLoad(at time.Time) pendingLoad {
 	var p pendingLoad
 	for _, c := range s.evLimit.offers {
@@ -368,9 +383,6 @@ func EVFuseBudget(store *telemetry.Store, state *State, points []loadpoint.State
 		*lim = evMeterLimit{}
 		return 0, true
 	}
-	if pool.offerKnown {
-		state.evOffers = state.evOffers.add(state.now(), pool.offerW)
-	}
 	state.recordEVOffers(store, points)
 	if !lim.set || meter.UpdatedAt.After(lim.readingAt) {
 		state.stepEVMeterLimit(store, meter, gridW, pool, fuseMaxW)
@@ -389,9 +401,13 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	}
 	lim.set = true
 	peakW := pool.offerW
-	if _, high, _, ok := s.evOffers.span(now); ok {
-		peakW = math.Max(peakW, high)
+	var logPeakW float64
+	for _, c := range s.evLimit.offers {
+		if _, high, _, ok := c.log.span(now); ok {
+			logPeakW += high
+		}
 	}
+	peakW = math.Max(peakW, logPeakW)
 	// Our own battery orders the meter may not show yet count beside the
 	// chargers' offers, in total import and on each phase.
 	pending := s.pendingBatteryCommandsW(now)

@@ -10,17 +10,13 @@ import (
 // still needs. It reads only the site meter and our own commands; no charger
 // reading takes part, and a battery's own reading only bounds how much of a
 // discharge we ordered it may keep. The EV still needs its demand less the
-// lowest offer of the last evSettle, which the meter surely shows.
+// offers the meter surely shows (evShownW).
 func clampEVBatteryHeadroom(targets []DispatchTarget, store *telemetry.Store, state *State, fuseMaxW float64) []DispatchTarget {
 	if store == nil || state == nil || len(targets) == 0 || fuseMaxW <= 0 {
 		return targets
 	}
 	now := state.now()
-	// This tick's new offer is not in the meter yet; the lowest logged one is.
-	offeredW, _, _, ok := state.evOffers.span(now)
-	if !ok {
-		offeredW = 0
-	}
+	offeredW := state.evShownW(now)
 	var demandW float64
 	phases := 3.0 // No phase placement promise for 1p or auto chargers.
 	for _, demand := range state.evFuseDemands {
