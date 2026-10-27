@@ -7,6 +7,10 @@ import (
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 )
 
+// deadlineReserveMargin is one slot at the planner's longest (hourly) price
+// slot.
+const deadlineReserveMargin = time.Hour
+
 // withDeadlineReserve supplies current EV intent. It never activates or
 // invents an optimizer plan, battery energy, a price or a solar forecast.
 func (s *Service) withDeadlineReserve(now time.Time, d SlotDirective, accepted bool) (SlotDirective, bool) {
@@ -43,6 +47,20 @@ func (s *Service) withDeadlineReserve(now time.Time, d SlotDirective, accepted b
 			continue
 		}
 		if !st.ManualActive {
+			// A goal with slack waits for its latest start: the time the
+			// remaining need takes at full power, plus an hourly price slot.
+			// Before that the car holds 0 W, as at startup, so a missing
+			// plan does not start a car the next plan would pause (#1718).
+			// A running reserve keeps a second slot, so one SoC step does
+			// not stop and restart it.
+			margin := deadlineReserveMargin
+			if st.CommandedKnown && st.CommandedW > 0 {
+				margin *= 2
+			}
+			latestStart := st.TargetTime.Add(-time.Duration(need / peak * float64(time.Hour))).Add(-margin)
+			if now.Before(latestStart) {
+				continue
+			}
 			// Near the goal use the smallest legal offer that can deliver
 			// this minute's need, rather than reserving the charger's full
 			// rating for a final few Wh. A charger without a table takes
