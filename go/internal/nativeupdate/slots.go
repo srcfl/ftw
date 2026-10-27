@@ -184,9 +184,45 @@ func (m Manager) Select() (path, tag string, trial bool, err error) {
 			tag = state.Trial
 		}
 		path, readErr = m.ReleaseDir(tag)
+		if readErr != nil && !trial {
+			// A damaged current release would fail every start. Run the
+			// previous one once as a trial; it commits as any trial does.
+			if previous := m.fallbackCandidateLocked(state); previous != "" {
+				state.LastFailed = state.Current
+				state.Trial = previous
+				if writeErr := m.writeLocked(state); writeErr != nil {
+					return writeErr
+				}
+				tag, trial = previous, true
+				path, readErr = m.ReleaseDir(tag)
+			}
+		}
 		return readErr
 	})
 	return
+}
+
+// fallbackCandidateLocked returns the previous release when it is healthy
+// and reads the same data as the damaged current release. A previous
+// release that already failed is not tried again. Without a readable
+// current receipt the state schema is unknown, so there is no fallback.
+func (m Manager) fallbackCandidateLocked(state Slots) string {
+	if state.Previous == "" || state.Previous == state.LastFailed {
+		return ""
+	}
+	previousDir, err := m.ReleaseDir(state.Previous)
+	if err != nil {
+		return ""
+	}
+	previous, err := readReceipt(previousDir, state.Previous, runtime.GOARCH)
+	if err != nil {
+		return ""
+	}
+	current, err := readReceipt(filepath.Join(m.Root, "releases", state.Current), state.Current, runtime.GOARCH)
+	if err != nil || current.StateSchema != previous.StateSchema {
+		return ""
+	}
+	return state.Previous
 }
 
 func (m Manager) Commit(tag string) error {
