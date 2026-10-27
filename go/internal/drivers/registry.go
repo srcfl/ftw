@@ -123,6 +123,7 @@ type Registry struct {
 	lifecycleMu      sync.Mutex
 	lifecycleGates   map[string]*lifecycleGate
 	spawnRetries     map[string]*spawnRetry
+	spawnInflight    map[string]struct{}
 	spawnRetryClosed bool
 }
 
@@ -1453,7 +1454,11 @@ func (r *Registry) Names() []string {
 
 // ShutdownAll stops every driver. Blocks until all poll loops exit.
 func (r *Registry) ShutdownAll() {
-	r.closeSpawnRetries()
+	// An attempt in flight holds its gate and tears its driver down itself
+	// once it sees the registry closed. Wait for it.
+	for _, n := range r.closeSpawnRetries() {
+		r.acquireLifecycle(n)()
+	}
 	r.mu.Lock()
 	names := make([]string, 0, len(r.rec))
 	for n := range r.rec {

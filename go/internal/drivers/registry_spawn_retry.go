@@ -73,13 +73,22 @@ func (r *Registry) retrySpawn(name string, e *spawnRetry) {
 		return
 	}
 	e.attempting = true
-	r.mu.Unlock()
-	if err := r.add(context.Background(), e.cfg, true); err != nil {
-		return
+	// add deletes the map entry before the driver reaches r.rec. Until add
+	// returns, the in-flight mark is what lets Reload and ShutdownAll find
+	// this name and wait on its gate.
+	if r.spawnInflight == nil {
+		r.spawnInflight = make(map[string]struct{})
 	}
+	r.spawnInflight[name] = struct{}{}
+	r.mu.Unlock()
+	err := r.add(context.Background(), e.cfg, true)
 	r.mu.Lock()
+	delete(r.spawnInflight, name)
 	closed := r.spawnRetryClosed
 	r.mu.Unlock()
+	if err != nil {
+		return
+	}
 	if closed {
 		// Shutdown began while this attempt ran and may have missed it.
 		r.removeLocked(name, false)
@@ -88,18 +97,25 @@ func (r *Registry) retrySpawn(name string, e *spawnRetry) {
 	slog.Info("driver started on retry", "name", name)
 }
 
+// pendingSpawnRetries lists names with a scheduled retry or one in flight.
 func (r *Registry) pendingSpawnRetries() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	out := make([]string, 0, len(r.spawnRetries))
+	out := make([]string, 0, len(r.spawnRetries)+len(r.spawnInflight))
 	for n := range r.spawnRetries {
 		out = append(out, n)
+	}
+	for n := range r.spawnInflight {
+		if _, dup := r.spawnRetries[n]; !dup {
+			out = append(out, n)
+		}
 	}
 	return out
 }
 
-// closeSpawnRetries stops every pending retry and refuses new ones.
-func (r *Registry) closeSpawnRetries() {
+// closeSpawnRetries stops every pending retry, refuses new ones and returns
+// the names whose attempt is still in flight.
+func (r *Registry) closeSpawnRetries() []string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.spawnRetryClosed = true
@@ -107,4 +123,9 @@ func (r *Registry) closeSpawnRetries() {
 		e.timer.Stop()
 	}
 	r.spawnRetries = nil
+	inflight := make([]string, 0, len(r.spawnInflight))
+	for n := range r.spawnInflight {
+		inflight = append(inflight, n)
+	}
+	return inflight
 }
