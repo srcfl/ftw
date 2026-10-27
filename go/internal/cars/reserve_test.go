@@ -16,7 +16,13 @@ import (
 func fallback(t *testing.T, h *harness) (ok bool, maxW float64) {
 	t.Helper()
 	svc := &mpc.Service{LoadpointStates: h.mgr.States}
-	d, _ := svc.SlotDirectiveAt(h.now)
+	// Ask at the goal's deadline: before its latest start a goal with
+	// slack holds 0 W (#1718).
+	at := h.now
+	if st, ok := h.mgr.State("easee"); ok && st.TargetTime.After(at) {
+		at = st.TargetTime
+	}
+	d, _ := svc.SlotDirectiveAt(at)
 	return d.LoadpointFallback["easee"], d.LoadpointMaxPowerW["easee"]
 }
 

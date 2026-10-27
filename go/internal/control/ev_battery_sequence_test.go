@@ -521,6 +521,38 @@ func TestFuseOverageGetsBatteryReliefUntilEVCutShows(t *testing.T) {
 	if s.offer() >= 10350 || s.batteryW != 0 {
 		t.Fatalf("after the cut: offer %.0f W battery %.0f W, want a cut car and an idle battery", s.offer(), s.batteryW)
 	}
+	// The car's rise never counts the battery's relief as room. A car that
+	// rose into it kept the battery feeding it 650 W at the 24 A line for
+	// as long as the house load stayed.
+	for range 10 {
+		s.run(time.Minute)
+		if s.batteryW != 0 || s.gridW()/690 > 24+1e-6 {
+			t.Fatalf("%v: offer %.0f W battery %.0f W, %.2f A on each phase; want an idle battery under the 24 A line",
+				s.now.Sub(stepAt), s.offer(), s.batteryW, s.gridW()/690)
+		}
+	}
+	if s.offer() != 5520 {
+		t.Fatalf("offer %.0f W, want 5,520 W: 8 A beside 16 A of house under the 24 A line", s.offer())
+	}
+}
+
+// Relief is only the discharge the fuse guard added: a cancelled charge or
+// the planner's own discharge stays room for the car.
+func TestFuseReliefIsOnlyAddedDischarge(t *testing.T) {
+	s := &State{}
+	s.recordFuseRelief(
+		[]DispatchTarget{{Driver: "idle", TargetW: 0}, {Driver: "planned", TargetW: -1000}, {Driver: "charge", TargetW: 2000}, {Driver: "flip", TargetW: 300}},
+		[]DispatchTarget{{Driver: "idle", TargetW: -650}, {Driver: "planned", TargetW: -1650}, {Driver: "charge", TargetW: 500}, {Driver: "flip", TargetW: -200}},
+	)
+	want := map[string]float64{"idle": 650, "planned": 650, "flip": 200}
+	if len(s.batteryFuseRelief) != len(want) {
+		t.Fatalf("relief %v, want %v", s.batteryFuseRelief, want)
+	}
+	for d, w := range want {
+		if got := s.batteryFuseRelief[d]; math.Abs(got-w) > 1e-9 {
+			t.Fatalf("relief %v, want %v", s.batteryFuseRelief, want)
+		}
+	}
 }
 
 // Only the hour's import limit leaves watts to an EV cut, only those the cut

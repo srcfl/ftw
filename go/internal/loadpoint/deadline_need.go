@@ -13,7 +13,7 @@ func DeadlineNeed(st State, minW, maxW float64, steps []float64) (energyWh, powe
 		!finite(st.CurrentSoC) || st.CurrentSoC < 0 || st.CurrentSoC > 1 ||
 		!finite(st.TargetSoC) || st.TargetSoC < 0 || st.TargetSoC > 1 ||
 		!finite(st.VehicleCapacityWh) || st.VehicleCapacityWh <= 0 ||
-		!finite(st.MinChargeW) || !finite(st.MaxChargeW) || st.MinChargeW <= 0 || st.MaxChargeW < st.MinChargeW {
+		!finite(st.MinChargeW) || !finite(st.MaxChargeW) || !(minW > 0) || st.MaxChargeW < st.MinChargeW {
 		return 0, 0, false
 	}
 	// A vehicle-limit goal aims at 1, and the controller still stops at the

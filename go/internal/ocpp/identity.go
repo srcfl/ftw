@@ -99,7 +99,17 @@ func (h *Handler) noteIdentity(id string) {
 		slog.Info("ocpp: charger reported neither vendor nor serial — device identity falls back to the name it dialled with",
 			"charger", id)
 	}
-	fn(ident)
+	h.callback(id, func() { fn(ident) })
+}
+
+// callback runs fn, a callback main.go registered, outside the charger's
+// socket lock.
+func (h *Handler) callback(id string, fn func()) {
+	if h.later == nil {
+		fn()
+		return
+	}
+	h.later(id, fn)
 }
 
 // CurrentIdentity returns only an adopted charger's identity reported on its

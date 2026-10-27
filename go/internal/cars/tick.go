@@ -177,8 +177,8 @@ func (r *Runtime) resumeSessionLocked(st loadpoint.State, s *session) {
 const bootWindow = 30 * time.Second
 
 // UnplugGrace is how long a charger must say the cable is out before the
-// session ends.
-const UnplugGrace = 30 * time.Second
+// session ends. The loadpoint clears Charge now on the same grace.
+const UnplugGrace = loadpoint.UnplugGrace
 
 // PrePlugMaxAge is how much older than the plug-in a level may be and still
 // start the session. An older one may predate a drive.
@@ -801,7 +801,9 @@ func (r *Runtime) syncLocked(now time.Time) []func() {
 			s.seeded = true
 			seed := r.seedLocked(car, s, st)
 			acts = append(acts, func() { lps.SeedSessionLevel(id, seed) })
-			if car != nil && car.ProfileTarget > 0 {
+			// The profile target fills in only for a car without a goal;
+			// SetTarget clears the deadline of the goal it would replace.
+			if car != nil && car.ProfileTarget > 0 && !goal.HasTarget() {
 				target := car.ProfileTarget
 				acts = append(acts, func() { lps.SetTarget(id, target, time.Time{}) })
 			}

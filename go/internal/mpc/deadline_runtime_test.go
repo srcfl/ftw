@@ -100,6 +100,8 @@ func TestDeadlineReserveSmallRemainderLeavesRoomForOtherGoal(t *testing.T) {
 	now := time.Now()
 	a, b := deadlineGoalState(now, "a"), deadlineGoalState(now, "b")
 	a.CurrentSoC = a.TargetSoC - loadpoint.DefaultChargeEfficiency/a.VehicleCapacityWh // 1 AC Wh.
+	// Within the latest start.
+	a.TargetTime = now.Add(30 * time.Minute)
 	svc := &Service{LoadpointStates: func() []loadpoint.State { return []loadpoint.State{a, b} }}
 	d, ok := svc.SlotDirectiveAt(now)
 	if !ok || math.Abs(d.LoadpointEnergyWh["a"]-1) > 1e-6 || d.LoadpointMaxPowerW["a"] != a.MinChargeW || d.LoadpointMaxPowerW["b"] != b.MaxChargeW {

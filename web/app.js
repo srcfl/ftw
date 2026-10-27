@@ -2350,7 +2350,7 @@
   }
 
   // ---- Storage-health banner (DB corruption auto-recovered) ----
-  // storage = { state, cache, last_event_ms, detail } from /api/health.
+  // storage = { state, cache, history, last_event_ms, detail } from /api/health.
   // Heal events are set once at boot and never change, so a session-scoped
   // dismissal (keyed on the event) hides it without losing a fresh alert
   // after a later restart.
@@ -2358,7 +2358,8 @@
     var existing = document.getElementById("storage-banner");
     var bad = !!storage && (
       (storage.state && storage.state !== "ok") ||
-      (storage.cache && storage.cache !== "ok")
+      (storage.cache && storage.cache !== "ok") ||
+      (storage.history && storage.history !== "ok")
     );
     if (!bad) { if (existing) existing.remove(); return; }
 

@@ -50,6 +50,7 @@ func Apply(
 	if newCfg.Site.MinDispatchIntervalS != oldCfg.Site.MinDispatchIntervalS {
 		ctrl.MinDispatchIntervalS = newCfg.Site.MinDispatchIntervalS
 	}
+	ctrl.ControlIntervalS = newCfg.Site.ControlIntervalS
 	gain := newCfg.Site.Gain
 	if gain == 0 {
 		gain = 0.5

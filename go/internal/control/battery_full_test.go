@@ -60,6 +60,7 @@ func TestFullBatteryManualStopDischargeAndSibling(t *testing.T) {
 		}
 	}
 	st.SetBatteryManualHold(BatteryManualHold{PowerW: -2000, ExpiresAt: time.Now().Add(time.Hour)})
+	tel.Update("ferroamp", telemetry.DerMeter, -1000, nil, nil) // a new sample allows the reversal
 	got = ComputeDispatch(tel, st, capacities, 13800)
 	for _, target := range got {
 		if target.TargetW >= 0 {

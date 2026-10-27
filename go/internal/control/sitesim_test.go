@@ -20,6 +20,9 @@ import (
 // simCoreEvery is control_interval_s's default. The plant steps every second.
 const simCoreEvery = 2 * time.Second
 
+// simFuseSafetyA is the site's fuse.safety_margin_a, the config default.
+const simFuseSafetyA = .5
+
 // simSite runs Core's control tick against a sitesim.Plant in main.go's
 // order: site import, charger tick, then battery dispatch. Core's settings
 // are the config defaults. Every plant second it checks the invariants and
@@ -39,6 +42,12 @@ type simSite struct {
 
 	every time.Duration // control_interval_s; zero: simCoreEvery
 	field *fieldRun     // the field matrix's own checks; nil outside it
+	// evMaxAge is the power_max_age_s the charger driver declares outside
+	// the field matrix; zero declares none.
+	evMaxAge time.Duration
+	// meterNoise is added to each phase current Core reads, not to the
+	// plant's own; nil reads the plant exactly.
+	meterNoise func() float64
 
 	downUntil, nextTick time.Time
 	meter               sitesim.MeterReading
@@ -83,7 +92,7 @@ func (s *simSite) boot() {
 	s.state = NewState(0, 42, "meter")
 	s.state.clock = func() time.Time { return s.p.Now }
 	s.state.SlewRateW, s.state.MinDispatchIntervalS = 3000, 2
-	s.state.SiteFuseAmps, s.state.SiteFuseVoltage, s.state.SiteFusePhases, s.state.SiteFuseSafetyA = s.p.Fuse.RatingA, s.p.Voltage, 3, .5
+	s.state.SiteFuseAmps, s.state.SiteFuseVoltage, s.state.SiteFusePhases, s.state.SiteFuseSafetyA = s.p.Fuse.RatingA, s.p.Voltage, 3, simFuseSafetyA
 	if b := s.p.Battery; b != nil {
 		s.state.DriverLimits = map[string]PowerLimits{"battery": {MaxChargeW: b.MaxChargeW, MaxDischargeW: b.MaxDischargeW}}
 	}
@@ -215,8 +224,17 @@ func (s *simSite) step() {
 	}
 	if s.downUntil.IsZero() {
 		if m := tick.Meter; m != nil {
-			s.emit("meter", telemetry.DerMeter, m.W, nil, map[string]any{"l1_a": m.PhaseA[0], "l2_a": m.PhaseA[1], "l3_a": m.PhaseA[2],
-				"l1_w": m.PhaseW[0], "l2_w": m.PhaseW[1], "l3_w": m.PhaseW[2]})
+			read := *m
+			if s.meterNoise != nil {
+				for i := range read.PhaseA {
+					n := s.meterNoise()
+					read.PhaseA[i] += n
+					read.PhaseW[i] += n * s.p.Voltage
+					read.W += n * s.p.Voltage
+				}
+			}
+			s.emit("meter", telemetry.DerMeter, read.W, nil, map[string]any{"l1_a": read.PhaseA[0], "l2_a": read.PhaseA[1], "l3_a": read.PhaseA[2],
+				"l1_w": read.PhaseW[0], "l2_w": read.PhaseW[1], "l3_w": read.PhaseW[2]})
 		}
 		if b := tick.Battery; b != nil {
 			s.emit("battery", telemetry.DerBattery, b.W, &b.SoC, nil)
@@ -326,8 +344,10 @@ func (s *simSite) check() {
 	// fuseHeat reads the meter, may break for the fastest response time plus
 	// 3 s: a phase may sit above the fuse less its margin only while its
 	// I²-filtered current is under it, and never above the instant limit.
+	// A phase exactly at the line is under it; 1 µA absorbs the rounding of
+	// summed watts.
 	fuseA := p.Fuse.RatingA
-	limitA, k := fuseA-evPhaseMarginA, -math.Expm1(-sitesim.Step.Seconds()/fuseHeatTau.Seconds())
+	limitA, k := s.state.fuseLineA()+1e-6, -math.Expm1(-sitesim.Step.Seconds()/fuseHeatTau.Seconds())
 	over, overLimit := false, false
 	for i, a := range p.A {
 		if s.heatSet {
@@ -350,7 +370,7 @@ func (s *simSite) check() {
 		s.limitSince = time.Time{}
 	}
 	if s.ownRaise && !s.limitSince.IsZero() && now.Sub(s.limitSince) > 3*time.Second {
-		s.fail("a raise we sent kept a phase over %.0f A for more than 3 s", limitA)
+		s.fail("a raise we sent kept a phase over %.1f A for more than 3 s", limitA)
 	}
 	if !over {
 		s.overSince = time.Time{}
@@ -358,7 +378,7 @@ func (s *simSite) check() {
 		s.overSince = now
 	}
 	if allow := s.responseTime(false) + 3*time.Second; !s.overSince.IsZero() && now.Sub(s.overSince) > allow {
-		s.fail("over Core's limit for more than %v (heat %.1f A, limit %.0f A)", allow, math.Sqrt(max(s.heat[0], s.heat[1], s.heat[2])), limitA)
+		s.fail("over Core's limit for more than %v (heat %.1f A, limit %.1f A)", allow, math.Sqrt(max(s.heat[0], s.heat[1], s.heat[2])), limitA)
 	}
 	// (b) With the meter on schedule, room for the car's minimum and a car
 	// that asks, the car draws within a minute plus the charger's delay
@@ -392,7 +412,7 @@ func (s *simSite) wantsCharge() bool {
 	}
 	// After a real overload, an idle car must wait for the fuse to cool.
 	// Its recovery deadline starts when that heat no longer blocks a start.
-	if e.DrawW <= 0 && max(s.heat[0], s.heat[1], s.heat[2]) > math.Pow(p.Fuse.RatingA-evPhaseMarginA, 2) {
+	if e.DrawW <= 0 && max(s.heat[0], s.heat[1], s.heat[2]) > math.Pow(s.state.fuseLineA(), 2) {
 		return false
 	}
 	phases := min(e.Phases, p.Car.Phases)
@@ -400,7 +420,7 @@ func (s *simSite) wantsCharge() bool {
 	for i, houseW := range p.HouseW {
 		w := houseW + p.PVW/3
 		baseW += w
-		if i < phases && math.Abs(w/p.Voltage+e.MinA) > p.Fuse.RatingA-evPhaseMarginA {
+		if i < phases && math.Abs(w/p.Voltage+e.MinA) > s.state.fuseLineA() {
 			return false
 		}
 	}
@@ -801,7 +821,7 @@ func TestSiteSimScenarios(t *testing.T) {
 				start = simStart
 			}
 			s := runSimScenario(sc, start)
-			t.Logf("peak phase %.1f A, %v over %.0f A; car idle with room %v", s.peakA, s.overLimit, s.p.Fuse.RatingA-evPhaseMarginA, s.idleWithRoom)
+			t.Logf("peak phase %.1f A, %v over %.1f A; car idle with room %v", s.peakA, s.overLimit, s.state.fuseLineA(), s.idleWithRoom)
 			switch {
 			case sc.known == "" && s.failure != "":
 				t.Fatal(s.failure)
