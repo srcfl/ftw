@@ -24,6 +24,10 @@ type socketSessions struct {
 	slots   map[string]*socketSlot
 	aliases map[string]*socketBinding
 	raw     map[ws.Channel]*socketBinding
+	// after holds the callback work a message handler queued while its
+	// boundCall holds that charger's slot lock, keyed by charger id. A key
+	// is present only during such a call.
+	after map[string][]func()
 	// The library closes the sockets in its table when it stops, but a
 	// handshake that has passed the connection check joins that table
 	// later and would stay open on a stopped server. Once closed is set no
@@ -48,7 +52,7 @@ type socketBinding struct {
 
 func (b *socketBinding) ID() string { return b.alias }
 func newSocketSessions() *socketSessions {
-	return &socketSessions{slots: map[string]*socketSlot{}, aliases: map[string]*socketBinding{}, raw: map[ws.Channel]*socketBinding{}}
+	return &socketSessions{slots: map[string]*socketSlot{}, aliases: map[string]*socketBinding{}, raw: map[ws.Channel]*socketBinding{}, after: map[string][]func(){}}
 }
 func (s *socketSessions) slot(id string) *socketSlot {
 	s.mu.Lock()
@@ -239,17 +243,51 @@ func (g *guardedServer) Write(alias string, data []byte) error {
 
 // Match and mutate under one per-charger lock. SDK goroutines from a closed
 // socket cannot alter its replacement, including via a late BootNotification.
+//
+// The lock guards state only. Every write to this charger takes the same
+// lock, so callback work that fn queues through later (main.go writes SQLite
+// from identityReported) runs after the unlock: a stalled callback must not
+// stop the commands to this charger and, through the SDK's single request
+// pump, to every other charger.
 func boundCall[T any](s *socketSessions, alias string, fn func(string) (T, error)) (zero T, err error) {
 	b := s.lookup(alias)
 	if b == nil {
 		return zero, errOldSocket
 	}
 	b.slot.mu.Lock()
-	defer b.slot.mu.Unlock()
 	if b.slot.current != b || !b.active {
+		b.slot.mu.Unlock()
 		return zero, errOldSocket
 	}
-	return fn(b.Channel.ID())
+	id := b.Channel.ID()
+	s.mu.Lock()
+	s.after[id] = nil
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		after := s.after[id]
+		delete(s.after, id)
+		s.mu.Unlock()
+		b.slot.mu.Unlock()
+		for _, f := range after {
+			f()
+		}
+	}()
+	return fn(id)
+}
+
+// later runs fn once the boundCall that holds id's slot lock releases it, or
+// now when no boundCall holds it.
+func (s *socketSessions) later(id string, fn func()) {
+	s.mu.Lock()
+	after, held := s.after[id]
+	if held {
+		s.after[id] = append(after, fn)
+	}
+	s.mu.Unlock()
+	if !held {
+		fn()
+	}
 }
 func (s *socketSessions) disconnected(alias string, fn func(string)) {
 	b := s.lookup(alias)

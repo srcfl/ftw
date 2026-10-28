@@ -170,6 +170,9 @@ func (l commandLog) toCome(from, at time.Time, before sentCommand) (w, a float64
 type chargerOffers struct {
 	log    commandLog
 	settle time.Duration
+	// declared is true when the driver declares that time; settle is then
+	// not evUnknownSettle's guess (evShownW).
+	declared bool
 	// found is the offer in force before the limit's first site reading,
 	// after a restart: Core did not send it in this run. A rise counts the
 	// charger as 0 before it; a cut takes it as shown, since the reading is
@@ -185,6 +188,30 @@ type chargerOffers struct {
 type pendingLoad struct {
 	w      float64    // in total import
 	phaseA [3]float64 // on each phase
+}
+
+// evShownW is the EV load a reading taken at `at` surely shows: each
+// plugged charger's latest offer less what it may not show yet. The battery
+// side reads this. A raise stays unshown for the response time the
+// charger's driver declares, so the battery waits for a slow charger's raise
+// as long as the EV limit does. A charger that declares none gets evSettle,
+// not evUnknownSettle: the battery would otherwise reserve a local charger's
+// raise on top of the reading that already shows it, and stop charging for
+// three minutes after each one. Easee Cloud, the slow charger we know,
+// declares its 180 s.
+func (s *State) evShownW(at time.Time) float64 {
+	var w float64
+	for _, c := range s.evLimit.offers {
+		if n := len(c.log); n > 0 {
+			settle := evSettle
+			if c.declared {
+				settle = c.settle
+			}
+			unshown, _ := c.log.unshown(at, settle)
+			w += math.Max(0, c.log[n-1].w-unshown)
+		}
+	}
+	return w
 }
 
 func (s *State) pendingLoad(at time.Time) pendingLoad {
@@ -258,10 +285,10 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 			continue
 		}
 		c := s.evLimit.offers[point.ID]
-		c.settle = evUnknownSettle
+		c.settle, c.declared = evUnknownSettle, false
 		if r := store.Get(point.DriverName, telemetry.DerEV); r != nil {
 			if declared := telemetry.DeclaredPowerMaxAge(r.Data); declared > 0 {
-				c.settle = max(evSettle, declared)
+				c.settle, c.declared = max(evSettle, declared), true
 			}
 		}
 		w := math.Max(0, point.CommandedW)
@@ -368,9 +395,6 @@ func EVFuseBudget(store *telemetry.Store, state *State, points []loadpoint.State
 		*lim = evMeterLimit{}
 		return 0, true
 	}
-	if pool.offerKnown {
-		state.evOffers = state.evOffers.add(state.now(), pool.offerW)
-	}
 	state.recordEVOffers(store, points)
 	if !lim.set || meter.UpdatedAt.After(lim.readingAt) {
 		state.stepEVMeterLimit(store, meter, gridW, pool, fuseMaxW)
@@ -389,9 +413,13 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	}
 	lim.set = true
 	peakW := pool.offerW
-	if _, high, _, ok := s.evOffers.span(now); ok {
-		peakW = math.Max(peakW, high)
+	var logPeakW float64
+	for _, c := range s.evLimit.offers {
+		if _, high, _, ok := c.log.span(now); ok {
+			logPeakW += high
+		}
 	}
+	peakW = math.Max(peakW, logPeakW)
 	// Our own battery orders the meter may not show yet count beside the
 	// chargers' offers, in total import and on each phase.
 	pending := s.pendingBatteryCommandsW(now)

@@ -70,6 +70,84 @@ func TestTrialExecFailureRunsCurrentRelease(t *testing.T) {
 	}
 }
 
+// damagedCurrentWithPendingUpdate leaves v0.132.0 current but damaged,
+// v0.131.0 previous and healthy, and v0.133.0 waiting to start.
+func damagedCurrentWithPendingUpdate(t *testing.T) (string, nativeupdate.Manager) {
+	t.Helper()
+	root := t.TempDir()
+	manager := nativeupdate.Manager{Root: root}
+	for _, tag := range []string{"v0.131.0", "v0.132.0", "v0.133.0"} {
+		testRelease(t, root, tag)
+	}
+	if err := manager.Init("v0.131.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Prepare("v0.132.0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := manager.Select(); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Commit("v0.132.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Prepare("v0.133.0"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "releases", "v0.132.0", "web", "index.html")); err != nil {
+		t.Fatal(err)
+	}
+	return root, manager
+}
+
+func TestTrialExecFailureWithDamagedCurrentRunsPrevious(t *testing.T) {
+	root, manager := damagedCurrentWithPendingUpdate(t)
+	var launched []string
+	err := launch(root, "/data/config.yaml", "/data/drivers", nil, func(binary string, _ []string, env []string) error {
+		launched = append(launched, binary)
+		if strings.HasSuffix(binary, "v0.133.0/ftw") {
+			return errors.New("cannot exec")
+		}
+		if !containsEnv(env, "FTW_NATIVE_TRIAL_TAG=v0.131.0") {
+			t.Fatal("the fallback must start as a trial")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(launched) != 2 || !strings.HasSuffix(launched[0], "v0.133.0/ftw") || !strings.HasSuffix(launched[1], "v0.131.0/ftw") {
+		t.Fatalf("launch order = %v", launched)
+	}
+	state, err := manager.Read()
+	if err != nil || state.Current != "v0.132.0" || state.Trial != "v0.131.0" || state.LastFailed != "v0.133.0" {
+		t.Fatalf("slots: %+v %v", state, err)
+	}
+}
+
+func TestFallbackExecFailureIsRecordedAndNotRetried(t *testing.T) {
+	root, manager := damagedCurrentWithPendingUpdate(t)
+	var launched []string
+	failAll := func(binary string, _ []string, _ []string) error {
+		launched = append(launched, binary)
+		return errors.New("cannot exec")
+	}
+	if err := launch(root, "/data/config.yaml", "/data/drivers", nil, failAll); err == nil {
+		t.Fatal("want the fallback exec error")
+	}
+	if len(launched) != 2 || !strings.HasSuffix(launched[1], "v0.131.0/ftw") {
+		t.Fatalf("launch order = %v", launched)
+	}
+	state, err := manager.Read()
+	if err != nil || state.Trial != "" || state.LastFailed != "v0.131.0" {
+		t.Fatalf("slots: %+v %v", state, err)
+	}
+	launched = nil
+	if err := launch(root, "/data/config.yaml", "/data/drivers", nil, failAll); err == nil || len(launched) != 0 {
+		t.Fatalf("second start err=%v launched=%v; want the damaged-release error", err, launched)
+	}
+}
+
 func containsEnv(env []string, value string) bool {
 	for _, item := range env {
 		if item == value {
