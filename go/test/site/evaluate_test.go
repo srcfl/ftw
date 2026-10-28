@@ -673,8 +673,7 @@ func le(p *float64, limit float64) bool { return p != nil && *p <= limit }
 func (d *runData) overage(t0, t1, fuse float64) metrics {
 	w := d.window(t0, t1)
 	m := metrics{"max_i": round(maxOf(w, maxAbsI), 2)}
-	m["over_limit_longest_s"], m["over_limit_total_s"] = d.runsOver(t0, t1, fuse-1)
-	m["over_fuse_longest_s"], _ = d.runsOver(t0, t1, fuse)
+	m["over_limit_longest_s"], m["over_limit_total_s"] = d.runsOver(t0, t1, fuse)
 	m["fuse_damage_max"] = round(maxOf(w, damage), 4)
 	m["fuse_blown"] = anyBlown(w)
 	return m

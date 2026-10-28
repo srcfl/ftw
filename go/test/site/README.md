@@ -79,7 +79,7 @@ its sources (`provenance` in [catalog_test.go](catalog_test.go)).
 
 ## Scenarios
 
-"Over the limit" is the worst phase above the fuse − 1 A, measured through
+"Over the limit" is the worst phase above the fuse rating, measured through
 the fuse. A device's response time counts as 2 s, the meter and control
 tick as 2 s more.
 
@@ -87,7 +87,7 @@ tick as 2 s more.
 |---|---|---|---|
 | `s0-25` Idle charger | 25 A, 3 A per phase, a charger with no car, heartbeat 60 s, 300 s | Home use `measured` in 95 % of samples; no OCPP disconnect | yes |
 | `s0b-25` | as s0, Core's heartbeat | as s0 | |
-| `s1-16`, `s1-25` Charge now | 3 A per phase, Charge now 16 A for 180 s | the room the fuse gives (25 A: 11 040 W) within 60 s; held 95 %; fuse holds; on 25 A no `fuse_limit` | yes |
+| `s1-16`, `s1-25` Charge now | 3 A per phase, Charge now 16 A for 180 s | the room the fuse gives (16 A: 8 970 W; 25 A: 11 040 W) within 60 s; held 95 %; fuse holds; on 25 A no `fuse_limit` | yes |
 | `s2-16` Charge now during export | 16 A, 1 A house, 7 kW PV, full battery: 9.1 A export per phase | car starts within 60 s (**known**: export counted as import); fuse holds | |
 | `s3-16`, `s3-25` Load step | car and a 3 kW battery hold charging, then 13 A (16 A) or 21 A (25 A) per phase for 180 s | fuse holds; over the limit at most 7 s after the step | yes |
 | `s4-25`, `s4b-25` Saved unlock | `surplus_unlock_bat_soc` 0.9 saved, not armed; Charge now 3p, and bare (s4b) | no stops; no offer drops to 0 W; full power over the last minute | |

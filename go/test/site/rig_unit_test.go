@@ -4,6 +4,7 @@ package site
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -113,7 +114,7 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 		for i := 0; i <= 100; i++ {
 			a := 10.0
 			if i >= 50 && i < 56 {
-				a = 26 // 6 s over the 24 A limit
+				a = 26 // 6 s over the 25 A fuse
 			}
 			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}, Bat: plantDevice{SoCPct: 50}})
 		}
@@ -137,5 +138,126 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 	_, cs := judgeInvariants(mk(false))
 	if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
 		t.Fatalf("without a step: %v", f)
+	}
+}
+
+// The limit is the fuse rating: a phase may sit at exactly the fuse until
+// the end of the run, and 0.1 A above it fails once the time budget is up.
+func TestInvariantsJudgeAtTheFuse(t *testing.T) {
+	const fuse = 25.0
+	const own = "over the limit at most 3 s after FTW's own raise"
+	const step = "over the limit no longer than an outside step allows"
+	for _, c := range []struct {
+		name     string
+		a        float64
+		to       int // the level holds from 50 s until this second
+		withStep bool
+		want     []string
+	}{
+		{"at the fuse", fuse, 101, false, nil},
+		{"at the fuse after a step", fuse, 101, true, nil},
+		// 20 s is past the 3 s for FTW's own raise, and past the
+		// 2 + 2 + 3 s a step allows while the battery can answer.
+		{"0.1 A over", fuse + 0.1, 70, false, []string{own}},
+		{"0.1 A over after a step", fuse + 0.1, 70, true, []string{step}},
+	} {
+		d := &runData{marks: map[string]float64{"start": 0, "end": 100}, meta: map[string]any{"fuse": fuse}}
+		for i := 0; i <= 100; i++ {
+			a := 10.0
+			if i >= 50 && i < c.to {
+				a = c.a
+			}
+			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}, Bat: plantDevice{SoCPct: 50}})
+		}
+		if c.withStep {
+			d.events = append(d.events, houseEventLine{T: 49.5, Event: houseEvent{Do: "loads"}})
+		}
+		var failed []string
+		_, cs := judgeInvariants(d)
+		for _, x := range cs {
+			if !x.OK {
+				failed = append(failed, x.Name)
+			}
+		}
+		if !slices.Equal(failed, c.want) {
+			t.Errorf("%s: failed %v, want %v", c.name, failed, c.want)
+		}
+	}
+}
+
+// S1 expects the room the fuse rating gives: on 16 A with a 3 A house that
+// is 13 A per phase, 8 970 W. The old line at fuse - 1 A (8 280 W) falls
+// short of it.
+func TestJudgeS1ExpectsTheRoomAtTheFuse(t *testing.T) {
+	const name = "target within 60 s"
+	for _, c := range []struct {
+		carW float64
+		want bool
+	}{{8970, true}, {8280, false}} {
+		d := synth(181, map[string]float64{"charge_now": 0, "end": 180}, map[string]any{"fuse": 16.0, "house_a": 3},
+			func(i int, r *sample) {
+				if i >= 10 {
+					r.CarW = []float64{c.carW}
+				}
+			})
+		m, cs := judgeS1(d)
+		if m["target_w"] != 8970.0 {
+			t.Fatalf("target_w = %v, want 8970", m["target_w"])
+		}
+		if got := verdictsOf(cs)[name]; got != c.want {
+			t.Errorf("car at %v W: %q = %v, want %v", c.carW, name, got, c.want)
+		}
+	}
+}
+
+// S12 counts a cut as one on room alone while every phase is under the fuse
+// by more than 0.1 A, and records fuse_limit while the worst phase has 6 A.
+func TestJudgeS12MeasuresRoomAtTheFuse(t *testing.T) {
+	const fuse = 20.0
+	for _, c := range []struct {
+		name        string
+		a           float64 // the worst phase when the order drops
+		cuts, limit int
+	}{
+		{"at the fuse", fuse, 0, 0},
+		{"0.1 A under", fuse - 0.1, 0, 0},
+		{"0.5 A under", fuse - 0.5, 1, 0},
+		{"5.5 A under", fuse - 5.5, 1, 0},
+		{"6.5 A under", fuse - 6.5, 1, 1},
+	} {
+		d := synth(121, map[string]float64{"plan": 0, "ready": 100, "end": 120}, map[string]any{"fuse": fuse, "plan_wh": 6600.0},
+			func(i int, r *sample) {
+				r.PhaseA = [3]float64{c.a, c.a - 1, c.a - 2}
+				if i == 30 {
+					r.LPs = []ftwLoadpoint{{CommandedReason: "fuse_limit"}}
+				}
+			})
+		d.frames = []frame{profileAt(10, 16), profileAt(20, 10)}
+		m, _ := judgeS12(d)
+		if m["cuts_with_room"] != c.cuts || m["fuse_limit_with_room_s"] != c.limit {
+			t.Errorf("%s: cuts %v, fuse_limit %v; want %d, %d", c.name, m["cuts_with_room"], m["fuse_limit_with_room_s"], c.cuts, c.limit)
+		}
+	}
+}
+
+// During Charge now an idle car is a fault once the house leaves the car's
+// 6 A minimum under the fuse; with less room it is not.
+func TestInvariantsChargeNowRoomAtTheFuse(t *testing.T) {
+	const fuse = 25.0
+	const name = "Charge now charges when there is room"
+	for _, c := range []struct {
+		houseA float64
+		want   bool
+	}{{fuse - 6, false}, {fuse - 5.5, true}} {
+		d := synth(201, map[string]float64{"start": 0, "end": 200}, map[string]any{"fuse": fuse},
+			func(_ int, r *sample) {
+				r.PhaseA = [3]float64{c.houseA, c.houseA, c.houseA}
+				r.Bat.SoCPct = 50
+			})
+		d.allMarks = []markLine{{T: 1, Label: "ftw:charge_now"}, {T: 200, Label: "end"}}
+		_, cs := judgeInvariants(d)
+		if got := verdictsOf(cs)[name]; got != c.want {
+			t.Errorf("house %v A: %q = %v, want %v", c.houseA, name, got, c.want)
+		}
 	}
 }

@@ -711,10 +711,10 @@ func judgeS12(d *runData) (metrics, []criterion) {
 		if p.Limit > 0 && p.phasesOr3() == 1 {
 			ones++
 		}
-		// A lower order while every phase has room is a cut on room alone,
-		// unless the plan itself asked for less (a pause between slots).
+		// A lower order while every phase is under the fuse is a cut on room
+		// alone, unless the plan itself asked for less (a pause between slots).
 		if i > 0 && p.offerW() < prs[i-1].offerW()-1 {
-			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-1-0.5 {
+			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-0.1 {
 				if after := d.at(t0 + p.T + 2); after == nil || firstLP(after).CommandedReason != "plan" {
 					cuts++
 				}
@@ -725,7 +725,7 @@ func judgeS12(d *runData) (metrics, []criterion) {
 	// recorded, not judged, since a slow charger's pending order may hold it.
 	limited := 0
 	for _, r := range w {
-		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-1-6 {
+		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-6 {
 			limited++
 		}
 	}
@@ -1014,7 +1014,7 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 	start := d.firstT(t0, func(r *sample) bool { return carW(r, 0) >= 0.95*1380 })
 	over, longest := 0.0, 0.0
 	for _, r := range d.window(t0, t1) {
-		if maxAbsI(r) > fuse-1 {
+		if maxAbsI(r) > fuse {
 			over++
 			longest = math.Max(longest, over)
 		} else {
@@ -1022,13 +1022,13 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 		}
 	}
 	m := metrics{"battery_rise_w_20s_before": math.Round(rise), "car_start_s": roundp(start, 1),
-		"car_w_last60":               math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
-		"over_fuse_minus1_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
+		"car_w_last60":        math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
+		"over_fuse_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
 	return m, []criterion{
 		crit("the battery order rose over 1 150 W in the 20 s before Charge now", rise > 1150), // the setup
 		crit("car charging within 10 s of Charge now", le(start, 10)),
 		crit("fuse holds", !anyBlown(d.window(t0, t1))),
-		crit("over fuse - 1 A at most 3 s", longest <= 3),
+		crit("over the fuse at most 3 s", longest <= 3),
 	}
 }
 

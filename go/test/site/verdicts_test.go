@@ -45,8 +45,11 @@ func judgeS1(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
 	target := maxW
 	if fuse < 25 {
-		// Room on a 16 A fuse: fuse - 1 A margin - house, in 1 A steps.
-		target = math.Min(maxW, math.Floor(fuse-1-d.metaF("house_a"))*volt*3)
+		// Room on a 16 A fuse: fuse - house, in 1 A steps. Core works to
+		// the rating; safety_margin_a is a site's opt-in and the rig sets 0.
+		// The target is a floor, not the line: the battery (SoC 50) covers
+		// the house, so a Core that stops at fuse - 1 A also passes.
+		target = math.Min(maxW, math.Floor(fuse-d.metaF("house_a"))*volt*3)
 	}
 	m := d.carSummary(t0, t1, target)
 	m["target_w"] = target
@@ -87,11 +90,10 @@ func judgeS3(d *runData) (metrics, []criterion) {
 		"pre_step_max_i": round(maxOf(pre, maxAbsI), 2),
 	}
 	m["post_step_max_i"] = round(maxOf(d.window(tStep, tBack), maxAbsI), 2)
-	m["over_fuse_longest_s"], m["over_fuse_total_s"] = d.runsOver(tStep, tBack, fuse)
-	overLongest, overTotal := d.runsOver(tStep, tBack, fuse-1)
-	m["over_fuse_minus1_longest_s"], m["over_fuse_minus1_total_s"] = overLongest, overTotal
-	m["i2_over_fuse_minus1_s"], m["i2_peak_a"] = d.i2Over(tCN, t1, fuse-1)
-	m["back_under_fuse_minus1_s"] = roundp(d.firstT(tStep, func(r *sample) bool { return maxAbsI(r) <= fuse-1 && r.T > tStep+1 }), 1)
+	overLongest, overTotal := d.runsOver(tStep, tBack, fuse)
+	m["over_fuse_longest_s"], m["over_fuse_total_s"] = overLongest, overTotal
+	m["i2_over_fuse_s"], m["i2_peak_a"] = d.i2Over(tCN, t1, fuse)
+	m["back_under_fuse_s"] = roundp(d.firstT(tStep, func(r *sample) bool { return maxAbsI(r) <= fuse && r.T > tStep+1 }), 1)
 	last := d.window(tBack-60, tBack)
 	m["post_step_car_w_last60"] = math.Round(meanOf(last, func(r *sample) float64 { return carW(r, 0) }))
 	m["post_step_bat_w_last60"] = math.Round(meanOf(last, batSigned))
@@ -107,15 +109,12 @@ func judgeS3(d *runData) (metrics, []criterion) {
 	// Device response + meter and tick (2 + 2 s) + 3 s.
 	allowed := d.metaF("charger_delay_s") + 2 + 2 + 3
 	m["allowed_over_s"] = allowed
-	m["run_over_fuse_minus1_longest_s"], _ = d.runsOver(tCN, t1, fuse-1)
+	m["run_over_fuse_longest_s"], _ = d.runsOver(tCN, t1, fuse)
 	m["run_max_i"] = round(maxOf(after, maxAbsI), 2)
-	// Before the step, layers with different margins may hold a phase
-	// between fuse - 1 A and fuse - 0.5 A; reported, not judged.
-	m["pre_step_over_fuse_minus1_longest_s"], _ = d.runsOver(tCN, tStep, fuse-1)
-	m["pre_step_over_fuse_minus_half_longest_s"], _ = d.runsOver(tCN, tStep, fuse-0.5)
+	m["pre_step_over_fuse_longest_s"], _ = d.runsOver(tCN, tStep, fuse)
 	return m, []criterion{
 		crit("fuse holds", !isBlown),
-		crit("over fuse - 1 A no longer than the response time + 3 s after the step", overLongest <= allowed),
+		crit("over the fuse no longer than the response time + 3 s after the step", overLongest <= allowed),
 	}
 }
 
@@ -414,10 +413,9 @@ func judgeS8(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
 	t0, t1 := d.marks["charge_now"], d.marks["end"]
 	m := d.carSummary(t0, t1, maxW)
-	m["over_fuse_longest_s"], m["over_fuse_total_s"] = d.runsOver(t0, t1, fuse)
-	overLongest, overTotal := d.runsOver(t0, t1, fuse-1)
-	m["over_fuse_minus1_longest_s"], m["over_fuse_minus1_total_s"] = overLongest, overTotal
-	m["i2_over_fuse_minus1_s"], m["i2_peak_a"] = d.i2Over(t0, t1, fuse-1)
+	overLongest, overTotal := d.runsOver(t0, t1, fuse)
+	m["over_fuse_longest_s"], m["over_fuse_total_s"] = overLongest, overTotal
+	m["i2_over_fuse_s"], m["i2_peak_a"] = d.i2Over(t0, t1, fuse)
 	var prs [][2]float64
 	for i, p := range connector1(profiles(d.frames, t0, t1)) {
 		if i >= 20 {
@@ -435,7 +433,7 @@ func judgeS8(d *runData) (metrics, []criterion) {
 	}
 	return m, []criterion{
 		crit("fuse holds", !m["fuse_blown"].(bool)),
-		crit("over fuse - 1 A no longer than the charger's delay + 7 s", overLongest <= allowed),
+		crit("over the fuse no longer than the charger's delay + 7 s", overLongest <= allowed),
 	}
 }
 
@@ -461,8 +459,8 @@ func judgeS9(d *runData) (metrics, []criterion) {
 	m["profiles_after_switch"] = seq
 	return m, []criterion{
 		crit("fuse holds", !before["fuse_blown"].(bool) && !after["fuse_blown"].(bool)),
-		crit("over fuse - 1 A at most 3 s on 3p", before["over_limit_longest_s"].(float64) <= 3),
-		crit("over fuse - 1 A at most 3 s after the switch to 1p", after["over_limit_longest_s"].(float64) <= 3),
+		crit("over the fuse at most 3 s on 3p", before["over_limit_longest_s"].(float64) <= 3),
+		crit("over the fuse at most 3 s after the switch to 1p", after["over_limit_longest_s"].(float64) <= 3),
 	}
 }
 
@@ -502,7 +500,7 @@ func judgeS10(d *runData) (metrics, []criterion) {
 	}
 	return m, []criterion{
 		crit("fuse holds", !before["fuse_blown"].(bool) && !after["fuse_blown"].(bool)),
-		crit("over fuse - 1 A at most 3 s after the step", after["over_limit_longest_s"].(float64) <= 3),
+		crit("over the fuse at most 3 s after the step", after["over_limit_longest_s"].(float64) <= 3),
 	}
 }
 
@@ -549,7 +547,7 @@ func judgeS11(d *runData) (metrics, []criterion) {
 	}
 	return m, []criterion{
 		crit("an offer within 60 s of the restart", le(firstPosS, 60)),
-		crit("over fuse - 1 A at most 3 s", run["over_limit_longest_s"].(float64) <= 3),
+		crit("over the fuse at most 3 s", run["over_limit_longest_s"].(float64) <= 3),
 		crit("fuse holds", !run["fuse_blown"].(bool)),
 	}
 }
