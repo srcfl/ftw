@@ -705,3 +705,21 @@ func TestOnlineMeterWSkipsOfflineMeter(t *testing.T) {
 		t.Fatal("an offline meter's last reading was returned")
 	}
 }
+
+// A battery's raw power, like the meter's, stops counting once its driver
+// goes offline.
+func TestOnlineRawWSkipsOfflineBattery(t *testing.T) {
+	s := NewStore()
+	s.Update("bat", DerBattery, -3000, nil, nil)
+	s.DriverHealthMut("bat").RecordSuccess()
+	if w, _, ok := s.OnlineRawW("bat", DerBattery); !ok || w != -3000 {
+		t.Fatalf("online battery: %v %v, want -3000 W", w, ok)
+	}
+	if _, _, ok := s.OnlineRawW("bat", DerMeter); ok {
+		t.Fatal("a battery driver reported a meter reading")
+	}
+	s.DriverHealthMut("bat").SetOffline()
+	if _, _, ok := s.OnlineRawW("bat", DerBattery); ok {
+		t.Fatal("an offline battery's last reading was returned")
+	}
+}
