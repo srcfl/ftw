@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"math"
 	"testing"
 	"time"
 
@@ -24,12 +25,22 @@ func setBattery(st *State, store *telemetry.Store, w float64) {
 	store.Update("bat", telemetry.DerBattery, w, ptrF64(0.5), nil)
 }
 
+// freezeStore is a store whose test drivers all report: the check reads
+// telemetry through health-gated accessors.
+func freezeStore() *telemetry.Store {
+	store := telemetry.NewStore()
+	for _, name := range []string{"meter", "bat", "own", "charger", "a", "b"} {
+		store.EnsureDriverHealth(name)
+	}
+	return store
+}
+
 // Seed 207537: the meter answers every poll with one sample while the
 // battery PI winds on it. The freeze must count as stale well before the
 // rig's EV rise went out (38 s into the freeze), and the battery must stop
 // moving once it does.
 func TestFrozenMeterWithMovingOrdersIsStale(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	soc := 0.5
 	store.Update("bat", telemetry.DerBattery, 4075, &soc, nil)
 	store.DriverHealthMut("bat").RecordSuccess()
@@ -44,8 +55,11 @@ func TestFrozenMeterWithMovingOrdersIsStale(t *testing.T) {
 
 	frozenAfter := time.Duration(-1)
 	minW, maxW := 4075.0, 4075.0
+	ordered := 4075.0
 	start := clk
 	for clk.Sub(start) < 38*time.Second {
+		// The rig's battery follows an order about 2 s later: one tick.
+		store.Update("bat", telemetry.DerBattery, ordered, &soc, nil)
 		store.Update("meter", telemetry.DerMeter, 2667, nil, frozenRigMeter)
 		store.DriverHealthMut("meter").RecordSuccess()
 		st.ObserveSiteMeterFreeze(store, clk)
@@ -57,7 +71,7 @@ func TestFrozenMeterWithMovingOrdersIsStale(t *testing.T) {
 			// The gate is open: dispatch acts on the frozen meter.
 			for _, tg := range ComputeDispatch(store, st, capsMap, 3*16*230) {
 				if tg.Driver == "bat" {
-					store.Update("bat", telemetry.DerBattery, tg.TargetW, &soc, nil)
+					ordered = tg.TargetW
 					minW, maxW = min(minW, tg.TargetW), max(maxW, tg.TargetW)
 				}
 			}
@@ -71,6 +85,12 @@ func TestFrozenMeterWithMovingOrdersIsStale(t *testing.T) {
 		t.Fatalf("stale only after %v; the rig's EV rise went out at 38 s", frozenAfter)
 	}
 	t.Logf("stale after %v; battery orders %.0f..%.0f W", frozenAfter, minW, maxW)
+	// In the rig the battery swung from +5 kW to -5 kW before the verdict.
+	// Once the battery has moved past meterFreezeMoveW and the meter still
+	// repeats itself, dispatch holds it.
+	if maxW-minW > 2500 {
+		t.Fatalf("battery orders swung %.0f..%.0f W on a repeated sample before the verdict", minW, maxW)
+	}
 
 	// Any change in the meter's values ends the freeze.
 	store.Update("meter", telemetry.DerMeter, 2654, nil, nil)
@@ -80,9 +100,60 @@ func TestFrozenMeterWithMovingOrdersIsStale(t *testing.T) {
 	}
 }
 
+// Holding the battery on a repeat must not stall a live meter's loop. A
+// 10 s HAN meter, polled on every 2 s tick, and the battery following an
+// order one tick later: dispatch reaches the import target, does not
+// overshoot into export by acting on one reading five times, and the meter
+// never counts as stale. A noise-free meter that sends a new reading on
+// every tick does the same.
+func TestFrozenMeterHoldLetsLiveMeterLoopSettle(t *testing.T) {
+	// The 2 s case overshoots about 1.4 kW with or without the hold: the PI
+	// acting on a meter one tick late. Only the 10 s case is bounded here.
+	for _, tc := range []struct {
+		telegram  time.Duration
+		maxExport float64
+	}{{2 * time.Second, math.Inf(1)}, {10 * time.Second, 1000}} {
+		telegram := tc.telegram
+		store := freezeStore()
+		soc := 0.5
+		clk := time.Now()
+		st := freezeState(&clk)
+		st.Mode = ModeSelfConsumption
+		st.MinDispatchIntervalS = 0
+		st.DriverLimits = map[string]PowerLimits{"bat": {MaxChargeW: 5000, MaxDischargeW: 5000}}
+		capsMap := caps(map[string]float64{"bat": 10000})
+		start := clk
+		houseW, ordered, batW, gridW := 3000.0, 0.0, 0.0, 3000.0
+		for clk.Sub(start) < 3*time.Minute {
+			if clk.Sub(start)%telegram == 0 {
+				gridW = houseW + batW // the meter shows the battery as it is now
+				if -gridW > tc.maxExport {
+					t.Fatalf("%v telegrams: the battery overshot to %.0f W export at %v", telegram, -gridW, clk.Sub(start))
+				}
+			}
+			batW = ordered // the battery takes the last order
+			store.Update("bat", telemetry.DerBattery, batW, &soc, nil)
+			store.Update("meter", telemetry.DerMeter, gridW, nil, nil)
+			st.ObserveSiteMeterFreeze(store, clk)
+			if st.SiteMeterFrozen() {
+				t.Fatalf("%v telegrams: live meter marked stale at %v", telegram, clk.Sub(start))
+			}
+			for _, tg := range ComputeDispatch(store, st, capsMap, 3*16*230) {
+				if tg.Driver == "bat" {
+					ordered = tg.TargetW
+				}
+			}
+			clk = clk.Add(2 * time.Second)
+		}
+		if err := houseW + batW; err > 300 || err < -300 {
+			t.Errorf("%v telegrams: the site still imports %.0f W after 3 min (battery %.0f W)", telegram, err, batW)
+		}
+	}
+}
+
 // A quiet site whose devices do not move keeps a meter that repeats itself.
 func TestFrozenMeterQuietSiteStaysFresh(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	for i := 0; i < 150; i++ { // 5 min at 2 s
@@ -100,7 +171,7 @@ func TestFrozenMeterQuietSiteStaysFresh(t *testing.T) {
 // every second repeats each reading ten times. Large battery moves inside
 // that window must not mark it stale, or it would flap.
 func TestFrozenMeterTenSecondTelegramsDoNotFlap(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	for s := 0; s < 300; s++ {
@@ -120,7 +191,7 @@ func TestFrozenMeterTenSecondTelegramsDoNotFlap(t *testing.T) {
 // at 0 W, and a battery that charges on its own against an order to
 // discharge. The rig's meter has no noise, so it repeats itself here.
 func TestFrozenMeterOrdersNotFollowedDoNotCount(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	st.PrevTargets["bat"] = 0
@@ -146,7 +217,7 @@ func TestFrozenMeterOrdersNotFollowedDoNotCount(t *testing.T) {
 // The verdict waits for the slowest legitimate refresh after the move, and
 // for several samples, before it calls the meter stale.
 func TestFrozenMeterWaitsForTheMoveToLand(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	poll := func() bool {
@@ -175,7 +246,7 @@ func TestFrozenMeterWaitsForTheMoveToLand(t *testing.T) {
 // one telegram (a CRC error) serves the old values for 20 s. A battery move
 // right after the last good telegram must not mark this live meter stale.
 func TestFrozenMeterLostTelegramDoesNotTrip(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	tripped := -1
@@ -204,7 +275,7 @@ func TestFrozenMeterLostTelegramDoesNotTrip(t *testing.T) {
 // Two batteries trade 1.5 kW each way. The meter sees only the sum, which
 // does not change, so the repeat is no evidence.
 func TestFrozenMeterOppositeMovesCancel(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	set := func(name string, w float64) {
@@ -232,7 +303,7 @@ func TestFrozenMeterOppositeMovesCancel(t *testing.T) {
 // had no offer when the meter last changed. FTW's raise, which the car
 // draws, must still count, or an EV rise on a frozen meter goes unseen.
 func TestFrozenMeterNewlyPluggedEVCounts(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	store.Update("charger", telemetry.DerEV, 0, nil, nil)
@@ -257,7 +328,7 @@ func TestFrozenMeterNewlyPluggedEVCounts(t *testing.T) {
 // A battery that moves 2 kW and back before the meter's next telegram
 // leaves nothing for the meter to show, so a repeat is no evidence.
 func TestFrozenMeterMoveAndBackDoesNotCount(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	setBattery(st, store, 0)
@@ -281,7 +352,7 @@ func TestFrozenMeterMoveAndBackDoesNotCount(t *testing.T) {
 // when the meter's only sample is taken. Winding the battery 3 kW on it must
 // still count.
 func TestFrozenMeterFromStartIsCaught(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk) // PrevTargets empty, as after a restart
 	store.Update("bat", telemetry.DerBattery, 0, ptrF64(0.5), nil)
@@ -303,7 +374,7 @@ func TestFrozenMeterFromStartIsCaught(t *testing.T) {
 // own counts only by how far the battery's reading moves. Ordering what it
 // already does is no move.
 func TestFrozenMeterFirstOrderMatchingAutonomousBatteryDoesNotCount(t *testing.T) {
-	store := telemetry.NewStore()
+	store := freezeStore()
 	clk := time.Now()
 	st := freezeState(&clk)
 	store.Update("bat", telemetry.DerBattery, 1500, ptrF64(0.5), nil)
@@ -315,6 +386,62 @@ func TestFrozenMeterFirstOrderMatchingAutonomousBatteryDoesNotCount(t *testing.T
 		st.ObserveSiteMeterFreeze(store, clk)
 		if st.SiteMeterFrozen() {
 			t.Fatalf("first order matching the battery's own 1500 W marked the meter stale at %d s", s)
+		}
+		clk = clk.Add(time.Second)
+	}
+}
+
+// A slow poller (one answer every 20 s) after a 3 kW move: the verdict
+// needs three repeated answers after the move, not just 30 s.
+func TestFrozenMeterSlowPollerNeedsThreeRepeats(t *testing.T) {
+	store := freezeStore()
+	clk := time.Now()
+	st := freezeState(&clk)
+	start := clk
+	poll := func(s int) bool {
+		store.Update("meter", telemetry.DerMeter, 900, nil, nil)
+		st.ObserveSiteMeterFreeze(store, start.Add(time.Duration(s)*time.Second))
+		return st.SiteMeterFrozen()
+	}
+	setBattery(st, store, 0)
+	poll(0)
+	setBattery(st, store, -3000)
+	poll(20) // the move is seen
+	if poll(40) {
+		t.Fatal("stale after one repeat")
+	}
+	if poll(60) {
+		t.Fatal("stale after two repeats, 40 s after the move")
+	}
+	if !poll(80) {
+		t.Fatal("not stale after three repeats, 60 s after a 3 kW move")
+	}
+}
+
+// The rig's OCPP charger accepts a new limit at once, and the car draws it
+// about 30 s later (seed 207537: offer at 157 s, draw at 188 s). A live
+// meter with no noise repeats itself until then. Counting the accepted
+// offer as a move would mark this meter stale, so an EV order counts only
+// once the charger's reading shows the car drawing it.
+func TestFrozenMeterAcceptedOfferWaitsForTheCar(t *testing.T) {
+	store := freezeStore()
+	clk := time.Now()
+	st := freezeState(&clk)
+	store.Update("charger", telemetry.DerEV, 0, nil, nil)
+	st.evCommanded = map[string]float64{"charger": 0}
+	gridW := 208.0
+	for s := 0; s < 120; s++ {
+		if s == 1 { // FTW raises to 6 A x 3; the charger accepts at once
+			st.evCommanded = map[string]float64{"charger": 4140}
+		}
+		if s == 32 { // the car draws; the meter and the charger show it
+			gridW += 4140
+			store.Update("charger", telemetry.DerEV, 4140, nil, nil)
+		}
+		store.Update("meter", telemetry.DerMeter, gridW, nil, nil)
+		st.ObserveSiteMeterFreeze(store, clk)
+		if st.SiteMeterFrozen() {
+			t.Fatalf("live meter marked stale at %d s; the car started 31 s after the offer", s)
 		}
 		clk = clk.Add(time.Second)
 	}

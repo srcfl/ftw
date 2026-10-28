@@ -723,3 +723,39 @@ func TestOnlineRawWSkipsOfflineBattery(t *testing.T) {
 		t.Fatal("an offline battery's last reading was returned")
 	}
 }
+
+// The meter's sample comes with its phase data, and both stop once the
+// meter goes offline.
+func TestOnlineMeterSampleSkipsOfflineMeter(t *testing.T) {
+	s := NewStore()
+	data := json.RawMessage(`{"l1_a":2.4}`)
+	s.Update("meter", DerMeter, 2667, nil, data)
+	if _, _, _, ok := s.OnlineMeterSample("meter"); ok {
+		t.Fatal("a meter with no health record was returned")
+	}
+	s.DriverHealthMut("meter").RecordSuccess()
+	w, got, at, ok := s.OnlineMeterSample("meter")
+	if !ok || w != 2667 || string(got) != string(data) || at.IsZero() {
+		t.Fatalf("online meter: %v %s %v %v", w, got, at, ok)
+	}
+	s.DriverHealthMut("meter").SetOffline()
+	if _, _, _, ok := s.OnlineMeterSample("meter"); ok {
+		t.Fatal("an offline meter's last sample was returned")
+	}
+}
+
+// Every reporting driver of one type, and none that went offline.
+func TestOnlineRawWByTypeSkipsOfflineDrivers(t *testing.T) {
+	s := NewStore()
+	for name, w := range map[string]float64{"a": -3000, "b": 1500} {
+		s.Update(name, DerBattery, w, nil, nil)
+		s.DriverHealthMut(name).RecordSuccess()
+	}
+	s.Update("charger", DerEV, 4140, nil, nil)
+	s.DriverHealthMut("charger").RecordSuccess()
+	s.DriverHealthMut("b").SetOffline()
+	got := s.OnlineRawWByType(DerBattery)
+	if len(got) != 1 || got["a"] != -3000 {
+		t.Fatalf("online batteries = %v, want only a at -3000 W", got)
+	}
+}

@@ -58,7 +58,10 @@ type meterFreeze struct {
 	devices map[ownDeviceKey]ownDevice
 	movedAt time.Time // when the devices first moved past meterFreezeMoveW
 	repeats int       // identical samples since movedAt
-	frozen  bool
+	// repeatAfterMove: the sample at `at` repeats the values from before
+	// the devices moved past meterFreezeMoveW. See siteMeterRepeatsAfterMove.
+	repeatAfterMove bool
+	frozen          bool
 }
 
 // ObserveSiteMeterFreeze compares the site meter's newest sample with the
@@ -71,36 +74,38 @@ func (s *State) ObserveSiteMeterFreeze(store *telemetry.Store, now time.Time) {
 		return
 	}
 	f := &s.meterFreeze
-	r := store.Get(s.SiteMeterDriver, telemetry.DerMeter)
-	if r == nil || f.driver != s.SiteMeterDriver {
+	w, data, at, ok := store.OnlineMeterSample(s.SiteMeterDriver)
+	if !ok || f.driver != s.SiteMeterDriver {
+		// An offline meter is stale on its own; start over once it returns.
 		*f = meterFreeze{driver: s.SiteMeterDriver}
-		if r == nil {
+		if !ok {
 			return
 		}
 	}
 	// No new sample: siteMeterHeld and the watchdog handle that.
-	if !r.UpdatedAt.After(f.at) {
+	if !at.After(f.at) {
 		return
 	}
-	sample := readMeterSample(r)
+	sample := readMeterSample(w, data)
 	devices := s.ownDevices(store)
 	if f.at.IsZero() || sample != f.sample {
 		if f.frozen {
 			slog.Info("site meter values move again", "site_meter", f.driver)
 		}
-		*f = meterFreeze{driver: f.driver, at: r.UpdatedAt, sample: sample, devices: devices}
+		*f = meterFreeze{driver: f.driver, at: at, sample: sample, devices: devices}
 		return
 	}
-	f.at = r.UpdatedAt
+	f.at = at
 	if f.frozen {
 		return // only a change in the meter's values clears it
 	}
 	moved := devicesMovedW(f.devices, devices)
 	if math.Abs(moved) <= meterFreezeMoveW {
 		// Not moved, or moved back: a live meter may repeat itself here.
-		f.movedAt, f.repeats = time.Time{}, 0
+		f.movedAt, f.repeats, f.repeatAfterMove = time.Time{}, 0, false
 		return
 	}
+	f.repeatAfterMove = true
 	if f.movedAt.IsZero() {
 		f.movedAt = now
 		return
@@ -118,6 +123,18 @@ func (s *State) ObserveSiteMeterFreeze(store *telemetry.Store, now time.Time) {
 // meter repeating one reading while FTW's devices moved.
 func (s *State) SiteMeterFrozen() bool {
 	return s != nil && s.meterFreeze.frozen
+}
+
+// siteMeterRepeatsAfterMove reports whether meter is the sample
+// ObserveSiteMeterFreeze judged last, and it repeats the values from before
+// FTW's devices moved by more than meterFreezeMoveW. A live meter shows
+// such a move, so the repeat carries no new error. Battery dispatch treats
+// it as a held sample (siteMeterHeld) from the first repeat, not only once
+// the meter counts as stale. On a meter that sends a reading every 10 s,
+// this waits for the next reading instead of acting on the old one again.
+func (s *State) siteMeterRepeatsAfterMove(meter *telemetry.DerReading) bool {
+	f := &s.meterFreeze
+	return meter != nil && f.driver == s.SiteMeterDriver && f.repeatAfterMove && meter.UpdatedAt.Equal(f.at)
 }
 
 type ownDeviceKey struct {
@@ -138,11 +155,11 @@ type ownDevice struct {
 // a freeze, is judged like any other move.
 func (s *State) ownDevices(store *telemetry.Store) map[ownDeviceKey]ownDevice {
 	out := make(map[ownDeviceKey]ownDevice)
-	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
-		out[ownDeviceKey{telemetry.DerBattery, r.Driver}] = ownDevice{orderW: s.PrevTargets[r.Driver], readW: r.RawW}
+	for driver, w := range store.OnlineRawWByType(telemetry.DerBattery) {
+		out[ownDeviceKey{telemetry.DerBattery, driver}] = ownDevice{orderW: s.PrevTargets[driver], readW: w}
 	}
-	for _, r := range store.ReadingsByType(telemetry.DerEV) {
-		out[ownDeviceKey{telemetry.DerEV, r.Driver}] = ownDevice{orderW: s.evCommanded[r.Driver], readW: r.RawW}
+	for driver, w := range store.OnlineRawWByType(telemetry.DerEV) {
+		out[ownDeviceKey{telemetry.DerEV, driver}] = ownDevice{orderW: s.evCommanded[driver], readW: w}
 	}
 	return out
 }
@@ -168,7 +185,7 @@ func devicesMovedW(a, b map[ownDeviceKey]ownDevice) float64 {
 	return moved
 }
 
-func readMeterSample(r *telemetry.DerReading) meterSample {
+func readMeterSample(w float64, data json.RawMessage) meterSample {
 	var d struct {
 		L1A *float64 `json:"l1_a"`
 		L2A *float64 `json:"l2_a"`
@@ -180,11 +197,11 @@ func readMeterSample(r *telemetry.DerReading) meterSample {
 		L2V *float64 `json:"l2_v"`
 		L3V *float64 `json:"l3_v"`
 	}
-	if len(r.Data) > 0 {
-		_ = json.Unmarshal(r.Data, &d)
+	if len(data) > 0 {
+		_ = json.Unmarshal(data, &d)
 	}
 	var out meterSample
-	out.vals[0], out.has[0] = r.RawW, true
+	out.vals[0], out.has[0] = w, true
 	for i, p := range [...]*float64{d.L1A, d.L2A, d.L3A, d.L1W, d.L2W, d.L3W, d.L1V, d.L2V, d.L3V} {
 		if p != nil {
 			out.vals[i+1], out.has[i+1] = *p, true

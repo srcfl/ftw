@@ -95,10 +95,24 @@ func siteDispatchGateLocked(
 	timeout time.Duration,
 	now time.Time,
 ) siteDispatchDecision {
+	return siteMeterGateLocked(tel, ctrl, ctrl.SiteMeterDriver, ctrl.SiteFuseAmps, ctrl.SiteFusePhases, timeout, now)
+}
+
+// siteMeterGateLocked is siteDispatchGateLocked for a given meter and fuse.
+// Setup uses it to judge a candidate's fuse before it enables control. Only
+// the running site meter can be frozen. Call it with ctrlMu held.
+func siteMeterGateLocked(
+	tel *telemetry.Store,
+	ctrl *control.State,
+	meter string,
+	fuseAmps float64,
+	phases int,
+	timeout time.Duration,
+	now time.Time,
+) siteDispatchDecision {
 	ctrl.ObserveSiteMeterFreeze(tel, now)
-	return evaluateSiteDispatchFreshnessAt(
-		tel, ctrl.SiteMeterDriver, ctrl.SiteFuseAmps, ctrl.SiteFusePhases, timeout, now,
-	).frozenMeter(ctrl.SiteMeterFrozen())
+	frozen := meter == ctrl.SiteMeterDriver && ctrl.SiteMeterFrozen()
+	return evaluateSiteDispatchFreshnessAt(tel, meter, fuseAmps, phases, timeout, now).frozenMeter(frozen)
 }
 
 // sitePhaseCurrentsAt returns the configured phases in L1/L2/L3 order.

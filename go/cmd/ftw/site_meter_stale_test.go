@@ -125,6 +125,8 @@ func TestSiteDispatchGateClosesOnFrozenMeter(t *testing.T) {
 	frozen := []byte(`{"w":2667,"l1_a":2.4,"l2_a":5.5,"l3_a":-0.2,"l1_v":230,"l2_v":230,"l3_v":230}`)
 	soc := 0.5
 	tel.Update("bat", telemetry.DerBattery, 0, &soc, nil)
+	tel.EnsureDriverHealth("meter")
+	tel.EnsureDriverHealth("bat")
 
 	start := time.Now()
 	staleAt := -1
@@ -145,6 +147,15 @@ func TestSiteDispatchGateClosesOnFrozenMeter(t *testing.T) {
 	}
 	if staleAt < 0 || staleAt >= 38 {
 		t.Fatalf("meter repeated one sample for 40 s while the battery moved 3 kW: stale at %d s, want before 38 s", staleAt)
+	}
+
+	// Setup's check before it enables control, with the candidate's own
+	// fuse, sees the same verdict.
+	ctrlMu.Lock()
+	setup := siteMeterGateLocked(tel, ctrl, "meter", 25, 3, 2*time.Minute, start.Add(40*time.Second))
+	ctrlMu.Unlock()
+	if setup.Reason != siteDispatchMeterStale {
+		t.Fatalf("setup gate on a frozen meter = %q, want %q", setup.Reason, siteDispatchMeterStale)
 	}
 
 	tel.Update("meter", telemetry.DerMeter, 2654, nil, nil)

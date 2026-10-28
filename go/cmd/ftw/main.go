@@ -2612,7 +2612,10 @@ func main() {
 			if timeout <= 0 {
 				timeout = 60 * time.Second
 			}
-			if gate := evaluateSiteDispatchFreshnessAt(tel, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now()); !gate.Allowed() {
+			ctrlMu.Lock()
+			gate := siteMeterGateLocked(tel, ctrl, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now())
+			ctrlMu.Unlock()
+			if !gate.Allowed() {
 				return fmt.Errorf("measure before enabling control: %s", gate.Reason)
 			}
 			return nil
