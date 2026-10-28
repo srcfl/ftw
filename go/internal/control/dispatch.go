@@ -241,8 +241,8 @@ type PowerLimits struct {
 	SoCMin float64
 }
 
-// socFloor is the lowest SoC that the stale-plan fallback, fuse relief and
-// the hourly import limit may discharge to.
+// socFloor is the lowest SoC that planner modes, fuse relief and the hourly
+// import limit may discharge to.
 func (l PowerLimits) socFloor() float64 {
 	if l.SoCMin > dischargeFloorSoC && l.SoCMin <= 1 {
 		return l.SoCMin
@@ -1198,10 +1198,10 @@ type batteryInfo struct {
 	dischargeBlocked bool
 	chargeBlocked    bool
 	socMissing       bool // no fresh SoC reading; soc is 0
-	// belowStaleFloor: a planner mode without a plan, and SoC under the
-	// owner's floor. Unlike a driver's transient report, this must also
-	// stop a discharge already running, past the deadband and slew.
-	belowStaleFloor bool
+	// belowOwnerFloor: a planner mode, with or without a plan, and SoC at
+	// or under the owner's floor. Unlike a driver's transient report, this
+	// must also stop a discharge already running, past the deadband and slew.
+	belowOwnerFloor bool
 }
 
 // chargeCap returns the effective per-battery charge ceiling, falling
@@ -1536,8 +1536,8 @@ func ComputeDispatch(
 	}
 
 	// ---- Gather online batteries ----
-	// Without a plan, a planner mode keeps the owner's reserve.
-	staleFloor := !manualHoldActive && state.Mode.IsPlannerMode() && state.PlanStale
+	// A planner mode keeps the owner's reserve, with or without a plan.
+	ownerFloor := !manualHoldActive && state.Mode.IsPlannerMode()
 	batteries := make([]batteryInfo, 0, len(driverCapacities))
 	for name, cap := range driverCapacities {
 		r := store.Get(name, telemetry.DerBattery)
@@ -1559,8 +1559,8 @@ func ComputeDispatch(
 		// A configured zero is a hard direction block, not the legacy
 		// "use MaxCommandW" sentinel. Feed it into the allocator as well as
 		// the clamps so capable siblings receive the blocked battery's share.
-		belowStaleFloor := staleFloor && soc < lim.socFloor()
-		dischargeBlocked = dischargeBlocked || lim.dischargeCap() == 0 || belowStaleFloor
+		belowOwnerFloor := ownerFloor && soc <= lim.socFloor()
+		dischargeBlocked = dischargeBlocked || lim.dischargeCap() == 0 || belowOwnerFloor
 		chargeBlocked = chargeBlocked || lim.chargeCap() == 0 || state.BatteryChargePaused(name)
 		batteries = append(batteries, batteryInfo{
 			driver:           name,
@@ -1576,7 +1576,7 @@ func ComputeDispatch(
 			dischargeBlocked: dischargeBlocked,
 			chargeBlocked:    chargeBlocked,
 			socMissing:       socMissing,
-			belowStaleFloor:  belowStaleFloor,
+			belowOwnerFloor:  belowOwnerFloor,
 		})
 	}
 	onlineBats := make([]batteryInfo, 0, len(batteries))
@@ -1850,7 +1850,8 @@ func ComputeDispatch(
 		// and the held-meter exit both fall through to cut it.
 		batteryBreaksLimit := (noSelfDischarge && anyBatteryDischarging(onlineBats)) ||
 			anyExplicitZeroDischargeViolation(onlineBats) ||
-			anyBelowStaleFloorDischarging(onlineBats) ||
+			anyBelowOwnerFloorDischarging(onlineBats, state.PrevTargets) ||
+			anyAtHardFloorDischarging(onlineBats, state.PrevTargets) ||
 			anyBlockedBatteryCharging(onlineBats, noSelfCharge)
 
 		// The PI acts on the meter alone. A held sample carries no new
@@ -2344,7 +2345,7 @@ func ComputeDispatch(
 		noSelfDischarge:   noSelfDischarge,
 		noSelfCharge:      noSelfCharge,
 		chargeBlocked:     chargeBlockedDrivers(onlineBats),
-		floorBlocked:      belowStaleFloorDrivers(onlineBats),
+		floorBlocked:      belowOwnerFloorDrivers(onlineBats),
 		updatePrevTargets: true,
 		recordDispatch:    true,
 	})
@@ -2439,13 +2440,13 @@ func chargeBlockedDrivers(bats []batteryInfo) map[string]bool {
 	return out
 }
 
-// belowStaleFloorDrivers is the set of online batteries under the stale-plan
-// SoC floor. Slew anchors on measured power and would hand back part of a
-// discharge the allocator already withdrew.
-func belowStaleFloorDrivers(bats []batteryInfo) map[string]bool {
+// belowOwnerFloorDrivers is the set of online batteries at or under the
+// owner SoC floor. Slew anchors on measured power and would hand back part
+// of a discharge the allocator already withdrew.
+func belowOwnerFloorDrivers(bats []batteryInfo) map[string]bool {
 	var out map[string]bool
 	for _, b := range bats {
-		if !b.belowStaleFloor {
+		if !b.belowOwnerFloor {
 			continue
 		}
 		if out == nil {
@@ -2456,22 +2457,46 @@ func belowStaleFloorDrivers(bats []batteryInfo) map[string]bool {
 	return out
 }
 
-// anyBelowStaleFloorDischarging reports a battery under the stale-plan floor
-// that is measured discharging. The deadband exit returns no targets, and a
+// floorStandbyW is the largest draw a pack parked at its floor may read
+// without counting as a discharge. Packs report tens of watts of standby
+// draw there; treating that as a discharge sent an order every tick.
+const floorStandbyW = 50.0
+
+// dischargingAtFloor reports a real discharge on a pack at its floor: past
+// standby draw, or any measured discharge after FTW's own last order to it
+// was a discharge, which the driver would otherwise hold.
+func dischargingAtFloor(b batteryInfo, prev map[string]float64) bool {
+	return b.currentW < -floorStandbyW || b.currentW < -1 && prev[b.driver] < 0
+}
+
+// anyBelowOwnerFloorDischarging reports a battery at or under the owner
+// floor that is discharging. The deadband exit returns no targets, and a
 // driver keeps its last setpoint, so such a battery would drain on.
-func anyBelowStaleFloorDischarging(bats []batteryInfo) bool {
+func anyBelowOwnerFloorDischarging(bats []batteryInfo, prev map[string]float64) bool {
 	for _, b := range bats {
-		if b.belowStaleFloor && b.currentW < -1 {
+		if b.belowOwnerFloor && dischargingAtFloor(b, prev) {
 			return true
 		}
 	}
 	return false
 }
 
-// floorBelowStaleFloorDischarge moves a discharge target to 0 W for each
-// battery under the stale-plan floor. Fuse relief runs later and stops at
+// anyAtHardFloorDischarging reports a battery at or under Core's 5 % floor
+// that is discharging, in any mode. The deadband exit would leave the
+// driver on its last discharge setpoint.
+func anyAtHardFloorDischarging(bats []batteryInfo, prev map[string]float64) bool {
+	for _, b := range bats {
+		if !b.socMissing && b.soc <= dischargeFloorSoC && dischargingAtFloor(b, prev) {
+			return true
+		}
+	}
+	return false
+}
+
+// floorBelowOwnerFloorDischarge moves a discharge target to 0 W for each
+// battery at or under the owner floor. Fuse relief runs later and stops at
 // the same floor, so it cannot reopen the discharge.
-func floorBelowStaleFloorDischarge(targets []DispatchTarget, blocked map[string]bool) []DispatchTarget {
+func floorBelowOwnerFloorDischarge(targets []DispatchTarget, blocked map[string]bool) []DispatchTarget {
 	if len(blocked) == 0 {
 		return targets
 	}
@@ -2530,7 +2555,7 @@ func applyDispatchSafetyPipeline(
 		targets = floorNegativeTargets(targets)
 	}
 	targets = floorBlockedCharge(targets, opts.noSelfCharge, opts.chargeBlocked)
-	targets = floorBelowStaleFloorDischarge(targets, opts.floorBlocked)
+	targets = floorBelowOwnerFloorDischarge(targets, opts.floorBlocked)
 	targets = floorBlockedDischarge(targets, store, state, driverCapacities, fuseMaxW)
 
 	// A battery-boost lease may never draw the stationary fleet below its
@@ -3672,12 +3697,12 @@ func floorBlockedDischarge(
 }
 
 // dischargeParked reports whether the distributor parks a pack's discharge
-// at 0 W: no SoC, SoC under Core's 5 % floor, discharge_capable=false or a
-// zero discharge limit. The owner's soc_min is a planner rule; the stale-plan
-// floor applies it separately (floorBelowStaleFloorDischarge).
+// at 0 W: no SoC, SoC at or under Core's 5 % floor, discharge_capable=false
+// or a zero discharge limit. The owner's soc_min is a planner rule; the
+// owner floor applies it separately (floorBelowOwnerFloorDischarge).
 func dischargeParked(r *telemetry.DerReading, lim PowerLimits) bool {
 	dischargeBlocked, _ := batteryDirectionBlocks(r.Data)
-	return r.SoC == nil || *r.SoC < dischargeFloorSoC || dischargeBlocked || lim.dischargeCap() == 0
+	return r.SoC == nil || *r.SoC <= dischargeFloorSoC || dischargeBlocked || lim.dischargeCap() == 0
 }
 
 // blockedDischargeKeepW is the discharge the blocked packs must keep after
@@ -3851,7 +3876,7 @@ func clampTargetsToPowerLimits(targets []DispatchTarget, limits map[string]Power
 const dischargeFloorSoC = 0.05
 
 // clampWithSoC applies the hard safety clamps for one battery command:
-//   - don't discharge below SoC 5 % (site: don't make target < 0 when SoC < 0.05);
+//   - don't discharge at or below SoC 5 % (no target < 0 when SoC <= 0.05);
 //     BMS handles fine-grained SoC but we never ask it to pull an empty pack.
 //   - cap charge at the battery's MaxChargeW (falls back to MaxCommandW default).
 //   - cap discharge at the battery's MaxDischargeW (same fallback).
@@ -3863,7 +3888,7 @@ func clampWithSoC(target float64, b batteryInfo) (float64, bool) {
 	clamped := target
 	wasClamped := false
 	// Block discharge when the battery is empty.
-	if b.soc < dischargeFloorSoC && target < 0 {
+	if b.soc <= dischargeFloorSoC && target < 0 {
 		clamped = 0
 		wasClamped = true
 	}
@@ -4778,7 +4803,7 @@ func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper fl
 	lower = -lim.dischargeCap()
 	upper = lim.chargeCap()
 	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-	if r.SoC == nil || *r.SoC < lim.socFloor() || dischargeBlocked {
+	if r.SoC == nil || *r.SoC <= lim.socFloor() || dischargeBlocked {
 		lower = 0
 	}
 	if chargeBlocked || r.SoC != nil && *r.SoC >= lim.socCeiling() {
