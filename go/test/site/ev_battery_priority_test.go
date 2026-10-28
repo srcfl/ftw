@@ -2,8 +2,6 @@
 
 package site
 
-import "math"
-
 // #1868: the car has only [0, 4140] W, while the battery can charge at
 // 6000 W. The actual devices run over Modbus and OCPP; marks and the
 // physical meter record let the judge see which device yielded.
@@ -53,18 +51,29 @@ func judgeS18(d *runData) (metrics, []criterion) {
 	batteryBefore, batteryAfter := meanOf(pre, batSigned), meanOf(d.window(none-20, none), batSigned)
 	// Core holds the phases at the fuse line, so the house's 0.1 A step
 	// lands over it until Core cuts; the I²t model judges that stretch.
-	// Own commands are the rest, as in the minor window.
-	ownI := math.Max(maxOf(d.window(t0, small), maxAbsI), maxOf(minor, maxAbsI))
+	// Own commands are the rest, as in the minor window. The working limit
+	// is the fuse rating (owner rule, 27 Oct 2026): a reading over it fails
+	// only while the 60 s heat is over it too, or over 1.2 x the fuse at
+	// once (heatOver). Readings jitter a few mA around the line.
+	fuse := d.metaF("fuse")
+	own := append(d.window(t0, small), minor...)
+	ownI, ownOver := maxOf(own, maxAbsI), 0
+	d.warm()
+	for _, r := range own {
+		if heatOver(r, fuse) {
+			ownOver++
+		}
+	}
 	m := metrics{"battery_before_w": batteryBefore, "battery_after_w": batteryAfter, "restart_s": restart,
 		"car_before_w": carMin(pre), "car_small_step_w": carMin(minor), "car_recovered_w": carMin(recovered),
 		"fuse_blown": anyBlown(d.samples), "max_i_before_house_overload": maxOf(d.window(t0, none), maxAbsI),
-		"max_i_own_commands": ownI}
+		"max_i_own_commands": ownI, "own_commands_over_fuse_heat_samples": ownOver}
 	return m, []criterion{
 		crit("setup: car and battery charge together", len(pre) > 0 && carMin(pre) >= 4100 && batteryBefore > 1000),
 		crit("battery yields before the minimum-step car", len(minor) > 0 && carMin(minor) >= 4100 && batteryAfter < batteryBefore-40),
 		crit("car stops when house leaves no room", len(paused) > 0 && maxOf(paused, func(r *sample) float64 { return carW(r, 0) }) < 100),
 		crit("car restarts automatically within 150 s", le(restart, 150) && len(recovered) > 0 && carMin(recovered) >= 4100),
-		crit("own commands stay inside the rated fuse", ownI <= 16.01),
+		crit("own commands stay inside the rated fuse", len(own) > 0 && ownOver == 0),
 		crit("fuse holds", !anyBlown(d.samples)),
 	}
 }
