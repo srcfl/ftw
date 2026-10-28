@@ -580,3 +580,58 @@ func TestSecondDeadLinkOutageAfterReturnGetsDefault(t *testing.T) {
 		})
 	}
 }
+
+// An accepted command for the excluded action ends the trial guard at once.
+// On a hybrid inverter a curtail streak can keep the refusal record alive
+// after the battery trial was accepted. A dead-link outage a minute later is
+// then a new outage, so the device gets its default when it reads again
+// instead of waiting out the retry window.
+func TestAcceptedTrialEndsGuardWhileOtherActionStreakRemains(t *testing.T) {
+	tel := pollingStore(t, "sungrow")
+	tracker := newDriverActuationTracker(tel)
+	battery := []byte(`{"action":"battery","power_w":-3000}`)
+	curtail := []byte(`{"action":"curtail","power_limit_w":2500}`)
+	now := time.Now()
+	excludeDuringOutage(t, tel, tracker, refusingSender("modbus reconnect backoff active"), now)
+
+	now = now.Add(20 * time.Second)
+	time.Sleep(time.Millisecond) // LastSuccess is wall time
+	tel.RecordDriverSuccess("sungrow")
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+	tracker.dispatchCommand(context.Background(), refusingSender("curtail register refused"), "pv curtail send", "sungrow", curtail, time.Second, now)
+	tracker.dispatchCommand(context.Background(), &stubSender{}, "driver send", "sungrow", battery, time.Second, now)
+	if _, kept := tracker.refusals["sungrow"]; !kept {
+		t.Fatal("curtail streak did not keep the refusal record")
+	}
+	for end := now.Add(time.Minute); now.Before(end); {
+		now = now.Add(5 * time.Second)
+		time.Sleep(time.Millisecond)
+		tel.RecordDriverSuccess("sungrow")
+		if p := tracker.update(now, nil); len(p) != 0 {
+			t.Fatalf("default while healthy: %v", p)
+		}
+	}
+
+	dead := refusingSender("force command write failed: connection refused")
+	for i := 0; i < driverRefusalLimit; i++ {
+		tracker.dispatchCommand(context.Background(), dead, "driver send", "sungrow", battery, time.Second, now)
+	}
+	if tel.DriverHealth("sungrow").IsOnline() {
+		t.Fatal("dead-link refusals did not exclude the driver")
+	}
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+	for i := 1; i <= 6; i++ {
+		tel.RecordDriverError("sungrow", "driver_poll: none of 17 modbus reads returned data")
+		tel.WatchdogScan(time.Minute)
+		if p := tracker.update(now.Add(time.Duration(i)*5*time.Second), nil); len(p) != 0 {
+			t.Fatalf("default while reads fail: %v", p)
+		}
+	}
+	now = now.Add(35 * time.Second)
+	time.Sleep(time.Millisecond)
+	tel.RecordDriverSuccess("sungrow")
+	assertStringsEqual(t, tracker.update(now, nil), []string{"sungrow"})
+	if !tel.DriverHealth("sungrow").IsOnline() {
+		t.Fatalf("driver back from a 29 s outage waits out the %v window", driverRefusalRetryInterval)
+	}
+}
