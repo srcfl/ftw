@@ -964,9 +964,11 @@ func judgeS15p(d *runData) (metrics, []criterion) {
 // (15 - 3) x 230 - (1 380 + 230) = 1 150 W on its way once kept the car from
 // starting at all (#1805). With the battery's 2 s the car started 25 s late
 // when Charge now caught a raise in flight, and at once when it did not.
+// The run plans in Self: in passive arbitrage the plan may keep the battery
+// idle and export the PV, and then no raise is on its way (#1875).
 func s15bat(c *runCtx, fuse float64) (map[string]any, error) {
 	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(3), socPct: 50, chargers: []charger{onePhaseCharger},
-		lpExtra: onePhaseExtra, batteryDelayS: 8}, func(st *stack) error {
+		lpExtra: onePhaseExtra, batteryDelayS: 8, mode: "planner_self"}, func(st *stack) error {
 		if err := st.plug(0); err != nil {
 			return err
 		}

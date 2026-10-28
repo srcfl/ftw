@@ -1303,6 +1303,7 @@ func main() {
 		// and one whose entry was removed goes back to pending.
 		if ocppSrv != nil {
 			ocppSrv.Handler().SetApprovedIDs(ocppApprovedIDs(newCfg))
+			ocppSrv.Handler().SetManagedIDs(ocppStartLimitIDs(newCfg, setupMeasurementAtBoot))
 			// A charger adopted by this save booted long ago and will not
 			// boot again just because we changed our mind, so its device
 			// row has to be written here rather than waiting for one.
@@ -1473,6 +1474,7 @@ func main() {
 			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
 			ChargerSecrets:     cfg.OCPP.ChargerSecrets(),
 			ApprovedIDs:        approved,
+			ManagedIDs:         ocppStartLimitIDs(cfg, setupMeasurementAtBoot),
 		}
 		if t := cfg.OCPP.TLS; t != nil {
 			ocppCfg.TLS = &ocpp.TLSConfig{
@@ -2610,7 +2612,10 @@ func main() {
 			if timeout <= 0 {
 				timeout = 60 * time.Second
 			}
-			if gate := evaluateSiteDispatchFreshnessAt(tel, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now()); !gate.Allowed() {
+			ctrlMu.Lock()
+			gate := siteMeterGateLocked(tel, ctrl, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now())
+			ctrlMu.Unlock()
+			if !gate.Allowed() {
 				return fmt.Errorf("measure before enabling control: %s", gate.Reason)
 			}
 			return nil
@@ -3048,15 +3053,11 @@ func main() {
 			// standdown/default commands remain permitted.
 			ctrlMu.Lock()
 			ctrl.ObserveSiteImport(tel)
+			freshness := siteDispatchGateLocked(tel, ctrl, watchdogTimeout, tickNow)
 			siteMeterDriver := ctrl.SiteMeterDriver
-			siteFuseAmps := ctrl.SiteFuseAmps
-			siteFusePhases := ctrl.SiteFusePhases
 			forecastIntent := forecastCurtailmentActive(ctrl, tickNow)
 			ctrlMu.Unlock()
 			forecastCurtail.ObserveIntent(forecastIntent)
-			freshness := evaluateSiteDispatchFreshnessAt(
-				tel, siteMeterDriver, siteFuseAmps, siteFusePhases, watchdogTimeout, tickNow,
-			)
 			if reason := setupRuntimeBlockReason(); reason != "" {
 				freshness.Reason = reason
 			}
@@ -3663,10 +3664,19 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 
 // driverLimitsFrom gives dispatch the same per-driver power limits and charge
 // ceilings as the planner. Each battery's soc_max overrides the planner's.
+// The SoC floor is the higher of the battery's and the running planner's
+// soc_min, with the planner's 10 % default.
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery, planner *config.Planner) map[string]control.PowerLimits {
 	ceiling := 1.0
 	if planner != nil && planner.SoCMax > 0 {
 		ceiling = planner.SoCMax
+	}
+	floor := 0.0
+	if planner != nil && planner.Enabled {
+		floor = planner.SoCMin
+		if floor <= 0 {
+			floor = 0.10
+		}
 	}
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
@@ -3676,6 +3686,10 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 			if b := batteries[d.Name]; b.SoCMax != nil {
 				limits.SoCMax = *b.SoCMax
 				limits.SoCMaxSet = true
+			}
+			limits.SoCMin = floor
+			if b := batteries[d.Name]; b.SoCMin != nil && *b.SoCMin > floor {
+				limits.SoCMin = *b.SoCMin
 			}
 			out[d.Name] = limits
 		}

@@ -241,9 +241,17 @@ func (d *runData) inverterBackFrom(inverterOut, down []eventWindow) func(t float
 	}
 	var backs []back
 	add := func(at float64, outage bool) {
-		from := at + reconnectBackoffMaxS
+		// While Core is down nothing reads the inverter: its backoff
+		// starts when Core is up again.
+		start := at
+		for _, w := range down {
+			if outage && at >= w.from && at < w.to {
+				start = w.to
+			}
+		}
+		from := start + reconnectBackoffMaxS
 		for _, r := range d.samples {
-			if r.T >= at && r.T < from && readsInverter(r) {
+			if r.T >= start && r.T < from && readsInverter(r) {
 				from = r.T
 				break
 			}
@@ -314,7 +322,7 @@ const (
 	// and the Core timers that may delay it after the inverter returns.
 	inverterDriver   = "sungrow" // the rig's inverter driver (stack_test.go)
 	forcedBudgetS    = 10.0
-	defaultRetryMaxS = 30.0 // drivers/registry.go defaultRetryMax; 0 once #1915 (C11) lands
+	defaultRetryMaxS = 0.0 // #1915 (C11) retries the default on the first good poll after an outage
 )
 
 // reconnectBackoffMaxS is Core's Modbus reconnect backoff cap

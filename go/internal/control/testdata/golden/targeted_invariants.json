@@ -1,7 +1,7 @@
 {
   "family": "targeted_invariants",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "68c5b6125898bb9da70728b8921259c87e96171d",
+  "ftw_commit": "a11706b4",
   "record_count": 18,
   "records": [
     {
@@ -683,7 +683,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3360,
+          "target_w": -2760,
           "clamped": true
         }
       ],
@@ -708,9 +708,9 @@
       },
       "site_totals": {
         "battery_current_w": 0,
-        "battery_target_sum_w": -3360,
+        "battery_target_sum_w": -2760,
         "raw_grid_w": 1000,
-        "projected_grid_w": -2360
+        "projected_grid_w": -1760
       }
     },
     {
@@ -782,7 +782,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2240,
+          "target_w": -0,
           "clamped": true
         }
       ],
@@ -790,15 +790,15 @@
         "clamped_drivers": [
           "ferroamp"
         ],
-        "all_targets_zero_clamped": false,
+        "all_targets_zero_clamped": true,
         "plan_sign_intent": -1,
-        "plan_sign_floor_zeroed": false,
+        "plan_sign_floor_zeroed": true,
         "plan_stale": false,
         "fuse_saturated": false,
         "fuse_ev_max_w": 0,
         "fuse_hold_latched": true,
         "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 2240,
+        "fuse_hold_max_discharge_w": 0,
         "per_phase_overage_w": 920,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
@@ -807,9 +807,9 @@
       },
       "site_totals": {
         "battery_current_w": -2000,
-        "battery_target_sum_w": -2240,
+        "battery_target_sum_w": 0,
         "raw_grid_w": -6000,
-        "projected_grid_w": -6240
+        "projected_grid_w": -4000
       }
     },
     {

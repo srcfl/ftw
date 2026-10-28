@@ -440,9 +440,9 @@ func (c forcedCase) run() *runData {
 
 // R8, C1, on the shapes of the nightly seeds on master 83c2b24c. Once Core
 // has the inverter back, a battery FTW does not dispatch leaves its forced
-// mode within 10 s, plus the registry's 30 s default retry until #1915
-// (C11) lands. The Modbus reconnect backoff between the inverter's return
-// and Core's first good read is Core's to take.
+// mode within 10 s; #1915 (C11) sends the default on Core's first good
+// read. The Modbus reconnect backoff (10 s since #1930) between the
+// inverter's return and that read is Core's to take.
 func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
 	const forced = "no forced battery mode FTW does not dispatch"
 	read207539 := 182 + reconnectBackoffMaxS - 4
@@ -466,11 +466,11 @@ func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
 		{name: "default 8 s after Core reads again", outage: "offline", outFrom: 100, outFor: 68, readAt: 177,
 			cmd: 187, setW: 2668, forcedTo: 185, want: true},
 		// 207539: offline 508.5-590.0 s, the Modbus backoff (60 s then)
-		// holds Core's first good read back 55.7 s, and FTW dispatches 20 s
-		// after it. Here the read comes 4 s before the backoff's cap ends.
-		// Inside Core's timers; it fails once #1915 (C11) lands.
-		{name: "207539: Core's reconnect backoff and default retry", outage: "offline", outFrom: 100, outFor: 82, readAt: read207539,
-			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: read207539 + 20, want: true},
+		// held Core's first good read back 55.7 s, and FTW dispatched 20 s
+		// after it. With #1915 (C11) the default goes out on that first
+		// read, so 20 s fails.
+		{name: "207539: 20 s after Core's first read", outage: "offline", outFrom: 100, outFor: 82, readAt: read207539,
+			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: read207539 + 20, want: false},
 		{name: "past the registry's 30 s retry", outage: "offline", outFrom: 100, outFor: 82, readAt: read207539,
 			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: read207539 + 47, want: false},
 		// Core never reads the inverter again: the count starts at the
@@ -517,7 +517,7 @@ func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
 func TestInvariantsForcedBatteryCountsFromTheLatestReturn(t *testing.T) {
 	const forced = "no forced battery mode FTW does not dispatch"
 	// Outage 1 100-120, Core reads at 125 and dispatches 130-300. Outage 2
-	// 300-340, Core reads at 380 and the default lands at 388.
+	// 300-340, Core reads at 345 and the default lands at 353.
 	run := func(forcedTo float64) *runData {
 		d := randomRun(601, 16, 5, func(i int, r *sample) {
 			tt := float64(i)
@@ -531,7 +531,7 @@ func TestInvariantsForcedBatteryCountsFromTheLatestReturn(t *testing.T) {
 				r.Bat.Running = &off
 			}
 			errs := 0
-			if (tt >= 100 && tt < 125) || (tt >= 300 && tt < 380) {
+			if (tt >= 100 && tt < 125) || (tt >= 300 && tt < 345) {
 				errs = 3
 			}
 			r.Status = &ftwStatus{Drivers: map[string]ftwDriver{inverterDriver: {Status: "ok", ConsecutiveErrors: &errs}}}
@@ -545,7 +545,7 @@ func TestInvariantsForcedBatteryCountsFromTheLatestReturn(t *testing.T) {
 		}
 		return d
 	}
-	if !judged(run(388))[forced] {
+	if !judged(run(353))[forced] {
 		t.Errorf("default 8 s after Core reads again after the second outage: got fail, want pass")
 	}
 	if judged(run(1201))[forced] {
