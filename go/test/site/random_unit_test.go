@@ -629,3 +629,123 @@ func TestInvariantsAStepAfterADipGetsItsTime(t *testing.T) {
 		}
 	}
 }
+
+// R4 after the third review of #1920: a car or battery raise FTW sends
+// while an import stretch is over the fuse is FTW's own, after a step's
+// meter delay too, and a house event that changes nothing does not take
+// the rise from it. One sent in a dip under the fuse, with the heat still
+// over it, is allowed: the step after it gets its time. Raising the car
+// into export is the right answer. 40 s charger, the battery at its
+// floor.
+func TestInvariantsARaiseOverTheFuseIsFTWsOwn(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		fuse   float64
+		set    func(i int, r *sample)
+		frames []frame
+		events []houseEventLine
+		want   bool // both limit criteria hold
+	}{
+		{"0 -> 16 A at 1.24 x In after PV moved", 25, func(i int, r *sample) {
+			if i >= 41 && i < 84 {
+				r.PhaseA = [3]float64{31, 31, 31}
+			}
+			if i >= 52 && i < 84 {
+				r.PhaseA = [3]float64{42, 42, 42}
+			}
+		}, []frame{profileAt(20, 0), profileAt(50, 16)},
+			[]houseEventLine{{T: 40, Event: houseEvent{Do: "pv", Device: "inverter"}}}, false},
+		{"6 -> 10 A at 1.25 x In, a load event that changes nothing as it lands", 16, func(i int, r *sample) {
+			if i >= 11 && i < 75 {
+				r.PhaseA = [3]float64{20, 12, 12}
+			}
+			if i >= 32 && i < 75 {
+				r.PhaseA[0] = 22
+			}
+		}, []frame{profileAt(1, 6), profileAt(30, 10)},
+			[]houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}, {T: 31, Event: houseEvent{Do: "loads"}}}, false},
+		{"battery charge 0 -> 3 kW at 1.25 x In after a load step", 16, func(i int, r *sample) {
+			r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: 0}}}
+			if i >= 30 {
+				r.Status.Dispatch[0].TargetW, r.BatW = 3000, 3000
+			}
+			if i >= 11 && i < 55 {
+				r.PhaseA = [3]float64{20, 12, 12}
+			}
+			if i >= 32 && i < 55 {
+				r.PhaseA = [3]float64{22, 16, 16}
+			}
+		}, nil, []houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}}, false},
+		{"car and battery raised in a dip under the fuse, a step after it", 16, func(i int, r *sample) {
+			r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: 0}}}
+			if i >= 56 {
+				r.Status.Dispatch[0].TargetW = 2000
+			}
+			switch {
+			case i >= 11 && i < 45, i >= 71 && i < 76:
+				r.PhaseA = [3]float64{22, 12, 12}
+			case i >= 45 && i < 71:
+				r.PhaseA = [3]float64{15, 12, 12}
+			}
+		}, []frame{profileAt(1, 6), profileAt(55, 8)},
+			[]houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}, {T: 70, Event: houseEvent{Do: "loads"}}}, true},
+		{"0 -> 16 A into export over the fuse after PV moved", 16, func(i int, r *sample) {
+			r.PhaseA, r.BatW = [3]float64{-8, -8, -8}, 4000
+			if i >= 11 && i < 45 {
+				r.PhaseA = [3]float64{-24, -12, -12}
+			}
+		}, []frame{profileAt(1, 0), profileAt(20, 16)},
+			[]houseEventLine{{T: 10, Event: houseEvent{Do: "pv", Device: "inverter"}}}, true},
+	} {
+		d := randomRun(121, c.fuse, 12, func(i int, r *sample) {
+			r.Bat.SoCPct = 6
+			c.set(i, r)
+		})
+		withCharger(t, d, 40, 0)
+		d.frames, d.events = c.frames, c.events
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v", c.name, v[limitStep], v[limitOwn], c.want)
+		}
+	}
+}
+
+// R4 for the battery: a charge raise FTW sends after a Core restart is
+// its own, as a car raise is (triage C2). An order moved while the
+// inverter is off reaches no battery. 16 A fuse, Core restarts at 50 s
+// and is back at 55 s; the order goes 0 -> 4 kW at 60 s; 21 A on L1
+// (1.31 x) from 61 to 105 s.
+func TestInvariantsABatteryRaiseAfterARestartIsFTWsOwn(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		running bool // the inverter runs from 55 to 70 s
+		want    bool
+	}{
+		{"the inverter runs", true, false},
+		{"the inverter is off", false, true},
+	} {
+		d := randomRun(201, 16, 8, func(i int, r *sample) {
+			w := 0.0
+			if i >= 60 {
+				w = 4000
+			}
+			r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: w}}}
+			if i >= 55 && i < 70 {
+				run := c.running
+				r.Bat.Running = &run
+			}
+			if i >= 61 && c.running {
+				r.BatW = w
+			}
+			if i >= 61 && i < 105 {
+				r.PhaseA = [3]float64{21, 13, 13}
+			}
+		})
+		withCharger(t, d, 5, 0)
+		d.allMarks = []markLine{{T: 50, Label: "ftw:restart"}, {T: 55, Label: "ftw:up"}}
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v", c.name, v[limitStep], v[limitOwn], c.want)
+		}
+	}
+}

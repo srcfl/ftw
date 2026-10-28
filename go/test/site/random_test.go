@@ -441,19 +441,47 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	// starts when the heat passes the fuse, as Core's cut does. A stretch
 	// runs on across dips under the fuse while the heat stays over it.
 	blownAny := anyBlown(run)
-	// raisedIn is whether FTW sent the car a higher order in (a, b].
-	raisedIn := func(a, b float64) bool {
+	// raisedIn is whether FTW sent the car a higher order in (a, b]; with
+	// over, only one sent while the meter showed the fuse passed.
+	raisedIn := func(a, b float64, over bool) bool {
 		prev, ok := 0.0, false
 		for _, p := range orders {
 			if p.T > b {
 				break
 			}
-			if ok && p.T > a && p.offerW() > prev+1 {
+			if ok && p.T > a && p.offerW() > prev+1 && (!over || maxAbsI(d.at(p.T)) > fuse) {
 				return true
 			}
 			prev, ok = p.offerW(), true
 		}
 		return false
+	}
+	// batRaisedIn is the same for the battery: FTW moved its order more
+	// than 100 W toward import while the inverter ran. An order moved
+	// while the inverter is out reaches no battery. No order counts as 0.
+	batRaisedIn := func(a, b float64, over bool) bool {
+		prev, ok := 0.0, false
+		for _, r := range d.samples {
+			if r.T < a-5 {
+				continue
+			}
+			if r.T > b {
+				break
+			}
+			w, has := dispatchW(r)
+			running := !during(inverterOut, r.T) && (r.Bat.Running == nil || *r.Bat.Running)
+			if ok && has && r.T > a && w > prev+100 && running && (!over || maxAbsI(r) > fuse) {
+				return true
+			}
+			prev, ok = w, true
+		}
+		return false
+	}
+	// ownImport is whether FTW raised the battery's charge in (a, s], or
+	// raised the car or the battery while an import stretch from s to end
+	// was over the fuse. Raising the car into export is the right answer.
+	ownImport := func(a, s, end float64) bool {
+		return batRaisedIn(a, s, false) || raisedIn(s, end, true) || batRaisedIn(s, end, true)
 	}
 	// raisedAt is whether the worst phase rose 0.5 A or more in the 3 s
 	// from t.
@@ -497,10 +525,12 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		}
 		c := clock.T
 		// A window explains the stretch unless FTW raised the car after
-		// the window's meter delay and before the stretch began.
+		// the window's meter delay and before the stretch began. For
+		// import, a battery raise there, or a raise of either while the
+		// stretch is over the fuse, makes it FTW's own too.
 		to, explained, own := math.Inf(-1), false, false
 		for _, w := range windows {
-			if x := until(w, s, overA, export); w.from <= s && s <= x && !raisedIn(w.from+2, s) {
+			if x := until(w, s, overA, export); w.from <= s && s <= x && !raisedIn(w.from+2, s, false) && (export || !ownImport(w.from+2, s, end)) {
 				to, explained = math.Max(to, x), true
 			}
 		}
