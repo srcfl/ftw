@@ -47,13 +47,15 @@ func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample
 		st, _ := c.manager.State(cfg.ID)
 		request := fuseRequest{cfg: c.fuseConfig(cfg, c.tickChoices[cfg.ID].phaseMode), deadline: st.TargetTime}
 		if sample.Connected && !sample.ConnectionUnknown && c.driverCanDispatch(cfg.DriverName) {
-			if hold, held := c.GetManualHold(cfg.ID, now); held {
+			hold, held := c.GetManualHold(cfg.ID, now)
+			if held {
 				request.wantW = clampManualPower(cfg, hold, c.siteFuse())
 			} else {
 				request.wantW, _, _ = c.computeCommandForBudget(now, request.cfg, sample.PowerW, false)
 			}
-			request.goal = request.wantW > 0 && !cfg.SurplusOnly
-			if _, held := c.GetManualHold(cfg.ID, now); !held {
+			// Charge now is a goal even on a solar-only charger.
+			request.goal = request.wantW > 0 && (held || !cfg.SurplusOnly)
+			if !held {
 				c.batSoCArmedMu.Lock()
 				armed := c.batSoCArmed[cfg.ID]
 				c.batSoCArmedMu.Unlock()
