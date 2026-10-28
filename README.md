@@ -246,6 +246,24 @@ metadata are the detailed reference.
 Other files under [`docs/`](docs/) are focused installation or
 external-integration guides.
 
+## Related repositories
+
+FTW spans several repositories. This one is Core; the others are:
+
+| Repository | Role |
+|---|---|
+| [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) | Lua driver source, contracts, tests and the signed driver bundle Core pins. Change drivers there. |
+| [`srcfl/device-simulator`](https://github.com/srcfl/device-simulator) | Simulated house: inverters, batteries, chargers and meters over Modbus TCP, MQTT and OCPP. |
+| [`srcfl/ftw-webapp`](https://github.com/srcfl/ftw-webapp) | Installable everyday client. |
+| [`srcfl/ftw-app`](https://github.com/srcfl/ftw-app) | Native iOS and Android app. |
+| [`srcfl/ftw-cloud`](https://github.com/srcfl/ftw-cloud) | Opt-in, box-signed, read-only copy of each home's state for the apps. |
+| [`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons) | Home Assistant app packaging of each FTW release. |
+| [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web) | The project website. |
+| [`srcfl/energyplan-demo`](https://github.com/srcfl/energyplan-demo) | Browser demo running the Energyplan worker in WebAssembly against a simulated home. |
+
+The Energyplan solver source is private; Core receives only its compiled
+worker and public integration metadata.
+
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). User-visible changes need a Changeset.
