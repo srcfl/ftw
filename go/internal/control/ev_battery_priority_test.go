@@ -34,6 +34,7 @@ func issue1868Site(t *testing.T) (*telemetry.Store, *State, []loadpoint.State, [
 	a, n := st.offerPhaseA(4140, 3)
 	st.evLimit.offers = map[string]chargerOffers{"rav4": {log: commandLog{{at: st.now().Add(-evUnknownSettle - time.Second), w: 4140, a: a, n: n}}}}
 	sent(st, "battery", 4000)
+	lastingFuseHeat(tel, st) // The overage has lasted, as in the field.
 	points := []loadpoint.State{{ID: "rav4", DriverName: "car", PluggedIn: true, CommandedKnown: true, CommandedW: 4140, CommandedPhases: 3}}
 	configs := []loadpoint.Config{{ID: "rav4", DriverName: "car", PhaseMode: "3p", MinChargeW: 4140, MaxChargeW: 4140, AllowedStepsW: []float64{0, 4140}}}
 	return tel, st, points, configs
@@ -107,8 +108,9 @@ func TestEVPriorityFallsBackWhenTheBatteryCannotYield(t *testing.T) {
 		{"stale meter", func(tel *telemetry.Store, _ *State) {
 			tel.Get("meter", telemetry.DerMeter).UpdatedAt = time.Now().Add(-time.Minute)
 		}},
-		{"over the working limit", func(tel *telemetry.Store, _ *State) {
+		{"over the working limit", func(tel *telemetry.Store, st *State) {
 			tel.Update("meter", telemetry.DerMeter, 9000, nil, []byte(`{"l1_a":15.6,"l2_a":12.5,"l3_a":11.9}`))
+			lastingFuseHeat(tel, st) // the overage has lasted (I²t)
 		}},
 		{"unseen battery rise", func(_ *telemetry.Store, st *State) { sent(st, "battery", 0, 4000) }},
 	} {
