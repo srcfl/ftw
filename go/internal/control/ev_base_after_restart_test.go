@@ -33,6 +33,8 @@ func restartFixture(t *testing.T, gridW float64, phaseA [3]float64, batteryW, pv
 	}
 	store.Update("charger", telemetry.DerEV, evW, nil, nil)
 	store.RecordDriverSuccess("charger")
+	// The charger measured its draw with the site reading, not after it.
+	store.Get("charger", telemetry.DerEV).UpdatedAt = store.Get("meter", telemetry.DerMeter).UpdatedAt
 
 	state := NewState(0, 0, "meter")
 	now := time.Now()
@@ -110,6 +112,13 @@ func setMaxW(state *State, w float64) {
 	state.evLimit.offers["garage"] = c
 }
 
+// setRiseCapW puts both max_charge_w and the site fuse at w, the most an
+// offer in force may be, so a case can test the other bounds alone.
+func setRiseCapW(state *State, w float64) {
+	setMaxW(state, w)
+	state.SiteFuseAmps = w / (state.SiteFuseVoltage * float64(state.SiteFusePhases))
+}
+
 // The credit never exceeds the latest offer, keeps room for the car's rise
 // to its max, takes the lowest of the sample, raw and smoothed draw, needs
 // a live charger reading, and ends once the charger's first offer of this
@@ -123,24 +132,31 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 	}{
 		{"the car may still rise to its max", func(*telemetry.Store, *State) {}, 8222 - (11040 - 6210)},
 		{"no max_charge_w", func(_ *telemetry.Store, state *State) { setMaxW(state, 0) }, 0},
-		{"latest offer bounds the draw", func(_ *telemetry.Store, state *State) { setMaxW(state, 6210) }, 6210},
-		{"measured draw below the offer", func(store *telemetry.Store, state *State) {
-			setMaxW(state, 6210)
-			store.Update("charger", telemetry.DerEV, 4000, nil, nil)
+		{"max_charge_w below the fuse: the offer in force may still be the fuse's", func(_ *telemetry.Store, state *State) {
+			setMaxW(state, 7360)
+		}, 8222 - (11040 - 6210)},
+		{"a charger sample measured after the site reading", func(store *telemetry.Store, state *State) {
+			store.Get("meter", telemetry.DerMeter).UpdatedAt = state.now().Add(-time.Second)
 			store.Get("charger", telemetry.DerEV).UpdatedAt = state.now()
+		}, 0},
+		{"latest offer bounds the draw", func(_ *telemetry.Store, state *State) { setRiseCapW(state, 6210) }, 6210},
+		{"measured draw below the offer", func(store *telemetry.Store, state *State) {
+			setRiseCapW(state, 6210)
+			store.Update("charger", telemetry.DerEV, 4000, nil, nil)
+			store.Get("charger", telemetry.DerEV).UpdatedAt = store.Get("meter", telemetry.DerMeter).UpdatedAt
 		}, 4000},
 		{"smoothed draw below the sample", func(store *telemetry.Store, state *State) {
-			setMaxW(state, 6210)
+			setRiseCapW(state, 6210)
 			store.Get("charger", telemetry.DerEV).SmoothedW = 5000
 		}, 5000},
 		{"raw draw below the sample", func(store *telemetry.Store, state *State) {
-			setMaxW(state, 6210)
+			setRiseCapW(state, 6210)
 			r := store.Get("charger", telemetry.DerEV)
 			r.Data = json.RawMessage(`{"control_power_w":8222}`)
 			r.RawW = 5000
 		}, 5000},
 		{"control sample below raw and smoothed", func(store *telemetry.Store, state *State) {
-			setMaxW(state, 6210)
+			setRiseCapW(state, 6210)
 			store.Get("charger", telemetry.DerEV).Data = json.RawMessage(`{"control_power_w":5000}`)
 		}, 5000},
 		{"charger offline", func(store *telemetry.Store, _ *State) {
@@ -187,7 +203,7 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 // shows as consumption only 3,780 W is left for this car.
 func TestEVFoundDrawWLeavesOutShownOffers(t *testing.T) {
 	store, state := restartFixture(t, 780, [3]float64{2.03, 4.97, .47}, -5000, -3000, 8222)
-	setMaxW(state, 6210)
+	setRiseCapW(state, 6210)
 	meter := store.Get("meter", telemetry.DerMeter)
 	if got := state.evFoundDrawW(store, meter.RawW, meter.UpdatedAt, state.now(), 5000); math.Abs(got-3780) > 1e-6 {
 		t.Fatalf("credit %.0f W, want 3780 W", got)
@@ -348,8 +364,17 @@ func TestSiteSimRestartTenSecondSamples(t *testing.T) {
 // reaches 1.2 x In, and time over In stays within the heat model.
 func TestSiteSimRestartCarRisesUnderOfferInForce(t *testing.T) {
 	s := restartSim(houseA(4, 12, 2))
-	s.p.EVSE.OfferA, s.p.Car.MaxW = 16, 8280
-	s.p.Events = append(s.p.Events, sitesim.Event{At: 14 * time.Second, Kind: sitesim.Change, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }})
+	carRisesUnderOldOffer(t, s, 8280, 14*time.Second)
+}
+
+// carRisesUnderOldOffer runs s with the charger still on the 16 A offer it
+// had before the restart, and a car that draws fromW until it lifts its own
+// limit at riseAt. No phase may reach 1.2 x In, and the sim's fuse checks
+// must pass.
+func carRisesUnderOldOffer(t *testing.T, s *simSite, fromW float64, riseAt time.Duration) {
+	t.Helper()
+	s.p.EVSE.OfferA, s.p.Car.MaxW = 16, fromW
+	s.p.Events = append(s.p.Events, sitesim.Event{At: riseAt, Kind: sitesim.Change, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }})
 	s.boot()
 	s.run(2 * time.Minute)
 	if s.failure != "" {
@@ -358,4 +383,47 @@ func TestSiteSimRestartCarRisesUnderOfferInForce(t *testing.T) {
 	if s.peakA >= fuseInstantFactor*16 {
 		t.Fatalf("a phase reached %.2f A", s.peakA)
 	}
+}
+
+// Third review of #1926: a site meter that samples every 3 s. The car draws
+// 10 A under the 16 A offer in force and lifts its own limit 11 s in. The
+// charger reads the rise before the next meter sample, so its sample is
+// newer than the site reading, which still shows the old draw. That sample
+// does not count as in the reading, and the battery keeps the discharge
+// the rise needs. Before: L2 reached 19.30 A.
+func TestSiteSimRestartCarRisesBetweenMeterSamples(t *testing.T) {
+	s := restartSim(houseA(4, 12, 2))
+	s.p.Meter.Every = 3 * time.Second
+	carRisesUnderOldOffer(t, s, 6900, 11*time.Second)
+}
+
+// Third review of #1926: max_charge_w is not the most an offer in force
+// may be. The owner lowered it to 7,360 W (10.67 A) and restarted; the
+// charger still runs the 16 A Core sent before. The car draws 7 kW and may
+// rise to 11,040 W before the 6.2 kW order lands. The rise reserve runs to
+// the site fuse, so the battery keeps the discharge that rise needs.
+func TestEVBaseAfterRestartMaxChargeLoweredAtRestart(t *testing.T) {
+	house := 3.0
+	evW, batW := 7000.0, -5000.0
+	gridW := house*690 + evW + batW
+	phaseA := gridW / 690
+	store, state := restartFixture(t, gridW, [3]float64{phaseA, phaseA, phaseA}, batW, 0, evW)
+	setMaxW(state, 7360)
+	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "sungrow", TargetW: 0}}, store, state, 16*230*3)
+	got := targetW(out, "sungrow")
+	if afterA := phaseA + (got-batW)/690 + (11040-evW)/690; afterA > 16+1e-6 {
+		t.Fatalf("battery ends discharge to %.0f W; the car rising to the old 16 A offer puts %.2f A on each phase", got, afterA)
+	}
+}
+
+// The plant form: max_charge_w is now 8,280 W (12 A), and the car lifts
+// its own 12 A limit 14 s in, before the 40 s charger applies Core's order.
+// Before: L2 reached 19.30 A.
+func TestSiteSimRestartMaxChargeLoweredAtRestart(t *testing.T) {
+	s := restartSim(houseA(4, 12, 2))
+	s.lp.MaxChargeW, s.lp.AllowedStepsW = 8280, []float64{0}
+	for a := 6.0; a <= 12; a++ {
+		s.lp.AllowedStepsW = append(s.lp.AllowedStepsW, a*690)
+	}
+	carRisesUnderOldOffer(t, s, 8280, 14*time.Second)
 }

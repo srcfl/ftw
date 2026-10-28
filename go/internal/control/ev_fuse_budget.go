@@ -181,8 +181,8 @@ type chargerOffers struct {
 	found sentCommand
 	// driver is the charger's driver, whose power reading only the battery
 	// side reads, and only before any offer of this run has surely landed
-	// (evFoundDrawW). maxW is the loadpoint's max_charge_w, the most the car
-	// may draw on an offer Core does not know; zero when not configured.
+	// (evFoundDrawW). maxW is the loadpoint's max_charge_w; zero when not
+	// configured.
 	driver string
 	maxW   float64
 	// carPhases is how many phases the car draws on, as the loadpoint saw
@@ -411,15 +411,19 @@ func (s *State) evShownW(at time.Time) float64 {
 // then does not know which offer the charger runs on, and its first offers
 // (often 0 A) say nothing of what the meter shows. A car seen drawing in
 // that window is in the reading when the charger measured it within one
-// control interval of the site reading: a fast charger may have applied a
-// 0 A offer since an older sample, and a held reading after a failed poll
-// says nothing of now. A charger that samples less often (OCPP MeterValues
-// every 10 s or more) counts only on the ticks just after a sample, and
-// holds its battery's discharge between them. The measured draw is the
-// lowest of the sample, raw and smoothed. Until the latest offer lands, the
-// car may still rise from that draw to the offer in force, up to the
-// loadpoint's max_charge_w; that rise past the latest offer stays reserved,
-// and a charger with no max_charge_w counts nothing. Each charger counts no
+// control interval before the site reading: a fast charger may have applied
+// a 0 A offer since an older sample, a held reading after a failed poll
+// says nothing of now, and a sample newer than the site reading may hold a
+// rise the meter does not show yet. A charger that samples less often (OCPP
+// MeterValues every 10 s or more) counts only on the ticks just after a
+// sample, and holds its battery's discharge between them. The measured draw
+// is the lowest of the sample, raw and smoothed. Until the latest offer
+// lands, the car may still rise from that draw to the offer in force. Core
+// does not know that offer: one from before a restart, under an older
+// max_charge_w, or the charger's own default. The reserve takes it as the
+// larger of the loadpoint's max_charge_w and the site fuse's rating, and
+// keeps the rise past the latest offer; a charger with no max_charge_w
+// counts nothing. Each charger counts no
 // more than its latest offer, and in all no more than the consumption the
 // site meter shows (siteConsumptionW) less shownW. The car's own limit
 // never reads this; only how much of our latest offers the battery reserves
@@ -448,7 +452,7 @@ func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at 
 			continue
 		}
 		p, ok := qualifiedFuseObservation(store.Get(c.driver, telemetry.DerEV), at)
-		if !ok || p.Seen().Before(meterAt.Add(-skew)) || p.At.After(meterAt.Add(skew)) {
+		if !ok || p.Seen().Before(meterAt.Add(-skew)) || p.At.After(meterAt) {
 			continue
 		}
 		drawW := math.Min(p.PowerW, lowerW)
@@ -457,7 +461,8 @@ func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at 
 		}
 		unshown, _ := c.log.unshown(at, c.batterySettle())
 		latest := c.log[n-1].w
-		inLatestW := math.Min(latest, drawW-math.Max(0, c.maxW-latest))
+		capW := math.Max(c.maxW, s.siteFuseMaxW())
+		inLatestW := math.Min(latest, drawW-math.Max(0, capW-latest))
 		w += math.Max(0, inLatestW-math.Max(0, latest-unshown))
 	}
 	return math.Max(0, math.Min(w, consumptionW-shownW))
