@@ -204,12 +204,13 @@ func split(scs []scenario, n int) [][]scenario {
 type outcome struct {
 	Name      string      `json:"name"`
 	Dir       string      `json:"dir"`
-	Verdict   string      `json:"verdict"` // pass, known, fail
+	Verdict   string      `json:"verdict"` // pass, known, fail, skip
 	DurationS float64     `json:"duration_s"`
 	Criteria  []criterion `json:"criteria"`
 	Known     []string    `json:"known,omitempty"`
 	Failures  []string    `json:"failures,omitempty"`
 	Error     string      `json:"error,omitempty"`
+	Skipped   string      `json:"skipped,omitempty"` // what the simulator lacks
 }
 
 // TestSite runs the scenarios FTW_SITE names. FTW_SITE_LANES runs that many
@@ -239,6 +240,16 @@ func TestSite(t *testing.T) {
 	env := setup(t)
 	var mu sync.Mutex
 	var outcomes []outcome
+	var runnable []scenario
+	for _, sc := range scs {
+		if sc.skip == "" {
+			runnable = append(runnable, sc)
+			continue
+		}
+		t.Logf("%s skipped: %s", sc.name, sc.skip)
+		outcomes = append(outcomes, outcome{Name: sc.name, Dir: sc.dir, Verdict: "skip", Skipped: sc.skip})
+	}
+	scs = runnable
 	t.Run("lanes", func(t *testing.T) {
 		for k, group := range split(scs, lanes) {
 			k, group := k, group
@@ -364,7 +375,7 @@ func TestJudge(t *testing.T) {
 		t.Skip("set FTW_SITE_JUDGE to a results directory of an earlier run")
 	}
 	var outs []outcome
-	for _, sc := range selected(t, "full") {
+	for _, sc := range append(selected(t, "full"), recordedRandom(dir)...) {
 		rundir := filepath.Join(dir, sc.dir)
 		b, err := os.ReadFile(filepath.Join(rundir, "meta.json"))
 		if err != nil {
@@ -392,6 +403,25 @@ func TestJudge(t *testing.T) {
 	writeSummary(t, dir, outs)
 }
 
+// recordedRandom is each random seed recorded in dir, from the plan.json
+// its run wrote, so TestJudge judges a nightly random run again.
+func recordedRandom(dir string) []scenario {
+	files, _ := filepath.Glob(filepath.Join(dir, "random-*", "plan.json"))
+	sort.Strings(files)
+	var out []scenario
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var p randomPlan
+		if json.Unmarshal(b, &p) == nil && p.Found == nil {
+			out = append(out, randomScenario(p))
+		}
+	}
+	return out
+}
+
 func writeSummary(t *testing.T, out string, outs []outcome) {
 	if len(outs) == 0 {
 		return
@@ -404,6 +434,9 @@ func writeSummary(t *testing.T, out string, outs []outcome) {
 		notes := append(append([]string{}, o.Failures...), o.Known...)
 		if o.Error != "" {
 			notes = append([]string{o.Error}, notes...)
+		}
+		if o.Skipped != "" {
+			notes = append(notes, o.Skipped)
 		}
 		fmt.Fprintf(&md, "| %s | %s | %s | %s |\n", o.Name, o.Verdict,
 			(time.Duration(o.DurationS) * time.Second).String(), strings.ReplaceAll(strings.Join(notes, "; "), "|", "/"))

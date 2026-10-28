@@ -40,7 +40,7 @@ make siterig-judge DIR=/tmp/ftw-site-123  # judge a recorded run again
 | `FTW_SITE_DEVSIM_SRC` | a device-simulator checkout at the pinned commit; without it the test clones the pin into the user cache |
 | `FTW_SITE_FTW_BIN`, `FTW_SITE_DEVSIM_BIN` | prebuilt binaries |
 | `FTW_SITE_CATALOG` | the fault catalog, for `TestCatalogCoverage` |
-| `FTW_SITE_JUDGE` | a results directory: `TestJudge` judges its runs again with the criteria as they are now, and rewrites their `result.json` and the summary |
+| `FTW_SITE_JUDGE` | a results directory: `TestJudge` judges its runs again with the criteria as they are now, random seeds included (from each run's `plan.json`), and rewrites their `result.json` and the summary |
 
 Each run directory keeps `house/plant.jsonl` (the house once a second, with
 every event and mark), `house/ocpp-<charger>.jsonl` (every OCPP frame the
@@ -64,7 +64,13 @@ that touch control, loadpoint, OCPP or telemetry code), `siterig/full`
 
 A criterion named in a scenario's `known` map fails on master for the
 finding it names. The run passes while it keeps failing, and fails once it
-passes: a fix deletes its line in the same pull request.
+passes: a fix deletes its line in the same pull request. The `r`
+scenarios are R1-R5 of the stable plan; their known lines name the Wave 1
+item whose fix deletes them.
+
+A scenario with a `skip` waits for a device-simulator change the pinned
+commit lacks. `TestSite` reports it as `skip` with the knob it needs; the
+pull request that pins a simulator with the knob deletes the skip.
 
 ## The fault catalog
 
@@ -76,13 +82,15 @@ its sources (`provenance` in [catalog_test.go](catalog_test.go)).
 
 "Over the limit" is the worst phase above the fuse rating, measured through
 the fuse. A device's response time counts as 2 s, the meter and control
-tick as 2 s more.
+tick as 2 s more. The random cases, `r3` and `r5a` judge a phase between
+the fuse and 1.2 × the fuse as Core does: it counts only once its 60 s heat
+(I² filter) is above the fuse too.
 
 | Scenario | House and steps | Criteria | Short |
 |---|---|---|---|
 | `s0-25` Idle charger | 25 A, 3 A per phase, a charger with no car, heartbeat 60 s, 300 s | Home use `measured` in 95 % of samples; no OCPP disconnect | yes |
 | `s0b-25` | as s0, Core's heartbeat | as s0 | |
-| `s1-16`, `s1-25` Charge now | 3 A per phase, Charge now 16 A for 180 s | the room the fuse gives (25 A: 11 040 W) within 60 s; held 95 %; fuse holds; on 25 A no `fuse_limit` | yes |
+| `s1-16`, `s1-25` Charge now | 3 A per phase, Charge now 16 A for 180 s | the room the fuse gives (16 A: 8 970 W; 25 A: 11 040 W) within 60 s; held 95 %; fuse holds; on 25 A no `fuse_limit` | yes |
 | `s2-16` Charge now during export | 16 A, 1 A house, 7 kW PV, full battery: 9.1 A export per phase | car starts within 60 s (**known**: export counted as import); fuse holds | |
 | `s3-16`, `s3-25` Load step | car and a 3 kW battery hold charging, then 13 A (16 A) or 21 A (25 A) per phase for 180 s | fuse holds; over the limit at most 7 s after the step | yes |
 | `s4-25`, `s4b-25` Saved unlock | `surplus_unlock_bat_soc` 0.9 saved, not armed; Charge now 3p, and bare (s4b) | no stops; no offer drops to 0 W; full power over the last minute | |
@@ -103,5 +111,12 @@ tick as 2 s more.
 | `s15bat-16` One-phase charger, battery rising | 16 A, 3 A per phase, the s15 charger, battery at 50 % following its EMS 8 s late, `planner_self`; PV 2.1 kW rising every 30 s (+2.5 kW, then 1.5 kW) so Core charges the battery in steps; Charge now 6 s after the second step, while the raise is on its way | the battery order rose over 1 150 W in the 20 s before (setup check); car charging within 10 s; fuse holds; over the limit at most 3 s | |
 | `s15p-25` One-phase charger, planned | as s15, a plan for 600 Wh by the first quarter hour 15 min out | fuse holds; 90 % of the plan by the ready time; never called not following | |
 | `s14-25` One-phase car | an 11 kW charger with a one-phase car, a plan it cannot meet, 20 min | 3.4–3.8 kW over the last 10 min; never called not following | |
+| `r1-25` Meter silent, then offline | 25 A, 15 A per phase, battery at 50 %, Charge now 16 A; the site meter silent (Modbus timeouts) for 120 s, then gone for 90 s. **Skipped**: the pinned simulator cannot silence the site meter | the battery relieved the fuse (setup); while silent no offer rises and the battery order only moves toward 0 (**known**: A1); a 0 W order and the battery back on its own within 64 s; the meter never shows live; Charge now back within 95 s of each return and held until the next event; fuse holds | |
+| `r2-25`, `r2-60-25` Battery drops out | 25 A, 20 A per phase, the battery held at a 3 kW discharge, a car taking 10 A on Charge now, the charger at once or 60 s late; the inverter gone for 180 s. The site stays under 1.2 × the fuse, where Core cuts the car on its 60 s heat budget, not at once | the battery discharged (setup); fuse holds; over 1.2 × the fuse at most the charger's delay + 7 s; the 60 s heat under 1.13 × the fuse; no offer rises while it is gone; Home use shown as estimated throughout. The time over the fuse and when Core sends the cut are recorded | |
+| `r3-25` Planner floor | 25 A, 15 A per phase, battery at 12 %, planner `soc_min` 10 %, inverter floor 5 %, charger 60 s late, Charge now 16 A for 600 s | the battery reaches the floor (setup); no discharge ordered below it (**known**: A4); the battery order swings at most 100 W over the last 5 min (**known**: A3, A4); over the fuse at most the delay + 7 s; fuse holds | |
+| `r4-25` Hard kill | 25 A, 12 A per phase, Charge now 16 A; once the day's Home use is known and 10 min more, the battery held at a 3 kW discharge; 5 min later SIGKILL for 20 s, and 2 min after that for 120 s while the house steps to 16 A | Charge now back at its minimum within 60 s of each restart and held until the next kill or the end; the day's Home use kept within 1 % across the first kill; session energy counts again (**known**: E1); no state.db recovery in the log; fuse holds | |
+| `r5a-25` Start beside a charging car | 25 A, 14 A per phase, battery at its 5 % floor, a car charging on its own at 16 A: 30 A per phase for 60 s before Core starts | the car charged and the site was over the fuse (setup); under the fuse within 30 s of Core answering, and over it at most 3 s after; Home use shown within 30 s; fuse holds | |
+| `r5b-25` Start on a stale plan | a goal 40 → 60 % 8 h out, Core stopped for 20 min | no positive order in the first 30 s before a fresh plan; Home use shown within 30 s; fuse holds. It does not reach D6 on master: the saved plan is younger than 30 min and a fresh one lands within seconds | |
+| `r5c-25` Start into a new session | Charge now, Core stopped for 10 min while the car leaves and another plugs in | Core sees the car within 60 s; Home use shown within 30 s; fuse holds. Whether Charge now carries over is recorded, not judged: ev-088 waits for the owner | |
 | `s16-25` Import ceiling | 25 A, house 1.3 kW, battery idle at its floor, `peak_import_ceiling_w` 4 500, Charge now 16 A: house and the car's 4 140 W minimum are above the ceiling. Starts in an hour's first minutes or waits for :56, then runs one whole clock hour and 3 min | the car starts on the hour's room before :45; every clock hour's recorded import averages at most the ceiling + 1 %; the next hour stops the car within 60 s; while held it says `import_limit` 90 % of the time and never `fuse_limit`; fuse holds | |
 | `s17-25` Two equal batteries | 25 A, house 3 kW, no PV, two hybrids with 10 kWh at 74 % and 60 %, Energyplan whatever `FTW_SITE_ENGINE` says (Core DP plans one battery), a 6 h horizon. Waits up to an hour for a quarter the plan discharges, then 15 min | Energyplan's plan moves the batteries in half the polls (setup); while the fleet moves 500 W or more, each battery takes at least a quarter of it 90 % of the time; while the plan moves them, the charge gap shrinks by over 0.2 points; fuse holds | |

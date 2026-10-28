@@ -42,24 +42,37 @@ type plantDevice struct {
 	W         float64 `json:"w"`         // a charger's draw
 	BatteryW  float64 `json:"battery_w"` // an inverter's battery, + charging
 	SoCPct    float64 `json:"soc_pct"`
-	EMSCmd    float64 `json:"ems_cmd"` // 170 charge, 187 discharge, 204 stop
+	EMSMode   float64 `json:"ems_mode"` // 2 forced, as Core drives it
+	EMSCmd    float64 `json:"ems_cmd"`  // 170 charge, 187 discharge, 204 stop
 	EMSSetW   float64 `json:"ems_setpoint_w"`
 	Connected bool    `json:"connected"`
+	Running   *bool   `json:"running"` // an inverter that answers; nil when not recorded
 }
 
 type ftwStatus struct {
-	Drivers map[string]struct {
-		Status string `json:"status"`
-	} `json:"drivers"`
-	LoadQuality *string  `json:"load_quality"`
-	LoadReason  *string  `json:"load_reason"`
-	LoadW       *float64 `json:"load_w"`
+	Drivers     map[string]ftwDriver `json:"drivers"`
+	Dispatch    []ftwDispatch        `json:"dispatch"` // Core's battery orders this tick
+	LoadQuality *string              `json:"load_quality"`
+	LoadReason  *string              `json:"load_reason"`
+	LoadW       *float64             `json:"load_w"`
 	Energy      struct {
 		Today struct {
 			LoadWh         *float64 `json:"load_wh"`
 			HistoryQuality *string  `json:"history_quality"`
 		} `json:"today"`
 	} `json:"energy"`
+}
+
+// ftwDispatch is one battery order Core sent: + charge, - discharge.
+type ftwDispatch struct {
+	Driver  string  `json:"driver"`
+	TargetW float64 `json:"target_w"`
+}
+
+type ftwDriver struct {
+	Status            string   `json:"status"`
+	EVSessionWh       *float64 `json:"ev_session_wh"`      // a charger's session energy
+	ConsecutiveErrors *int     `json:"consecutive_errors"` // failed polls in a row; 0 once a poll reads
 }
 
 type ftwLoadpoint struct {
@@ -69,6 +82,7 @@ type ftwLoadpoint struct {
 	Charger struct {
 		Known bool `json:"known"`
 	} `json:"charger"`
+	ManualActive    bool   `json:"manual_active"`
 	CommandedReason string `json:"commanded_reason"`
 	Manual          struct {
 		LimitReason string `json:"limit_reason"` // the clamp behind a limited Charge now
@@ -102,6 +116,7 @@ type sample struct {
 	Bat2   plantDevice // the second, if any
 	Status *ftwStatus
 	LPs    []ftwLoadpoint
+	HeatA  [3]float64 // each phase's 60 s heat, filled in by warm
 }
 
 type frame struct {
@@ -125,6 +140,7 @@ type runData struct {
 	events   []houseEventLine
 	frames   []frame // garage's charger
 	meta     map[string]any
+	warmed   bool // every sample's HeatA is filled in
 }
 
 type markLine struct {
@@ -340,6 +356,24 @@ func (d *runData) firstT(t0 float64, pred func(*sample) bool) *float64 {
 	return nil
 }
 
+// holdsFrom is the seconds from t0 to the start of the unbroken run of
+// samples satisfying pred that lasts until t1, or nil when the last sample
+// before t1 does not. A stop that begins after t0 resets it, so a car still
+// running at t0 and stopped later does not count as back.
+func (d *runData) holdsFrom(t0, t1 float64, pred func(*sample) bool) *float64 {
+	var from *float64
+	for _, r := range d.window(t0, t1) {
+		switch {
+		case !pred(r):
+			from = nil
+		case from == nil:
+			v := r.T - t0
+			from = &v
+		}
+	}
+	return from
+}
+
 // runsOver is the longest contiguous stretch and the total seconds with the
 // worst phase above limit.
 func (d *runData) runsOver(t0, t1, limit float64) (longest, total float64) {
@@ -367,10 +401,72 @@ func (d *runData) runsOver(t0, t1, limit float64) (longest, total float64) {
 	return round(longest, 1), round(total, 1)
 }
 
+// fuseHeatTauS is the time constant of Core's fuse heat model
+// (control/fuse_heat.go).
+const fuseHeatTauS = 60.0
+
+// warm fills in each sample's HeatA: per phase, the 60 s I² filter of Core's
+// fuse heat model, on the current through the fuse in either direction,
+// from the record's first sample on.
+func (d *runData) warm() {
+	if d.warmed {
+		return
+	}
+	d.warmed = true
+	var sq [3]float64
+	for i, r := range d.samples {
+		for k, a := range r.PhaseA {
+			if i == 0 {
+				sq[k] = a * a
+			} else {
+				sq[k] += (1 - math.Exp(-(r.T-d.samples[i-1].T)/fuseHeatTauS)) * (a*a - sq[k])
+			}
+			r.HeatA[k] = math.Sqrt(sq[k])
+		}
+	}
+}
+
+// heatOver is whether a phase is over the fuse as Core's heat model judges
+// it (owner rule, 27 Oct 2026): above the fuse while its 60 s heat is above
+// the fuse too, or above fuseInstantFactor x the fuse. Between the fuse and
+// that factor the heat is the budget. Call warm first.
+func heatOver(r *sample, fuse float64) bool {
+	for k, a := range r.PhaseA {
+		a = math.Abs(a)
+		if a > fuse && (r.HeatA[k] > fuse || a > fuseInstantFactor*fuse) {
+			return true
+		}
+	}
+	return false
+}
+
+// heatRunsOver is the longest stretch in [t0, t1] that heatOver holds,
+// timed like runsOver.
+func (d *runData) heatRunsOver(t0, t1, fuse float64) float64 {
+	d.warm()
+	longest := 0.0
+	var from *float64
+	var last float64
+	for _, r := range d.window(t0, t1) {
+		t := r.T
+		switch {
+		case heatOver(r, fuse) && from == nil:
+			from = &t
+		case !heatOver(r, fuse) && from != nil:
+			longest, from = math.Max(longest, t-*from), nil
+		}
+		last = t
+	}
+	if from != nil {
+		longest = math.Max(longest, last-*from)
+	}
+	return round(longest, 1)
+}
+
 // i2Over is the seconds the worst phase's I² filter (tau 60 s) is above
 // limit, and the filter's peak.
 func (d *runData) i2Over(t0, t1, limit float64) (over, peak float64) {
-	const tau = 60.0
+	const tau = fuseHeatTauS
 	var y, prev float64
 	started := false
 	for _, r := range d.window(t0, t1) {
@@ -685,4 +781,81 @@ func (d *runData) disconnects(t0, t1 float64) []float64 {
 		}
 	})
 	return out
+}
+
+// ---- the battery, the charger's orders and the log, for R1-R5 ----
+
+// batOrder is Core's battery order as the inverter holds it: + charge, -
+// discharge, 0 when not forced.
+func batOrder(r *sample) float64 {
+	if r.Bat.EMSMode != 2 {
+		return 0
+	}
+	switch r.Bat.EMSCmd {
+	case 170:
+		return r.Bat.EMSSetW
+	case 187:
+		return -r.Bat.EMSSetW
+	}
+	return 0
+}
+
+// batForced is true while Core drives the battery: forced mode with a charge
+// or discharge command.
+func batForced(r *sample) bool {
+	return r.Bat.EMSMode == 2 && (r.Bat.EMSCmd == 170 || r.Bat.EMSCmd == 187)
+}
+
+// offers is every SetChargingProfile on connector 1 of charger 0, timed in
+// Unix seconds.
+func (d *runData) offers() []profile { return connector1(profiles(d.frames, 0, math.Inf(1))) }
+
+// offerRises counts orders sent in [t0, t1) that offer more than the order
+// before them.
+func (d *runData) offerRises(t0, t1 float64) int {
+	n := 0
+	prs := d.offers()
+	for i := 1; i < len(prs); i++ {
+		if prs[i].T >= t0 && prs[i].T < t1 && prs[i].offerW() > prs[i-1].offerW()+1 {
+			n++
+		}
+	}
+	return n
+}
+
+// firstOffer is the seconds from t0 to the first order from t0 on that
+// satisfies pred, or nil.
+func (d *runData) firstOffer(t0 float64, pred func(profile) bool) *float64 {
+	for _, p := range d.offers() {
+		if p.T >= t0 && pred(p) {
+			v := p.T - t0
+			return &v
+		}
+	}
+	return nil
+}
+
+// logLines are the lines of FTW's log that hold any of subs.
+func (d *runData) logLines(subs ...string) []string {
+	var out []string
+	readLines(filepath.Join(d.dir, "ftw.log"), func(b []byte) {
+		for _, s := range subs {
+			if strings.Contains(string(b), s) {
+				out = append(out, string(b))
+				return
+			}
+		}
+	})
+	return out
+}
+
+// todayLoadWh is the day's Home use FTW last showed in ws, or nil.
+func todayLoadWh(ws []*sample) *float64 {
+	var v *float64
+	for _, r := range ws {
+		if r.Status != nil && r.Status.Energy.Today.LoadWh != nil {
+			v = r.Status.Energy.Today.LoadWh
+		}
+	}
+	return v
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +28,9 @@ type scenario struct {
 	// tolerate names criteria that may fail for a known finding but need
 	// not: random cases, where a seed may or may not reach it.
 	tolerate map[string]string
+	// skip, when set, says what the pinned device-simulator lacks for this
+	// scenario: TestSite reports it skipped instead of running it.
+	skip string
 }
 
 var scenarios = []scenario{
@@ -411,7 +415,7 @@ func s7(c *runCtx, fuse float64, short bool) (map[string]any, error) {
 			sleepS(900)
 		}
 		st.mark("ftw_stop")
-		st.stopFTW()
+		st.stopFTW(syscall.SIGTERM)
 		sleepS(20)
 		st.mark("ftw_start")
 		if err := st.startFTW(); err != nil {
@@ -707,10 +711,10 @@ func judgeS12(d *runData) (metrics, []criterion) {
 		if p.Limit > 0 && p.phasesOr3() == 1 {
 			ones++
 		}
-		// A lower order while every phase has room is a cut on room alone,
-		// unless the plan itself asked for less (a pause between slots).
+		// A lower order while every phase is under the fuse is a cut on room
+		// alone, unless the plan itself asked for less (a pause between slots).
 		if i > 0 && p.offerW() < prs[i-1].offerW()-1 {
-			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-1-0.5 {
+			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-0.1 {
 				if after := d.at(t0 + p.T + 2); after == nil || firstLP(after).CommandedReason != "plan" {
 					cuts++
 				}
@@ -721,7 +725,7 @@ func judgeS12(d *runData) (metrics, []criterion) {
 	// recorded, not judged, since a slow charger's pending order may hold it.
 	limited := 0
 	for _, r := range w {
-		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-1-6 {
+		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-6 {
 			limited++
 		}
 	}

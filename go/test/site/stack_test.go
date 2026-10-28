@@ -208,6 +208,7 @@ type houseDevice struct {
 	CarMaxA          float64           `json:"car_max_a,omitempty"`
 	CarPhases        int               `json:"car_phases,omitempty"`
 	WiredPhases      int               `json:"wired_phases,omitempty"`
+	Plugged          bool              `json:"plugged,omitempty"`
 }
 
 // houseEvent is one change to the house (device-simulator's runEvent).
@@ -247,6 +248,7 @@ type charger struct {
 	carPhases   int     // 0: as many as offered
 	wiredPhases int     // 1: wired on L1 only, kw its rating there
 	carMaxA     float64
+	plugged     bool // a car on it when the house starts, charging on its own
 }
 
 type stackSpec struct {
@@ -276,6 +278,11 @@ type stackSpec struct {
 	mode string
 	// horizonH is the planner's horizon_hours; 0 leaves Core's 48 h.
 	horizonH int
+	// plannerSoCMin is the planner's soc_min (a fraction); 0 leaves Core's.
+	plannerSoCMin float64
+	// startAfterS runs the house this long before FTW starts, as a site
+	// runs before Core boots; FTW's start is marked ftw_start.
+	startAfterS float64
 }
 
 type stack struct {
@@ -344,7 +351,7 @@ func (st *stack) houseSpec() houseSpec {
 		h.Devices = append(h.Devices, houseDevice{ID: lpIDs[i], Driver: "ocpp",
 			OCPPURL: fmt.Sprintf("ws://ftw:%s@127.0.0.1:%d/", ocppPass, st.lane.ftwOCPP()),
 			MaxKW:   kw, Vendor: "RigCo", Model: fmt.Sprintf("Rig%.0f", kw), PhaseSwitch: c.phaseSwitch, CommandResponseS: delay,
-			CarPhases: c.carPhases, CarMaxA: c.carMaxA, WiredPhases: c.wiredPhases,
+			CarPhases: c.carPhases, CarMaxA: c.carMaxA, WiredPhases: c.wiredPhases, Plugged: c.plugged,
 			OCPPConfig: map[string]string{"HeartbeatInterval": "60", "MeterValueSampleInterval": "10"}})
 	}
 	return h
@@ -393,6 +400,10 @@ func (st *stack) up() error {
 			return err
 		}
 	}
+	if st.spec.startAfterS > 0 {
+		sleepS(st.spec.startAfterS)
+		st.mark("ftw_start")
+	}
 	if err := st.startFTW(); err != nil {
 		return err
 	}
@@ -413,7 +424,9 @@ func (st *stack) startFTW() error {
 	return waitHTTP(st.ftw+"/api/status", 90*time.Second)
 }
 
-func (st *stack) stopFTW() { st.ps.stop("ftw", syscall.SIGTERM, 30*time.Second) }
+// stopFTW stops FTW with sig: SIGTERM lets it clean up, SIGKILL is a power
+// cut.
+func (st *stack) stopFTW(sig syscall.Signal) { st.ps.stop("ftw", sig, 30*time.Second) }
 
 func (st *stack) down() {
 	if st.rec != nil {
@@ -569,7 +582,9 @@ func (st *stack) ftwConfig() (string, error) {
 	cfg := map[string]any{
 		"site": map[string]any{"name": "rig", "control_interval_s": 2, "grid_target_w": 0,
 			"grid_tolerance_w": 42, "watchdog_timeout_s": 60},
-		"fuse": map[string]any{"max_amps": st.spec.fuseA, "phases": 3, "voltage": 230},
+		// safety_margin_a pinned at 0 so the rig judges Core at the rating
+		// whatever the default.
+		"fuse": map[string]any{"max_amps": st.spec.fuseA, "phases": 3, "voltage": 230, "safety_margin_a": 0},
 		"drivers": []map[string]any{
 			{"name": "meter", "lua": "drivers/sdm630.lua", "is_site_meter": true, "capabilities": modbus("meter")},
 			{"name": "sungrow", "lua": "drivers/sungrow.lua", "battery_capacity_wh": 10000, "capabilities": modbus("inverter")},
@@ -590,6 +605,9 @@ func (st *stack) ftwConfig() (string, error) {
 	}
 	if st.spec.horizonH > 0 {
 		cfg["planner"].(map[string]any)["horizon_hours"] = st.spec.horizonH
+	}
+	if st.spec.plannerSoCMin > 0 {
+		cfg["planner"].(map[string]any)["soc_min"] = st.spec.plannerSoCMin
 	}
 	if st.spec.soc2Pct > 0 {
 		cfg["drivers"] = append(cfg["drivers"].([]map[string]any),
