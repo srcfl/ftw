@@ -351,6 +351,30 @@ func TestFuseReliefStaysAtTheLineAfterPVDrop(t *testing.T) {
 // readLag ticks earlier. maxDischargeW > 0 caps what the battery delivers
 // without Core knowing it.
 func pvDropLoop(readLag int, maxDischargeW float64) (targets, l1 []float64, line float64) {
+	r := pvDropRun(pvDropCase{readLag: readLag, maxDischargeW: maxDischargeW})
+	return r.targets, r.l1, r.line
+}
+
+// pvDropCase varies pvDropLoop. freezeFrom > 0 makes the meter repeat its
+// reading from that tick on. onePhase puts the battery on that phase only
+// (1-3), which Core reads as balanced. load replaces the house and car
+// current per phase.
+type pvDropCase struct {
+	readLag       int
+	maxDischargeW float64
+	freezeFrom    int
+	onePhase      int
+	load          [3]float64
+}
+
+type pvDropResult struct {
+	targets, l1 []float64
+	// batPhase is the true current on the battery's phase when onePhase > 0.
+	batPhase []float64
+	line     float64
+}
+
+func pvDropRun(c pvDropCase) (r pvDropResult) {
 	st := phaseDirectionState(0)
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	st.clock = func() time.Time { return now }
@@ -358,9 +382,14 @@ func pvDropLoop(readLag int, maxDischargeW float64) (targets, l1 []float64, line
 
 	store := telemetry.NewStore()
 	load := [3]float64{23.44, 11.04, 11.54} // house and car, A import per phase
+	if c.load != ([3]float64{}) {
+		load = c.load
+	}
 	pvW := -3200.0
 	actual := []float64{-3005}
-	line = st.fuseLineA()
+	r.line = st.fuseLineA()
+	var frozen json.RawMessage
+	var frozenW float64
 	for tick := 0; tick < 40; tick++ {
 		switch tick {
 		case 5:
@@ -374,15 +403,27 @@ func pvDropLoop(readLag int, maxDischargeW float64) (targets, l1 []float64, line
 		var totalW float64
 		for i := range a {
 			a[i] = load[i] + (pvW+batW)/690
+			if c.onePhase > 0 {
+				a[i] = load[i] + pvW/690
+				if i == c.onePhase-1 {
+					a[i] += batW / 230
+				}
+			}
 			data[fmt.Sprintf("l%d_a", i+1)] = math.Abs(a[i])
 			data[fmt.Sprintf("l%d_w", i+1)] = a[i] * 230
 			totalW += a[i] * 230
 		}
 		raw, _ := json.Marshal(data)
+		if c.freezeFrom > 0 && tick >= c.freezeFrom {
+			if frozen == nil {
+				frozen, frozenW = raw, totalW
+			}
+			raw, totalW = frozen, frozenW
+		}
 		store.Update("meter", telemetry.DerMeter, totalW, nil, raw)
 		store.DriverHealthMut("meter").RecordSuccess()
 		soc := 0.6
-		store.Update("bat", telemetry.DerBattery, actual[max(0, len(actual)-1-readLag)], &soc, nil)
+		store.Update("bat", telemetry.DerBattery, actual[max(0, len(actual)-1-c.readLag)], &soc, nil)
 		store.DriverHealthMut("bat").RecordSuccess()
 
 		order := batW
@@ -392,15 +433,18 @@ func pvDropLoop(readLag int, maxDischargeW float64) (targets, l1 []float64, line
 			}
 		}
 		batW = order
-		if maxDischargeW > 0 {
-			batW = math.Max(order, -maxDischargeW)
+		if c.maxDischargeW > 0 {
+			batW = math.Max(order, -c.maxDischargeW)
 		}
 		actual = append(actual, batW)
-		targets = append(targets, math.Round(order))
-		l1 = append(l1, math.Round(a[0]*100)/100)
+		r.targets = append(r.targets, math.Round(order))
+		r.l1 = append(r.l1, math.Round(a[0]*100)/100)
+		if c.onePhase > 0 {
+			r.batPhase = append(r.batPhase, math.Round(a[c.onePhase-1]*100)/100)
+		}
 		now = now.Add(5 * time.Second)
 	}
-	return targets, l1, line
+	return r
 }
 
 // assertHeldAtTheLine wants L1 at the line while PV is low, and one crossing
@@ -462,5 +506,162 @@ func TestFuseReliefSettlesWhenTheBatteryFallsShort(t *testing.T) {
 	if t.Failed() {
 		t.Logf("targets %v", targets)
 		t.Logf("L1 %v", l1)
+	}
+}
+
+// Mixed directions, three-phase battery holding -2000 W: L1 imports at the
+// 16 A line, and a one-phase PV inverter on L3 steps from -15 A to -18 A
+// of export. No move fits both phases. The least-over move cuts the
+// discharge by 690 W and leaves L1 at 17 A and L3 at -17 A. Before, the
+// last-command bound read L1 at the import line as a reason to keep
+// -2000 W, put back every cut the export side made, and left L3 at -18 A.
+func TestFuseReliefLeavesMixedPhasesLeastOver(t *testing.T) {
+	st := phaseDirectionState(0)
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	st.clock = func() time.Time { return now }
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: -2000, ExpiresAt: now.Add(time.Hour)})
+	store := telemetry.NewStore()
+	base := [3]float64{18.9, 8, -12.1} // A without the battery, + import
+	batW := -2000.0
+	var orders, worst []float64
+	for tick := 0; tick < 20; tick++ {
+		if tick == 3 {
+			base[2] = -15.1
+		}
+		data := map[string]any{}
+		var totalW, w float64
+		for i := range base {
+			a := base[i] + batW/690
+			data[fmt.Sprintf("l%d_a", i+1)] = math.Abs(a)
+			data[fmt.Sprintf("l%d_w", i+1)] = a * 230
+			totalW += a * 230
+			w = math.Max(w, math.Abs(a))
+		}
+		raw, _ := json.Marshal(data)
+		store.Update("meter", telemetry.DerMeter, totalW, nil, raw)
+		store.DriverHealthMut("meter").RecordSuccess()
+		soc := 0.6
+		store.Update("bat", telemetry.DerBattery, batW, &soc, nil)
+		store.DriverHealthMut("bat").RecordSuccess()
+		for _, o := range ComputeDispatch(store, st, map[string]float64{"bat": 15200}, 16*230*3) {
+			if o.Driver == "bat" {
+				batW = o.TargetW
+			}
+		}
+		orders = append(orders, math.Round(batW))
+		worst = append(worst, math.Round(w*100)/100)
+		now = now.Add(5 * time.Second)
+	}
+	for i := 8; i < 20; i++ {
+		if worst[i] > 17.05 {
+			t.Errorf("tick %d: worst phase %.2f A, want at most 17 A (L1 17, L3 -17)", i, worst[i])
+		}
+	}
+	if t.Failed() {
+		t.Logf("orders %v", orders)
+		t.Logf("worst phase |A| %v", worst)
+	}
+}
+
+// A one-phase battery on L2, which Core reads as balanced, with L1 at 18 A
+// while PV is low. Once PV returns, L1 still sits at 16.14 A, which the
+// battery cannot reach. Before, the last-command bound held the -4882 W
+// discharge for L1 and left L2 exporting 19.86 A, past 1.2 x In, on every
+// tick. Now L2 comes back inside the line and the order holds.
+func TestFuseReliefLetsAOnePhaseBatteryOffItsOwnPhase(t *testing.T) {
+	r := pvDropRun(pvDropCase{onePhase: 2, load: [3]float64{20.78, 6, 11.54}})
+	for i := 31; i < 40; i++ {
+		if math.Abs(r.batPhase[i]) > r.line+0.01 {
+			t.Errorf("tick %d: L2 %.2f A, want inside the %.1f A line", i, r.batPhase[i], r.line)
+		}
+		if r.targets[i] != r.targets[31] {
+			t.Errorf("tick %d: order %.0f W, want the %.0f W order held", i, r.targets[i], r.targets[31])
+		}
+	}
+	if t.Failed() {
+		t.Logf("targets %v", r.targets)
+		t.Logf("L1 %v", r.l1)
+		t.Logf("L2 %v", r.batPhase)
+	}
+}
+
+// The meter repeats its 16.3 A reading from the PV step on (frozen@5)
+// while the battery follows its orders. Before, every tick found the same
+// 0.3 A overage and added it to a battery already moved for it: -3214,
+// -3422, ... -10000 W, with the true L1 down at 4.3 A. Now the relief stops
+// once the battery has moved one ampere per phase (690 W) and L1 has not
+// moved: at most that ampere and one step past the first relief.
+func TestFuseReliefStopsWhenTheMeterIsFrozen(t *testing.T) {
+	r := pvDropRun(pvDropCase{freezeFrom: 5})
+	assertReliefStops(t, r)
+}
+
+// A one-phase battery on L2 and L1 at 16.3 A while PV is low. The battery
+// cannot reach L1, so L1 never shows its move. Before, the relief grew by
+// 0.3 A of overage a tick to -4512 W and drove L2 to -16.4 A of export,
+// then -18.25 A on the PV return tick. Now it stops the same way as for a
+// frozen meter, and L2 stays inside the line.
+func TestFuseReliefStopsWhenTheBatteryCannotReachTheWorstPhase(t *testing.T) {
+	r := pvDropRun(pvDropCase{onePhase: 2, load: [3]float64{19.08, 6, 11.54}})
+	assertReliefStops(t, r)
+	for i, a := range r.batPhase {
+		if math.Abs(a) > r.line+0.01 {
+			t.Errorf("tick %d: L2 %.2f A, want inside the %.1f A line", i, a, r.line)
+		}
+	}
+}
+
+// assertReliefStops wants the order no further out than one ampere per
+// phase and one 0.3 A step past the first relief (-3214 W), and held from
+// tick 9 until PV returns.
+func assertReliefStops(t *testing.T, r pvDropResult) {
+	t.Helper()
+	const floorW = -3214 - phaseResponseA*690 - 0.3*690
+	for i := 5; i < 30; i++ {
+		if r.targets[i] < floorW {
+			t.Errorf("tick %d: order %.0f W, past %.0f W", i, r.targets[i], floorW)
+		}
+		if i >= 9 && r.targets[i] != r.targets[9] {
+			t.Errorf("tick %d: order %.0f W, want the %.0f W order held", i, r.targets[i], r.targets[9])
+		}
+	}
+	if t.Failed() {
+		t.Logf("targets %v", r.targets)
+		t.Logf("L1 %v", r.l1)
+		if r.batPhase != nil {
+			t.Logf("battery phase %v", r.batPhase)
+		}
+	}
+}
+
+// The meter fails to show the batteries only once they moved one ampere
+// per phase (phaseResponseA, 690 W here) and the worst phase moved less
+// than half an ampere. A phase that moves becomes the new reference.
+func TestPhaseUnresponsiveNeedsOneAmpereOfBatteryMove(t *testing.T) {
+	st := phaseDirectionState(0)
+	step := func(l1, batW float64) bool {
+		_, stuck := st.phaseUnresponsive([]float64{l1, 9, 9.5}, map[string]float64{"bat": batW})
+		return stuck
+	}
+	if step(16.3, -3000) {
+		t.Fatal("first reading: stuck, want a reference")
+	}
+	if step(16.3, -3689) {
+		t.Error("689 W moved, L1 still: stuck, want not yet")
+	}
+	if !step(16.3, -3690) {
+		t.Error("690 W moved, L1 still: not stuck")
+	}
+	if !step(16.79, -3690) {
+		t.Error("690 W moved, L1 0.49 A: not stuck")
+	}
+	if step(15.8, -3690) {
+		t.Error("L1 moved 0.5 A: stuck, want a new reference")
+	}
+	if step(15.8, -3690) {
+		t.Error("same reading again: stuck")
+	}
+	if !step(15.8, -3000) {
+		t.Error("690 W back, L1 still: not stuck")
 	}
 }

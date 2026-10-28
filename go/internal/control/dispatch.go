@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"sort"
 	"time"
@@ -406,6 +407,9 @@ type State struct {
 	// batteriesOfflineSince is, per battery whose relief still counts,
 	// when dispatch first found it offline (expireOfflineFuseRelief).
 	batteriesOfflineSince map[string]time.Time
+	// phaseResponse is the reading the batteries' phase relief last saw
+	// the worst phase move in (phaseUnresponsive).
+	phaseResponse phaseResponse
 
 	// PI controller (outer, site-level)
 	PI *PIController
@@ -4022,34 +4026,36 @@ func livePhaseSample(store *telemetry.Store, driver string, meter *telemetry.Der
 //
 // sentW is the same change from the command each battery got in the last
 // dispatch, for a battery that got one, and from its reading otherwise.
-func (p phaseSample) moveW(state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (moveW, sentW float64, ok bool) {
+//
+// rawW is each battery's raw power in this reading.
+func (p phaseSample) moveW(state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (moveW, sentW float64, rawW map[string]float64, ok bool) {
 	if p.store == nil {
-		return 0, 0, false
+		return 0, 0, nil, false
 	}
-	seen := make(map[string]bool, len(targets))
+	rawW = make(map[string]float64, len(targets))
 	for _, t := range targets {
 		moveW += t.TargetW
 		sentW += t.TargetW
-		if seen[t.Driver] {
+		if _, seen := rawW[t.Driver]; seen {
 			continue
 		}
-		seen[t.Driver] = true
 		r := batteries[t.Driver]
 		if r == nil {
-			return 0, 0, false
+			return 0, 0, nil, false
 		}
-		rawW, at, ok := p.store.OnlineRawW(t.Driver, telemetry.DerBattery)
+		w, at, ok := p.store.OnlineRawW(t.Driver, telemetry.DerBattery)
 		if !ok || !at.Equal(r.UpdatedAt) {
-			return 0, 0, false
+			return 0, 0, nil, false
 		}
-		moveW -= rawW
-		if w, sent := state.lastDispatchedW(t.Driver); sent {
-			sentW -= w
+		rawW[t.Driver] = w
+		moveW -= w
+		if last, sent := state.lastDispatchedW(t.Driver); sent {
+			sentW -= last
 		} else {
-			sentW -= rawW
+			sentW -= w
 		}
 	}
-	return moveW, sentW, true
+	return moveW, sentW, rawW, true
 }
 
 // lastDispatchedW is the command driver got in the last dispatch, if it
@@ -4077,14 +4083,81 @@ func (s *State) lastDispatchedW(driver string) (float64, bool) {
 // shows it and the relief goes on top of it. The order runs further out
 // each time. So a move from the last command may not pass the room the
 // meter shows either (phaseSentReliefW).
+//
+// The relief also counts on the meter showing the batteries' move. When it
+// does not, because the meter repeats one reading or the worst phase is one
+// the batteries do not reach, each tick finds the same overage and adds it
+// to a battery already moved for it: the order runs out to the battery's
+// limit. Once the meter fails to show a move it should
+// (phaseUnresponsive), the relief toward the worst phase stops at the last
+// command.
 func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (importW, exportW float64) {
-	moveW, sentW, ok := p.moveW(state, targets, batteries)
+	moveW, sentW, rawW, ok := p.moveW(state, targets, batteries)
 	if !ok {
 		return 0, 0
 	}
 	importW, exportW = phaseFuseReliefW(p, state, moveW)
 	sentImportW, sentExportW := phaseSentReliefW(p, state, sentW)
-	return math.Max(importW, sentImportW), math.Max(exportW, sentExportW)
+	importW, exportW = math.Max(importW, sentImportW), math.Max(exportW, sentExportW)
+	if amps, ok := p.signedA(state); ok {
+		if worst, stuck := state.phaseUnresponsive(amps, rawW); stuck {
+			if worst > 0 {
+				importW = math.Min(importW, math.Max(0, sentW))
+			} else {
+				exportW = math.Min(exportW, math.Max(0, -sentW))
+			}
+		}
+	}
+	return importW, exportW
+}
+
+// phaseResponseA is the current a battery move must change on every phase
+// before any meter is sure to show it: one ampere, the step in which P1
+// meters report phase current. A phase that changed by less than half of
+// it has not moved.
+const phaseResponseA = 1.0
+
+// phaseResponse is the reading in which the worst phase last moved, with
+// each battery's raw power at that reading (phaseUnresponsive).
+type phaseResponse struct {
+	amps []float64
+	rawW map[string]float64
+}
+
+// phaseUnresponsive reports whether the batteries' raw power has changed by
+// phaseResponseA or more per phase since the worst phase last moved, while
+// that phase has not moved since: the meter does not show the batteries.
+// worstA is the worst phase's signed current, + import. A reading in which
+// the worst phase moved becomes the new reference.
+func (s *State) phaseUnresponsive(amps []float64, rawW map[string]float64) (worstA float64, stuck bool) {
+	if s == nil || len(amps) == 0 {
+		return 0, false
+	}
+	worst := 0
+	for i, a := range amps {
+		if math.Abs(a) > math.Abs(amps[worst]) {
+			worst = i
+		}
+	}
+	ref := &s.phaseResponse
+	if len(ref.amps) != len(amps) || math.Abs(amps[worst]-ref.amps[worst]) >= phaseResponseA/2 {
+		ref.amps = append([]float64(nil), amps...)
+		ref.rawW = maps.Clone(rawW)
+		return amps[worst], false
+	}
+	var changedW float64
+	for driver, w := range rawW {
+		if was, ok := ref.rawW[driver]; ok {
+			changedW += w - was
+		} else {
+			if ref.rawW == nil {
+				ref.rawW = make(map[string]float64, len(rawW))
+			}
+			ref.rawW[driver] = w
+		}
+	}
+	perA := s.SiteFuseVoltage * float64(s.SiteFusePhases)
+	return amps[worst], math.Abs(changedW) >= phaseResponseA*perA
 }
 
 // phaseSentReliefW is the relief that keeps sentW, the batteries' move from
@@ -4092,7 +4165,10 @@ func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget
 // phase already over the line has no room; its overage is
 // phaseFuseReliefW's. So this relief never asks for more than to stay at
 // the last command, and a battery that cannot reach its command does not
-// wind the relief up.
+// wind the relief up. With a phase over the export line, holding the last
+// command against the import line would pin that overage where it is, so
+// the import side gives way to phaseFuseReliefW's least-over move; the
+// same holds the other way round.
 func phaseSentReliefW(p phaseSample, state *State, sentW float64) (importW, exportW float64) {
 	amps, ok := p.signedA(state)
 	if !ok {
@@ -4101,15 +4177,17 @@ func phaseSentReliefW(p phaseSample, state *State, sentW float64) (importW, expo
 	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases)
 	limitA := state.fuseLineA()
 	hi, lo := math.Inf(-1), math.Inf(1)
+	overImport, overExport := false, false
 	for _, a := range amps {
+		overImport, overExport = overImport || a > limitA, overExport || a < -limitA
 		a = math.Max(-limitA, math.Min(limitA, a)) + sentW/perA
 		hi, lo = math.Max(hi, a), math.Min(lo, a)
 	}
 	importW, exportW = math.Max(0, hi-limitA)*perA, math.Max(0, -limitA-lo)*perA
-	if importW < 1 {
+	if importW < 1 || overExport {
 		importW = 0
 	}
-	if exportW < 1 {
+	if exportW < 1 || overImport {
 		exportW = 0
 	}
 	return importW, exportW
