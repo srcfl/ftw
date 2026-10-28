@@ -4289,20 +4289,14 @@ func fuseSaverEarlyExit(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
-	out := fuseSaverFromLivePower(store, state, driverCapacities, fuseMaxW)
+	out, live := fuseSaverAtLivePower(store, state, driverCapacities, fuseMaxW)
 	out = state.stopFullBatteries(out, store, driverCapacities)
 	if out == nil || state == nil {
 		return out
 	}
 	// The early path starts from live power, so relief is discharge below
-	// what each battery reads now. Without a command the last one stands,
-	// and so does its relief.
-	live := make([]DispatchTarget, 0, len(out))
-	for _, t := range out {
-		if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
-			live = append(live, DispatchTarget{Driver: t.Driver, TargetW: r.SmoothedW})
-		}
-	}
+	// the live power the decision read. Without a command the last one
+	// stands, and so does its relief.
 	state.recordFuseRelief(live, out)
 	state.LastTargets = out
 	now := state.now()
@@ -4685,16 +4679,29 @@ func fuseSaverFromLivePower(
 	driverCapacities map[string]float64,
 	fuseMaxW float64,
 ) []DispatchTarget {
+	out, _ := fuseSaverAtLivePower(store, state, driverCapacities, fuseMaxW)
+	return out
+}
+
+// fuseSaverAtLivePower is fuseSaverFromLivePower that also returns the live
+// power of each online battery it started from, so the caller records relief
+// against the same reading the decision used.
+func fuseSaverAtLivePower(
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) (out, rawLive []DispatchTarget) {
 	if fuseMaxW <= 0 || len(driverCapacities) == 0 || store == nil || state == nil {
-		return nil
+		return nil, nil
 	}
 	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
 	if meter == nil {
-		return nil
+		return nil, nil
 	}
 	rawLive, safeBaseline, batteryReadings := fleetAtLivePower(store, driverCapacities, state.DriverLimits)
 	if len(rawLive) == 0 {
-		return nil
+		return nil, nil
 	}
 	// A command-safe baseline may differ from the live snapshot even when the
 	// site is safe. Preserve the deadband in that case: this early-return path
@@ -4703,7 +4710,7 @@ func fuseSaverFromLivePower(
 	phases := livePhaseSample(store, state.SiteMeterDriver, meter)
 	requiredRelief := fuseReliefFromSnapshot(rawLive, batteryReadings, meter, phases, state, fuseMaxW)
 	if requiredRelief <= 0 {
-		return nil
+		return nil, nil
 	}
 	_, _, predictedRaw := predictedGridFromSnapshot(rawLive, batteryReadings, meter)
 	maxRelief := predictedRaw + state.effectiveExportCeilingW(fuseMaxW)
@@ -4717,9 +4724,9 @@ func fuseSaverFromLivePower(
 		maxRelief,
 	)
 	if len(safeBaseline) == 0 {
-		return nil
+		return nil, nil
 	}
-	out := forceFuseDischargeWithSnapshot(safeBaseline, batteryReadings, meter, phases, state, driverCapacities, fuseMaxW)
+	out = forceFuseDischargeWithSnapshot(safeBaseline, batteryReadings, meter, phases, state, driverCapacities, fuseMaxW)
 	rawByDriver := make(map[string]DispatchTarget, len(rawLive))
 	for _, t := range rawLive {
 		rawByDriver[t.Driver] = t
@@ -4728,12 +4735,12 @@ func fuseSaverFromLivePower(
 		rawTarget, ok := rawByDriver[t.Driver]
 		if !ok || t.TargetW != rawTarget.TargetW || t.Clamped != rawTarget.Clamped {
 			if !fuseSnapshotStillCurrent(store, state, meter.UpdatedAt, batteryReadings, out) {
-				return nil
+				return nil, nil
 			}
-			return out
+			return out, rawLive
 		}
 	}
-	return nil
+	return nil, nil
 }
 
 // fuseReliefFromSnapshot returns the import-side relief required for one

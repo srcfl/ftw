@@ -572,13 +572,17 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 }
 
 // evFuseReliefW is the fuse guard's battery relief the meter may show now:
-// each battery's recorded relief, at most the discharge it reads.
+// each battery's recorded relief, at most the discharge it reads. A battery
+// with no live reading (watchdog-offline, or none yet) counts its whole
+// relief: Core can no longer hold that discharge, and the car must not
+// build on it.
 func (s *State) evFuseReliefW(store *telemetry.Store) float64 {
 	var w float64
 	for driver, relief := range s.batteryFuseRelief {
-		if r := store.Get(driver, telemetry.DerBattery); r != nil && finiteFuseValue(r.RawW) {
-			w += math.Min(relief, math.Max(0, -r.RawW))
+		if raw, _, ok := store.OnlineRawW(driver, telemetry.DerBattery); ok {
+			relief = math.Min(relief, math.Max(0, -raw))
 		}
+		w += relief
 	}
 	return w
 }
