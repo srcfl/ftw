@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -111,6 +112,8 @@ func plan(gh github, cfg config, now time.Time, lastRandom string) ([]job, error
 	if err != nil {
 		return nil, err
 	}
+	// Oldest first: lower numbers come earlier in the merge order.
+	sort.Slice(pulls, func(i, j int) bool { return pulls[i].Number < pulls[j].Number })
 	for _, p := range pulls {
 		if p.Draft && !cfg.Drafts {
 			continue
@@ -140,6 +143,17 @@ func plan(gh github, cfg config, now time.Time, lastRandom string) ([]job, error
 		jobs = append(jobs, job{Context: ctxRandom, SHA: master, Set: fmt.Sprintf("random:%d:%d", first, cfg.RandomSeeds)})
 	}
 	return jobs, nil
+}
+
+// next is the first job not yet run in this tick. A job whose status failed
+// to post is planned again; this keeps it from running twice.
+func next(jobs []job, ran map[string]bool) (job, bool) {
+	for _, j := range jobs {
+		if !ran[j.Context+" "+j.SHA] {
+			return j, true
+		}
+	}
+	return job{}, false
 }
 
 func touchesWatched(files []string) bool {
