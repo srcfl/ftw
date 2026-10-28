@@ -327,9 +327,10 @@ type State struct {
 	SiteFuseVoltage float64
 	SiteFusePhases  int
 
-	// SiteFuseSafetyA is amps held back from the breaker. Without it the
-	// inverter's own limiter trips first, output falls to 0, and dispatch
-	// ramps from idle. Zero disables the margin.
+	// SiteFuseSafetyA is an opt-in margin in amps per phase below the
+	// breaker; zero, the default, works to the rating. Set it for an
+	// inverter whose own limiter trips at the rating: output falls to 0
+	// and dispatch ramps from idle.
 	SiteFuseSafetyA float64
 
 	// Peak limit — enforced only in PeakShaving mode
