@@ -9,7 +9,9 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -225,6 +227,60 @@ func within(ws []eventWindow, t, afterS float64) bool {
 	return false
 }
 
+// inverterBackFrom gives, for a time t, the latest return before t (at):
+// the inverter's from an outage (inverterOut) or Core's from a restart
+// (down), and when the R8 count may start after it (from). Core has the inverter back at its first
+// good read of it (no consecutive errors), which the Modbus reconnect
+// backoff may hold back up to reconnectBackoffMaxS. After an outage, a
+// default that failed while the inverter was away waits on the registry's
+// retry timer, up to defaultRetryMaxS more, until #1915 (C11) sends it on
+// the first good poll. A Core that starts fresh has no such wait.
+func (d *runData) inverterBackFrom(inverterOut, down []eventWindow) func(t float64) (at, from float64) {
+	type back struct {
+		at, from float64
+	}
+	var backs []back
+	add := func(at float64, outage bool) {
+		from := at + reconnectBackoffMaxS
+		for _, r := range d.samples {
+			if r.T >= at && r.T < from && readsInverter(r) {
+				from = r.T
+				break
+			}
+		}
+		if outage {
+			from += defaultRetryMaxS
+		}
+		backs = append(backs, back{at, from})
+	}
+	for _, w := range inverterOut {
+		add(w.to, true)
+	}
+	for _, w := range down {
+		add(w.to, false)
+	}
+	return func(t float64) (at, from float64) {
+		at, from = math.Inf(-1), math.Inf(-1)
+		for _, b := range backs {
+			if b.at <= t && b.at >= at {
+				at, from = b.at, b.from
+			}
+		}
+		return at, from
+	}
+}
+
+// readsInverter is whether Core's last poll of the inverter succeeded. A
+// status without the driver's error count says nothing, and counts as a
+// read.
+func readsInverter(r *sample) bool {
+	if r.Status == nil {
+		return false
+	}
+	dr, ok := r.Status.Drivers[inverterDriver]
+	return !ok || dr.ConsecutiveErrors == nil || *dr.ConsecutiveErrors == 0
+}
+
 // during is whether t falls in one of ws, up to but not at its end: at its
 // end the device is back.
 func during(ws []eventWindow, t float64) bool {
@@ -253,7 +309,34 @@ const (
 	evRestartDwellS = 35.0   // control/ev_fuse_budget.go evRestartDwell
 	tickS           = 2.0    // the rig's site.control_interval_s
 	plannerFloorPct = 10.0   // Core's planner.soc_min when the config leaves it out (cmd/ftw/main.go)
+
+	// R8: how long a battery FTW does not dispatch may hold a forced mode,
+	// and the Core timers that may delay it after the inverter returns.
+	inverterDriver   = "sungrow" // the rig's inverter driver (stack_test.go)
+	forcedBudgetS    = 10.0
+	defaultRetryMaxS = 30.0 // drivers/registry.go defaultRetryMax; 0 once #1915 (C11) lands
 )
+
+// reconnectBackoffMaxS is Core's Modbus reconnect backoff cap
+// (modbus/client.go reconnectBackoffMax), read from the source the rig
+// builds Core from, so R8 follows Core when the cap changes (60 s, then
+// 10 s with #1930).
+var reconnectBackoffMaxS = coreSeconds("modbus/client.go", "reconnectBackoffMax")
+
+// coreSeconds reads "name = N * time.Second" from a file under go/internal.
+// It panics when the line is gone: the judge has no number to fall back on.
+func coreSeconds(file, name string) float64 {
+	b, err := os.ReadFile(filepath.Join("..", "..", "internal", file))
+	if err != nil {
+		panic(err)
+	}
+	m := regexp.MustCompile(name + `\s*=\s*(\d+)\s*\*\s*time\.Second`).FindSubmatch(b)
+	if m == nil {
+		panic(fmt.Sprintf("no %s = N * time.Second in Core's %s", name, file))
+	}
+	n, _ := strconv.Atoi(string(m[1]))
+	return float64(n)
+}
 
 // dispatchW is Core's battery order on r, + charge; false when Core
 // dispatched no battery.
@@ -813,26 +896,44 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	}
 	m["raises_on_a_stale_meter"] = raises
 
-	// 8: a battery FTW does not dispatch is back in its own mode within
-	// 10 s: no forced charge or discharge left in the inverter's register
-	// once the inverter and Core are both up again (R8, C1). The 10 s
-	// count starts when both are back.
-	forcedS, run8 := 0.0, 0.0
+	// 8: a battery FTW does not dispatch runs in its own mode (R8, C1). The
+	// inverter's register may hold a forced charge or discharge FTW does
+	// not dispatch for forcedBudgetS. After an inverter outage or a Core
+	// restart the count starts once Core has the inverter back (backFrom).
+	// While Core is stopped with SIGTERM its driver cleanup writes the
+	// default, so a running inverter gets the same 10 s from the stop. One
+	// that comes back while Core is down has its outage's allowance. The
+	// triage's line is 10 s from the return itself; the seconds past that
+	// line that Core's timers excuse are recorded, not hidden.
+	backFrom := d.inverterBackFrom(inverterOut, down)
+	forcedS, pastS, timersS, run8, from8 := 0.0, 0.0, 0.0, 0.0, 0.0
 	for i, r := range run {
 		w, ok := dispatchW(r)
-		stray := r.Status != nil && (!ok || math.Abs(w) <= 50) && math.Abs(batOrder(r)) > 50 &&
-			!within(inverterOut, r.T, 0) && !within(down, r.T, 0)
-		if stray && i > 0 {
-			run8 += r.T - run[i-1].T
-			forcedS = math.Max(forcedS, run8)
-			if run8 > 10 {
-				note("forced battery", r.T)
-			}
-		} else {
+		stray := math.Abs(batOrder(r)) > 50 && !within(inverterOut, r.T, 0)
+		if !within(down, r.T, 0) {
+			stray = stray && r.Status != nil && (!ok || math.Abs(w) <= 50)
+		}
+		if !stray || i == 0 {
 			run8 = 0
+			continue
+		}
+		if run8 == 0 {
+			from8 = run[i-1].T
+		}
+		run8 += r.T - run[i-1].T
+		forcedS = math.Max(forcedS, run8)
+		at, from := backFrom(r.T)
+		switch {
+		case r.T > math.Max(from8, from)+forcedBudgetS:
+			pastS += r.T - run[i-1].T
+			note("forced battery", r.T)
+		case r.T > math.Max(from8, at)+forcedBudgetS:
+			timersS += r.T - run[i-1].T
 		}
 	}
 	m["battery_forced_without_dispatch_s"] = round(forcedS, 1)
+	m["battery_forced_past_allowance_s"] = round(pastS, 1)
+	m["battery_forced_in_core_timers_s"] = round(timersS, 1)
 	// The first second an invariant broke, from the start, per invariant:
 	// a kept seed is cut a minute after the one it failed on.
 	firsts := map[string]float64{}
@@ -849,7 +950,7 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		crit("no offer above the charger's rating", over == 0),
 		crit("no discharge asked at the battery's floor", floorS <= 10),
 		crit("no raise on a stale meter", raises == 0),
-		crit("no forced battery mode FTW does not dispatch", forcedS <= 10),
+		crit("no forced battery mode FTW does not dispatch", pastS == 0),
 	}
 }
 
