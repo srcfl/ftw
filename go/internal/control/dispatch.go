@@ -4065,8 +4065,8 @@ func (s *State) unshownBatteryW(now time.Time, store *telemetry.Store) float64 {
 		if read, _, _, seen := s.batteryReadings[driver].span(now); seen {
 			low = math.Min(low, read)
 		}
-		if r := store.Get(driver, telemetry.DerBattery); r != nil {
-			low = math.Min(low, r.RawW)
+		if w, _, live := store.OnlineRawW(driver, telemetry.DerBattery); live {
+			low = math.Min(low, w)
 		}
 		unshown += math.Max(0, latest-low)
 	}
@@ -4081,14 +4081,14 @@ func (s *State) recordBatteryReadings(targets []DispatchTarget, store *telemetry
 	}
 	now := s.now()
 	for _, t := range targets {
-		r := store.Get(t.Driver, telemetry.DerBattery)
-		if r == nil {
+		w, _, live := store.OnlineRawW(t.Driver, telemetry.DerBattery)
+		if !live {
 			continue
 		}
 		if s.batteryReadings == nil {
 			s.batteryReadings = map[string]commandLog{}
 		}
-		s.batteryReadings[t.Driver] = s.batteryReadings[t.Driver].add(now, r.RawW)
+		s.batteryReadings[t.Driver] = s.batteryReadings[t.Driver].add(now, w)
 	}
 }
 
@@ -4133,8 +4133,8 @@ func fitBatteryRisesToFuse(targets []DispatchTarget, store *telemetry.Store, sta
 		var base float64
 		if _, _, latest, sent := state.batteryCommands[t.Driver].span(now); sent {
 			base = latest
-		} else if r := store.Get(t.Driver, telemetry.DerBattery); r != nil {
-			base = r.RawW
+		} else if w, _, live := store.OnlineRawW(t.Driver, telemetry.DerBattery); live {
+			base = w
 		}
 		roomW -= math.Max(0, math.Min(0, t.TargetW)-math.Min(0, base))
 		holds[i] = math.Min(t.TargetW, math.Max(0, base))
