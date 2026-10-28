@@ -225,10 +225,22 @@ func within(ws []eventWindow, t, afterS float64) bool {
 	return false
 }
 
+// during is whether t falls in one of ws, up to but not at its end: at its
+// end the device is back.
+func during(ws []eventWindow, t float64) bool {
+	for _, w := range ws {
+		if t >= w.from && t < w.to {
+			return true
+		}
+	}
+	return false
+}
+
 // stepWindow is a change FTW did not make, and how long FTW may take to
 // answer it: until from + extraS + its lever's time + 2 s for the meter and
 // the tick + 3 s.
 type stepWindow struct {
+	plain        bool // a house event that is no fault: it extends a stretch only if it raised the current
 	from, extraS float64
 	leverS       float64 // > 0: the only lever that can answer (the charger, for a car FTW did not start)
 	untilT       float64 // > 0: the window ends here, whatever the lever (a Core restart)
@@ -331,6 +343,7 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 				w.noBattery = true
 			}
 		}
+		w.plain = until == 0
 		windows = append(windows, w)
 	}
 	// The battery's floor: the higher of the inverter's own floor and the
@@ -387,10 +400,11 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	// lever is how long FTW's fastest lever takes, from t, to take overA off
 	// the worst phase: the battery, in 2 s, while its inverter runs and its
 	// spare power covers the overage; otherwise the charger. At its floor
-	// the battery may only charge less, never discharge more.
+	// the battery may only charge less, never discharge more. The inverter
+	// is back at the end of its outage.
 	lever := func(t, overA float64, export bool) float64 {
 		r := d.at(t)
-		if r == nil || within(inverterOut, t, 0) || (r.Bat.Running != nil && !*r.Bat.Running) {
+		if r == nil || during(inverterOut, t) || (r.Bat.Running != nil && !*r.Bat.Running) {
 			return chargerLever(t)
 		}
 		spare := rigBatteryMaxW + r.BatW // discharge more, or charge less
@@ -424,8 +438,37 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	// 1, 2: the fuse holds; over the limit only as long as an outside step
 	// allows, and at most 3 s after FTW's own raise. Between the fuse and
 	// 1.2 x the fuse the 60 s heat is the budget (heatOver): the clock
-	// starts when the heat passes the fuse, as Core's cut does.
+	// starts when the heat passes the fuse, as Core's cut does. A stretch
+	// runs on across dips under the fuse while the heat stays over it.
 	blownAny := anyBlown(run)
+	// raisedIn is whether FTW sent the car a higher order in (a, b].
+	raisedIn := func(a, b float64) bool {
+		prev, ok := 0.0, false
+		for _, p := range orders {
+			if p.T > b {
+				break
+			}
+			if ok && p.T > a && p.offerW() > prev+1 {
+				return true
+			}
+			prev, ok = p.offerW(), true
+		}
+		return false
+	}
+	// raisedAt is whether the worst phase rose 0.5 A or more in the 3 s
+	// from t.
+	raisedAt := func(t float64) bool {
+		b := d.at(t - 0.5)
+		if b == nil {
+			return true
+		}
+		for _, r := range d.window(t, t+3) {
+			if maxAbsI(r) >= maxAbsI(b)+0.5 {
+				return true
+			}
+		}
+		return false
+	}
 	unexplained, longestOwn := 0.0, 0.0
 	var firstBad float64
 	bad := func(t float64) {
@@ -453,9 +496,11 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			return // the heat budget covers it
 		}
 		c := clock.T
+		// A window explains the stretch unless FTW raised the car after
+		// the window's meter delay and before the stretch began.
 		to, explained, own := math.Inf(-1), false, false
 		for _, w := range windows {
-			if x := until(w, s, overA, export); w.from <= s && s <= x {
+			if x := until(w, s, overA, export); w.from <= s && s <= x && !raisedIn(w.from+2, s) {
 				to, explained = math.Max(to, x), true
 			}
 		}
@@ -465,14 +510,36 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		if !own && c > s { // Core answers once the heat says so
 			to = math.Max(to, c+lever(c, overA, export)+2+3)
 		}
-		// Every window that opens inside a step's stretch while it is still
-		// allowed extends it: a second step, an outage or a Core restart.
-		// FTW's own raise stays its own.
-		for grown := !own; grown; {
+		// brokeAt is the first time from t on that the stretch is over the
+		// fuse; an over sample holds until the next one.
+		brokeAt := func(t float64) float64 {
+			for i, r := range stretch {
+				next := end
+				if i+1 < len(stretch) {
+					next = stretch[i+1].T
+				}
+				if maxAbsI(r) > fuse && next > t {
+					return math.Max(r.T, t)
+				}
+			}
+			return math.Inf(1)
+		}
+		// A window that opens inside the stretch before it broke its
+		// allowance extends it: a second step, an outage or a Core restart.
+		// A plain house event counts only if it raised the current. Inside
+		// FTW's own raise a window counts only once the raise is answered:
+		// after its 3 s, with the current under the fuse until the window.
+		for grown := true; grown; {
 			grown = false
 			for _, w := range windows {
-				if x := until(w, w.from, overA, export); w.from >= s && w.from <= math.Min(end, to) && x > to {
-					to, grown = x, true
+				if w.from < s || w.from > math.Min(end, brokeAt(to)) || (own && w.from <= to) {
+					continue
+				}
+				if w.plain && !raisedAt(w.from) {
+					continue
+				}
+				if x := until(w, w.from, overA, export); x > to {
+					to, grown, own = x, true, false
 				}
 			}
 		}
@@ -491,18 +558,17 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			bad(to)
 		}
 	}
-	from := -1
+	from, last := -1, -1
 	for i, r := range run {
-		over := maxAbsI(r) > fuse
-		if over && from < 0 {
-			from = i
-		}
-		if (!over || i == len(run)-1) && from >= 0 {
-			hi := i
-			if over {
-				hi = i + 1
+		if maxAbsI(r) > fuse {
+			if from < 0 {
+				from = i
 			}
-			judgeStretch(run[from:hi], r.T)
+			last = i
+		}
+		open := last == i || (from >= 0 && max(r.HeatA[0], r.HeatA[1], r.HeatA[2]) > fuse)
+		if (!open || i == len(run)-1) && from >= 0 {
+			judgeStretch(run[from:last+1], run[min(last+1, len(run)-1)].T)
 			from = -1
 		}
 	}

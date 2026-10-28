@@ -71,6 +71,7 @@ func TestInvariantsExtendAStretchByEveryWindowInsideIt(t *testing.T) {
 		{"restart 1 s into the stretch", 120, true},
 		{"no restart", 0, false},
 		{"restart after the step's time", 130, false},
+		{"restart 0.2 s after the step's time", 121.9, false},
 	} {
 		// 20 A fuse; 26 A (1.3 x) from 119 to 143 s, after a load step
 		// at 114.7 s. The battery's 5 kW (7.2 A) covers the 6 A overage,
@@ -157,8 +158,8 @@ func TestInvariantsCarStartingOnItsOwnIsAStep(t *testing.T) {
 // R5, seed 207536: between the fuse and 1.2 x the fuse the 60 s heat is the
 // budget (owner rule, 27 Oct 2026). 27.84 A on 25 A for 15 s from 15 A
 // passes; above 1.2 x it fails once the step's time is up; so does the same
-// 27.84 A held until the heat passes the fuse, and 25.5 A on a fuse already
-// warm at its rating.
+// 27.84 A held past the lever's time after the heat passes the fuse, and
+// 25.5 A on a fuse already warm at its rating.
 func TestInvariantsJudgeBetweenFuseAndInstantByHeat(t *testing.T) {
 	for _, c := range []struct {
 		name     string
@@ -170,6 +171,9 @@ func TestInvariantsJudgeBetweenFuseAndInstantByHeat(t *testing.T) {
 		{"30.1 A for 15 s", 15, 30.1, 50, 65, false},
 		{"27.84 A for 200 s", 15, 27.84, 50, 250, false},
 		{"25.5 A for 15 s on a warm fuse", 25, 25.5, 50, 65, false},
+		// The heat passes the fuse at 127 s; the battery then has 2 + 5 s.
+		{"27.84 A until 7 s after the heat passes the fuse", 15, 27.84, 50, 134, true},
+		{"27.84 A until 8 s after the heat passes the fuse", 15, 27.84, 50, 135, false},
 	} {
 		d := randomRun(301, 25, c.base, func(i int, r *sample) {
 			if i >= c.from && i < c.to {
@@ -274,7 +278,8 @@ func TestInvariantsFloorJudgesFTWsOrders(t *testing.T) {
 // An over-limit stretch no outside change explains is FTW's own, whichever
 // way the current flows and however it is cut up: FTW's discharge pushing
 // export over the fuse, and a warm fuse held over its rating with a 1 s dip
-// every 7 s. Both fail after 3 s.
+// every 7 s, or every 4 s. A dip does not end a stretch while the heat stays
+// over the fuse. All fail after 3 s.
 func TestInvariantsAStretchWithNoStepIsFTWsOwn(t *testing.T) {
 	export := randomRun(121, 16, -10, func(i int, r *sample) {
 		w := 0.0
@@ -286,12 +291,15 @@ func TestInvariantsAStretchWithNoStepIsFTWsOwn(t *testing.T) {
 			r.PhaseA = [3]float64{-21, -21, -21}
 		}
 	})
-	dips := randomRun(601, 25, 25.5, func(i int, r *sample) {
-		if i%7 == 6 {
-			r.PhaseA = [3]float64{24.9, 24.9, 24.9}
-		}
-	})
-	for name, d := range map[string]*runData{"export 6 s at 1.31 x In": export, "600 s on a warm fuse, with dips": dips} {
+	dips := func(every int) *runData {
+		return randomRun(601, 25, 25.5, func(i int, r *sample) {
+			if i%every == every-1 {
+				r.PhaseA = [3]float64{24.9, 24.9, 24.9}
+			}
+		})
+	}
+	for name, d := range map[string]*runData{"export 6 s at 1.31 x In": export,
+		"600 s on a warm fuse, a dip every 7 s": dips(7), "600 s on a warm fuse, 3 s over and 1 s under": dips(4)} {
 		withCharger(t, d, 5, 0)
 		if v := judged(d); v[limitOwn] {
 			t.Errorf("%s: %q passed", name, limitOwn)
@@ -301,23 +309,35 @@ func TestInvariantsAStretchWithNoStepIsFTWsOwn(t *testing.T) {
 
 // A window that opens inside FTW's own raise does not turn it into a step:
 // FTW raises the car at 45 s and the phases sit at 31 A (1.24 x 25 A) from
-// 50 to 60 s; PV rising at 51 s changes nothing. The battery is at its
-// floor, so the 40 s charger would be a step's lever.
+// 50 to 60 s; PV moving at 51 s changes nothing, and a load step at 51 s
+// that adds 1 A comes after FTW's raise broke the line. The battery is at
+// its floor, so the 40 s charger would be a step's lever.
 func TestInvariantsAnEventInsideFTWsRaiseLeavesItOwn(t *testing.T) {
-	for _, withEvent := range []bool{false, true} {
+	for _, c := range []struct {
+		name  string
+		event string // at 51 s; "": none
+		addA  float64
+	}{
+		{"no event", "", 0},
+		{"PV moves", "pv", 0},
+		{"a load step adds 1 A", "loads", 1},
+	} {
 		d := randomRun(121, 25, 10, func(i int, r *sample) {
 			r.Bat.SoCPct = 6
 			if i >= 50 && i < 60 {
 				r.PhaseA = [3]float64{31, 31, 31}
 			}
+			if i >= 51 && i < 60 {
+				r.PhaseA[0] += c.addA
+			}
 		})
 		withCharger(t, d, 40, 0)
 		d.frames = []frame{profileAt(40, 0), profileAt(45, 16)}
-		if withEvent {
-			d.events = []houseEventLine{{T: 51, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+		if c.event != "" {
+			d.events = []houseEventLine{{T: 51, Event: houseEvent{Do: c.event}}}
 		}
 		if v := judged(d); v[limitOwn] {
-			t.Errorf("event %v: FTW's raise held 10 s at 1.24 x In and passed", withEvent)
+			t.Errorf("%s: FTW's raise held 10 s at 1.24 x In and passed", c.name)
 		}
 	}
 }
@@ -411,5 +431,201 @@ func TestRecordedRandomFindsSeedRuns(t *testing.T) {
 	}
 	if len(got) != 2 || got[0] != "r7@random-7" || got[1] != "r9@random-9" {
 		t.Fatalf("recordedRandom = %v", got)
+	}
+}
+
+// R2 after the second review of #1920: a house event that is no fault
+// extends a step's stretch only if the worst phase rose 0.5 A or more
+// within 3 s of it. 16 A fuse, the battery at its floor and a 40 s charger,
+// so a step allows 45 s; 20 A on L1 (1.25 x) from 12 s, after a load step
+// at 10 s.
+func TestInvariantsOnlyARiseExtendsAStretch(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		to     int     // 20 A on L1 until here
+		riseAt int     // L1 rises to 21 A from here; 0: never
+		every  float64 // a load event that changes nothing, this often; 0: none
+		want   bool
+	}{
+		{"a load event at 50 s raises L1", 80, 50, 0, true},
+		{"load events every 40 s change nothing", 290, 0, 40, false},
+	} {
+		d := randomRun(301, 16, 8, func(i int, r *sample) {
+			r.Bat.SoCPct = 6
+			if i >= 12 && i < c.to {
+				r.PhaseA = [3]float64{20, 12, 12}
+				if c.riseAt > 0 && i >= c.riseAt {
+					r.PhaseA[0] = 21
+				}
+			}
+		})
+		withCharger(t, d, 40, 0)
+		d.events = []houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}}
+		if c.riseAt > 0 {
+			d.events = append(d.events, houseEventLine{T: float64(c.riseAt), Event: houseEvent{Do: "loads"}})
+		}
+		for t0 := 50.0; c.every > 0 && t0 < 290; t0 += c.every {
+			d.events = append(d.events, houseEventLine{T: t0, Event: houseEvent{Do: "loads"}})
+		}
+		if got := judged(d)[limitStep]; got != c.want {
+			t.Errorf("%s: %q = %v, want %v", c.name, limitStep, got, c.want)
+		}
+	}
+}
+
+// The inverter is back at the end of its outage: its return is no step
+// unless the current rises, and then the battery answers in 2 s, not the
+// charger. 16 A fuse, a 40 s charger, the inverter out from 10 to 40 s;
+// the outage allows until 55 s.
+func TestInvariantsTheInverterIsBackAtItsReturn(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		from, to int // 20 A on L1 in [from, to)
+	}{
+		{"over from 12 to 80 s, the return changes nothing", 12, 80},
+		{"the current rises at the return, over until 60 s", 40, 60},
+	} {
+		d := randomRun(121, 16, 8, func(i int, r *sample) {
+			run := !(i >= 10 && i < 40)
+			r.Bat.Running = &run
+			if i >= c.from && i < c.to {
+				r.PhaseA = [3]float64{20, 12, 12}
+			}
+		})
+		withCharger(t, d, 40, 0)
+		d.events = []houseEventLine{
+			{T: 10, Event: houseEvent{Do: "offline", Device: "inverter", ForS: 30}},
+			{T: 40, Event: houseEvent{Do: "online", Device: "inverter"}},
+		}
+		if judged(d)[limitStep] {
+			t.Errorf("%s: %q passed", c.name, limitStep)
+		}
+	}
+}
+
+// R4 after the second review of #1920: a car raise FTW sends after a
+// step's meter delay, or after a Core restart, is FTW's own; one sent
+// before the meter shows the step is part of the step. 25 A fuse, the
+// battery at its floor and a 40 s charger; the phases sit at 31 A
+// (1.24 x) from 50 to 80 s.
+func TestInvariantsARaiseAfterAStepIsFTWsOwn(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		raiseAt float64
+		event   bool // PV moves at 40 s
+		restart bool // Core restarts at 30 s and is back at 35 s
+		want    bool // both limit criteria hold
+	}{
+		{"FTW raises 5 s after PV moved", 45, true, false, false},
+		{"FTW raises 1 s after PV moved", 41, true, false, true},
+		{"FTW raises 15 s after Core is back", 50, false, true, false},
+	} {
+		d := randomRun(121, 25, 10, func(i int, r *sample) {
+			r.Bat.SoCPct = 6
+			if i >= 50 && i < 80 {
+				r.PhaseA = [3]float64{31, 31, 31}
+				r.CarW[0] = 11040
+			}
+		})
+		withCharger(t, d, 40, 0)
+		d.frames = []frame{profileAt(20, 0), profileAt(c.raiseAt, 16)}
+		if c.event {
+			d.events = []houseEventLine{{T: 40, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+		}
+		if c.restart {
+			d.allMarks = []markLine{{T: 30, Label: "ftw:restart"}, {T: 35, Label: "ftw:up"}}
+		}
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v", c.name, v[limitStep], v[limitOwn], c.want)
+		}
+	}
+}
+
+// A Core restart explains a stretch for 60 s from the restart. 16 A fuse,
+// Core restarts at 50 s and is back at 55 s; 20 A on L1 (1.25 x).
+func TestInvariantsARestartExplainsAMinute(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		from, to int
+		want     bool
+	}{
+		{"over from 100 to 108 s", 100, 108, true},
+		{"over from 115 to 125 s", 115, 125, false},
+	} {
+		d := randomRun(201, 16, 8, func(i int, r *sample) {
+			if i >= c.from && i < c.to {
+				r.PhaseA = [3]float64{20, 12, 12}
+			}
+		})
+		withCharger(t, d, 5, 0)
+		d.allMarks = []markLine{{T: 50, Label: "ftw:restart"}, {T: 55, Label: "ftw:up"}}
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v", c.name, v[limitStep], v[limitOwn], c.want)
+		}
+	}
+}
+
+// For export the battery's spare is what it can charge more: a battery
+// charging 4 kW has 1 kW, too little for a 4 A overage, so the 5 s charger
+// answers; one discharging 4 kW has 9 kW and answers in 2 s, even at its
+// floor. 16 A fuse; -20 A on L1 from 50 to 59 s after a step at 49.5 s.
+func TestInvariantsBatteryLeverForExport(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		batW   float64
+		socPct float64
+		want   bool
+	}{
+		{"charging 4 kW", 4000, 50, true},
+		{"discharging 4 kW", -4000, 50, false},
+		{"idle at its floor", 0, 6, false},
+	} {
+		d := randomRun(101, 16, -8, func(i int, r *sample) {
+			r.BatW, r.Bat.SoCPct = c.batW, c.socPct
+			if i >= 50 && i < 59 {
+				r.PhaseA = [3]float64{-20, -12, -12}
+			}
+		})
+		withCharger(t, d, 5, 0)
+		d.events = []houseEventLine{{T: 49.5, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+		if got := judged(d)[limitStep]; got != c.want {
+			t.Errorf("%s: %q = %v, want %v", c.name, limitStep, got, c.want)
+		}
+	}
+}
+
+// A dip under the fuse keeps the stretch open while the heat stays over
+// it, but a new step after the dip still gets its own time (2 + 5 s for
+// the battery), after a step or after FTW's own raise that was cut in
+// time. A step held past its time fails as a step. 16 A fuse at 15.95 A,
+// so the heat stays over the fuse for a minute after a few seconds at 20 A
+// on L1.
+func TestInvariantsAStepAfterADipGetsItsTime(t *testing.T) {
+	for _, c := range []struct {
+		name              string
+		first             []houseEventLine // the change before 50 s; none: FTW's own
+		stepTo            int              // the step at 80 s holds 20 A until here
+		wantStep, wantOwn bool
+	}{
+		{"after a step", []houseEventLine{{T: 49.5, Event: houseEvent{Do: "loads"}}}, 84, true, true},
+		{"after FTW's own raise", nil, 84, true, true},
+		{"held 8 s after FTW's own raise", nil, 88, false, true},
+	} {
+		d := randomRun(201, 16, 15.95, func(i int, r *sample) {
+			if (i >= 50 && i < 53) || (i >= 80 && i < c.stepTo) {
+				r.PhaseA[0] = 20
+			}
+		})
+		withCharger(t, d, 5, 0)
+		d.events = append(c.first, houseEventLine{T: 80, Event: houseEvent{Do: "loads"}})
+		d.warm()
+		if h := d.at(79).HeatA[0]; h <= 16 {
+			t.Fatalf("%s: heat %.2f A at 79 s, want over the fuse", c.name, h)
+		}
+		if v := judged(d); v[limitStep] != c.wantStep || v[limitOwn] != c.wantOwn {
+			t.Errorf("%s: step %v, own %v; want %v, %v", c.name, v[limitStep], v[limitOwn], c.wantStep, c.wantOwn)
+		}
 	}
 }
