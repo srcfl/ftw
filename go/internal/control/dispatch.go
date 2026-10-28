@@ -1791,7 +1791,10 @@ func ComputeDispatch(
 		// Below 100 W is meter noise.
 		if currentDirective.HasPlannedGridW && targetTotalW > 0 {
 			const planGridDeadband = 100.0
-			// The plan's grid leaves out the car the battery does not cover.
+			// As before the car came first, the projection leaves out the
+			// car the battery does not cover, while the plan's grid counts
+			// the car it planned. The car's draw never starts this
+			// back-off.
 			projectedGridW := noCarGridW + (targetTotalW - currentTotal)
 			gridErr := projectedGridW - currentDirective.PlannedGridW
 			if gridErr > planGridDeadband {
