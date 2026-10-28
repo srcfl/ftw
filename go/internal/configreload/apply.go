@@ -80,6 +80,14 @@ func Apply(
 	if newCfg.Site.DCLinkProtectionMarginW != oldCfg.Site.DCLinkProtectionMarginW {
 		ctrl.DCLinkProtectionMarginW = newCfg.Site.DCLinkProtectionMarginW
 	}
+	// Fuse and export limits reach dispatch before the applier restarts any
+	// driver, so a save that lowers them cannot wait behind driver I/O.
+	ctrl.SiteFuseAmps = newCfg.Fuse.MaxAmps
+	ctrl.SiteFuseVoltage = newCfg.Fuse.Voltage
+	ctrl.SiteFusePhases = newCfg.Fuse.Phases
+	// nil → 0.5, explicit 0 → disabled. See EffectiveSafetyMarginA.
+	ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
+	ctrl.MaxExportW = newCfg.Site.MaxExportW
 	// Site-meter swap (operator moved `is_site_meter: true` from one
 	// driver to another, or set it for the first time). Without this
 	// the dispatcher keeps reading the old driver's meter telemetry —
