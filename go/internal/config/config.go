@@ -1683,6 +1683,23 @@ func relToBaseDir(baseDir, p string) string {
 	return rel
 }
 
+// FillUnsetTimings treats a zero control interval or watchdog timeout as
+// unset. Neither has a meaning at zero: a 0 s interval panics the boot ticker
+// and a 0 s watchdog marks every driver stale. Every decoded settings
+// document runs this, not only YAML, so a partial save cannot store a zero
+// that the next boot cannot start from.
+func (s *Site) FillUnsetTimings() {
+	if s.ControlIntervalS == 0 {
+		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
+		// dispatching twice on the same telemetry sample, and halves
+		// the perceived response lag operators saw at the original 5 s.
+		s.ControlIntervalS = 2
+	}
+	if s.WatchdogTimeoutS == 0 {
+		s.WatchdogTimeoutS = 60
+	}
+}
+
 // applyDefaults fills in sensible zero-value defaults.
 func applyDefaults(c *Config) {
 	if c.DeviceRepository == nil {
@@ -1723,17 +1740,9 @@ func applyDefaults(c *Config) {
 	}
 	// Endpoint is deliberately left blank: Resolved() supplies the default at
 	// use, so the collector's address is never written into a household's YAML.
-	if c.Site.ControlIntervalS == 0 {
-		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
-		// dispatching twice on the same telemetry sample, and halves
-		// the perceived response lag operators saw at the original 5 s.
-		c.Site.ControlIntervalS = 2
-	}
+	c.Site.FillUnsetTimings()
 	if c.Site.GridToleranceW == 0 {
 		c.Site.GridToleranceW = 42 // The Answer
-	}
-	if c.Site.WatchdogTimeoutS == 0 {
-		c.Site.WatchdogTimeoutS = 60
 	}
 	if c.Site.SmoothingAlpha == 0 {
 		c.Site.SmoothingAlpha = 0.3
