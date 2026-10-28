@@ -236,6 +236,18 @@ type PowerLimits struct {
 	// SoCMax is the battery's charge ceiling, 0..1. An unset limit uses 100%.
 	SoCMax    float64
 	SoCMaxSet bool
+	// SoCMin is the owner's discharge floor, 0..1: the higher of the
+	// battery's and the planner's soc_min. Core never goes below 5 %.
+	SoCMin float64
+}
+
+// socFloor is the lowest SoC that the stale-plan fallback, fuse relief and
+// the hourly import limit may discharge to.
+func (l PowerLimits) socFloor() float64 {
+	if l.SoCMin > dischargeFloorSoC && l.SoCMin <= 1 {
+		return l.SoCMin
+	}
+	return dischargeFloorSoC
 }
 
 func (l PowerLimits) socCeiling() float64 {
@@ -425,6 +437,9 @@ type State struct {
 	// dispatchMeterAt is the UpdatedAt of the last site-meter sample the
 	// battery dispatch acted on. See siteMeterHeld.
 	dispatchMeterAt time.Time
+	// meterFreeze finds a site meter that repeats one reading while FTW's
+	// orders move. See ObserveSiteMeterFreeze.
+	meterFreeze meterFreeze
 
 	// Slew + holdoff
 	SlewRateW float64
@@ -1183,6 +1198,10 @@ type batteryInfo struct {
 	dischargeBlocked bool
 	chargeBlocked    bool
 	socMissing       bool // no fresh SoC reading; soc is 0
+	// belowStaleFloor: a planner mode without a plan, and SoC under the
+	// owner's floor. Unlike a driver's transient report, this must also
+	// stop a discharge already running, past the deadband and slew.
+	belowStaleFloor bool
 }
 
 // chargeCap returns the effective per-battery charge ceiling, falling
@@ -1481,6 +1500,8 @@ func ComputeDispatch(
 		rawGridW = siteMeter.SmoothedW
 	}
 	meterHeld := state.siteMeterHeld(siteMeter)
+	// A repeat that ignores FTW's own move is no new sample either.
+	meterHeld = meterHeld || state.siteMeterRepeatsAfterMove(siteMeter)
 	// Live EV/V2X charger readings override the manual slider on each tick —
 	// hardware truth beats guesses. Positive V2X is a vehicle charging load;
 	// negative V2X is kept separate so the default controller does not
@@ -1515,6 +1536,8 @@ func ComputeDispatch(
 	}
 
 	// ---- Gather online batteries ----
+	// Without a plan, a planner mode keeps the owner's reserve.
+	staleFloor := !manualHoldActive && state.Mode.IsPlannerMode() && state.PlanStale
 	batteries := make([]batteryInfo, 0, len(driverCapacities))
 	for name, cap := range driverCapacities {
 		r := store.Get(name, telemetry.DerBattery)
@@ -1536,7 +1559,8 @@ func ComputeDispatch(
 		// A configured zero is a hard direction block, not the legacy
 		// "use MaxCommandW" sentinel. Feed it into the allocator as well as
 		// the clamps so capable siblings receive the blocked battery's share.
-		dischargeBlocked = dischargeBlocked || lim.dischargeCap() == 0
+		belowStaleFloor := staleFloor && soc < lim.socFloor()
+		dischargeBlocked = dischargeBlocked || lim.dischargeCap() == 0 || belowStaleFloor
 		chargeBlocked = chargeBlocked || lim.chargeCap() == 0 || state.BatteryChargePaused(name)
 		batteries = append(batteries, batteryInfo{
 			driver:           name,
@@ -1552,6 +1576,7 @@ func ComputeDispatch(
 			dischargeBlocked: dischargeBlocked,
 			chargeBlocked:    chargeBlocked,
 			socMissing:       socMissing,
+			belowStaleFloor:  belowStaleFloor,
 		})
 	}
 	onlineBats := make([]batteryInfo, 0, len(batteries))
@@ -1825,6 +1850,7 @@ func ComputeDispatch(
 		// and the held-meter exit both fall through to cut it.
 		batteryBreaksLimit := (noSelfDischarge && anyBatteryDischarging(onlineBats)) ||
 			anyExplicitZeroDischargeViolation(onlineBats) ||
+			anyBelowStaleFloorDischarging(onlineBats) ||
 			anyBlockedBatteryCharging(onlineBats, noSelfCharge)
 
 		// The PI acts on the meter alone. A held sample carries no new
@@ -2318,6 +2344,7 @@ func ComputeDispatch(
 		noSelfDischarge:   noSelfDischarge,
 		noSelfCharge:      noSelfCharge,
 		chargeBlocked:     chargeBlockedDrivers(onlineBats),
+		floorBlocked:      belowStaleFloorDrivers(onlineBats),
 		updatePrevTargets: true,
 		recordDispatch:    true,
 	})
@@ -2412,11 +2439,57 @@ func chargeBlockedDrivers(bats []batteryInfo) map[string]bool {
 	return out
 }
 
+// belowStaleFloorDrivers is the set of online batteries under the stale-plan
+// SoC floor. Slew anchors on measured power and would hand back part of a
+// discharge the allocator already withdrew.
+func belowStaleFloorDrivers(bats []batteryInfo) map[string]bool {
+	var out map[string]bool
+	for _, b := range bats {
+		if !b.belowStaleFloor {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]bool, len(bats))
+		}
+		out[b.driver] = true
+	}
+	return out
+}
+
+// anyBelowStaleFloorDischarging reports a battery under the stale-plan floor
+// that is measured discharging. The deadband exit returns no targets, and a
+// driver keeps its last setpoint, so such a battery would drain on.
+func anyBelowStaleFloorDischarging(bats []batteryInfo) bool {
+	for _, b := range bats {
+		if b.belowStaleFloor && b.currentW < -1 {
+			return true
+		}
+	}
+	return false
+}
+
+// floorBelowStaleFloorDischarge moves a discharge target to 0 W for each
+// battery under the stale-plan floor. Fuse relief runs later and stops at
+// the same floor, so it cannot reopen the discharge.
+func floorBelowStaleFloorDischarge(targets []DispatchTarget, blocked map[string]bool) []DispatchTarget {
+	if len(blocked) == 0 {
+		return targets
+	}
+	for i := range targets {
+		if targets[i].TargetW < 0 && blocked[targets[i].Driver] {
+			targets[i].TargetW = 0
+			targets[i].Clamped = true
+		}
+	}
+	return targets
+}
+
 type dispatchSafetyOptions struct {
 	manualHoldActive  bool
 	noSelfDischarge   bool
 	noSelfCharge      bool
 	chargeBlocked     map[string]bool
+	floorBlocked      map[string]bool
 	updatePrevTargets bool
 	recordDispatch    bool
 }
@@ -2457,12 +2530,14 @@ func applyDispatchSafetyPipeline(
 		targets = floorNegativeTargets(targets)
 	}
 	targets = floorBlockedCharge(targets, opts.noSelfCharge, opts.chargeBlocked)
+	targets = floorBelowStaleFloorDischarge(targets, opts.floorBlocked)
 	targets = floorBlockedDischarge(targets, store, state, driverCapacities, fuseMaxW)
 
 	// A battery-boost lease may never draw the stationary fleet below its
 	// explicit reserve. Apply this immediately before forceFuseDischarge:
 	// normal planning/operator intent is constrained, while the physical fuse
 	// emergency remains superior and may still discharge to prevent a trip.
+	// The hour's import limit is not a fuse and keeps the reserve.
 	targets = applyBatteryBoostReserve(targets, store, state, driverCapacities)
 
 	// forceFuseDischarge runs after the normal policy rails. A fuse overflow can
@@ -2648,29 +2723,34 @@ func applyBatteryBoostReserve(targets []DispatchTarget, store *telemetry.Store, 
 			continue
 		}
 		r := store.Get(out[i].Driver, telemetry.DerBattery)
-		capacityWh := driverCapacities[out[i].Driver]
-		if r == nil || r.SoC == nil || capacityWh <= 0 || *r.SoC <= state.BatteryBoostReserveSoC {
-			out[i].TargetW = 0
-			out[i].Clamped = true
-			continue
-		}
-		// Bound the next control interval's discharge energy to the SoC
-		// headroom above reserve. A 0.9 discharge-efficiency factor is
-		// deliberately conservative: delivering 1 Wh to the AC bus costs
-		// more than 1 Wh inside the pack. This closes the between-ticks
-		// overshoot that a threshold-only clamp would permit.
-		dtS := float64(state.MinDispatchIntervalS)
-		if dtS <= 0 {
-			dtS = 5
-		}
-		headroomWh := (*r.SoC - state.BatteryBoostReserveSoC) * capacityWh
-		maxDischargeW := headroomWh * 0.9 * 3600 / dtS
-		if -out[i].TargetW > maxDischargeW {
-			out[i].TargetW = -maxDischargeW
+		if lower := boostReserveLowerW(r, driverCapacities[out[i].Driver], state); out[i].TargetW < lower {
+			out[i].TargetW = lower
 			out[i].Clamped = true
 		}
 	}
 	return out
+}
+
+// boostReserveLowerW is the lowest target that keeps a battery above the
+// battery-boost reserve until the next tick. Without a reserve it is -Inf.
+func boostReserveLowerW(r *telemetry.DerReading, capacityWh float64, state *State) float64 {
+	if state == nil || state.BatteryBoostReserveSoC <= 0 {
+		return math.Inf(-1)
+	}
+	if r == nil || r.SoC == nil || capacityWh <= 0 || *r.SoC <= state.BatteryBoostReserveSoC {
+		return 0
+	}
+	// Bound the next control interval's discharge energy to the SoC
+	// headroom above reserve. A 0.9 discharge-efficiency factor is
+	// deliberately conservative: delivering 1 Wh to the AC bus costs
+	// more than 1 Wh inside the pack. This closes the between-ticks
+	// overshoot that a threshold-only clamp would permit.
+	dtS := float64(state.MinDispatchIntervalS)
+	if dtS <= 0 {
+		dtS = 5
+	}
+	headroomWh := (*r.SoC - state.BatteryBoostReserveSoC) * capacityWh
+	return -headroomWh * 0.9 * 3600 / dtS
 }
 
 // protectiveCurtailLimitW caps PV at live load plus margin when SoC is
@@ -3558,7 +3638,7 @@ func floorBlockedDischarge(
 		if t.TargetW >= 0 || r == nil {
 			continue
 		}
-		if lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver]); lower < 0 {
+		if !dischargeParked(r, state.DriverLimits[t.Driver]) {
 			continue
 		}
 		if out == nil {
@@ -3589,6 +3669,15 @@ func floorBlockedDischarge(
 		}
 	}
 	return out
+}
+
+// dischargeParked reports whether the distributor parks a pack's discharge
+// at 0 W: no SoC, SoC under Core's 5 % floor, discharge_capable=false or a
+// zero discharge limit. The owner's soc_min is a planner rule; the stale-plan
+// floor applies it separately (floorBelowStaleFloorDischarge).
+func dischargeParked(r *telemetry.DerReading, lim PowerLimits) bool {
+	dischargeBlocked, _ := batteryDirectionBlocks(r.Data)
+	return r.SoC == nil || *r.SoC < dischargeFloorSoC || dischargeBlocked || lim.dischargeCap() == 0
 }
 
 // blockedDischargeKeepW is the discharge the blocked packs must keep after
@@ -4689,7 +4778,7 @@ func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper fl
 	lower = -lim.dischargeCap()
 	upper = lim.chargeCap()
 	dischargeBlocked, chargeBlocked := batteryDirectionBlocks(r.Data)
-	if r.SoC == nil || *r.SoC < dischargeFloorSoC || dischargeBlocked {
+	if r.SoC == nil || *r.SoC < lim.socFloor() || dischargeBlocked {
 		lower = 0
 	}
 	if chargeBlocked || r.SoC != nil && *r.SoC >= lim.socCeiling() {
@@ -5065,8 +5154,22 @@ func fuseReliefFromSnapshot(
 	state *State,
 	fuseMaxW float64,
 ) float64 {
+	overage, _ := fuseReliefPartsFromSnapshot(targets, batteryReadings, meter, phases, state, fuseMaxW)
+	return overage
+}
+
+// fuseReliefPartsFromSnapshot also returns limitOnlyW, the part of the relief
+// that only the hour's import limit asks for.
+func fuseReliefPartsFromSnapshot(
+	targets []DispatchTarget,
+	batteryReadings map[string]*telemetry.DerReading,
+	meter *telemetry.DerReading,
+	phases phaseSample,
+	state *State,
+	fuseMaxW float64,
+) (overage, limitOnlyW float64) {
 	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
-		return 0
+		return 0, 0
 	}
 
 	_, _, predicted := predictedGridFromSnapshot(targets, batteryReadings, meter)
@@ -5077,12 +5180,19 @@ func fuseReliefFromSnapshot(
 	// would discharge the battery into export once the cut lands (#1674).
 	// Per-phase relief is fuse-only.
 	fuseW := math.Max(0, fuseMaxW-state.fuseSafetyMarginW())
-	overage := predicted - fuseW
+	overage = predicted - fuseW
+	limitOverage := math.Inf(-1)
 	if ceilingW := state.effectiveImportCeilingW(fuseMaxW); ceilingW < fuseW {
-		overage = math.Max(overage, predicted-ceilingW-state.pendingEVCutW())
+		limitOverage = predicted - ceilingW - state.pendingEVCutW()
 	}
-	phaseW, _ := phaseReliefForTargets(phases, state, targets, batteryReadings)
-	return math.Max(overage, phaseW)
+	if phaseW, _ := phaseReliefForTargets(phases, state, targets, batteryReadings); phaseW > overage {
+		overage = phaseW
+	}
+	if limitOverage > overage {
+		limitOnlyW = math.Max(0, limitOverage-math.Max(0, overage))
+		overage = limitOverage
+	}
+	return overage, limitOnlyW
 }
 
 // predictedGridFromSnapshot holds non-targeted site power constant and replaces
@@ -5152,7 +5262,7 @@ func forceFuseDischargeWithSnapshot(
 	if fuseMaxW <= 0 || len(targets) == 0 || state == nil {
 		return targets
 	}
-	overage := fuseReliefFromSnapshot(targets, batteryReadings, meter, phases, state, fuseMaxW)
+	overage, limitOnlyW := fuseReliefPartsFromSnapshot(targets, batteryReadings, meter, phases, state, fuseMaxW)
 	if overage <= 0 {
 		return targets
 	}
@@ -5165,13 +5275,12 @@ func forceFuseDischargeWithSnapshot(
 		overage = exportRoom
 	}
 
-	type slot struct {
-		idx      int
-		headroom float64
-	}
-	slots := make([]slot, 0, len(targets))
-	var totalHeadroom float64
+	// The fuse may discharge down to the SoC floor. The hour's import limit
+	// is a bill, not a breaker: its extra part also keeps the boost reserve.
+	lowers := make([]float64, len(targets))
+	limitLowers := make([]float64, len(targets))
 	for i, t := range targets {
+		lowers[i], limitLowers[i] = math.Inf(1), math.Inf(1)
 		cap, ok := driverCapacities[t.Driver]
 		if !ok || cap <= 0 {
 			continue
@@ -5180,35 +5289,49 @@ func forceFuseDischargeWithSnapshot(
 		if r == nil {
 			continue
 		}
-		lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver])
+		lowers[i], _ = fuseTargetBounds(r, state.DriverLimits[t.Driver])
+		limitLowers[i] = math.Max(lowers[i], boostReserveLowerW(r, cap, state))
+	}
+	// Give the limit-only part first to the batteries above the reserve.
+	// The fuse part then takes what is left down to the SoC floor, so a
+	// battery under the reserve still serves the fuse and the total is
+	// never less than in the other order.
+	fusePartW := math.Max(0, overage-limitOnlyW)
+	out := allocateFuseRelief(targets, overage-fusePartW, limitLowers)
+	return allocateFuseRelief(out, fusePartW, lowers)
+}
+
+// allocateFuseRelief subtracts reliefW from the targets in proportion to
+// each one's room above its lower bound.
+func allocateFuseRelief(targets []DispatchTarget, reliefW float64, lowers []float64) []DispatchTarget {
+	if reliefW <= 0 {
+		return targets
+	}
+	var totalHeadroom float64
+	for i, t := range targets {
 		// Relief subtracts from the current target. Its full safe travel is
 		// the distance to the current lower command bound. A live positive
 		// target contributes charge cancellation even when SoC or the driver
 		// blocks discharge, but the target cannot cross below 0 W in that case.
-		room := t.TargetW - lower
-		if room <= 0 {
-			continue
+		if room := t.TargetW - lowers[i]; room > 0 {
+			totalHeadroom += room
 		}
-		slots = append(slots, slot{idx: i, headroom: room})
-		totalHeadroom += room
 	}
 	if totalHeadroom <= 0 {
 		return targets
 	}
-
-	allocate := overage
-	if allocate > totalHeadroom {
-		allocate = totalHeadroom
-	}
-
+	allocate := math.Min(reliefW, totalHeadroom)
 	out := make([]DispatchTarget, len(targets))
 	copy(out, targets)
-	for _, s := range slots {
-		share := allocate * (s.headroom / totalHeadroom)
+	for i, t := range targets {
+		room := t.TargetW - lowers[i]
+		if room <= 0 {
+			continue
+		}
 		// Subtract from the current target. Replacing a charge with -share
 		// removed the charge twice and discharged more than the overage.
-		out[s.idx].TargetW -= share
-		out[s.idx].Clamped = true
+		out[i].TargetW -= allocate * (room / totalHeadroom)
+		out[i].Clamped = true
 	}
 	return out
 }

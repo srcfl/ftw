@@ -168,3 +168,35 @@ func TestDescribe(t *testing.T) {
 		t.Fatalf("%d characters", len(desc))
 	}
 }
+
+func TestPlanTakesRecentPullFirstAndNextSkipsWhatRan(t *testing.T) {
+	watched := []string{"go/internal/control/dispatch.go"}
+	gh := fakeGitHub{
+		master:   "m1",
+		pulls:    []pull{pr(3, "c3", "srcfl/ftw", false), pr(9, "c9", "srcfl/ftw", false)},
+		files:    map[int][]string{9: watched, 3: watched},
+		contexts: map[string]map[string]bool{"m1": {ctxFull: true}},
+	}
+	gh.pulls[0].UpdatedAt, gh.pulls[1].UpdatedAt = "2026-10-01T08:00:00Z", "2026-10-27T21:00:00Z"
+	jobs, err := plan(gh, config{Repo: "srcfl/ftw", Drafts: true, RandomAt: -1}, time.Now(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 2 || jobs[0].PR != 9 || jobs[1].PR != 3 {
+		t.Fatalf("jobs %v, want #9 (updated last) then #3", jobs)
+	}
+	ran := map[string]bool{}
+	j, ok := next(jobs, ran)
+	if !ok || j.PR != 9 {
+		t.Fatalf("first: %v %v", j, ok)
+	}
+	// #9's status failed to post, so the next plan lists it again.
+	ran[j.Context+" "+j.SHA] = true
+	if j, ok = next(jobs, ran); !ok || j.PR != 3 {
+		t.Fatalf("second: %v %v", j, ok)
+	}
+	ran[j.Context+" "+j.SHA] = true
+	if _, ok = next(jobs, ran); ok {
+		t.Fatal("a third job after both ran")
+	}
+}
