@@ -185,8 +185,11 @@ type chargerOffers struct {
 	// configured.
 	driver string
 	maxW   float64
-	// draws are the charger's samples while that window is open (noteDraw).
-	draws []evDraw
+	// draws are the charger's samples while that window is open (noteDraw),
+	// and watchFrom the receipt of the first reading noteDraw took there:
+	// a sample already there then may have arrived at any earlier time.
+	draws     []evDraw
+	watchFrom time.Time
 	// carPhases is how many phases the car draws on, as the loadpoint saw
 	// it on the site meter: 1 or 3, or 0 when unknown. carPhase is the phase
 	// a car on one phase draws on, 1-3.
@@ -394,19 +397,19 @@ func (s *State) evShownW(at time.Time) float64 {
 // A car seen drawing in that window is in the site reading when the
 // charger sampled that draw before the reading, and no sample since reads
 // less. The charger stamps its samples with its own clock (OCPP
-// MeterValues), often cut to the whole second, and the meter's reading
-// arrives some time after it was measured; so a sample counts as before
-// the reading only when stamped evClockAllowance before its arrival, and
-// no more than one control interval before that: a fast charger may have
-// applied a 0 A offer since an older sample. The draw is the lowest of
-// that sample and every sample since (noteDraw, each the lowest of the
-// sample, raw and smoothed), up to the charger's current reading. So a
-// rise sampled after the reading never counts while the charger's clock
-// runs behind Core's by less than evClockAllowance less the meter's own
-// delay. A held reading after a failed poll says nothing of now. A charger
-// that samples less often (OCPP MeterValues every 10 s or more) counts
-// only on the ticks from evClockAllowance to one control interval more
-// after a sample, and holds its battery's discharge between them.
+// MeterValues), which may run behind Core's by any amount, so Core judges
+// a sample by when it first arrived on Core's clock (noteDraw): a sample
+// arrives after it was measured. It counts as before the reading only
+// when Core saw it arrive evMeterDelay before the reading did (arrivedBy),
+// and no more than one control interval before that: a fast charger may
+// have applied a 0 A offer, or the car paused, since an older sample. The
+// draw is the lowest of that sample and every sample since (noteDraw, each
+// the lowest of the sample, raw and smoothed), up to the charger's current
+// reading. So a rise sampled after the reading never counts, whatever the
+// charger's clock. A held reading after a failed poll says nothing of now.
+// A charger that samples less often (OCPP MeterValues every 10 s or more) counts
+// only on the ticks from evMeterDelay to one control interval more after a
+// sample arrives, and holds its battery's discharge between them.
 //
 // Until the latest offer lands, the car may still rise from that draw to
 // the offer in force. Core does not know that offer: one from before a
@@ -431,7 +434,7 @@ func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at 
 	if skew <= 0 {
 		skew = 2 * time.Second // config's default control_interval_s
 	}
-	edge := meterAt.Add(-evClockAllowance)
+	edge := meterAt.Add(-evMeterDelay)
 	from := edge.Add(-skew)
 	var w float64
 	for _, c := range s.evLimit.offers {
@@ -440,15 +443,24 @@ func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at 
 			continue
 		}
 		now, ok := readEVDraw(store, c.driver, at)
-		if !ok || now.seen.Before(from) {
+		if !ok {
 			continue
 		}
-		drawW, before := now.w, !now.at.After(edge)
+		for _, d := range c.draws {
+			if d.at.Equal(now.at) {
+				d.merge(now)
+				now = d
+			}
+		}
+		if now.seen.Before(from) {
+			continue
+		}
+		drawW, before := now.w, c.arrivedBy(now, edge)
 		for _, d := range c.draws {
 			if d.seen.Before(from) {
 				continue
 			}
-			drawW, before = math.Min(drawW, d.w), before || !d.at.After(edge)
+			drawW, before = math.Min(drawW, d.w), before || c.arrivedBy(d, edge)
 		}
 		if !before {
 			continue
@@ -462,31 +474,55 @@ func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at 
 	return math.Max(0, math.Min(w, consumptionW-shownW))
 }
 
-// evClockAllowance is how much earlier than the site reading's arrival a
-// charger's sample must be stamped to count as in that reading
-// (evFoundDrawW). It covers a charger clock running behind Core's, a stamp
-// cut to the whole second, and the meter's own delay from measurement to
-// arrival, together.
-const evClockAllowance = 5 * time.Second
+// evMeterDelay is how much earlier than the site reading a charger's
+// sample must arrive to count as in that reading (evFoundDrawW): the site
+// meter's own delay from measurement to arrival.
+const evMeterDelay = time.Second
 
-// evDraw is one charger sample: when the charger measured it (its own
-// clock), when it last vouched for it, and the lowest of the sample, raw
-// and smoothed.
+// evDraw is one charger sample: its stamp on the charger's own clock,
+// which only tells samples apart; when it first arrived on Core's clock;
+// when the charger last vouched for it, on Core's clock (its arrival, or a
+// later confirmed reading); and the lowest of the sample, raw and smoothed.
 type evDraw struct {
-	at, seen time.Time
-	w        float64
+	at, got, seen time.Time
+	confirmed     bool
+	w             float64
+}
+
+// merge folds a repeat of the same sample into e: the lowest draw, the
+// first arrival, and a later receipt only where the charger confirms it.
+func (e *evDraw) merge(d evDraw) {
+	e.w = math.Min(e.w, d.w)
+	if d.got.Before(e.got) {
+		e.got = d.got
+	}
+	if d.confirmed && d.seen.After(e.seen) {
+		e.seen, e.confirmed = d.seen, true
+	}
 }
 
 // readEVDraw is the charger's current sample, while its telemetry is live,
-// its last poll succeeded and the sample passes qualifiedFuseObservation.
+// its last poll succeeded and the sample passes qualifiedFuseObservation,
+// taken as arriving with the charger's current reading.
 func readEVDraw(store *telemetry.Store, driver string, at time.Time) (evDraw, bool) {
 	lowerW, live := store.OnlineLowerW(driver, telemetry.DerEV)
 	if !live {
 		return evDraw{}, false
 	}
-	p, ok := qualifiedFuseObservation(store.Get(driver, telemetry.DerEV), at)
+	r := store.Get(driver, telemetry.DerEV)
+	p, ok := qualifiedFuseObservation(r, at)
+	if !ok {
+		return evDraw{}, false
+	}
 	w := math.Min(p.PowerW, lowerW)
-	return evDraw{at: p.At, seen: p.Seen(), w: w}, ok && finiteFuseValue(w)
+	return evDraw{at: p.At, got: r.UpdatedAt, seen: r.UpdatedAt, confirmed: !p.ConfirmedAt.IsZero(), w: w}, finiteFuseValue(w)
+}
+
+// arrivedBy reports whether Core saw sample d arrive by edge. A sample
+// already there when Core began to watch the charger arrived at a time
+// Core does not know, so it never counts as arrived.
+func (c chargerOffers) arrivedBy(d evDraw, edge time.Time) bool {
+	return !c.watchFrom.IsZero() && d.got.After(c.watchFrom) && !d.got.After(edge)
 }
 
 // foundOpen is true while the charger has no order of this run that has
@@ -496,22 +532,22 @@ func (c chargerOffers) foundOpen(at time.Time) bool {
 }
 
 // noteDraw keeps the charger's samples while foundOpen, for evFoundDrawW,
-// over telemetry.ControlWindowDuration.
+// over telemetry.ControlWindowDuration, each with its first arrival.
 func (c *chargerOffers) noteDraw(store *telemetry.Store, at time.Time) {
 	if !c.foundOpen(at) || c.driver == "" {
-		c.draws = nil
+		c.draws, c.watchFrom = nil, time.Time{}
 		return
 	}
 	d, ok := readEVDraw(store, c.driver, at)
 	if !ok {
 		return
 	}
+	if c.watchFrom.IsZero() {
+		c.watchFrom = d.got
+	}
 	if n := len(c.draws); n > 0 && !d.at.After(c.draws[n-1].at) {
 		if last := &c.draws[n-1]; d.at.Equal(last.at) {
-			last.w = math.Min(last.w, d.w)
-			if d.seen.After(last.seen) {
-				last.seen = d.seen
-			}
+			last.merge(d)
 		}
 		return
 	}
