@@ -283,11 +283,14 @@ func TestInvariantsChargeNowRoomAtTheFuse(t *testing.T) {
 
 // s18 at margin 0: Core holds the phases at the 16 A line, so the house's own
 // 0.1 A step lands over it until Core cuts. That stretch is the house's, not
-// an own command. The same overage at any other time is Core's and fails.
+// an own command. The same overage at any other time is Core's and fails:
+// the phases sit at the fuse from the start, so the 60 s heat is at the fuse
+// and any reading over it heats it past.
 func TestS18OwnCommandsSkipTheHouseStep(t *testing.T) {
 	const own = "own commands stay inside the rated fuse"
 	mk := func(overFrom float64) *runData {
-		d := &runData{marks: map[string]float64{"charge_now": 0, "small_step": 100, "no_room": 200, "room_returns": 300, "end": 450}}
+		d := &runData{marks: map[string]float64{"charge_now": 0, "small_step": 100, "no_room": 200, "room_returns": 300, "end": 450},
+			meta: map[string]any{"fuse": 16.0}}
 		for i := 0; i <= 450; i++ {
 			a := 16.0
 			if float64(i) >= overFrom && float64(i) < overFrom+4 {
@@ -313,6 +316,41 @@ func TestS18OwnCommandsSkipTheHouseStep(t *testing.T) {
 	for _, at := range []float64{50, 150} {
 		if ok(mk(at)) {
 			t.Errorf("4 s at 16.1 A from %.0f s with no outside step passed", at)
+		}
+	}
+}
+
+// s18's own commands are judged at the 16 A rating by Core's heat model
+// (owner rule, 27 Oct 2026): a reading over the fuse fails only while the
+// 60 s heat is over it too, or at once over 1.2 x the fuse. On master
+// 575152ea the local rig failed s18 at 16.011 A against a fixed 16.01 A
+// bound, with the heat at 14.95 A.
+func TestS18OwnCommandsJudgedByHeat(t *testing.T) {
+	const own = "own commands stay inside the rated fuse"
+	for _, c := range []struct {
+		name         string
+		baseA, overA float64
+		overS        int
+		want         bool
+	}{
+		{"16.011 A jitter for 5 s at the line", 15.99, 16.011, 5, true},
+		{"16.5 A for 30 s at the line heats past the fuse", 15.99, 16.5, 30, false},
+		{"16.5 A for 5 s from a cool fuse", 12, 16.5, 5, true},
+		{"one reading at 19.1 A from a cool fuse", 12, 19.1, 1, true},
+		{"one reading at 19.3 A, over 1.2 x the fuse", 12, 19.3, 1, false},
+	} {
+		d := &runData{marks: map[string]float64{"charge_now": 0, "small_step": 100, "no_room": 200, "room_returns": 300, "end": 450},
+			meta: map[string]any{"fuse": 16.0}}
+		for i := 0; i <= 450; i++ {
+			a := c.baseA
+			if i >= 50 && i < 50+c.overS {
+				a = c.overA
+			}
+			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}})
+		}
+		_, cs := judgeS18(d)
+		if got := verdictsOf(cs)[own]; got != c.want {
+			t.Errorf("%s: %q = %v, want %v", c.name, own, got, c.want)
 		}
 	}
 }
