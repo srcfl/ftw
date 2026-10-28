@@ -326,7 +326,7 @@
       </div>
     </section>
 
-    <!-- History — one wrapper card with a single Week/Month toggle that
+    <!-- History — one wrapper card with shared week/calendar-month controls
          drives all three daily-kWh tiles. Mirrors the fuse-card pattern:
          the outer card owns label + toggle chrome; each inner
          <ftw-history-card hide-toggle range=…> renders as a pure chart
@@ -350,10 +350,13 @@
                   <button type="button" role="tab" data-view="bars"  class="active" aria-selected="true">Bars</button>
                   <button type="button" role="tab" data-view="cakes" aria-selected="false">Pie</button>
                 </div>
-                <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
-                  <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
-                  <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+                <div class="history-toggle" id="history-toggle" role="group" aria-label="History period" data-active="this-month">
+                  <button type="button" data-range="week" aria-pressed="false">Week</button>
+                  <button type="button" data-range="this-month" class="active" aria-pressed="true">This month</button>
+                  <button type="button" data-range="last-month" aria-pressed="false">Last month</button>
                 </div>
+                <label class="history-month-picker-label" for="history-month-picker">Choose month</label>
+                <input id="history-month-picker" class="history-month-picker" type="month" aria-label="Choose history month">
               </div>
             </div>
             <div class="history-tiles" id="history-tiles">

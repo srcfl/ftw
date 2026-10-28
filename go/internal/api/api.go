@@ -2524,18 +2524,41 @@ func (s *Server) handleEnergyDaily(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"days": []any{}})
 		return
 	}
+	now := time.Now()
+	loc := now.Location()
+	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	// `month=YYYY-MM` selects a calendar month in the box's configured timezone.
 	days := 7
+	if month := r.URL.Query().Get("month"); month != "" {
+		loc, err := time.LoadLocation(localzone.Name())
+		if err != nil {
+			http.Error(w, "configured timezone is unavailable", http.StatusInternalServerError)
+			return
+		}
+		now = now.In(loc)
+		todayMidnight = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		start, end, err := calendarMonthBounds(month, now)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// The loop below walks backwards from an inclusive day boundary.
+		if start.Year() == now.In(loc).Year() && start.Month() == now.In(loc).Month() {
+			todayMidnight = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+			days = now.In(loc).Day()
+		} else {
+			todayMidnight = end.AddDate(0, 0, -1)
+			days = start.AddDate(0, 1, -1).Day()
+		}
+	}
 	if v := r.URL.Query().Get("days"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && r.URL.Query().Get("month") == "" {
 			days = n
 		}
 	}
 	if days > 90 {
 		days = 90
 	}
-	now := time.Now()
-	loc := now.Location()
-	todayMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	sourceThrough, sourceMode, err := s.deps.State.HistorySourceProgress(r.Context())
 	if err != nil {
 		http.Error(w, "history load failed", http.StatusInternalServerError)
