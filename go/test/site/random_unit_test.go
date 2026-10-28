@@ -1168,3 +1168,96 @@ func TestInvariantsARaiseBetweenFuseAndInstantIsOwn(t *testing.T) {
 		t.Errorf("a raise sent at 1.1 x In passed; judged %v", m["over_limit_judged"])
 	}
 }
+
+// Owner, 28 Oct 2026: what events add to a stretch stops at the fuse's
+// heat budget. Once L1's 60 s heat passes the fuse, Core's cut has its
+// lever's time (here the 5 s charger: the battery is at its floor), and
+// no further event extends the stretch, however many come. 16 A fuse,
+// 8 A on each phase, a load step at 10 s puts L1 at 20 A (1.25 x In)
+// from 11 s; a load event every 8 s from 18 s raises it 0.5 A from a
+// 1 s dip (the third review's E3). L1's heat passes the fuse at 62 s, so
+// the cap is 62 + 5 + 2 + 3 = 72 s. A Core restart at 15 s, which would
+// excuse a minute, is capped too: with no dips the heat passes at 61 s.
+func TestInvariantsHeatCapsWhatEventsAdd(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		to        int     // L1 over the fuse until here
+		restartAt float64 // a Core restart instead of the load events; 0: none
+		want      bool
+	}{
+		{"events end before the heat passes the fuse", 55, 0, true},
+		{"events end inside Core's cut time", 72, 0, true},
+		{"events past the heat's cap", 76, 0, false},
+		{"events chained 280 s", 290, 0, false},
+		{"a Core restart past the heat's cap", 74, 15, false},
+		{"a Core restart before the heat passes the fuse", 55, 15, true},
+	} {
+		d := randomRun(301, 16, 8, func(i int, r *sample) {
+			r.Bat.SoCPct = 6
+			if i >= 11 && i < c.to {
+				r.PhaseA[0] = 20
+				if c.restartAt == 0 && i >= 17 && (i-17)%8 == 0 {
+					r.PhaseA[0] = 19.5
+				}
+			}
+		})
+		withCharger(t, d, 5, 0)
+		d.events = []houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}}
+		if c.restartAt > 0 {
+			d.allMarks = []markLine{{T: c.restartAt, Label: "ftw:restart"}, {T: c.restartAt + 9, Label: "ftw:up"}}
+		} else {
+			for at := 18.0; at < float64(c.to); at += 8 {
+				d.events = append(d.events, houseEventLine{T: at, Event: houseEvent{Do: "loads"}})
+			}
+		}
+		d.warm()
+		if h := d.at(61).HeatA[0]; c.restartAt == 0 && h > 16 {
+			t.Fatalf("%s: heat %.2f A at 61 s, want under the fuse", c.name, h)
+		}
+		if h := d.at(62).HeatA[0]; c.to > 62 && h <= 16 {
+			t.Fatalf("%s: heat %.2f A at 62 s, want over the fuse", c.name, h)
+		}
+		m, _ := judgeInvariants(d)
+		if got := judged(d)[limitStep]; got != c.want {
+			t.Errorf("%s: %q = %v, want %v; judged %v", c.name, limitStep, got, c.want, m["over_limit_judged"])
+		}
+	}
+}
+
+// Owner, 28 Oct 2026: a car cut FTW sends that pushes export over the
+// fuse is FTW's own, as a battery move toward export is: after a step's
+// 2 s meter delay and before the stretch, or while the stretch is over
+// the fuse. A cut the meter cannot have shown the step for yet is part
+// of the step. 16 A fuse, 12 A export per phase, the battery charging at
+// its maximum, so the 40 s charger is the lever; PV steps at 10 s and
+// L1 exports 22 A from `from` to 45 s, inside the step's 55 s.
+func TestInvariantsACarCutIntoExportIsFTWsOwn(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		from   int
+		frames []frame
+		want   bool // both limit criteria hold
+	}{
+		{"no cut", 11, []frame{profileAt(1, 16)}, true},
+		{"16 -> 0 A while export is over the fuse", 11, []frame{profileAt(1, 16), profileAt(20, 0)}, false},
+		{"16 -> 6 A after the meter shows the step, before the stretch", 20, []frame{profileAt(1, 16), profileAt(15, 6)}, false},
+		{"16 -> 6 A before the meter shows the step", 20, []frame{profileAt(1, 16), profileAt(11, 6)}, true},
+		{"6 -> 16 A while export is over the fuse", 11, []frame{profileAt(1, 6), profileAt(20, 16)}, true},
+	} {
+		d := randomRun(121, 16, -12, func(i int, r *sample) {
+			r.BatW = rigBatteryMaxW
+			r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: rigBatteryMaxW}}}
+			if i >= c.from && i < 45 {
+				r.PhaseA[0] = -22
+			}
+		})
+		withCharger(t, d, 40, 0)
+		d.frames = c.frames
+		d.events = []houseEventLine{{T: 10, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+		m, _ := judgeInvariants(d)
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v; judged %v", c.name, v[limitStep], v[limitOwn], c.want, m["over_limit_judged"])
+		}
+	}
+}
