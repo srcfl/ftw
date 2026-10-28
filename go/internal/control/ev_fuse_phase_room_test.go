@@ -137,11 +137,11 @@ func (s *roomSite) run(d time.Duration) {
 	}
 }
 
-// requireWithinLimit fails when a phase passed the 24 A working limit.
+// requireWithinLimit fails when a phase passed the working limit (fuseLineA).
 func (s *roomSite) requireWithinLimit(after string) {
 	s.t.Helper()
-	if limitA := s.state.SiteFuseAmps - evPhaseMarginA; s.worstA > limitA+1e-6 {
-		s.t.Fatalf("%s: a phase reached %.1f A, over the %.0f A working limit", after, s.worstA, limitA)
+	if limitA := s.state.fuseLineA(); s.worstA > limitA+1e-6 {
+		s.t.Fatalf("%s: a phase reached %.1f A, over the %.1f A working limit", after, s.worstA, limitA)
 	}
 }
 
@@ -244,16 +244,16 @@ func TestEVFusePhaseRoomHoldsOnSilentMeter(t *testing.T) {
 		}
 		return roomA
 	}
-	if got := room(); math.Abs(got-9) > 1e-9 {
-		t.Fatalf("room %.2f A beside 15 A, want 9 A", got)
+	if got := room(); math.Abs(got-10) > 1e-9 {
+		t.Fatalf("room %.2f A beside 15 A, want 10 A", got)
 	}
 	points[0].CommandedW = 5520
 	now = now.Add(time.Second)
-	if got := room(); math.Abs(got-1) > 1e-9 {
-		t.Fatalf("room %.2f A after an 8 A offer, want 1 A", got)
+	if got := room(); math.Abs(got-2) > 1e-9 {
+		t.Fatalf("room %.2f A after an 8 A offer, want 2 A", got)
 	}
 	now = now.Add(10 * time.Minute)
-	if got := room(); math.Abs(got-1) > 1e-9 {
-		t.Fatalf("room %.2f A after ten silent minutes, want 1 A", got)
+	if got := room(); math.Abs(got-2) > 1e-9 {
+		t.Fatalf("room %.2f A after ten silent minutes, want 2 A", got)
 	}
 }

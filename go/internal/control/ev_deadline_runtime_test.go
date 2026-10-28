@@ -88,7 +88,7 @@ func TestJoinedNoBatteryNoPlanGoalContinuity(t *testing.T) {
 			legal = true
 		}
 	}
-	if !legal || 6000+got > 17250.001 || phaseA+got/(3*230) > 24.001 {
+	if !legal || 6000+got > 17250.001 || phaseA+got/(3*230) > st.fuseLineA()+.001 {
 		t.Fatalf("unsafe or illegal EV offer=%v, grid=%v phaseA=%v", got, 6000+got, phaseA+got/(3*230))
 	}
 	if svc.Latest() != nil {

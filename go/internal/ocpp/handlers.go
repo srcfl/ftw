@@ -30,6 +30,15 @@ type Handler struct {
 	// no driver health, no metrics — so it cannot influence dispatch. See
 	// SetApprovedIDs.
 	approved map[string]bool
+
+	// managed is the approved chargers a loadpoint names, which FTW orders.
+	// bootLimit, set by the Server, holds each at 0 A from its boot until
+	// FTW's first order, once the connector statuses after the boot have
+	// been quiet for bootLimitSettle. See boot_limit.go.
+	managed         map[string]bool
+	bootLimit       func(id string)
+	bootLimitSettle time.Duration
+
 	nextTxID int
 
 	// vehicleIdentified, when set, fires once per new vehicle identity seen
@@ -101,6 +110,9 @@ type chargerState struct {
 	// transactionRef is the 2.0.1 transaction id, which is a string rather
 	// than the int transactionID above. Empty on the 1.6 path.
 	transactionRef string
+	// stoppedTxID is the last transaction this charger stopped. A late meter
+	// value for it must not take it up again.
+	stoppedTxID int
 	// vendor and model come from BootNotification and exist so the UI can
 	// label a charger with what it actually is rather than its URL segment.
 	// serial is the hardware-stable half of its identity — what the device
@@ -118,6 +130,11 @@ type chargerState struct {
 	identityProbeEpoch    uint64
 	identityProbeAttempts int
 	identityProbeAfter    time.Time
+	// bootLimitPending marks a boot that may get the 0 A start limit once
+	// the status burst after it settles with no car. bootLimitEpoch names
+	// the latest settle timer. See boot_limit.go.
+	bootLimitPending bool
+	bootLimitEpoch   uint64
 	// vehicleID is the identity presented when the current/last transaction
 	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
 	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
@@ -149,8 +166,20 @@ func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 		approved:            map[string]bool{},
 		probing:             map[string]bool{},
 		identityProbeTiming: defaultIdentityProbeTiming,
-		nextTxID:            1,
+		nextTxID:            firstTxID(time.Now()),
 	}
+}
+
+// txIDEpoch keeps clock-based transaction ids far below the 32-bit limit
+// many chargers store them in.
+var txIDEpoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// firstTxID starts a run's transaction ids at the seconds since txIDEpoch.
+// A charger keeps its transaction id while Core restarts, so a restart must
+// not hand that id to another transaction. The start moves on one per
+// second, and a home starts far fewer transactions than that.
+func firstTxID(now time.Time) int {
+	return max(1, int(now.Sub(txIDEpoch)/time.Second))
 }
 
 // SetApprovedIDs declares which charger ids are part of the site — the ids
@@ -427,6 +456,7 @@ func (h *Handler) OnConnect(id string) {
 	s.charging = false
 	s.clearMeasuredPower()
 	s.identityCurrent = false
+	s.bootLimitPending = false
 	s.featureProfiles = ""
 	s.steerable = nil
 	h.cancelIdentityProbeLocked(s)
@@ -448,6 +478,7 @@ func (h *Handler) OnDisconnect(id string) {
 	delete(h.probing, id)
 	s.online = false
 	s.identityCurrent = false
+	s.bootLimitPending = false
 	h.cancelIdentityProbeLocked(s)
 	s.connectedKnown = false
 	s.charging = false
@@ -487,6 +518,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	h.noteIdentity(id)
 	h.telHealth(id)
 	h.maybeProbeCapability(id)
+	h.maybeSendBootLimit(id)
 	return core.NewBootNotificationConfirmation(
 		types.NewDateTime(time.Now()),
 		h.heartbeatIntervalS,
@@ -579,6 +611,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 
 	h.pushReading(id, s)
 	h.telSuccess(id)
+	h.resolveBootLimit(id)
 	return core.NewStatusNotificationConfirmation(), nil
 }
 
@@ -599,7 +632,9 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 				measurand = types.MeasurandEnergyActiveImportRegister
 			}
 			val, err := strconv.ParseFloat(sv.Value, 64)
-			if err != nil {
+			// ParseFloat accepts "NaN" and "Inf". Taken up as a start
+			// reading, one would spoil every later session value.
+			if err != nil || math.IsNaN(val) || math.IsInf(val, 0) {
 				continue
 			}
 			switch measurand {
@@ -615,6 +650,9 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 				if sv.Unit == types.UnitOfMeasureKWh {
 					val *= 1000
 				}
+				if s.transactionID < 0 && sv.Phase == "" && req.TransactionId != nil {
+					h.takeUpTransactionLocked(id, s, *req.TransactionId, val)
+				}
 				if s.transactionID >= 0 {
 					s.sessionMeterWh = val - s.sessionStartMeterWh
 				}
@@ -622,13 +660,30 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 		}
 		if w, ok := meterPowerW(samples); ok {
 			s.recordPower(w, measured, received)
+			s.meterCancelsBootLimitLocked(nil, w)
 		}
 	}
+	s.meterCancelsBootLimitLocked(req.TransactionId, 0)
 	h.mu.Unlock()
 
 	h.pushReading(id, s)
 	h.telSuccess(id)
 	return core.NewMeterValuesConfirmation(), nil
+}
+
+// takeUpTransactionLocked adopts a transaction that started before this run:
+// the charger kept it, and its meter values name it, while Core restarted.
+// The start meter reading went with the old process, so session energy
+// counts from this first reading. The caller holds h.mu.
+func (h *Handler) takeUpTransactionLocked(id string, s *chargerState, txID int, meterWh float64) {
+	if txID <= 0 || txID == s.stoppedTxID {
+		return
+	}
+	s.transactionID = txID
+	s.sessionStartMeterWh = meterWh
+	s.sessionMeterWh = 0
+	h.nextTxID = max(h.nextTxID, txID+1)
+	slog.Info("OCPP running transaction taken up", "charger", id, "txid", txID, "meter_wh", meterWh)
 }
 
 func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionRequest) (*core.StartTransactionConfirmation, error) {
@@ -661,7 +716,24 @@ func (h *Handler) OnStartTransaction(id string, req *core.StartTransactionReques
 func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest) (*core.StopTransactionConfirmation, error) {
 	s := h.state(id)
 	h.mu.Lock()
-	sessionWh := float64(req.MeterStop) - s.sessionStartMeterWh
+	// A stop for another transaction than the running one, such as a queued
+	// stop from before a restart, must not end the running one.
+	if s.transactionID >= 0 && req.TransactionId != s.transactionID {
+		current := s.transactionID
+		h.mu.Unlock()
+		slog.Warn("OCPP stop for another transaction ignored",
+			"charger", id, "txid", req.TransactionId, "current_txid", current)
+		h.telSuccess(id)
+		return core.NewStopTransactionConfirmation(), nil
+	}
+	// With no start and no meter value seen for the transaction, MeterStop is
+	// only the meter's lifetime total, not the session's energy.
+	known := s.transactionID >= 0
+	sessionWh := s.sessionMeterWh
+	if known {
+		sessionWh = float64(req.MeterStop) - s.sessionStartMeterWh
+	}
+	s.stoppedTxID = req.TransactionId
 	s.transactionID = -1
 	s.charging = false
 	// A charger may report Available before the stop. The car is gone then.
@@ -675,7 +747,9 @@ func (h *Handler) OnStopTransaction(id string, req *core.StopTransactionRequest)
 		"charger", id, "txid", req.TransactionId,
 		"session_wh", sessionWh, "reason", req.Reason)
 	h.pushReading(id, s)
-	h.telMetric(id, "ev_session_wh", sessionWh, "Wh")
+	if known {
+		h.telMetric(id, "ev_session_wh", sessionWh, "Wh")
+	}
 	h.telSuccess(id)
 	return core.NewStopTransactionConfirmation(), nil
 }

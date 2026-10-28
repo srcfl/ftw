@@ -21,6 +21,7 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 		ctrl.SlewEnabled = *cfg.Site.SlewEnabled
 	}
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
+	ctrl.ControlIntervalS = cfg.Site.ControlIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
 	ctrl.SolarFeedDrivers = solarFeedDriversFrom(cfg.Drivers)
@@ -31,9 +32,8 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 	ctrl.SiteFuseAmps = cfg.Fuse.MaxAmps
 	ctrl.SiteFuseVoltage = cfg.Fuse.Voltage
 	ctrl.SiteFusePhases = cfg.Fuse.Phases
-	// EffectiveSafetyMarginA distinguishes nil ("unset, use default")
-	// from explicit 0 ("operator chose to disable"). The earlier
-	// `<= 0 -> default` shortcut clobbered the disable case.
+	// EffectiveSafetyMarginA resolves nil to the default (0: work to the
+	// fuse rating) and keeps any explicit value, 0 included.
 	ctrl.SiteFuseSafetyA = cfg.Fuse.EffectiveSafetyMarginA()
 	// PV surplus absorber underlay (opt-in). cap == 0 keeps it off.
 	ctrl.PVSurplusAbsorbSoCCap = cfg.Site.PVSurplusAbsorbSoCCap

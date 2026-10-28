@@ -16,12 +16,6 @@ func ocppApprovedIDs(cfg *config.Config) []string {
 	if cfg == nil {
 		return nil
 	}
-	lua := make(map[string]struct{}, len(cfg.Drivers))
-	for _, d := range cfg.Drivers {
-		if d.Name != "" {
-			lua[d.Name] = struct{}{}
-		}
-	}
 	seen := make(map[string]struct{})
 	var out []string
 	add := func(id string) {
@@ -39,11 +33,41 @@ func ocppApprovedIDs(cfg *config.Config) []string {
 			add(c.ID)
 		}
 	}
+	for _, id := range ocppManagedIDs(cfg) {
+		add(id)
+	}
+	return out
+}
+
+// ocppStartLimitIDs is the chargers that get the 0 A start limit on boot.
+// Setup measurement mode blocks every charger write, standdowns included, so
+// none does then. measurementAtBoot is the mode Core started in: leaving it
+// takes a restart, so a reload that clears it must not lift the block early.
+func ocppStartLimitIDs(cfg *config.Config, measurementAtBoot bool) []string {
+	if measurementAtBoot {
+		return nil
+	}
+	return ocppManagedIDs(cfg)
+}
+
+// ocppManagedIDs is the OCPP chargers a loadpoint names: the ones FTW orders.
+// An id listed only under ocpp.chargers is approved but never ordered.
+func ocppManagedIDs(cfg *config.Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	lua := make(map[string]struct{}, len(cfg.Drivers))
+	for _, d := range cfg.Drivers {
+		if d.Name != "" {
+			lua[d.Name] = struct{}{}
+		}
+	}
+	var out []string
 	for _, lp := range cfg.Loadpoints {
-		if _, isLua := lua[lp.DriverName]; isLua {
+		if _, isLua := lua[lp.DriverName]; isLua || lp.DriverName == "" {
 			continue
 		}
-		add(lp.DriverName)
+		out = append(out, lp.DriverName)
 	}
 	return out
 }

@@ -522,7 +522,7 @@ async function electricalShell(fuse) {
   const rig = loadShell(structuredClone(original));
   rig.loadTab('./settings/tabs/control.js');
   const fields = {};
-  for (const [key, fallback] of Object.entries({ phases: 3, voltage: 230, max_amps: 16, safety_margin_a: 0.5 })) {
+  for (const [key, fallback] of Object.entries({ phases: 3, voltage: 230, max_amps: 16, safety_margin_a: 0 })) {
     fields[key] = Object.assign(stubElement(), {
       dataset: { path: 'fuse.' + key }, type: 'number', value: String(fuse[key] ?? fallback),
     });
@@ -562,6 +562,21 @@ describe('electricity connection settings', () => {
       assert.deepEqual(await rig.save(), rig.original);
     });
   }
+
+  it('shows an unset safety margin as 0 and offers a margin as opt-in', () => {
+    const rig = loadShell({});
+    rig.loadTab('./settings/tabs/control.js');
+    const config = { site: {}, fuse: { max_amps: 16 } };
+    const getByPath = (obj, path, dflt) => path.split('.').reduce((node, key) => node?.[key], obj) ?? dflt;
+    const html = rig.tabs.control.render({
+      config, getByPath, escHtml: s => String(s ?? ''),
+      help: text => '<span data-help="' + text + '">?</span>',
+      field: (label, path, type, dflt) => '<input data-path="' + path + '" value="' + getByPath(config, path, dflt) + '">',
+    });
+    assert.match(html, /data-path="fuse\.safety_margin_a" value="0"/);
+    assert.match(html, /Optional\. Amps to keep below the fuse rating[^"]*0 works to the rating\./);
+    assert.doesNotMatch(html, /Defaults to 0\.5 A/);
+  });
 
   it('only replaces custom voltage when the user picks a standard connection', async () => {
     const rig = await electricalShell({ phases: 2, voltage: 240, max_amps: 20, safety_margin_a: 0 });
