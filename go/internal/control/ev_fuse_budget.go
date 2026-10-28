@@ -185,6 +185,8 @@ type chargerOffers struct {
 	// configured.
 	driver string
 	maxW   float64
+	// draws are the charger's samples while that window is open (noteDraw).
+	draws []evDraw
 	// carPhases is how many phases the car draws on, as the loadpoint saw
 	// it on the site meter: 1 or 3, or 0 when unknown. carPhase is the phase
 	// a car on one phase draws on, 1-3.
@@ -409,26 +411,36 @@ func (s *State) evShownW(at time.Time) float64 {
 // set (at Core's start, or at a plug-in once no other managed charger was
 // plugged), until that offer is older than the charger's settle time. Core
 // then does not know which offer the charger runs on, and its first offers
-// (often 0 A) say nothing of what the meter shows. A car seen drawing in
-// that window is in the reading when the charger measured it within one
-// control interval before the site reading: a fast charger may have applied
-// a 0 A offer since an older sample, a held reading after a failed poll
-// says nothing of now, and a sample newer than the site reading may hold a
-// rise the meter does not show yet. A charger that samples less often (OCPP
-// MeterValues every 10 s or more) counts only on the ticks just after a
-// sample, and holds its battery's discharge between them. The measured draw
-// is the lowest of the sample, raw and smoothed. Until the latest offer
-// lands, the car may still rise from that draw to the offer in force. Core
-// does not know that offer: one from before a restart, under an older
-// max_charge_w, or the charger's own default. The reserve takes it as the
-// larger of the loadpoint's max_charge_w and the site fuse's rating, and
-// keeps the rise past the latest offer; a charger with no max_charge_w
-// counts nothing. Each charger counts no
-// more than its latest offer, and in all no more than the consumption the
-// site meter shows (siteConsumptionW) less shownW. The car's own limit
-// never reads this; only how much of our latest offers the battery reserves
-// as a rise to come.
-// gridW is the site reading, taken at meterAt.
+// (often 0 A) say nothing of what the meter shows.
+//
+// A car seen drawing in that window is in the site reading when the
+// charger sampled that draw before the reading, and no sample since reads
+// less. The charger stamps its samples with its own clock (OCPP
+// MeterValues), often cut to the whole second, and the meter's reading
+// arrives some time after it was measured; so a sample counts as before
+// the reading only when stamped evClockAllowance before its arrival, and
+// no more than one control interval before that: a fast charger may have
+// applied a 0 A offer since an older sample. The draw is the lowest of
+// that sample and every sample since (noteDraw, each the lowest of the
+// sample, raw and smoothed), up to the charger's current reading. So a
+// rise sampled after the reading never counts while the charger's clock
+// runs behind Core's by less than evClockAllowance less the meter's own
+// delay. A held reading after a failed poll says nothing of now. A charger
+// that samples less often (OCPP MeterValues every 10 s or more) counts
+// only on the ticks from evClockAllowance to one control interval more
+// after a sample, and holds its battery's discharge between them.
+//
+// Until the latest offer lands, the car may still rise from that draw to
+// the offer in force. Core does not know that offer: one from before a
+// restart, under an older max_charge_w, or the charger's own default. The
+// reserve takes it as the larger of the loadpoint's max_charge_w and the
+// site fuse's rating, and keeps the rise past the latest offer; a charger
+// with no max_charge_w counts nothing. Each charger counts no more than its
+// latest offer, and in all no more than the consumption the site meter
+// shows (siteConsumptionW) less shownW. The car's own limit never reads
+// this; only how much of our latest offers the battery reserves as a rise
+// to come.
+// gridW is the site reading, which arrived at meterAt.
 func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at time.Time, shownW float64) float64 {
 	if store == nil {
 		return 0
@@ -441,22 +453,26 @@ func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at 
 	if skew <= 0 {
 		skew = 2 * time.Second // config's default control_interval_s
 	}
+	edge := meterAt.Add(-evClockAllowance)
+	from := edge.Add(-skew)
 	var w float64
 	for _, c := range s.evLimit.offers {
 		n := len(c.log)
-		if n == 0 || c.found.at.IsZero() || at.Sub(c.found.at) >= c.settle || c.driver == "" || !(c.maxW > 0) || !finiteFuseValue(c.maxW) {
+		if n == 0 || !c.foundOpen(at) || c.driver == "" || !(c.maxW > 0) || !finiteFuseValue(c.maxW) {
 			continue
 		}
-		lowerW, live := store.OnlineLowerW(c.driver, telemetry.DerEV)
-		if !live {
+		now, ok := readEVDraw(store, c.driver, at)
+		if !ok || now.seen.Before(from) {
 			continue
 		}
-		p, ok := qualifiedFuseObservation(store.Get(c.driver, telemetry.DerEV), at)
-		if !ok || p.Seen().Before(meterAt.Add(-skew)) || p.At.After(meterAt) {
-			continue
+		drawW, before := now.w, !now.at.After(edge)
+		for _, d := range c.draws {
+			if d.seen.Before(from) {
+				continue
+			}
+			drawW, before = math.Min(drawW, d.w), before || !d.at.After(edge)
 		}
-		drawW := math.Min(p.PowerW, lowerW)
-		if !finiteFuseValue(drawW) {
+		if !before {
 			continue
 		}
 		unshown, _ := c.log.unshown(at, c.batterySettle())
@@ -466,6 +482,64 @@ func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at 
 		w += math.Max(0, inLatestW-math.Max(0, latest-unshown))
 	}
 	return math.Max(0, math.Min(w, consumptionW-shownW))
+}
+
+// evClockAllowance is how much earlier than the site reading's arrival a
+// charger's sample must be stamped to count as in that reading
+// (evFoundDrawW). It covers a charger clock running behind Core's, a stamp
+// cut to the whole second, and the meter's own delay from measurement to
+// arrival, together.
+const evClockAllowance = 5 * time.Second
+
+// evDraw is one charger sample: when the charger measured it (its own
+// clock), when it last vouched for it, and the lowest of the sample, raw
+// and smoothed.
+type evDraw struct {
+	at, seen time.Time
+	w        float64
+}
+
+// readEVDraw is the charger's current sample, while its telemetry is live,
+// its last poll succeeded and the sample passes qualifiedFuseObservation.
+func readEVDraw(store *telemetry.Store, driver string, at time.Time) (evDraw, bool) {
+	lowerW, live := store.OnlineLowerW(driver, telemetry.DerEV)
+	if !live {
+		return evDraw{}, false
+	}
+	p, ok := qualifiedFuseObservation(store.Get(driver, telemetry.DerEV), at)
+	w := math.Min(p.PowerW, lowerW)
+	return evDraw{at: p.At, seen: p.Seen(), w: w}, ok && finiteFuseValue(w)
+}
+
+// foundOpen is true while the charger has no order of this run that has
+// surely landed (evFoundDrawW).
+func (c chargerOffers) foundOpen(at time.Time) bool {
+	return !c.found.at.IsZero() && at.Sub(c.found.at) < c.settle
+}
+
+// noteDraw keeps the charger's samples while foundOpen, for evFoundDrawW,
+// over telemetry.ControlWindowDuration.
+func (c *chargerOffers) noteDraw(store *telemetry.Store, at time.Time) {
+	if !c.foundOpen(at) || c.driver == "" {
+		c.draws = nil
+		return
+	}
+	d, ok := readEVDraw(store, c.driver, at)
+	if !ok {
+		return
+	}
+	if n := len(c.draws); n > 0 && !d.at.After(c.draws[n-1].at) {
+		if last := &c.draws[n-1]; d.at.Equal(last.at) {
+			last.w = math.Min(last.w, d.w)
+			if d.seen.After(last.seen) {
+				last.seen = d.seen
+			}
+		}
+		return
+	}
+	c.draws = append(slices.DeleteFunc(c.draws, func(e evDraw) bool {
+		return at.Sub(e.seen) > telemetry.ControlWindowDuration
+	}), d)
 }
 
 // siteConsumptionW is the consumption a site reading of gridW shows: grid
@@ -611,7 +685,8 @@ func (s *State) riseAheadA(c chargerOffers) (ahead [3]float64) {
 // recordEVOffers keeps each plugged charger's offers, with the current each
 // puts on the phases its command names, for the longer of evSettle and the
 // power_max_age_s its driver declares, or evUnknownSettle when it declares
-// none. Our own commands only: a charger's power reading never counts.
+// none. Our own commands only: a charger's power reading never counts. The
+// samples kept for the battery side (noteDraw) take no part in the limit.
 func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State) {
 	now := s.now()
 	read := now
@@ -641,6 +716,7 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 			}
 			c.log = c.log.keep(sent, read.Add(-c.settle))
 		}
+		c.noteDraw(store, now)
 		offers[point.ID] = c
 	}
 	s.evLimit.offers = offers

@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"maps"
 	"math"
 	"testing"
 	"time"
@@ -16,9 +17,9 @@ import (
 // logged offers of this run are 0 A, sent while the meter was stale, then
 // 6,210 W (9 A on three phases) 2 s ago. The charger takes 40 s to apply an
 // order, so the car still draws what it drew before the restart. Its
-// max_charge_w is 11,040 W (16 A). evW is what the charger measures; the
-// site meter reads gridW with the phase currents phaseA, and the PV
-// inverter pvW.
+// max_charge_w is 11,040 W (16 A). evW is what the charger measures,
+// stamped evClockAllowance before the site reading arrived; the site meter
+// reads gridW with the phase currents phaseA, and the PV inverter pvW.
 func restartFixture(t *testing.T, gridW float64, phaseA [3]float64, batteryW, pvW, evW float64) (*telemetry.Store, *State) {
 	t.Helper()
 	store := telemetry.NewStore()
@@ -31,10 +32,7 @@ func restartFixture(t *testing.T, gridW float64, phaseA [3]float64, batteryW, pv
 		store.Update("pv", telemetry.DerPV, pvW, nil, nil)
 		store.RecordDriverSuccess("pv")
 	}
-	store.Update("charger", telemetry.DerEV, evW, nil, nil)
-	store.RecordDriverSuccess("charger")
-	// The charger measured its draw with the site reading, not after it.
-	store.Get("charger", telemetry.DerEV).UpdatedAt = store.Get("meter", telemetry.DerMeter).UpdatedAt
+	setChargerSample(store, evW, nil)
 
 	state := NewState(0, 0, "meter")
 	now := time.Now()
@@ -105,6 +103,24 @@ func TestEVBaseAfterRestartCreditStaysInsideTheMeter(t *testing.T) {
 	}
 }
 
+// chargerData is the fixture charger's data: its sample stamped
+// evClockAllowance before the site reading arrived, with extra fields.
+func chargerData(store *telemetry.Store, extra map[string]any) json.RawMessage {
+	at := store.Get("meter", telemetry.DerMeter).UpdatedAt.Add(-evClockAllowance)
+	d := map[string]any{"control_power_observed_at": at.Format(time.RFC3339Nano)}
+	maps.Copy(d, extra)
+	raw, _ := json.Marshal(d)
+	return raw
+}
+
+// setChargerSample makes w the fixture charger's reading (chargerData),
+// arriving with the site reading.
+func setChargerSample(store *telemetry.Store, w float64, extra map[string]any) {
+	store.Update("charger", telemetry.DerEV, w, nil, chargerData(store, extra))
+	store.RecordDriverSuccess("charger")
+	store.Get("charger", telemetry.DerEV).UpdatedAt = store.Get("meter", telemetry.DerMeter).UpdatedAt
+}
+
 // setMaxW sets the fixture charger's max_charge_w.
 func setMaxW(state *State, w float64) {
 	c := state.evLimit.offers["garage"]
@@ -120,10 +136,11 @@ func setRiseCapW(state *State, w float64) {
 }
 
 // The credit never exceeds the latest offer, keeps room for the car's rise
-// to its max, takes the lowest of the sample, raw and smoothed draw, needs
-// a live charger reading, and ends once the charger's first offer of this
-// run has had its settle time: then the offers alone say what the meter
-// shows.
+// to its max, takes the lowest of the sample, raw and smoothed draw and of
+// every sample since the site reading, needs a live charger reading
+// stamped evClockAllowance before the site reading, and ends once the
+// charger's first offer of this run has had its settle time: then the
+// offers alone say what the meter shows.
 func TestEVFoundDrawWBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -138,12 +155,35 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 		{"a charger sample measured after the site reading", func(store *telemetry.Store, state *State) {
 			store.Get("meter", telemetry.DerMeter).UpdatedAt = state.now().Add(-time.Second)
 			store.Get("charger", telemetry.DerEV).UpdatedAt = state.now()
+			store.Get("charger", telemetry.DerEV).Data = chargerData(store, map[string]any{"control_power_observed_at": state.now().Format(time.RFC3339Nano)})
 		}, 0},
+		{"a sample stamped less than evClockAllowance before the site reading", func(store *telemetry.Store, _ *State) {
+			at := store.Get("meter", telemetry.DerMeter).UpdatedAt.Add(-evClockAllowance + time.Second)
+			store.Get("charger", telemetry.DerEV).Data = chargerData(store, map[string]any{"control_power_observed_at": at.Format(time.RFC3339Nano)})
+		}, 0},
+		{"only a sample older than one control interval before the reading", func(store *telemetry.Store, state *State) {
+			// The car may have stopped and started again since that sample;
+			// the current one, 1 s before the reading, may be ahead of it.
+			risenSince(store, state, 8222, 11040)
+			c := state.evLimit.offers["garage"]
+			c.draws[0].at = c.draws[0].at.Add(-10 * time.Second)
+			c.draws[0].seen = c.draws[0].at
+			state.evLimit.offers["garage"] = c
+		}, 0},
+		{"a sample since the site reading reads less", func(store *telemetry.Store, state *State) {
+			risenSince(store, state, 8222, 6000)
+		}, 6000 - (11040 - 6210)},
+		// Review of #1926: OCPP stamps MeterValues with the charger's own
+		// clock. One running 1 s behind Core's stamps a rise sampled after
+		// the site reading as 1 s before it. The draw stays the one sampled
+		// before the reading.
+		{"a rise stamped before the reading by a charger clock behind Core's", func(store *telemetry.Store, state *State) {
+			risenSince(store, state, 6900, 11040)
+		}, 6900 - (11040 - 6210)},
 		{"latest offer bounds the draw", func(_ *telemetry.Store, state *State) { setRiseCapW(state, 6210) }, 6210},
 		{"measured draw below the offer", func(store *telemetry.Store, state *State) {
 			setRiseCapW(state, 6210)
-			store.Update("charger", telemetry.DerEV, 4000, nil, nil)
-			store.Get("charger", telemetry.DerEV).UpdatedAt = store.Get("meter", telemetry.DerMeter).UpdatedAt
+			setChargerSample(store, 4000, nil)
 		}, 4000},
 		{"smoothed draw below the sample", func(store *telemetry.Store, state *State) {
 			setRiseCapW(state, 6210)
@@ -152,12 +192,12 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 		{"raw draw below the sample", func(store *telemetry.Store, state *State) {
 			setRiseCapW(state, 6210)
 			r := store.Get("charger", telemetry.DerEV)
-			r.Data = json.RawMessage(`{"control_power_w":8222}`)
+			r.Data = chargerData(store, map[string]any{"control_power_w": 8222})
 			r.RawW = 5000
 		}, 5000},
 		{"control sample below raw and smoothed", func(store *telemetry.Store, state *State) {
 			setRiseCapW(state, 6210)
-			store.Get("charger", telemetry.DerEV).Data = json.RawMessage(`{"control_power_w":5000}`)
+			store.Get("charger", telemetry.DerEV).Data = chargerData(store, map[string]any{"control_power_w": 5000})
 		}, 5000},
 		{"charger offline", func(store *telemetry.Store, _ *State) {
 			store.DriverHealthMut("charger").SetOffline()
@@ -196,6 +236,20 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 			}
 		})
 	}
+}
+
+// risenSince keeps the fixture charger's sample of fromW, stamped
+// evClockAllowance before the site reading, as noteDraw does, and makes
+// its current reading toW, stamped 1 s before the site reading arrived.
+func risenSince(store *telemetry.Store, state *State, fromW, toW float64) {
+	setChargerSample(store, fromW, nil)
+	c := state.evLimit.offers["garage"]
+	c.noteDraw(store, state.now())
+	state.evLimit.offers["garage"] = c
+	at := store.Get("meter", telemetry.DerMeter).UpdatedAt.Add(-time.Second)
+	setChargerSample(store, toW, map[string]any{"control_power_observed_at": at.Format(time.RFC3339Nano)})
+	// The filter's smoothed value trails the rise; this case reads the sample.
+	store.Get("charger", telemetry.DerEV).SmoothedW = toW
 }
 
 // Offers the meter already shows come off the consumption the credit may
@@ -426,4 +480,39 @@ func TestSiteSimRestartMaxChargeLoweredAtRestart(t *testing.T) {
 		s.lp.AllowedStepsW = append(s.lp.AllowedStepsW, a*690)
 	}
 	carRisesUnderOldOffer(t, s, 8280, 14*time.Second)
+}
+
+// Review of #1926: OCPP stamps MeterValues with the charger's own clock,
+// often cut to the whole second. With the charger's clock 1-3 s behind
+// Core's, the third review's case (3 s meter, the car at 10 A under a 16 A
+// offer in force lifting its own limit 11 s in) stamps the rise before the
+// site reading that does not show it yet. The draw stays the one sampled
+// before that reading. Before: L2 reached 19.30 A.
+func TestSiteSimRestartChargerClockBehind(t *testing.T) {
+	for _, lag := range []time.Duration{time.Second, 2 * time.Second, 3 * time.Second} {
+		t.Run(lag.String(), func(t *testing.T) {
+			s := restartSim(houseA(4, 12, 2))
+			s.p.Meter.Every = 3 * time.Second
+			s.evClockLag = lag
+			carRisesUnderOldOffer(t, s, 6900, 11*time.Second)
+		})
+	}
+}
+
+// Review of #1926: a 22 kW charger (32 A) on a 3 x 25 A main fuse. The
+// offer in force may be the charger's 32 A, so the rise reserve runs to
+// max_charge_w, not to the fuse's rating: of the 14 kW the car draws,
+// 22,080 - 11,000 W may still come on top of Core's latest 11 kW offer.
+func TestEVFoundDrawWMaxChargeAboveFuse(t *testing.T) {
+	evW := 14000.0
+	store, state := restartFixture(t, 9000, [3]float64{13, 13, 13}, -5000, 0, evW)
+	state.SiteFuseAmps = 25
+	setMaxW(state, 22080)
+	c := state.evLimit.offers["garage"]
+	c.log[len(c.log)-1].w = 11000
+	state.evLimit.offers["garage"] = c
+	meter := store.Get("meter", telemetry.DerMeter)
+	if got, want := state.evFoundDrawW(store, meter.RawW, meter.UpdatedAt, state.now(), 0), evW-(22080-11000); math.Abs(got-want) > 1e-6 {
+		t.Fatalf("credit %.0f W, want %.0f W", got, want)
+	}
 }
