@@ -224,6 +224,49 @@ func TestPhaseReliefSkipsOfflineMeter(t *testing.T) {
 	}
 }
 
+// The batteries' move counts only power read live from the store, in the
+// same reading the rest of the decision used. A battery that went offline,
+// moved on to a newer reading or has no reading leaves its power in the
+// phases unknown: no phase relief, as #1876's stop relief did. Before,
+// the cached reading's RawW drove the relief.
+func TestPhaseReliefNeedsTheBatteryReadingItUses(t *testing.T) {
+	data := map[string]any{"l1_a": 15.0, "l2_a": 6.0, "l3_a": 5.1, "l1_w": 3450.0, "l2_w": 1380.0, "l3_w": 1173.0}
+	st := phaseDirectionState(0)
+	stop := []DispatchTarget{{Driver: "bat", TargetW: 0}}
+	seed := func() (*telemetry.Store, map[string]*telemetry.DerReading, phaseSample) {
+		store := phaseDirectionStore(t, 6003, -3000, data)
+		meter := store.Get("meter", telemetry.DerMeter)
+		return store, map[string]*telemetry.DerReading{"bat": store.Get("bat", telemetry.DerBattery)}, livePhaseSample(store, "meter", meter)
+	}
+
+	_, readings, phases := seed()
+	// Stopping 3000 W puts L1 at 15 + 4.35 A; 3.35 A over 16 A is 2310 W.
+	if imp, _ := phaseReliefForTargets(phases, st, stop, readings); math.Abs(imp-2310) > 1 {
+		t.Fatalf("live readings: relief %.0f W, want 2310 W", imp)
+	}
+
+	store, readings, phases := seed()
+	store.DriverHealthMut("bat").SetOffline()
+	if imp, exp := phaseReliefForTargets(phases, st, stop, readings); imp != 0 || exp != 0 {
+		t.Errorf("offline battery: relief %.0f/%.0f W, want none", imp, exp)
+	}
+
+	store, readings, phases = seed()
+	time.Sleep(time.Millisecond)
+	soc := 0.6
+	store.Update("bat", telemetry.DerBattery, -3000, &soc, nil)
+	if imp, exp := phaseReliefForTargets(phases, st, stop, readings); imp != 0 || exp != 0 {
+		t.Errorf("newer battery reading: relief %.0f/%.0f W, want none", imp, exp)
+	}
+
+	// Counted from 0 W, a 2000 W charge would read as L1 at 17.9 A.
+	_, _, phases = seed()
+	charge := []DispatchTarget{{Driver: "bat", TargetW: 2000}}
+	if imp, exp := phaseReliefForTargets(phases, st, charge, map[string]*telemetry.DerReading{}); imp != 0 || exp != 0 {
+		t.Errorf("no battery reading: relief %.0f/%.0f W, want none", imp, exp)
+	}
+}
+
 // The battery's working limit on each phase is L = In − safety_margin_a,
 // in both directions, with no floor under the margin. A phase at L needs no
 // relief, 0.1 A past it needs exactly 0.1 A, and a target that lands a
@@ -298,6 +341,16 @@ func TestBatteryFuseLineProperty(t *testing.T) {
 // PV is low. Each tick the battery reaches the order it was sent the tick
 // before, and the meter reads it there.
 func TestFuseReliefStaysAtTheLineAfterPVDrop(t *testing.T) {
+	targets, l1, line := pvDropLoop(0, 0)
+	assertHeldAtTheLine(t, targets, l1, line)
+}
+
+// pvDropLoop runs the 207533 shape: a -3005 W hold, L1 at 14.45 A, and PV
+// down 1280 W from tick 5 to tick 29, with 5 s ticks. The meter sees the
+// battery's actual power. The battery's own reading reports the power of
+// readLag ticks earlier. maxDischargeW > 0 caps what the battery delivers
+// without Core knowing it.
+func pvDropLoop(readLag int, maxDischargeW float64) (targets, l1 []float64, line float64) {
 	st := phaseDirectionState(0)
 	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
 	st.clock = func() time.Time { return now }
@@ -305,9 +358,9 @@ func TestFuseReliefStaysAtTheLineAfterPVDrop(t *testing.T) {
 
 	store := telemetry.NewStore()
 	load := [3]float64{23.44, 11.04, 11.54} // house and car, A import per phase
-	pvW, batW := -3200.0, -3005.0
-	line := st.fuseLineA()
-	var targets, l1 []float64
+	pvW := -3200.0
+	actual := []float64{-3005}
+	line = st.fuseLineA()
 	for tick := 0; tick < 40; tick++ {
 		switch tick {
 		case 5:
@@ -315,6 +368,7 @@ func TestFuseReliefStaysAtTheLineAfterPVDrop(t *testing.T) {
 		case 30:
 			pvW = -3200
 		}
+		batW := actual[len(actual)-1]
 		var a [3]float64
 		data := map[string]any{}
 		var totalW float64
@@ -328,18 +382,31 @@ func TestFuseReliefStaysAtTheLineAfterPVDrop(t *testing.T) {
 		store.Update("meter", telemetry.DerMeter, totalW, nil, raw)
 		store.DriverHealthMut("meter").RecordSuccess()
 		soc := 0.6
-		store.Update("bat", telemetry.DerBattery, batW, &soc, nil)
+		store.Update("bat", telemetry.DerBattery, actual[max(0, len(actual)-1-readLag)], &soc, nil)
 		store.DriverHealthMut("bat").RecordSuccess()
 
+		order := batW
 		for _, o := range ComputeDispatch(store, st, map[string]float64{"bat": 15200}, 16*230*3) {
 			if o.Driver == "bat" {
-				batW = o.TargetW
+				order = o.TargetW
 			}
 		}
-		targets = append(targets, math.Round(batW))
+		batW = order
+		if maxDischargeW > 0 {
+			batW = math.Max(order, -maxDischargeW)
+		}
+		actual = append(actual, batW)
+		targets = append(targets, math.Round(order))
 		l1 = append(l1, math.Round(a[0]*100)/100)
 		now = now.Add(5 * time.Second)
 	}
+	return targets, l1, line
+}
+
+// assertHeldAtTheLine wants L1 at the line while PV is low, and one crossing
+// of it, on the PV step.
+func assertHeldAtTheLine(t *testing.T, targets, l1 []float64, line float64) {
+	t.Helper()
 	crossings := 0
 	for i := range l1 {
 		if l1[i] > line+0.01 && (i == 0 || l1[i-1] <= line+0.01) {
@@ -351,6 +418,46 @@ func TestFuseReliefStaysAtTheLineAfterPVDrop(t *testing.T) {
 	}
 	if crossings != 1 {
 		t.Errorf("L1 crossed the %.1f A line %d times, want once (the PV step)", line, crossings)
+	}
+	if t.Failed() {
+		t.Logf("targets %v", targets)
+		t.Logf("L1 %v", l1)
+	}
+}
+
+// The battery's reading lags the meter by one or two ticks: the meter
+// already shows the battery at its relief while the reading still holds
+// the power before it. Counted from that reading, the relief looked like a
+// move still to make, so every other tick took it back, and the order ran
+// out further each time (-3214, -3005, -3422, -3005, ... -5717 W) with L1
+// back at 16.3 A on every other tick. The last command bounds the move, so
+// the relief holds -3214 W with L1 at the line.
+func TestFuseReliefHoldsWhenTheBatteryReadingLags(t *testing.T) {
+	for _, lag := range []int{1, 2} {
+		t.Run(fmt.Sprintf("lag %d", lag), func(t *testing.T) {
+			targets, l1, line := pvDropLoop(lag, 0)
+			assertHeldAtTheLine(t, targets, l1, line)
+			for i := 6; i < 30; i++ {
+				if targets[i] != targets[5] {
+					t.Errorf("tick %d: order %.0f W, want the %.0f W relief held", i, targets[i], targets[5])
+				}
+			}
+		})
+	}
+}
+
+// A battery that cannot reach its order, with no limit Core knows, must
+// not wind the relief up through the last-command bound: the order settles,
+// and it returns to the hold once PV comes back.
+func TestFuseReliefSettlesWhenTheBatteryFallsShort(t *testing.T) {
+	targets, l1, _ := pvDropLoop(0, 3100)
+	for i := 8; i < 30; i++ {
+		if targets[i] != targets[i-1] || targets[i] < -3300 {
+			t.Errorf("tick %d: order %.0f W after %.0f W, want it settled near -3214 W", i, targets[i], targets[i-1])
+		}
+	}
+	if targets[31] != -3005 {
+		t.Errorf("tick 31: order %.0f W, want the -3005 W hold back once PV returns", targets[31])
 	}
 	if t.Failed() {
 		t.Logf("targets %v", targets)

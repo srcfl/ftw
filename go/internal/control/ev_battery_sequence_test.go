@@ -586,9 +586,13 @@ func TestFuseReliefLeavesOnlyCeilingWattsToCommandedEVCut(t *testing.T) {
 		}
 		st.SetEVCommanded([]loadpoint.State{{ID: "car", DriverName: "easee", PluggedIn: true, CommandedKnown: true, CommandedW: tc.commandedW}})
 		targets := []DispatchTarget{{Driver: "pixii"}}
-		batteries := map[string]*telemetry.DerReading{"pixii": {}}
+		store := telemetry.NewStore()
+		soc := 0.5
+		store.Update("pixii", telemetry.DerBattery, 0, &soc, nil)
+		store.DriverHealthMut("pixii").RecordSuccess()
+		batteries := map[string]*telemetry.DerReading{"pixii": store.Get("pixii", telemetry.DerBattery)}
 		meter := &telemetry.DerReading{SmoothedW: tc.gridW, Data: tc.data}
-		got := fuseReliefFromSnapshot(targets, batteries, meter, phaseSample{meter: meter, totalW: meter.RawW}, st, 17250)
+		got := fuseReliefFromSnapshot(targets, batteries, meter, phaseSample{meter: meter, totalW: meter.RawW, store: store}, st, 17250)
 		if math.Abs(math.Max(0, got)-tc.wantW) > 1e-6 {
 			t.Errorf("%s: relief %.0f W, want %.0f W", tc.name, got, tc.wantW)
 		}
