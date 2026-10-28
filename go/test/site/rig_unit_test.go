@@ -107,19 +107,24 @@ func TestRandomPlansAreSeeded(t *testing.T) {
 }
 
 // An over-limit stretch right after an outside step is the house's; the
-// same stretch with no step before it is FTW's own and fails after 3 s.
+// same stretch with no step before it is FTW's own and fails after 3 s,
+// whether or not the record shows FTW raising anything. 31 A is over
+// 1.2 x the 25 A fuse, so the heat gives no budget.
 func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
-	mk := func(withStep bool) *runData {
+	mk := func(withStep, withRise bool) *runData {
 		d := &runData{marks: map[string]float64{"start": 0, "end": 100}, meta: map[string]any{"fuse": 25.0}}
 		for i := 0; i <= 100; i++ {
 			a := 10.0
 			if i >= 50 && i < 56 {
-				a = 26 // 6 s over the 25 A fuse
+				a = 31 // 6 s over the 25 A fuse
 			}
 			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}, Bat: plantDevice{SoCPct: 50}})
 		}
 		if withStep {
 			d.events = append(d.events, houseEventLine{T: 49.5, Event: houseEvent{Do: "loads"}})
+		}
+		if withRise {
+			d.frames = []frame{profileAt(40, 0), profileAt(45, 16)}
 		}
 		return d
 	}
@@ -132,38 +137,49 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 		}
 		return out
 	}
-	if _, cs := judgeInvariants(mk(true)); len(failed(cs)) != 0 {
+	if _, cs := judgeInvariants(mk(true, false)); len(failed(cs)) != 0 {
 		t.Fatalf("after a step: %v", failed(cs))
 	}
-	_, cs := judgeInvariants(mk(false))
-	if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
-		t.Fatalf("without a step: %v", f)
+	for _, withRise := range []bool{false, true} {
+		_, cs := judgeInvariants(mk(false, withRise))
+		if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
+			t.Fatalf("with no step, FTW's raise %v: %v", withRise, f)
+		}
 	}
 }
 
 // The limit is the fuse rating: a phase may sit at exactly the fuse until
-// the end of the run, and 0.1 A above it fails once the time budget is up.
+// the end of the run, and 0.1 A above it fails once the time budget is up
+// while the fuse is already warm (heat at the fuse). From a cool fuse the
+// same 20 s stays inside the heat budget.
 func TestInvariantsJudgeAtTheFuse(t *testing.T) {
 	const fuse = 25.0
 	const own = "over the limit at most 3 s after FTW's own raise"
 	const step = "over the limit no longer than an outside step allows"
 	for _, c := range []struct {
 		name     string
-		a        float64
-		to       int // the level holds from 50 s until this second
+		base, a  float64 // the level before 50 s, and from 50 s
+		to       int     // the level holds from 50 s until this second
 		withStep bool
 		want     []string
 	}{
-		{"at the fuse", fuse, 101, false, nil},
-		{"at the fuse after a step", fuse, 101, true, nil},
+		{"at the fuse", fuse, fuse, 101, false, nil},
+		{"at the fuse after a step", fuse, fuse, 101, true, nil},
 		// 20 s is past the 3 s for FTW's own raise, and past the
 		// 2 + 2 + 3 s a step allows while the battery can answer.
-		{"0.1 A over", fuse + 0.1, 70, false, []string{own}},
-		{"0.1 A over after a step", fuse + 0.1, 70, true, []string{step}},
+		{"0.1 A over", fuse, fuse + 0.1, 70, false, []string{own}},
+		{"0.1 A over after a step", fuse, fuse + 0.1, 70, true, []string{step}},
+		{"0.1 A over a cool fuse", 10, fuse + 0.1, 70, false, nil},
+		{"0.1 A over a cool fuse after a step", 10, fuse + 0.1, 70, true, nil},
 	} {
 		d := &runData{marks: map[string]float64{"start": 0, "end": 100}, meta: map[string]any{"fuse": fuse}}
+		// FTW raised the car's order at 45 s.
+		d.frames = []frame{profileAt(40, 0), profileAt(45, 16)}
+		if c.withStep {
+			d.frames = nil
+		}
 		for i := 0; i <= 100; i++ {
-			a := 10.0
+			a := c.base
 			if i >= 50 && i < c.to {
 				a = c.a
 			}

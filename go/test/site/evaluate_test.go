@@ -46,10 +46,12 @@ type plantDevice struct {
 	EMSCmd    float64 `json:"ems_cmd"`  // 170 charge, 187 discharge, 204 stop
 	EMSSetW   float64 `json:"ems_setpoint_w"`
 	Connected bool    `json:"connected"`
+	Running   *bool   `json:"running"` // an inverter that answers; nil when not recorded
 }
 
 type ftwStatus struct {
 	Drivers     map[string]ftwDriver `json:"drivers"`
+	Dispatch    []ftwDispatch        `json:"dispatch"` // Core's battery orders this tick
 	LoadQuality *string              `json:"load_quality"`
 	LoadReason  *string              `json:"load_reason"`
 	LoadW       *float64             `json:"load_w"`
@@ -61,9 +63,16 @@ type ftwStatus struct {
 	} `json:"energy"`
 }
 
+// ftwDispatch is one battery order Core sent: + charge, - discharge.
+type ftwDispatch struct {
+	Driver  string  `json:"driver"`
+	TargetW float64 `json:"target_w"`
+}
+
 type ftwDriver struct {
-	Status      string   `json:"status"`
-	EVSessionWh *float64 `json:"ev_session_wh"` // a charger's session energy
+	Status            string   `json:"status"`
+	EVSessionWh       *float64 `json:"ev_session_wh"`      // a charger's session energy
+	ConsecutiveErrors *int     `json:"consecutive_errors"` // failed polls in a row; 0 once a poll reads
 }
 
 type ftwLoadpoint struct {
@@ -107,6 +116,7 @@ type sample struct {
 	Bat2   plantDevice // the second, if any
 	Status *ftwStatus
 	LPs    []ftwLoadpoint
+	HeatA  [3]float64 // each phase's 60 s heat, filled in by warm
 }
 
 type frame struct {
@@ -130,6 +140,7 @@ type runData struct {
 	events   []houseEventLine
 	frames   []frame // garage's charger
 	meta     map[string]any
+	warmed   bool // every sample's HeatA is filled in
 }
 
 type markLine struct {
@@ -390,10 +401,72 @@ func (d *runData) runsOver(t0, t1, limit float64) (longest, total float64) {
 	return round(longest, 1), round(total, 1)
 }
 
+// fuseHeatTauS is the time constant of Core's fuse heat model
+// (control/fuse_heat.go).
+const fuseHeatTauS = 60.0
+
+// warm fills in each sample's HeatA: per phase, the 60 s I² filter of Core's
+// fuse heat model, on the current through the fuse in either direction,
+// from the record's first sample on.
+func (d *runData) warm() {
+	if d.warmed {
+		return
+	}
+	d.warmed = true
+	var sq [3]float64
+	for i, r := range d.samples {
+		for k, a := range r.PhaseA {
+			if i == 0 {
+				sq[k] = a * a
+			} else {
+				sq[k] += (1 - math.Exp(-(r.T-d.samples[i-1].T)/fuseHeatTauS)) * (a*a - sq[k])
+			}
+			r.HeatA[k] = math.Sqrt(sq[k])
+		}
+	}
+}
+
+// heatOver is whether a phase is over the fuse as Core's heat model judges
+// it (owner rule, 27 Oct 2026): above the fuse while its 60 s heat is above
+// the fuse too, or above fuseInstantFactor x the fuse. Between the fuse and
+// that factor the heat is the budget. Call warm first.
+func heatOver(r *sample, fuse float64) bool {
+	for k, a := range r.PhaseA {
+		a = math.Abs(a)
+		if a > fuse && (r.HeatA[k] > fuse || a > fuseInstantFactor*fuse) {
+			return true
+		}
+	}
+	return false
+}
+
+// heatRunsOver is the longest stretch in [t0, t1] that heatOver holds,
+// timed like runsOver.
+func (d *runData) heatRunsOver(t0, t1, fuse float64) float64 {
+	d.warm()
+	longest := 0.0
+	var from *float64
+	var last float64
+	for _, r := range d.window(t0, t1) {
+		t := r.T
+		switch {
+		case heatOver(r, fuse) && from == nil:
+			from = &t
+		case !heatOver(r, fuse) && from != nil:
+			longest, from = math.Max(longest, t-*from), nil
+		}
+		last = t
+	}
+	if from != nil {
+		longest = math.Max(longest, last-*from)
+	}
+	return round(longest, 1)
+}
+
 // i2Over is the seconds the worst phase's I² filter (tau 60 s) is above
 // limit, and the filter's peak.
 func (d *runData) i2Over(t0, t1, limit float64) (over, peak float64) {
-	const tau = 60.0
+	const tau = fuseHeatTauS
 	var y, prev float64
 	started := false
 	for _, r := range d.window(t0, t1) {

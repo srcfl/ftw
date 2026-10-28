@@ -375,7 +375,7 @@ func TestJudge(t *testing.T) {
 		t.Skip("set FTW_SITE_JUDGE to a results directory of an earlier run")
 	}
 	var outs []outcome
-	for _, sc := range selected(t, "full") {
+	for _, sc := range append(selected(t, "full"), recordedRandom(dir)...) {
 		rundir := filepath.Join(dir, sc.dir)
 		b, err := os.ReadFile(filepath.Join(rundir, "meta.json"))
 		if err != nil {
@@ -401,6 +401,25 @@ func TestJudge(t *testing.T) {
 		t.Fatalf("no recorded run of a scenario in %s", dir)
 	}
 	writeSummary(t, dir, outs)
+}
+
+// recordedRandom is each random seed recorded in dir, from the plan.json
+// its run wrote, so TestJudge judges a nightly random run again.
+func recordedRandom(dir string) []scenario {
+	files, _ := filepath.Glob(filepath.Join(dir, "random-*", "plan.json"))
+	sort.Strings(files)
+	var out []scenario
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		var p randomPlan
+		if json.Unmarshal(b, &p) == nil && p.Found == nil {
+			out = append(out, randomScenario(p))
+		}
+	}
+	return out
 }
 
 func writeSummary(t *testing.T, out string, outs []outcome) {

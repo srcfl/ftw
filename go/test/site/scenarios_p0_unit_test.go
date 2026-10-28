@@ -407,3 +407,43 @@ func TestJudgeR3JudgesAtTheFuse(t *testing.T) {
 		t.Error("25.1 A for 80 s passes")
 	}
 }
+
+// Between the fuse and 1.2 x the fuse R3 and R5a allow what Core's 60 s
+// heat allows (the #1888 review): a cool site may sit at 1.08 x the fuse
+// past the budget while the heat stays under the fuse; above 1.2 x the
+// budget holds.
+func TestJudgeR3AndR5aAllowTheHeatBudget(t *testing.T) {
+	const r3over = "over the fuse no longer than the charger's delay + 7 s"
+	const r5over = "over the fuse at most 3 s once under it"
+	r3 := func(a float64) bool {
+		d := synth(400, map[string]float64{"plug": 0, "charge_now": 20, "end": 400},
+			map[string]any{"fuse": 25.0, "charger_delay_s": 60.0, "planner_floor_pct": 10.0}, func(i int, r *sample) {
+				if i >= 100 && i < 180 { // 80 s, past the 67 s budget
+					r.PhaseA = [3]float64{a, a, a}
+				}
+			})
+		_, cs := judgeR3(d)
+		return verdictsOf(cs)[r3over]
+	}
+	if !r3(27) {
+		t.Error("R3: 27 A for 80 s from a cool fuse fails; its heat stays under 25 A")
+	}
+	if r3(30.5) {
+		t.Error("R3: 30.5 A, over 1.2 x the fuse, for 80 s passes")
+	}
+	r5 := func(a float64) bool {
+		_, cs := judgeR5a(r5aRun(30, func(i int) float64 {
+			if i >= 200 && i < 215 { // 15 s, past the 3 s budget
+				return a
+			}
+			return 20
+		}))
+		return verdictsOf(cs)[r5over]
+	}
+	if !r5(27) {
+		t.Error("R5a: 27 A for 15 s after 2 min at 20 A fails; its heat stays under 25 A")
+	}
+	if r5(30.5) {
+		t.Error("R5a: 30.5 A, over 1.2 x the fuse, for 15 s passes")
+	}
+}
