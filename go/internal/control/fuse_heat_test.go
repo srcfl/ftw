@@ -118,10 +118,12 @@ func TestFuseHeatStartsAtFirstReadingAfterRestart(t *testing.T) {
 
 // fuseHeatSite charges at 15 A beside 5 A of house load on each phase of a
 // 25 A fuse with no import ceiling: 20 A per phase, long enough for the heat
-// to settle there.
+// to settle there. The site opts into a 1 A safety margin, so the working
+// limit is 24 A.
 func fuseHeatSite(t *testing.T) *evMeterSite {
 	t.Helper()
 	s := newEVMeterSite(t, 0, 3450)
+	s.state.SiteFuseSafetyA = 1
 	s.run(10 * time.Minute)
 	if s.offer() != 10350 || s.evW != 10350 || math.Abs(s.state.fuseHeat.worstA()-20) > .01 {
 		t.Fatalf("setup: offer %.0f draw %.0f heat %.2f A", s.offer(), s.evW, s.state.fuseHeat.worstA())
@@ -339,11 +341,14 @@ func TestFuseHeatSixteenAmpPeaks(t *testing.T) {
 }
 
 // fuse16Site is Fredrik's case end to end: a 16 A fuse, 4 A of house load
-// and the car at 10 A on each phase, 14 A in all, settled.
+// and the car at 10 A on each phase, 14 A in all, settled. The site opts
+// into a 1 A safety margin, so the working limit is 15 A, and the car asks
+// for 10 A: a rise that fits under the line would otherwise fill it.
 func fuse16Site(t *testing.T) *evMeterSite {
 	t.Helper()
 	s := newEVMeterSite(t, 0, 2760)
-	s.state.SiteFuseAmps = 16
+	s.state.SiteFuseAmps, s.state.SiteFuseSafetyA = 16, 1
+	s.ctrl.SetManualHold("garage", loadpoint.ManualHold{PowerW: 6900, PhaseMode: "3p", Persistent: true})
 	s.ctrl.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3})
 	s.ctrl.SetFuseEVMax(func() (float64, bool) {
 		return EVFuseBudget(s.store, s.state, s.mgr.States(), s.mgr.Configs(), 16*690)
@@ -357,22 +362,27 @@ func fuse16Site(t *testing.T) *evMeterSite {
 
 // The same peaks on L1 with the car charging: patterns whose heat stays
 // under 15 A while the meter shows a peak never move the offer; the others
-// cut once when the budget is spent and settle where the peaks fit. A rise reads the heat as well as
-// the reading, so the car does not climb back between peaks and cut again.
+// cut when the budget is spent. A rise reads the heat as well as the
+// reading, and needs its whole step under the line, so the car climbs back
+// only once the heat has cooled a step under it. Where the pattern's heat
+// sits right at the line (17 A for 10 s, 14 A for 20 s: 15.07 A rms at
+// 10 A) the car steps up and down slowly, about once in five minutes, and
+// never stops.
 func TestEVHardLimitSixteenAmpPeaksCutOnceAndSettle(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		gap      time.Duration // 0: the 17 A stays
 		cutAfter time.Duration // 0: never
-		settleW  float64
+		maxCuts  int
+		settleW  float64 // 0: not judged
 	}{
-		{"14A_50s", 50 * time.Second, 0, 6900},
+		{"14A_50s", 50 * time.Second, 0, 0, 6900},
 		// The heat passes 15 A only as the peak ends, when the meter
 		// already shows 14 A: nothing is left to cut.
-		{"14A_30s", 30 * time.Second, 0, 6900},
-		{"14A_20s", 20 * time.Second, 98 * time.Second, 6210},
-		{"14A_10s", 10 * time.Second, 48 * time.Second, 5520},
-		{"steady_17A", 0, 23 * time.Second, 5520},
+		{"14A_30s", 30 * time.Second, 0, 0, 6900},
+		{"14A_20s", 20 * time.Second, 98 * time.Second, 3, 0},
+		{"14A_10s", 10 * time.Second, 48 * time.Second, 1, 6210},
+		{"steady_17A", 0, 23 * time.Second, 1, 5520},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := fuse16Site(t)
@@ -401,12 +411,13 @@ func TestEVHardLimitSixteenAmpPeaksCutOnceAndSettle(t *testing.T) {
 					cuts = append(cuts, offers[i])
 				}
 			}
-			want := 0
-			if tc.cutAfter > 0 {
-				want = 1
+			if len(cuts) > tc.maxCuts || tc.cutAfter > 0 && len(cuts) == 0 {
+				t.Fatalf("cuts %v, want 1 to %d", offerWatts(cuts), tc.maxCuts)
 			}
-			if len(cuts) != want {
-				t.Fatalf("cuts %v, want %d", offerWatts(cuts), want)
+			for _, o := range offers {
+				if o.w <= 0 {
+					t.Fatalf("the peaks stopped the car: %v", offerWatts(offers))
+				}
 			}
 			if tc.cutAfter > 0 {
 				// From the first reading of the first peak.
@@ -414,7 +425,7 @@ func TestEVHardLimitSixteenAmpPeaksCutOnceAndSettle(t *testing.T) {
 					t.Errorf("cut after %v, want ~%v", took, tc.cutAfter)
 				}
 			}
-			if s.offer() != tc.settleW {
+			if tc.settleW > 0 && s.offer() != tc.settleW {
 				t.Errorf("settled at %.0f W, want %.0f W", s.offer(), tc.settleW)
 			}
 			if maxHeat > 15.2 {

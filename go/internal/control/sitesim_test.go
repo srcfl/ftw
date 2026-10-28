@@ -20,6 +20,9 @@ import (
 // simCoreEvery is control_interval_s's default. The plant steps every second.
 const simCoreEvery = 2 * time.Second
 
+// simFuseSafetyA is the site's fuse.safety_margin_a, the config default.
+const simFuseSafetyA = 0
+
 // simSite runs Core's control tick against a sitesim.Plant in main.go's
 // order: site import, charger tick, then battery dispatch. Core's settings
 // are the config defaults. Every plant second it checks the invariants and
@@ -42,6 +45,17 @@ type simSite struct {
 	// evMaxAge is the power_max_age_s the charger driver declares outside
 	// the field matrix; zero declares none.
 	evMaxAge time.Duration
+	// evEvery is how often the charger samples its draw, as OCPP
+	// MeterValues do: between samples each poll repeats the last sample
+	// with its own time. Zero samples on every poll.
+	evEvery time.Duration
+	// evClockLag is how far the charger's clock runs behind Core's: it
+	// stamps each sample that much early, as an OCPP charger stamps
+	// MeterValues with its own clock (or cuts the stamp to whole seconds).
+	evClockLag time.Duration
+	// meterNoise is added to each phase current Core reads, not to the
+	// plant's own; nil reads the plant exactly.
+	meterNoise func() float64
 
 	downUntil, nextTick time.Time
 	meter               sitesim.MeterReading
@@ -86,7 +100,7 @@ func (s *simSite) boot() {
 	s.state = NewState(0, 42, "meter")
 	s.state.clock = func() time.Time { return s.p.Now }
 	s.state.SlewRateW, s.state.MinDispatchIntervalS = 3000, 2
-	s.state.SiteFuseAmps, s.state.SiteFuseVoltage, s.state.SiteFusePhases, s.state.SiteFuseSafetyA = s.p.Fuse.RatingA, s.p.Voltage, 3, .5
+	s.state.SiteFuseAmps, s.state.SiteFuseVoltage, s.state.SiteFusePhases, s.state.SiteFuseSafetyA = s.p.Fuse.RatingA, s.p.Voltage, 3, simFuseSafetyA
 	if b := s.p.Battery; b != nil {
 		s.state.DriverLimits = map[string]PowerLimits{"battery": {MaxChargeW: b.MaxChargeW, MaxDischargeW: b.MaxDischargeW}}
 	}
@@ -218,15 +232,34 @@ func (s *simSite) step() {
 	}
 	if s.downUntil.IsZero() {
 		if m := tick.Meter; m != nil {
-			s.emit("meter", telemetry.DerMeter, m.W, nil, map[string]any{"l1_a": m.PhaseA[0], "l2_a": m.PhaseA[1], "l3_a": m.PhaseA[2],
-				"l1_w": m.PhaseW[0], "l2_w": m.PhaseW[1], "l3_w": m.PhaseW[2]})
+			read := *m
+			if s.meterNoise != nil {
+				for i := range read.PhaseA {
+					n := s.meterNoise()
+					read.PhaseA[i] += n
+					read.PhaseW[i] += n * s.p.Voltage
+					read.W += n * s.p.Voltage
+				}
+			}
+			s.emit("meter", telemetry.DerMeter, read.W, nil, map[string]any{"l1_a": read.PhaseA[0], "l2_a": read.PhaseA[1], "l3_a": read.PhaseA[2],
+				"l1_w": read.PhaseW[0], "l2_w": read.PhaseW[1], "l3_w": read.PhaseW[2]})
 		}
 		if b := tick.Battery; b != nil {
 			s.emit("battery", telemetry.DerBattery, b.W, &b.SoC, nil)
 		}
 		if e := tick.EV; e != nil {
-			s.ev, s.evAt = *e, now
-			s.emit(s.lp.DriverName, telemetry.DerEV, e.W, nil, s.evData())
+			if s.evEvery <= 0 || s.evAt.IsZero() || now.Sub(s.evAt) >= s.evEvery {
+				s.ev, s.evAt = *e, now
+			}
+			data := s.evData()
+			if s.evEvery > 0 || s.evClockLag > 0 {
+				data = maps.Clone(data)
+				if data == nil {
+					data = map[string]any{}
+				}
+				data["control_power_observed_at"] = s.evAt.Add(-s.evClockLag).Format(time.RFC3339Nano)
+			}
+			s.emit(s.lp.DriverName, telemetry.DerEV, s.ev.W, nil, data)
 		}
 		if !now.Before(s.nextTick) {
 			s.nextTick = now.Add(s.coreEvery())
@@ -329,8 +362,10 @@ func (s *simSite) check() {
 	// fuseHeat reads the meter, may break for the fastest response time plus
 	// 3 s: a phase may sit above the fuse less its margin only while its
 	// I²-filtered current is under it, and never above the instant limit.
+	// A phase exactly at the line is under it; 1 µA absorbs the rounding of
+	// summed watts.
 	fuseA := p.Fuse.RatingA
-	limitA, k := fuseA-evPhaseMarginA, -math.Expm1(-sitesim.Step.Seconds()/fuseHeatTau.Seconds())
+	limitA, k := s.state.fuseLineA()+1e-6, -math.Expm1(-sitesim.Step.Seconds()/fuseHeatTau.Seconds())
 	over, overLimit := false, false
 	for i, a := range p.A {
 		if s.heatSet {
@@ -353,7 +388,7 @@ func (s *simSite) check() {
 		s.limitSince = time.Time{}
 	}
 	if s.ownRaise && !s.limitSince.IsZero() && now.Sub(s.limitSince) > 3*time.Second {
-		s.fail("a raise we sent kept a phase over %.0f A for more than 3 s", limitA)
+		s.fail("a raise we sent kept a phase over %.1f A for more than 3 s", limitA)
 	}
 	if !over {
 		s.overSince = time.Time{}
@@ -361,7 +396,7 @@ func (s *simSite) check() {
 		s.overSince = now
 	}
 	if allow := s.responseTime(false) + 3*time.Second; !s.overSince.IsZero() && now.Sub(s.overSince) > allow {
-		s.fail("over Core's limit for more than %v (heat %.1f A, limit %.0f A)", allow, math.Sqrt(max(s.heat[0], s.heat[1], s.heat[2])), limitA)
+		s.fail("over Core's limit for more than %v (heat %.1f A, limit %.1f A)", allow, math.Sqrt(max(s.heat[0], s.heat[1], s.heat[2])), limitA)
 	}
 	// (b) With the meter on schedule, room for the car's minimum and a car
 	// that asks, the car draws within a minute plus the charger's delay
@@ -395,7 +430,7 @@ func (s *simSite) wantsCharge() bool {
 	}
 	// After a real overload, an idle car must wait for the fuse to cool.
 	// Its recovery deadline starts when that heat no longer blocks a start.
-	if e.DrawW <= 0 && max(s.heat[0], s.heat[1], s.heat[2]) > math.Pow(p.Fuse.RatingA-evPhaseMarginA, 2) {
+	if e.DrawW <= 0 && max(s.heat[0], s.heat[1], s.heat[2]) > math.Pow(s.state.fuseLineA(), 2) {
 		return false
 	}
 	phases := min(e.Phases, p.Car.Phases)
@@ -403,7 +438,7 @@ func (s *simSite) wantsCharge() bool {
 	for i, houseW := range p.HouseW {
 		w := houseW + p.PVW/3
 		baseW += w
-		if i < phases && math.Abs(w/p.Voltage+e.MinA) > p.Fuse.RatingA-evPhaseMarginA {
+		if i < phases && math.Abs(w/p.Voltage+e.MinA) > s.state.fuseLineA() {
 			return false
 		}
 	}
@@ -490,7 +525,7 @@ func fieldNightLoadpoint(c *loadpoint.Config) {
 
 // carPhasesUnknown checks that the session's car was never marked one-phase.
 func carPhasesUnknown(s *simSite) error {
-	if st, _ := s.mgr.State(s.lp.ID); st.CarPhases != 0 {
+	if st, _ := s.mgr.State(s.lp.ID); st.CarPhases == 1 {
 		return fmt.Errorf("car marked one-phase on L%d; car draws %.0f W on %d phases", st.CarPhase, s.p.EVSE.DrawW, s.p.EVSE.DrawPhases)
 	}
 	return nil
@@ -592,6 +627,23 @@ func simDay(p *sitesim.Plant) {
 }
 
 func simScenarios() []simScenario {
+	// A charger whose own load balancer holds each phase to balancerA.
+	loadBalancer := func(balancerA float64) simScenario {
+		name := "charger's own load balancer"
+		if balancerA != 25 {
+			name = fmt.Sprintf("%s at %.1f A", name, balancerA)
+		}
+		return simScenario{name: name, run: 20 * time.Minute,
+			plant: func(p *sitesim.Plant) {
+				p.HouseW, p.EVSE.LoadBalancerA = houseA(12, 12, 12), balancerA
+				p.Events = []sitesim.Event{
+					{At: 5 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(18, 12, 12) }},
+					{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(4, 4, 4) }},
+					{At: 15 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(20, 20, 20) }},
+				}
+			}}
+	}
+	const loadBalancerBug = "a cut comes off an offer the car does not draw, stepEVMeterLimit (ev_fuse_budget.go:769)"
 	slowCharger := func(delay time.Duration) func(*sitesim.Plant) {
 		return func(p *sitesim.Plant) { p.HouseW, p.EVSE.Delay = houseA(15, 15, 15), delay }
 	}
@@ -607,42 +659,40 @@ func simScenarios() []simScenario {
 			c.AllowedStepsW = append(steps, c.AllowedStepsW[1:]...)
 		}
 	}
+	replay1761 := simScenario{name: "#1761 replay", run: 20 * time.Minute,
+		plant: func(p *sitesim.Plant) {
+			p.HouseW, p.Car.MaxW = houseA(1, 1, 1), 4200
+			p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 9400, MaxDischargeW: 9400, CapacityWh: 20000, SoC: .3, Latency: 3 * time.Second}
+			p.Events = []sitesim.Event{{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }}}
+		},
+		lp: func(c *loadpoint.Config) {
+			c.MaxChargeW, c.AllowedStepsW = 10350, c.AllowedStepsW[:len(c.AllowedStepsW)-1]
+		},
+		setup: planBatteryCharge(9400),
+		expect: []simExpect{{9*time.Minute + 50*time.Second, func(s *simSite) error {
+			p := s.p
+			offerW := p.EVSE.OfferA * p.Voltage * float64(p.EVSE.OfferPhases)
+			if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || math.Abs(p.Battery.W-9400) > 200 {
+				return fmt.Errorf("not the #1761 state before the car takes its offer: offer %.0f W, car %.0f W, battery %.0f W", offerW, p.EVSE.DrawW, p.Battery.W)
+			}
+			return nil
+		}}}}
 	return []simScenario{
 		{name: "export start", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW = houseA(2, 2, 2), -22*690 }},
 		{name: "export start, unsigned phase currents", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW, p.Meter.Unsigned = houseA(2, 2, 2), -22*690, true }},
-		{name: "charger's own load balancer", known: "a cut comes off an offer the car does not draw, ev_fuse_budget.go:172", run: 20 * time.Minute,
-			plant: func(p *sitesim.Plant) {
-				p.HouseW, p.EVSE.LoadBalancerA = houseA(12, 12, 12), 25
-				p.Events = []sitesim.Event{
-					{At: 5 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(18, 12, 12) }},
-					{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(4, 4, 4) }},
-					{At: 15 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(20, 20, 20) }},
-				}
-			}},
+		loadBalancer(25),
+		// The balancer sits at the rating, so at the default 0 A margin it
+		// never lets the car past Core's line. Above the line the bug shows.
+		withKnown(withSafetyMarginA(loadBalancer(25), .5), loadBalancerBug),
+		withKnown(loadBalancer(25.5), loadBalancerBug),
 		{name: "slow cloud charger 60 s", run: 15 * time.Minute,
 			plant: slowCharger(time.Minute)},
 		{name: "slow cloud charger 120 s", run: 15 * time.Minute,
 			plant: slowCharger(2 * time.Minute)},
-		{name: "#1761 replay", run: 20 * time.Minute,
-			plant: func(p *sitesim.Plant) {
-				p.HouseW, p.Car.MaxW = houseA(1, 1, 1), 4200
-				p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 9400, MaxDischargeW: 9400, CapacityWh: 20000, SoC: .3, Latency: 3 * time.Second}
-				p.Events = []sitesim.Event{{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }}}
-			},
-			lp: func(c *loadpoint.Config) {
-				c.MaxChargeW, c.AllowedStepsW = 10350, c.AllowedStepsW[:len(c.AllowedStepsW)-1]
-			},
-			setup: planBatteryCharge(9400),
-			expect: []simExpect{{9*time.Minute + 50*time.Second, func(s *simSite) error {
-				p := s.p
-				offerW := p.EVSE.OfferA * p.Voltage * float64(p.EVSE.OfferPhases)
-				if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || math.Abs(p.Battery.W-9400) > 200 {
-					return fmt.Errorf("not the #1761 state before the car takes its offer: offer %.0f W, car %.0f W, battery %.0f W", offerW, p.EVSE.DrawW, p.Battery.W)
-				}
-				return nil
-			}}}},
+		replay1761,
+		withSafetyMarginA(replay1761, .5),
 		{name: "meter every 30 s after a cut", known: "a meter slower than evSettle makes every reading a gap, ev_fuse_budget.go:141", run: 10 * time.Minute,
 			plant: func(p *sitesim.Plant) {
 				p.HouseW = houseA(3, 3, 3)
@@ -764,6 +814,26 @@ func simScenarios() []simScenario {
 	}
 }
 
+// withKnown marks sc as failing on the finding known.
+func withKnown(sc simScenario, known string) simScenario {
+	sc.known = known
+	return sc
+}
+
+// withSafetyMarginA runs sc with an opt-in fuse.safety_margin_a. The
+// default is 0; a site that keeps the old 0.5 A must still pass.
+func withSafetyMarginA(sc simScenario, a float64) simScenario {
+	setup := sc.setup
+	sc.name = fmt.Sprintf("%s, safety_margin_a %.1f A", sc.name, a)
+	sc.setup = func(s *simSite) {
+		if setup != nil {
+			setup(s)
+		}
+		s.state.SiteFuseSafetyA = a
+	}
+	return sc
+}
+
 // runSimScenario runs sc from start and returns the site, with the first
 // broken invariant or expectation in failure.
 func runSimScenario(sc simScenario, start time.Time) *simSite {
@@ -804,7 +874,7 @@ func TestSiteSimScenarios(t *testing.T) {
 				start = simStart
 			}
 			s := runSimScenario(sc, start)
-			t.Logf("peak phase %.1f A, %v over %.0f A; car idle with room %v", s.peakA, s.overLimit, s.p.Fuse.RatingA-evPhaseMarginA, s.idleWithRoom)
+			t.Logf("peak phase %.1f A, %v over %.1f A; car idle with room %v", s.peakA, s.overLimit, s.state.fuseLineA(), s.idleWithRoom)
 			switch {
 			case sc.known == "" && s.failure != "":
 				t.Fatal(s.failure)

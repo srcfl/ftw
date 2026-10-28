@@ -74,7 +74,7 @@ its sources (`provenance` in [catalog_test.go](catalog_test.go)).
 
 ## Scenarios
 
-"Over the limit" is the worst phase above the fuse − 1 A, measured through
+"Over the limit" is the worst phase above the fuse rating, measured through
 the fuse. A device's response time counts as 2 s, the meter and control
 tick as 2 s more.
 

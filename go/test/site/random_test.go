@@ -217,7 +217,6 @@ type eventWindow struct{ from, to float64 }
 
 func judgeInvariants(d *runData) (metrics, []criterion) {
 	fuse := d.metaF("fuse")
-	limit := fuse - 1
 	h := d.timing()
 	t0, t1 := d.marks["start"], d.marks["end"]
 	run := d.window(t0, t1)
@@ -269,7 +268,7 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	var firstBad float64
 	var start *sample
 	for i, r := range run {
-		over := maxAbsI(r) > limit
+		over := maxAbsI(r) > fuse
 		if over && start == nil {
 			start = r
 		}
@@ -367,7 +366,8 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	for _, hw := range holds {
 		run4 = 0
 		for i, r := range d.window(hw.from+grace, hw.to) {
-			roomA := limit - (maxAbsI(r) - carW(r, 0)/(3*volt))
+			// Room below fuse - 1 A, the car's line in Core.
+			roomA := fuse - 1 - (maxAbsI(r) - carW(r, 0)/(3*volt))
 			bad := carW(r, 0) < 0.5*1380 && roomA >= 7 && !inFault(r.T) && !nearRestart(r.T)
 			if bad && i > 0 {
 				run4++
