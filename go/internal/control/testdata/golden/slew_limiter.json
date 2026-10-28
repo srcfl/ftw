@@ -1,7 +1,7 @@
 {
   "family": "slew_limiter",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "15f9edc3b973d7b9151e88d63575a9b7d615a0b3",
+  "ftw_commit": "a11706b4",
   "record_count": 127,
   "records": [
     {
@@ -3225,7 +3225,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2760,
+          "target_w": -1259.9999999999995,
           "clamped": true
         }
       ],
@@ -3250,9 +3250,9 @@
       },
       "site_totals": {
         "battery_current_w": 1500,
-        "battery_target_sum_w": -2760,
+        "battery_target_sum_w": -1259.9999999999995,
         "raw_grid_w": 1000,
-        "projected_grid_w": -3260
+        "projected_grid_w": -1759.9999999999995
       }
     },
     {
@@ -10653,7 +10653,7 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 635.7936507936507,
+          "target_w": 0,
           "clamped": false
         }
       ],
@@ -10678,9 +10678,9 @@
       },
       "site_totals": {
         "battery_current_w": -2923,
-        "battery_target_sum_w": 491.7936507936507,
+        "battery_target_sum_w": -144,
         "raw_grid_w": -1903,
-        "projected_grid_w": 1511.7936507936506
+        "projected_grid_w": 876
       }
     },
     {

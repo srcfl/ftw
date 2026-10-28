@@ -27,8 +27,8 @@ func TestSlowChargerUnshownOfferKeepsBatteryOut(t *testing.T) {
 				planBatteryCharge(9400)(s)
 			}}
 		s := runSimScenario(sc, simStart)
-		t.Logf("delay %v: peak phase %.1f A, %v over %.0f A, idle with room %v, car %.0f W, battery %.0f W",
-			delay, s.peakA, s.overLimit, s.p.Fuse.RatingA-evPhaseMarginA, s.idleWithRoom, s.p.EVSE.DrawW, s.p.Battery.W)
+		t.Logf("delay %v: peak phase %.1f A, %v over %.1f A, idle with room %v, car %.0f W, battery %.0f W",
+			delay, s.peakA, s.overLimit, s.state.fuseLineA(), s.idleWithRoom, s.p.EVSE.DrawW, s.p.Battery.W)
 		if s.failure != "" {
 			t.Errorf("delay %v: %s", delay, s.failure)
 		}

@@ -8,6 +8,14 @@ import (
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
+// fuseLineA is each phase's working limit: the fuse rating less the user's
+// optional safety margin, never below 0. Every per-phase fuse decision reads
+// it. Anti-hunting lives in timers and in the size of the next step, never in
+// amps held back below this line.
+func (s *State) fuseLineA() float64 {
+	return math.Max(0, s.SiteFuseAmps-math.Max(0, s.SiteFuseSafetyA))
+}
+
 // phaseImbalanceA is how far the worst phase sits above the mean phase
 // current of one meter sample. The aggregate fuse budget assumes balanced
 // phases, but the breaker, and a charger's own load balancer, act on the
@@ -17,7 +25,7 @@ import (
 // Meters report phase magnitudes, so the mean uses |aggregate|. Phases
 // flowing in opposite directions make the gap look smaller than it is; the
 // per-phase fuse guards still act on a real overage. A single-phase battery
-// or charger is outside this model, as it is for perPhaseReliefW.
+// or charger is outside this model, as it is for phaseFuseReliefW.
 func phaseImbalanceA(r *telemetry.DerReading, state *State) (float64, bool) {
 	if state == nil || state.SiteFuseAmps <= 0 || state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 1 {
 		return 0, false
