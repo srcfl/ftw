@@ -358,13 +358,17 @@ func pvDropLoop(readLag int, maxDischargeW float64) (targets, l1 []float64, line
 // pvDropCase varies pvDropLoop. freezeFrom > 0 makes the meter repeat its
 // reading from that tick on. onePhase puts the battery on that phase only
 // (1-3), which Core reads as balanced. load replaces the house and car
-// current per phase.
+// current per phase. ticks > 0 replaces the 40 ticks, pvW the PV step, and
+// extra adds import current per phase at a tick.
 type pvDropCase struct {
 	readLag       int
 	maxDischargeW float64
 	freezeFrom    int
 	onePhase      int
 	load          [3]float64
+	ticks         int
+	pvW           func(tick int) float64
+	extra         func(tick int) [3]float64
 }
 
 type pvDropResult struct {
@@ -390,21 +394,32 @@ func pvDropRun(c pvDropCase) (r pvDropResult) {
 	r.line = st.fuseLineA()
 	var frozen json.RawMessage
 	var frozenW float64
-	for tick := 0; tick < 40; tick++ {
+	ticks := 40
+	if c.ticks > 0 {
+		ticks = c.ticks
+	}
+	for tick := 0; tick < ticks; tick++ {
 		switch tick {
 		case 5:
 			pvW = -1920
 		case 30:
 			pvW = -3200
 		}
+		if c.pvW != nil {
+			pvW = c.pvW(tick)
+		}
+		var extra [3]float64
+		if c.extra != nil {
+			extra = c.extra(tick)
+		}
 		batW := actual[len(actual)-1]
 		var a [3]float64
 		data := map[string]any{}
 		var totalW float64
 		for i := range a {
-			a[i] = load[i] + (pvW+batW)/690
+			a[i] = load[i] + extra[i] + (pvW+batW)/690
 			if c.onePhase > 0 {
-				a[i] = load[i] + pvW/690
+				a[i] = load[i] + extra[i] + pvW/690
 				if i == c.onePhase-1 {
 					a[i] += batW / 230
 				}
@@ -596,6 +611,37 @@ func TestFuseReliefStopsWhenTheMeterIsFrozen(t *testing.T) {
 	assertReliefStops(t, r)
 }
 
+// The meter freezes on a reading that is not the worst phase's reference:
+// L1 reads 16.3 A on the PV step, the relief brings it to 16.0 A, and a
+// 0.2 A load on L1 starts at tick 8, the reading the meter then repeats.
+// L1 moved only 0.1 A from 16.3 A, so the stop counts the battery's move
+// from the reading the meter repeats, not from that reference: the order
+// stops once the battery has moved one ampere per phase since the freeze.
+func TestFuseReliefStopsWhenTheMeterFreezesOffTheReference(t *testing.T) {
+	r := pvDropRun(pvDropCase{
+		freezeFrom: 8,
+		extra: func(tick int) [3]float64 {
+			if tick >= 8 {
+				return [3]float64{0.2, 0, 0}
+			}
+			return [3]float64{}
+		},
+	})
+	const floorW = -3214 - 0.2*690 - phaseResponseA*690 - 0.2*690
+	for i := 8; i < 30; i++ {
+		if r.targets[i] < floorW {
+			t.Errorf("tick %d: order %.0f W, past %.0f W", i, r.targets[i], floorW)
+		}
+		if i >= 15 && r.targets[i] != r.targets[15] {
+			t.Errorf("tick %d: order %.0f W, want the %.0f W order held", i, r.targets[i], r.targets[15])
+		}
+	}
+	if t.Failed() {
+		t.Logf("targets %v", r.targets)
+		t.Logf("L1 %v", r.l1)
+	}
+}
+
 // A one-phase battery on L2 and L1 at 16.3 A while PV is low. The battery
 // cannot reach L1, so L1 never shows its move. Before, the relief grew by
 // 0.3 A of overage a tick to -4512 W and drove L2 to -16.4 A of export,
@@ -635,33 +681,126 @@ func assertReliefStops(t *testing.T, r pvDropResult) {
 }
 
 // The meter fails to show the batteries only once they moved one ampere
-// per phase (phaseResponseA, 690 W here) and the worst phase moved less
-// than half an ampere. A phase that moves becomes the new reference.
+// per phase (phaseResponseA, 690 W here) and either the meter repeated its
+// reading all the while, or the worst phase moved less than half an ampere
+// while another phase carried the move. A phase that moves becomes the new
+// reference.
 func TestPhaseUnresponsiveNeedsOneAmpereOfBatteryMove(t *testing.T) {
 	st := phaseDirectionState(0)
-	step := func(l1, batW float64) bool {
-		_, stuck := st.phaseUnresponsive([]float64{l1, 9, 9.5}, map[string]float64{"bat": batW})
-		return stuck
+	for _, c := range []struct {
+		name  string
+		amps  []float64
+		batW  float64
+		stuck bool
+	}{
+		{"first reading: a reference", []float64{16.3, 9, 9.5}, -3000, false},
+		{"689 W moved, same reading", []float64{16.3, 9, 9.5}, -3689, false},
+		{"690 W moved, same reading", []float64{16.3, 9, 9.5}, -3690, true},
+		{"L1 0.49 A, L2 and L3 still: a load cancels the move", []float64{16.79, 9, 9.5}, -3690, false},
+		{"L1 0.49 A, L2 and L3 one share each: a load on L1", []float64{16.79, 8, 8.5}, -3690, false},
+		{"L1 0.49 A, L2 1.99 shares", []float64{16.79, 7.01, 9.5}, -3690, false},
+		{"L1 0.49 A, L2 two shares: a battery off L1", []float64{16.79, 7, 9.5}, -3690, true},
+		{"L1 moved 0.5 A: a new reference", []float64{15.8, 9, 9.5}, -3690, false},
+		{"same reading again", []float64{15.8, 9, 9.5}, -3690, false},
+		{"690 W back, same reading", []float64{15.8, 9, 9.5}, -3000, true},
+		{"L1 0.1 A, L2 and L3 still", []float64{15.9, 9, 9.5}, -3000, false},
+		{"690 W back again, the meter repeats L1 0.1 A off the reference", []float64{15.9, 9, 9.5}, -2310, true},
+	} {
+		if _, got := st.phaseUnresponsive(c.amps, map[string]float64{"bat": c.batW}); got != c.stuck {
+			t.Errorf("%s: stuck %v, want %v", c.name, got, c.stuck)
+		}
 	}
-	if step(16.3, -3000) {
-		t.Fatal("first reading: stuck, want a reference")
+}
+
+// pvLowAfter5 drops PV to -440 W from tick 5 on, which puts L1 at 18.45 A
+// under the -3005 W hold.
+func pvLowAfter5(tick int) float64 {
+	if tick >= 5 {
+		return -440
 	}
-	if step(16.3, -3689) {
-		t.Error("689 W moved, L1 still: stuck, want not yet")
+	return -3200
+}
+
+// The battery's reading lags the meter by a tick (207537). L1 reads
+// 18.45 A at tick 5, and one relief step of -4694 W brings it to the line.
+// The reading then catches up with that order while the meter stays put. A
+// 0.4 A load on L1 starts at tick 15 and stays. Before, the catch-up
+// counted as a move the meter did not show: the order stayed at -4694 W
+// and L1 at 16.4 A to the end, and the heat model trips that after about
+// three minutes. The catch-up is no new move, so the relief follows the
+// load.
+func TestFuseReliefFollowsALoadAfterTheReadingCatchesUp(t *testing.T) {
+	r := pvDropRun(pvDropCase{
+		ticks:   60,
+		readLag: 1,
+		pvW:     pvLowAfter5,
+		extra: func(tick int) [3]float64 {
+			if tick >= 15 {
+				return [3]float64{0.4, 0, 0}
+			}
+			return [3]float64{}
+		},
+	})
+	assertL1AtTheLine(t, r, 17, 60)
+}
+
+// L1 reads 18.45 A at tick 5 and the relief step is -4694 W. A balanced
+// 2 A load per phase (a three-phase heat pump) starts in the reading that
+// shows the step, so L1 reads 18.0 A, a move of 0.45 A. Before, that
+// counted as a meter that does not show the battery: the order stayed at
+// -4694 W with L1 at 18 A (1.125 x In) to the end, and the heat model
+// trips that after about 94 s. The meter is live, so the relief goes on.
+func TestFuseReliefGoesOnWhenALoadMasksTheStep(t *testing.T) {
+	r := pvDropRun(pvDropCase{
+		pvW: pvLowAfter5,
+		extra: func(tick int) [3]float64 {
+			if tick >= 6 {
+				return [3]float64{2, 2, 2}
+			}
+			return [3]float64{}
+		},
+	})
+	assertL1AtTheLine(t, r, 7, 40)
+}
+
+// A one-phase load on L1 rises 0.15 A a tick from tick 10 to tick 39,
+// after the PV step has put L1 at the line. The battery follows, so L1
+// never moves half an ampere, while L2 and L3 move with the battery.
+// Before, after 690 W of following, the relief stopped until L1 had risen
+// half an ampere past its 16.3 A reference: L1 climbed to 16.9 A, fell
+// back and climbed again. Now L1 stays within one tick's rise of the line,
+// and at the line once the rise stops.
+func TestFuseReliefFollowsASlowLoadRise(t *testing.T) {
+	r := pvDropRun(pvDropCase{
+		ticks: 50,
+		pvW: func(tick int) float64 {
+			if tick >= 5 {
+				return -1920
+			}
+			return -3200
+		},
+		extra: func(tick int) [3]float64 {
+			return [3]float64{0.15 * float64(min(max(tick-9, 0), 30)), 0, 0}
+		},
+	})
+	for i := 10; i < 40; i++ {
+		if r.l1[i] > r.line+0.16 {
+			t.Errorf("tick %d: L1 %.2f A, more than one 0.15 A rise over the %.1f A line", i, r.l1[i], r.line)
+		}
 	}
-	if !step(16.3, -3690) {
-		t.Error("690 W moved, L1 still: not stuck")
+	assertL1AtTheLine(t, r, 41, 50)
+}
+
+// assertL1AtTheLine wants L1 at or under the line on ticks [from, to).
+func assertL1AtTheLine(t *testing.T, r pvDropResult, from, to int) {
+	t.Helper()
+	for i := from; i < to; i++ {
+		if r.l1[i] > r.line+0.01 {
+			t.Errorf("tick %d: L1 %.2f A, over the %.1f A line with a battery that has room", i, r.l1[i], r.line)
+		}
 	}
-	if !step(16.79, -3690) {
-		t.Error("690 W moved, L1 0.49 A: not stuck")
-	}
-	if step(15.8, -3690) {
-		t.Error("L1 moved 0.5 A: stuck, want a new reference")
-	}
-	if step(15.8, -3690) {
-		t.Error("same reading again: stuck")
-	}
-	if !step(15.8, -3000) {
-		t.Error("690 W back, L1 still: not stuck")
+	if t.Failed() {
+		t.Logf("targets %v", r.targets)
+		t.Logf("L1 %v", r.l1)
 	}
 }

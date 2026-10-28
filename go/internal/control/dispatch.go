@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"slices"
 	"sort"
 	"time"
 
@@ -407,8 +408,8 @@ type State struct {
 	// batteriesOfflineSince is, per battery whose relief still counts,
 	// when dispatch first found it offline (expireOfflineFuseRelief).
 	batteriesOfflineSince map[string]time.Time
-	// phaseResponse is the reading the batteries' phase relief last saw
-	// the worst phase move in (phaseUnresponsive).
+	// phaseResponse holds the readings the batteries' phase relief checks
+	// the meter against (phaseUnresponsive).
 	phaseResponse phaseResponse
 
 	// PI controller (outer, site-level)
@@ -4117,18 +4118,29 @@ func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget
 // it has not moved.
 const phaseResponseA = 1.0
 
-// phaseResponse is the reading in which the worst phase last moved, with
-// each battery's raw power at that reading (phaseUnresponsive).
+// phaseResponse holds the readings phaseUnresponsive measures from, each
+// with the batteries' raw power at that reading: the one in which the
+// worst phase last moved, and the one in which any phase last changed.
 type phaseResponse struct {
-	amps []float64
-	rawW map[string]float64
+	amps, changedAmps []float64
+	rawW, changedRawW map[string]float64
 }
 
-// phaseUnresponsive reports whether the batteries' raw power has changed by
-// phaseResponseA or more per phase since the worst phase last moved, while
-// that phase has not moved since: the meter does not show the batteries.
-// worstA is the worst phase's signed current, + import. A reading in which
-// the worst phase moved becomes the new reference.
+// phaseUnresponsive reports whether the meter fails to show the batteries
+// on the worst phase. worstA is the worst phase's signed current, +
+// import. It is stuck when the batteries' raw power has changed by
+// phaseResponseA or more per phase since either
+//
+//   - the meter's phases last changed at all: the meter repeats one
+//     reading (C5 makes such a meter stale), or
+//   - the worst phase last moved, while another phase moved by twice the
+//     even share of that change or more. A balanced battery moves each
+//     phase by that share, so this battery sits off the worst phase.
+//
+// A live meter on which the worst phase does not move is not enough: a
+// load on that phase can cancel the move, at once or step by step, and
+// there the relief must go on. A reading in which the worst phase moved
+// becomes the new reference.
 func (s *State) phaseUnresponsive(amps []float64, rawW map[string]float64) (worstA float64, stuck bool) {
 	if s == nil || len(amps) == 0 {
 		return 0, false
@@ -4140,24 +4152,44 @@ func (s *State) phaseUnresponsive(amps []float64, rawW map[string]float64) (wors
 		}
 	}
 	ref := &s.phaseResponse
+	perA := s.SiteFuseVoltage * float64(s.SiteFusePhases)
+	if !slices.Equal(amps, ref.changedAmps) {
+		ref.changedAmps, ref.changedRawW = slices.Clone(amps), maps.Clone(rawW)
+	}
+	if math.Abs(batteriesMovedW(&ref.changedRawW, rawW)) >= phaseResponseA*perA {
+		return amps[worst], true
+	}
 	if len(ref.amps) != len(amps) || math.Abs(amps[worst]-ref.amps[worst]) >= phaseResponseA/2 {
-		ref.amps = append([]float64(nil), amps...)
-		ref.rawW = maps.Clone(rawW)
+		ref.amps, ref.rawW = slices.Clone(amps), maps.Clone(rawW)
 		return amps[worst], false
 	}
-	var changedW float64
-	for driver, w := range rawW {
-		if was, ok := ref.rawW[driver]; ok {
-			changedW += w - was
-		} else {
-			if ref.rawW == nil {
-				ref.rawW = make(map[string]float64, len(rawW))
-			}
-			ref.rawW[driver] = w
+	movedW := batteriesMovedW(&ref.rawW, rawW)
+	if math.Abs(movedW) < phaseResponseA*perA {
+		return amps[worst], false
+	}
+	for i, a := range amps {
+		if i != worst && (a-ref.amps[i])/(movedW/perA) >= 2 {
+			return amps[worst], true
 		}
 	}
-	perA := s.SiteFuseVoltage * float64(s.SiteFusePhases)
-	return amps[worst], math.Abs(changedW) >= phaseResponseA*perA
+	return amps[worst], false
+}
+
+// batteriesMovedW is the batteries' raw power change from ref. A battery
+// that ref has not seen joins it at its present power.
+func batteriesMovedW(ref *map[string]float64, rawW map[string]float64) (movedW float64) {
+	for driver, w := range rawW {
+		was, ok := (*ref)[driver]
+		if !ok {
+			if *ref == nil {
+				*ref = make(map[string]float64, len(rawW))
+			}
+			(*ref)[driver] = w
+			continue
+		}
+		movedW += w - was
+	}
+	return movedW
 }
 
 // phaseSentReliefW is the relief that keeps sentW, the batteries' move from
