@@ -15,7 +15,17 @@ package ocpp
 import (
 	"context"
 	"log/slog"
+	"time"
 )
+
+// defaultBootLimitSettle is how long the connector statuses after a boot must
+// stay quiet before the start limit goes out. The limit covers the whole
+// charger, so one socket's Available proves nothing while another socket may
+// still report a car. A charger sends its statuses one after another, each
+// after FTW's reply, so on a local network the burst ends within tens of
+// milliseconds. One second leaves room for a slow link and still sends the
+// limit seconds before FTW's first order would take hold.
+const defaultBootLimitSettle = time.Second
 
 // SetManagedIDs declares which approved chargers FTW orders: those a loadpoint
 // names. An id listed only under ocpp.chargers is approved and metered but
@@ -34,8 +44,8 @@ func (h *Handler) SetManagedIDs(ids []string) {
 }
 
 // maybeSendBootLimit marks a BootNotification for the 0 A start limit. The
-// limit goes out on the first connector status after it, and only when that
-// status shows no car (resolveBootLimit).
+// limit goes out once the connector statuses after it settle, and only when
+// none of them showed a car (resolveBootLimit).
 //
 // A boot alone does not show a fresh start. After a Core restart the new
 // process holds no status and no transaction, and much firmware sends its own
@@ -53,19 +63,56 @@ func (h *Handler) maybeSendBootLimit(id string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	s := h.chargersLocked(id)
+	s.bootLimitEpoch++
 	s.bootLimitPending = h.bootLimit != nil && h.approved[id] && h.managed[id] &&
 		s.identityProbeAttempts == 0 && !s.connected && s.transactionID < 0
 }
 
-// resolveBootLimit runs after each connector status. The first one after a
-// marked boot decides: no car and no transaction sends the start limit; a car
-// sends nothing, since FTW orders that car every tick. The send runs on its
-// own goroutine, as the capability probe does, and goes through the same
-// one-at-a-time slot as every other order. A refusal is logged once; the next
-// boot tries again.
+// resolveBootLimit runs after each connector status. A status that shows a car
+// or an open transaction on any socket cancels the start limit: FTW orders
+// that car every tick, and 0 A for the whole charger would pause it. A status
+// with no car starts the settle timer again, so the limit goes out only after
+// the statuses have been quiet for bootLimitSettle. FTW keeps one connection
+// state per charger and the last status wins, so the cancel happens here, as
+// each status arrives, not when the timer fires.
 func (h *Handler) resolveBootLimit(id string) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	s := h.chargersLocked(id)
+	if !s.bootLimitPending {
+		return
+	}
+	if s.connected || s.transactionID >= 0 {
+		s.bootLimitPending = false
+		return
+	}
+	s.bootLimitEpoch++
+	epoch := s.bootLimitEpoch
+	time.AfterFunc(h.bootLimitSettle, func() { h.fireBootLimit(id, epoch) })
+}
+
+// cancelBootLimit drops a pending start limit when FTW orders the charger
+// during the settle wait. That order is newer, and a 0 A landing after it
+// would undo it.
+func (h *Handler) cancelBootLimit(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s := h.chargers[id]; s != nil {
+		s.bootLimitPending = false
+	}
+}
+
+// fireBootLimit sends the start limit when no status, boot or socket change
+// came after the timer that calls it, and still no car or transaction shows.
+// The send goes through the same one-at-a-time slot as every other order. A
+// refusal is logged once; the next boot tries again.
+func (h *Handler) fireBootLimit(id string, epoch uint64) {
+	h.mu.Lock()
+	s := h.chargersLocked(id)
+	if s.bootLimitEpoch != epoch {
+		h.mu.Unlock()
+		return
+	}
 	send := h.bootLimit
 	if !s.bootLimitPending || !h.approved[id] || !h.managed[id] || s.connected || s.transactionID >= 0 {
 		send = nil
@@ -73,7 +120,7 @@ func (h *Handler) resolveBootLimit(id string) {
 	s.bootLimitPending = false
 	h.mu.Unlock()
 	if send != nil {
-		go send(id)
+		send(id)
 	}
 }
 

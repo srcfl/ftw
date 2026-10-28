@@ -19,15 +19,22 @@ import (
 
 // startManagedServer runs a 1.6 listener (and 2.0.1 when v201) where
 // "garage" is named by a loadpoint and "metered" is listed only under
-// ocpp.chargers.
+// ocpp.chargers. The status burst after a boot settles in testBootLimitSettle,
+// well inside settle(), so a start limit that should not come has time to.
 func startManagedServer(t *testing.T, v201 bool) *Server {
 	t.Helper()
-	return startOCPP(t, Config{
+	srv := startOCPP(t, Config{
 		Enabled: true, Bind: "127.0.0.1", HeartbeatIntervalS: 60,
 		ApprovedIDs: []string{"garage", "metered"},
 		ManagedIDs:  []string{"garage"},
 	}, telemetry.NewStore(), v201)
+	srv.handler.mu.Lock()
+	srv.handler.bootLimitSettle = testBootLimitSettle
+	srv.handler.mu.Unlock()
+	return srv
 }
+
+const testBootLimitSettle = 50 * time.Millisecond
 
 func awaitProfiles(t *testing.T, count func() int, want int) {
 	t.Helper()
@@ -334,5 +341,93 @@ func TestV201CoreRestartBootWithCarGetsNoBootLimit(t *testing.T) {
 	fake.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("boot after a Core restart with a car got %d profile(s); want none", n)
+	}
+}
+
+// A Core restart while a car charges on socket 2 of a two-socket 1.6
+// charger. The charger boots on its own and reports socket 1 Available
+// before socket 2 Charging. The start limit goes to connector 0, the whole
+// charger, so sending it on socket 1's status would pause the car on socket
+// 2. FTW waits for the status burst to settle; the car on socket 2 cancels it.
+func TestDualSocketCoreRestartCarOnSocket2GetsNoBootLimit(t *testing.T) {
+	srv := startManagedServer(t, false)
+	fake := newFakeCharger()
+	cp, _, err := dialChargePoint16(t, wsURL(srv.cfg.Port), "garage", nil, func(cp ocpp16.ChargePoint) { cp.SetSmartChargingHandler(fake) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cp.BootNotification("Twin", "RigCo"); err != nil {
+		t.Fatal(err)
+	}
+	for connector, st := range []core.ChargePointStatus{core.ChargePointStatusAvailable, core.ChargePointStatusAvailable, core.ChargePointStatusCharging} {
+		if _, err := cp.StatusNotification(connector, core.NoError, st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settle()
+	if n := fake.count(); n != 0 {
+		t.Fatalf("two-socket restart with a car on socket 2 got %d profile(s), last %v A; want none", n, fake.lastLimit(t))
+	}
+}
+
+// The same charger reporting socket 2 first. FTW keeps one connection state
+// per charger and the last status wins, so socket 1's later Available must
+// not undo the car socket 2 showed during the burst.
+func TestDualSocketCarReportedFirstStillCancelsBootLimit(t *testing.T) {
+	srv := startManagedServer(t, false)
+	fake := newFakeCharger()
+	cp, _, err := dialChargePoint16(t, wsURL(srv.cfg.Port), "garage", nil, func(cp ocpp16.ChargePoint) { cp.SetSmartChargingHandler(fake) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cp.BootNotification("Twin", "RigCo"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		connector int
+		status    core.ChargePointStatus
+	}{{0, core.ChargePointStatusAvailable}, {2, core.ChargePointStatusCharging}, {1, core.ChargePointStatusAvailable}} {
+		if _, err := cp.StatusNotification(c.connector, core.NoError, c.status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settle()
+	if n := fake.count(); n != 0 {
+		t.Fatalf("two-socket restart with a car on socket 2 reported first got %d profile(s); want none", n)
+	}
+}
+
+// FTW orders the charger while the start limit waits for the statuses to
+// settle. The order is newer, so the 0 A must not land after it.
+func TestOrderDuringSettleWaitCancelsBootLimit(t *testing.T) {
+	srv := startManagedServer(t, false)
+	cp, fake, _ := connectCharger(t, srv, srv.cfg.Port, "garage")
+	reportStatus16(t, cp, core.ChargePointStatusAvailable)
+	if err := srv.Command(context.Background(), "garage", setCurrent11kW(t)); err != nil {
+		t.Fatal(err)
+	}
+	settle()
+	if n, got := fake.count(), fake.lastLimit(t); n != 1 || got != 16 {
+		t.Fatalf("order during the settle wait: %d profile(s), last %v A; want FTW's 16 A alone", n, got)
+	}
+}
+
+// 2.0.1 with two EVSEs: EVSE 1 Available, then EVSE 2 Occupied. The start
+// limit goes to EVSE 0, the whole station, so it must not go out.
+func TestV201TwoEVSECoreRestartCarOnEVSE2GetsNoBootLimit(t *testing.T) {
+	srv := startManagedServer(t, true)
+	cs, fake := bootStationV201(t, srv)
+	if _, err := cs.StatusNotification(types201.NewDateTime(time.Now()), availability.ConnectorStatusAvailable, 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.StatusNotification(types201.NewDateTime(time.Now()), availability.ConnectorStatusOccupied, 2, 1); err != nil {
+		t.Fatal(err)
+	}
+	settle()
+	fake.mu.Lock()
+	n := len(fake.profiles)
+	fake.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("two-EVSE restart with a car on EVSE 2 got %d profile(s); want none", n)
 	}
 }

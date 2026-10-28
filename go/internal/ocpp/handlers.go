@@ -33,9 +33,11 @@ type Handler struct {
 
 	// managed is the approved chargers a loadpoint names, which FTW orders.
 	// bootLimit, set by the Server, holds each at 0 A from its boot until
-	// FTW's first order. See boot_limit.go.
-	managed   map[string]bool
-	bootLimit func(id string)
+	// FTW's first order, once the connector statuses after the boot have
+	// been quiet for bootLimitSettle. See boot_limit.go.
+	managed         map[string]bool
+	bootLimit       func(id string)
+	bootLimitSettle time.Duration
 
 	nextTxID int
 
@@ -126,8 +128,10 @@ type chargerState struct {
 	identityProbeAttempts int
 	identityProbeAfter    time.Time
 	// bootLimitPending marks a boot that may get the 0 A start limit once
-	// the next connector status shows no car. See boot_limit.go.
+	// the status burst after it settles with no car. bootLimitEpoch names
+	// the latest settle timer. See boot_limit.go.
 	bootLimitPending bool
+	bootLimitEpoch   uint64
 	// vehicleID is the identity presented when the current/last transaction
 	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
 	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
@@ -159,6 +163,7 @@ func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 		approved:            map[string]bool{},
 		probing:             map[string]bool{},
 		identityProbeTiming: defaultIdentityProbeTiming,
+		bootLimitSettle:     defaultBootLimitSettle,
 		nextTxID:            1,
 	}
 }
