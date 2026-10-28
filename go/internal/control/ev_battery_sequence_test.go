@@ -183,6 +183,7 @@ type evBatterySite struct {
 	batteryDelay     time.Duration // 0: the battery follows within a tick
 	batteryCommands  []evTimed
 	meterW, targetW  []evTimed // every site reading and battery target
+	batteryOffline   bool      // the battery reports nothing and gets no target
 }
 
 func newEVBatterySite(t *testing.T, houseW float64) *evBatterySite {
@@ -259,7 +260,9 @@ func (s *evBatterySite) step() {
 	}
 	s.maxGridW = math.Max(s.maxGridW, s.gridW())
 	s.meterW = append(s.meterW, evTimed{s.now, s.gridW()})
-	s.emit("pixii", telemetry.DerBattery, s.batteryW)
+	if !s.batteryOffline {
+		s.emit("pixii", telemetry.DerBattery, s.batteryW)
+	}
 	s.emit("charger", telemetry.DerEV, s.evW)
 	s.emit("meter", telemetry.DerMeter, s.gridW())
 	s.state.ObserveSiteImport(s.store)
@@ -267,6 +270,12 @@ func (s *evBatterySite) step() {
 	s.state.SetEVCommanded(s.mgr.States())
 	s.state.SetEVFuseDemands(s.ctrl.FuseDemands())
 	targets := ComputeDispatch(s.store, s.state, caps(map[string]float64{"pixii": 15000}), 17250)
+	if s.batteryOffline {
+		if len(targets) != 0 {
+			s.t.Fatalf("offline battery got targets %+v", targets)
+		}
+		return
+	}
 	if len(targets) != 1 {
 		s.t.Fatalf("targets %+v", targets)
 	}
@@ -533,6 +542,42 @@ func TestFuseOverageGetsBatteryReliefUntilEVCutShows(t *testing.T) {
 	}
 	if s.offer() != 5520 {
 		t.Fatalf("offer %.0f W, want 5,520 W: 8 A beside 16 A of house under the 24 A line", s.offer())
+	}
+}
+
+// The only battery goes offline in the middle of fuse relief and drops to
+// 0 W; then the house load falls. Its relief counts whole until the default
+// mode Core sent it can have reached the meter, and then it ends: the car
+// gets back up to the 24 A line instead of being held below it for as long
+// as the battery stays offline.
+func TestOfflineBatteryReliefEndsAfterSettle(t *testing.T) {
+	s := newIdleBatteryEVSite(t, 3000, 0)
+	s.run(5 * time.Minute)
+	stepAt := s.now
+	s.houseW += 8000
+	s.run(3 * time.Second)
+	reliefW := -s.batteryW
+	if reliefW <= 0 || s.state.batteryFuseRelief["pixii"] <= 0 {
+		t.Fatalf("setup: battery %.0f W relief %v", s.batteryW, s.state.batteryFuseRelief)
+	}
+	s.store.DriverHealthMut("pixii").SetOffline()
+	s.batteryOffline, s.batteryW = true, 0
+	offlineAt := s.now
+	for s.now.Sub(offlineAt) < evSettle-time.Second {
+		s.step()
+		if got := s.state.evFuseReliefW(s.store); math.Abs(got-reliefW) > 1e-6 {
+			t.Fatalf("%v after offline: relief %.0f W, want the whole %.0f W", s.now.Sub(offlineAt), got, reliefW)
+		}
+	}
+	s.run(time.Minute - s.now.Sub(stepAt))
+	s.houseW -= 4000 // 7,000 W of house.
+	s.run(9 * time.Minute)
+	t.Logf("offer %.0f W, %.2f A on each phase, relief %v", s.offer(), s.gridW()/690, s.state.batteryFuseRelief)
+	if got := s.state.evFuseReliefW(s.store); got != 0 {
+		t.Fatalf("relief %.0f W still counted %v after offline", got, s.now.Sub(offlineAt))
+	}
+	if s.offer() != 8970 || s.gridW()/690 > 24+1e-6 {
+		t.Fatalf("offer %.0f W at %.2f A, want 8,970 W: 13 A beside 10.1 A of house under the 24 A line", s.offer(), s.gridW()/690)
 	}
 }
 

@@ -403,6 +403,9 @@ type State struct {
 	// the site fits without it, so an EV rise or start never counts it as
 	// room (evFuseReliefW).
 	batteryFuseRelief map[string]float64
+	// batteriesOfflineSince is when dispatch first found no battery online
+	// (expireOfflineFuseRelief).
+	batteriesOfflineSince time.Time
 
 	// PI controller (outer, site-level)
 	PI *PIController
@@ -1540,10 +1543,12 @@ func ComputeDispatch(
 		}
 	}
 	if len(onlineBats) == 0 {
+		state.expireOfflineFuseRelief()
 		publishBatterylessEVFuseBudget(store, state, fuseMaxW)
 		state.LastTargets = nil
 		return nil
 	}
+	state.batteriesOfflineSince = time.Time{}
 	// Planner slots that are idle/charge-only must not leave an individual
 	// battery discharging just because slew anchored from a negative live
 	// reading. Plain self_consumption remains the classic grid-zero mode:

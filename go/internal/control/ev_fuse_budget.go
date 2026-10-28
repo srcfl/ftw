@@ -575,7 +575,7 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 // each battery's recorded relief, at most the discharge it reads. A battery
 // with no live reading (watchdog-offline, or none yet) counts its whole
 // relief: Core can no longer hold that discharge, and the car must not
-// build on it.
+// build on it. expireOfflineFuseRelief ends it once no battery is online.
 func (s *State) evFuseReliefW(store *telemetry.Store) float64 {
 	var w float64
 	for driver, relief := range s.batteryFuseRelief {
@@ -585,6 +585,23 @@ func (s *State) evFuseReliefW(store *telemetry.Store) float64 {
 		w += relief
 	}
 	return w
+}
+
+// expireOfflineFuseRelief ends the recorded relief evSettle after dispatch
+// first finds no battery online. Core sent each battery its default mode
+// then, and that command reaches the meter within evSettle, as ours do.
+// Until then the car must not build on a discharge that may still stand;
+// after it, holding the car below the line for relief Core no longer
+// orders would be a hidden margin. With a battery online, every recorded
+// dispatch rewrites the relief and drops the offline batteries.
+func (s *State) expireOfflineFuseRelief() {
+	now := s.now()
+	if s.batteriesOfflineSince.IsZero() {
+		s.batteriesOfflineSince = now
+	}
+	if now.Sub(s.batteriesOfflineSince) >= evSettle {
+		s.batteryFuseRelief = nil
+	}
 }
 
 // wholeStepsW rounds w down to whole charger amps on the pool's phases, one
