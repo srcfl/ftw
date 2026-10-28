@@ -827,3 +827,338 @@ func TestInvariantsAStepAfterADipGetsItsTime(t *testing.T) {
 		}
 	}
 }
+
+// R4 after the third review of #1920: a car or battery raise FTW sends
+// while an import stretch is over the fuse is FTW's own, after a step's
+// meter delay too, and a house event that changes nothing does not take
+// the rise from it. One sent in a dip under the fuse, with the heat still
+// over it, is allowed: the step after it gets its time. Raising the car
+// into export is the right answer. 40 s charger, the battery at its
+// floor.
+func TestInvariantsARaiseOverTheFuseIsFTWsOwn(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		fuse   float64
+		set    func(i int, r *sample)
+		frames []frame
+		events []houseEventLine
+		want   bool // both limit criteria hold
+	}{
+		{"0 -> 16 A at 1.24 x In after PV moved", 25, func(i int, r *sample) {
+			if i >= 41 && i < 84 {
+				r.PhaseA = [3]float64{31, 31, 31}
+			}
+			if i >= 52 && i < 84 {
+				r.PhaseA = [3]float64{42, 42, 42}
+			}
+		}, []frame{profileAt(20, 0), profileAt(50, 16)},
+			[]houseEventLine{{T: 40, Event: houseEvent{Do: "pv", Device: "inverter"}}}, false},
+		{"6 -> 10 A at 1.25 x In, a load event that changes nothing as it lands", 16, func(i int, r *sample) {
+			if i >= 11 && i < 75 {
+				r.PhaseA = [3]float64{20, 12, 12}
+			}
+			if i >= 32 && i < 75 {
+				r.PhaseA[0] = 22
+			}
+		}, []frame{profileAt(1, 6), profileAt(30, 10)},
+			[]houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}, {T: 31, Event: houseEvent{Do: "loads"}}}, false},
+		{"battery charge 0 -> 3 kW at 1.25 x In after a load step", 16, func(i int, r *sample) {
+			r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: 0}}}
+			if i >= 30 {
+				r.Status.Dispatch[0].TargetW, r.BatW = 3000, 3000
+			}
+			if i >= 11 && i < 55 {
+				r.PhaseA = [3]float64{20, 12, 12}
+			}
+			if i >= 32 && i < 55 {
+				r.PhaseA = [3]float64{22, 16, 16}
+			}
+		}, nil, []houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}}, false},
+		{"car and battery raised in a dip under the fuse, a step after it", 16, func(i int, r *sample) {
+			r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: 0}}}
+			if i >= 56 {
+				r.Status.Dispatch[0].TargetW = 2000
+			}
+			switch {
+			case i >= 11 && i < 45, i >= 71 && i < 76:
+				r.PhaseA = [3]float64{22, 12, 12}
+			case i >= 45 && i < 71:
+				r.PhaseA = [3]float64{15, 12, 12}
+			}
+		}, []frame{profileAt(1, 6), profileAt(55, 8)},
+			[]houseEventLine{{T: 10, Event: houseEvent{Do: "loads"}}, {T: 70, Event: houseEvent{Do: "loads"}}}, true},
+		{"0 -> 16 A into export over the fuse after PV moved", 16, func(i int, r *sample) {
+			r.PhaseA, r.BatW = [3]float64{-8, -8, -8}, 4000
+			if i >= 11 && i < 45 {
+				r.PhaseA = [3]float64{-24, -12, -12}
+			}
+		}, []frame{profileAt(1, 0), profileAt(20, 16)},
+			[]houseEventLine{{T: 10, Event: houseEvent{Do: "pv", Device: "inverter"}}}, true},
+	} {
+		d := randomRun(121, c.fuse, 12, func(i int, r *sample) {
+			r.Bat.SoCPct = 6
+			c.set(i, r)
+		})
+		withCharger(t, d, 40, 0)
+		d.frames, d.events = c.frames, c.events
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v", c.name, v[limitStep], v[limitOwn], c.want)
+		}
+	}
+}
+
+// R4 for the battery: a charge raise FTW sends after a Core restart is
+// its own, as a car raise is (triage C2). An order moved while the
+// inverter is off reaches no battery. 16 A fuse, Core restarts at 50 s
+// and is back at 55 s; the order goes 0 -> 4 kW at 60 s; 21 A on L1
+// (1.31 x) from 61 to 105 s.
+func TestInvariantsABatteryRaiseAfterARestartIsFTWsOwn(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		running bool // the inverter runs from 55 to 70 s
+		want    bool
+	}{
+		{"the inverter runs", true, false},
+		{"the inverter is off", false, true},
+	} {
+		d := randomRun(201, 16, 8, func(i int, r *sample) {
+			w := 0.0
+			if i >= 60 {
+				w = 4000
+			}
+			r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: w}}}
+			if i >= 55 && i < 70 {
+				run := c.running
+				r.Bat.Running = &run
+			}
+			if i >= 61 && c.running {
+				r.BatW = w
+			}
+			if i >= 61 && i < 105 {
+				r.PhaseA = [3]float64{21, 13, 13}
+			}
+		})
+		withCharger(t, d, 5, 0)
+		d.allMarks = []markLine{{T: 50, Label: "ftw:restart"}, {T: 55, Label: "ftw:up"}}
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v", c.name, v[limitStep], v[limitOwn], c.want)
+		}
+	}
+}
+
+// Fourth review of #1920: what FTW's battery order did, read correctly.
+// While Core is down, or before its first tick, status has no dispatch,
+// but the inverter keeps the last order: a missing order is no move. A
+// move counts from 0.5 A a phase (345 W), as raisedAt does, so a one-
+// sample 158 W wobble of Core's closed loop (seed 207539 at 151.7 s) is
+// no raise. 16 A fuse, a load step at 40 s puts 20 A on L1.
+func TestInvariantsABatteryOrderMovesOnlyWhenFTWMovesIt(t *testing.T) {
+	order := func(r *sample, w float64) {
+		r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: w}}}
+	}
+	for _, c := range []struct {
+		name string
+		set  func(i int, r *sample)
+		down bool // Core restarts at 44 s and is back at 49 s
+		want bool // both limit criteria hold
+	}{
+		// At 6 % SoC the battery charging 1 kW cannot take 4 A a phase
+		// off, so the charger is the lever; Core's restart extends the
+		// stretch to 104 s.
+		{"1 kW order kept while Core is down", func(i int, r *sample) {
+			r.BatW, r.Bat.SoCPct = 1000, 6
+			order(r, 1000)
+			if i >= 41 && i < 80 {
+				r.PhaseA = [3]float64{20, 8, 8}
+			}
+		}, true, true},
+		{"1 kW order missing while Core is down, then restored", func(i int, r *sample) {
+			r.BatW, r.Bat.SoCPct = 1000, 6
+			if i < 44 || i >= 50 {
+				order(r, 1000)
+			}
+			if i >= 41 && i < 80 {
+				r.PhaseA = [3]float64{20, 8, 8}
+			}
+		}, true, true},
+		{"0 W order missing while Core is down, then 1 kW", func(i int, r *sample) {
+			r.Bat.SoCPct = 6
+			switch {
+			case i < 44:
+				order(r, 0)
+			case i >= 50:
+				order(r, 1000)
+				r.BatW = 1000
+			}
+			if i >= 41 && i < 80 {
+				r.PhaseA = [3]float64{20, 8, 8}
+			}
+		}, true, false},
+		// The battery discharges 4 999 W and answers in 2 s: allowed
+		// until 47 s.
+		{"steady discharge order", func(i int, r *sample) {
+			r.BatW = -4999
+			order(r, -4999)
+			if i >= 41 && i < 46 {
+				r.PhaseA = [3]float64{20, 8, 8}
+			}
+		}, false, true},
+		{"one 158 W wobble toward import", func(i int, r *sample) {
+			r.BatW = -4999
+			order(r, -4999)
+			if i == 43 {
+				order(r, -4841)
+			}
+			if i >= 41 && i < 46 {
+				r.PhaseA = [3]float64{20, 8, 8}
+			}
+		}, false, true},
+		{"one 360 W move toward import", func(i int, r *sample) {
+			r.BatW = -4999
+			order(r, -4999)
+			if i == 43 {
+				order(r, -4639)
+			}
+			if i >= 41 && i < 46 {
+				r.PhaseA = [3]float64{20, 8, 8}
+			}
+		}, false, false},
+	} {
+		d := randomRun(121, 16, 8, c.set)
+		withCharger(t, d, 40, 0)
+		d.events = []houseEventLine{{T: 40, Event: houseEvent{Do: "loads"}}}
+		if c.down {
+			d.allMarks = []markLine{{T: 44, Label: "ftw:restart"}, {T: 49, Label: "ftw:up"}}
+		}
+		m, _ := judgeInvariants(d)
+		v := judged(d)
+		if got := v[limitStep] && v[limitOwn]; got != c.want {
+			t.Errorf("%s: step %v, own %v; want both %v; judged %v", c.name, v[limitStep], v[limitOwn], c.want, m["over_limit_judged"])
+		}
+	}
+}
+
+// Export is judged by what pushes export. A car raise before an export
+// stretch soaks it up, so the stretch keeps its step's time. A battery
+// pushed toward export after a Core restart is FTW's own push: the
+// restart's minute does not excuse it.
+func TestInvariantsExportIsFTWsOwnOnlyWhenFTWPushedExport(t *testing.T) {
+	t.Run("car raise before an export stretch", func(t *testing.T) {
+		off := false
+		d := randomRun(121, 16, 0, func(i int, r *sample) {
+			r.Bat.Running = &off
+			if i >= 45 && i < 80 {
+				r.PhaseA = [3]float64{-20, -20, -20}
+			}
+		})
+		withCharger(t, d, 40, 0)
+		d.frames = []frame{profileAt(20, 0), profileAt(43, 16)}
+		d.events = []houseEventLine{{T: 40, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+		m, _ := judgeInvariants(d)
+		if v := judged(d); !(v[limitStep] && v[limitOwn]) {
+			t.Errorf("step %v, own %v; judged %v", v[limitStep], v[limitOwn], m["over_limit_judged"])
+		}
+	})
+	for _, c := range []struct {
+		name    string
+		running bool // the inverter runs from 55 s
+		want    bool
+	}{
+		{"battery pushed 0 -> -5 kW after a restart", true, false},
+		{"the same order with the inverter off", false, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := randomRun(201, 16, 0, func(i int, r *sample) {
+				w := 0.0
+				if i >= 57 {
+					w = -5000
+				}
+				r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: w}}}
+				if i >= 55 && !c.running {
+					run := false
+					r.Bat.Running = &run
+				}
+				if i >= 58 && c.running {
+					r.BatW = w
+				}
+				if i >= 58 && i < 100 {
+					r.PhaseA = [3]float64{-21, -10, -10}
+				}
+			})
+			withCharger(t, d, 5, 0)
+			d.allMarks = []markLine{{T: 50, Label: "ftw:restart"}, {T: 55, Label: "ftw:up"}}
+			m, _ := judgeInvariants(d)
+			v := judged(d)
+			if got := v[limitStep] && v[limitOwn]; got != c.want {
+				t.Errorf("step %v, own %v; want both %v; judged %v", v[limitStep], v[limitOwn], c.want, m["over_limit_judged"])
+			}
+		})
+	}
+	// Inside an export stretch after a PV step. The battery charges at
+	// its maximum, so the 40 s charger is the lever. Moving its order
+	// toward export while the meter is over the fuse is FTW's own; the
+	// same move in a dip under the fuse, with a step after it, is not.
+	for _, c := range []struct {
+		name   string
+		moveAt int // the order goes 5 -> 4 kW; 0: no move
+		dip    bool
+		want   bool
+	}{
+		{"no move", 0, false, true},
+		{"battery moved toward export over the fuse", 20, false, false},
+		{"the same move in a dip, a step after it", 56, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := randomRun(121, 16, -12, func(i int, r *sample) {
+				r.BatW = rigBatteryMaxW
+				w := rigBatteryMaxW
+				if c.moveAt > 0 && i >= c.moveAt {
+					w = 4000
+				}
+				r.Status = &ftwStatus{Dispatch: []ftwDispatch{{Driver: "sungrow", TargetW: w}}}
+				switch {
+				case !c.dip && i >= 11 && i < 45:
+					r.PhaseA = [3]float64{-22, -12, -12}
+				case c.dip && (i >= 11 && i < 45 || i >= 71 && i < 76):
+					r.PhaseA = [3]float64{-22, -12, -12}
+				case c.dip && i >= 45 && i < 71:
+					r.PhaseA = [3]float64{-15, -12, -12}
+				}
+			})
+			withCharger(t, d, 40, 0)
+			d.events = []houseEventLine{{T: 10, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+			if c.dip {
+				d.events = append(d.events, houseEventLine{T: 70, Event: houseEvent{Do: "pv", Device: "inverter"}})
+			}
+			m, _ := judgeInvariants(d)
+			v := judged(d)
+			if got := v[limitStep] && v[limitOwn]; got != c.want {
+				t.Errorf("step %v, own %v; want both %v; judged %v", v[limitStep], v[limitOwn], c.want, m["over_limit_judged"])
+			}
+		})
+	}
+}
+
+// The line is In, not 1.2 x In: a car raise sent while the meter shows
+// 1.1 x In (under the instant cut, the heat still cool) is sent over the
+// line, and the stretch is FTW's own.
+func TestInvariantsARaiseBetweenFuseAndInstantIsOwn(t *testing.T) {
+	d := randomRun(121, 25, 12, func(i int, r *sample) {
+		r.Bat.SoCPct = 6
+		if i >= 41 && i < 84 {
+			r.PhaseA = [3]float64{27.5, 27.5, 27.5}
+		}
+		if i >= 52 && i < 84 {
+			r.PhaseA = [3]float64{42, 42, 42}
+		}
+	})
+	withCharger(t, d, 40, 0)
+	d.frames = []frame{profileAt(20, 0), profileAt(50, 16)}
+	d.events = []houseEventLine{{T: 40, Event: houseEvent{Do: "pv", Device: "inverter"}}}
+	m, _ := judgeInvariants(d)
+	if v := judged(d); v[limitStep] && v[limitOwn] {
+		t.Errorf("a raise sent at 1.1 x In passed; judged %v", m["over_limit_judged"])
+	}
+}
