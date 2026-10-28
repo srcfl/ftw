@@ -167,6 +167,29 @@ func TestBatteryLimitConfigBothZeroUsesDefault(t *testing.T) {
 	}
 }
 
+// A config with no fuse.safety_margin_a reaches Core at the fuse rating, and
+// an explicit value still wins.
+func TestUnsetFuseMarginReachesCoreAsZero(t *testing.T) {
+	cfg := parseBatteryLimitConfig(t, "", "    max_charge_w: 10000\n")
+	ctrl := newControlStateFromConfig(cfg)
+	if ctrl.SiteFuseSafetyA != 0 {
+		t.Fatalf("unset margin reached Core as %v A, want 0", ctrl.SiteFuseSafetyA)
+	}
+	// 63 A × 230 V × 3 = 43470 W is the ceiling with no margin.
+	if err := ctrl.SetPeakLimit(43470); err != nil {
+		t.Fatalf("peak limit at the fuse: %v", err)
+	}
+	if err := ctrl.SetPeakLimit(43471); err == nil {
+		t.Fatal("a peak limit 1 W over the fuse was accepted")
+	}
+
+	half := 0.5
+	cfg.Fuse.SafetyMarginA = &half
+	if got := newControlStateFromConfig(cfg).SiteFuseSafetyA; got != 0.5 {
+		t.Fatalf("explicit 0.5 A reached Core as %v A", got)
+	}
+}
+
 // A "NaN" saved from an MQTT command must not come back as the PI setpoint
 // on every boot.
 func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {

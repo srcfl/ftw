@@ -13,9 +13,8 @@ import (
 
 // randomHouseKnown names the seeds that break an invariant on master, by
 // kind, and the finding. A listed kind that passes fails the test until its
-// line goes. The fuse's own kind is never listed. Seed 2 no longer reaches
-// the case where a landed cut still covers the next overage; that cost is
-// pinned in TestEVFuseLandedCutCoversOnlyItsRun.
+// line goes. The fuse's own kind is never listed. A landed cut covers no
+// later overage (TestEVFuseLandedCutCoversOnlyItsRun).
 var randomHouseKnown = map[uint64]map[string]string{}
 
 // Core keeps a random house under the fuse. For each fixed seed the house

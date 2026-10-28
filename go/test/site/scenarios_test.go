@@ -1010,7 +1010,7 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 	start := d.firstT(t0, func(r *sample) bool { return carW(r, 0) >= 0.95*1380 })
 	over, longest := 0.0, 0.0
 	for _, r := range d.window(t0, t1) {
-		if maxAbsI(r) > fuse-1 {
+		if maxAbsI(r) > fuse {
 			over++
 			longest = math.Max(longest, over)
 		} else {
@@ -1018,13 +1018,13 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 		}
 	}
 	m := metrics{"battery_rise_w_20s_before": math.Round(rise), "car_start_s": roundp(start, 1),
-		"car_w_last60":               math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
-		"over_fuse_minus1_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
+		"car_w_last60":        math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
+		"over_fuse_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
 	return m, []criterion{
 		crit("the battery order rose over 1 150 W in the 20 s before Charge now", rise > 1150), // the setup
 		crit("car charging within 10 s of Charge now", le(start, 10)),
 		crit("fuse holds", !anyBlown(d.window(t0, t1))),
-		crit("over fuse - 1 A at most 3 s", longest <= 3),
+		crit("over the fuse at most 3 s", longest <= 3),
 	}
 }
 
