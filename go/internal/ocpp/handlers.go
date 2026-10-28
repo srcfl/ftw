@@ -30,6 +30,15 @@ type Handler struct {
 	// no driver health, no metrics — so it cannot influence dispatch. See
 	// SetApprovedIDs.
 	approved map[string]bool
+
+	// managed is the approved chargers a loadpoint names, which FTW orders.
+	// bootLimit, set by the Server, holds each at 0 A from its boot until
+	// FTW's first order, once the connector statuses after the boot have
+	// been quiet for bootLimitSettle. See boot_limit.go.
+	managed         map[string]bool
+	bootLimit       func(id string)
+	bootLimitSettle time.Duration
+
 	nextTxID int
 
 	// vehicleIdentified, when set, fires once per new vehicle identity seen
@@ -121,6 +130,11 @@ type chargerState struct {
 	identityProbeEpoch    uint64
 	identityProbeAttempts int
 	identityProbeAfter    time.Time
+	// bootLimitPending marks a boot that may get the 0 A start limit once
+	// the status burst after it settles with no car. bootLimitEpoch names
+	// the latest settle timer. See boot_limit.go.
+	bootLimitPending bool
+	bootLimitEpoch   uint64
 	// vehicleID is the identity presented when the current/last transaction
 	// started: the RFID idTag on 1.6, or a 2.0.1 idToken — where the token
 	// type MacAddress (autocharge) or eMAID (ISO 15118) names the actual
@@ -442,6 +456,7 @@ func (h *Handler) OnConnect(id string) {
 	s.charging = false
 	s.clearMeasuredPower()
 	s.identityCurrent = false
+	s.bootLimitPending = false
 	s.featureProfiles = ""
 	s.steerable = nil
 	h.cancelIdentityProbeLocked(s)
@@ -463,6 +478,7 @@ func (h *Handler) OnDisconnect(id string) {
 	delete(h.probing, id)
 	s.online = false
 	s.identityCurrent = false
+	s.bootLimitPending = false
 	h.cancelIdentityProbeLocked(s)
 	s.connectedKnown = false
 	s.charging = false
@@ -502,6 +518,7 @@ func (h *Handler) OnBootNotification(id string, req *core.BootNotificationReques
 	h.noteIdentity(id)
 	h.telHealth(id)
 	h.maybeProbeCapability(id)
+	h.maybeSendBootLimit(id)
 	return core.NewBootNotificationConfirmation(
 		types.NewDateTime(time.Now()),
 		h.heartbeatIntervalS,
@@ -594,6 +611,7 @@ func (h *Handler) OnStatusNotification(id string, req *core.StatusNotificationRe
 
 	h.pushReading(id, s)
 	h.telSuccess(id)
+	h.resolveBootLimit(id)
 	return core.NewStatusNotificationConfirmation(), nil
 }
 
@@ -642,8 +660,10 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 		}
 		if w, ok := meterPowerW(samples); ok {
 			s.recordPower(w, measured, received)
+			s.meterCancelsBootLimitLocked(nil, w)
 		}
 	}
+	s.meterCancelsBootLimitLocked(req.TransactionId, 0)
 	h.mu.Unlock()
 
 	h.pushReading(id, s)

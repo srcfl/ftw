@@ -46,6 +46,42 @@ func TestOCPPApprovedIDsSkipLuaLoadpointNames(t *testing.T) {
 	}
 }
 
+// Only a loadpoint's charger gets FTW's orders, so only it may start at 0 A.
+func TestOCPPManagedIDsAreLoadpointChargersOnly(t *testing.T) {
+	cfg := &config.Config{
+		Drivers: []config.Driver{{Name: "easee", Lua: "drivers/easee.lua"}},
+		Loadpoints: []config.Loadpoint{
+			{ID: "cloud", DriverName: "easee"},
+			{ID: "garage", DriverName: "garage"},
+		},
+		OCPP: &config.OCPP{Enabled: true, Chargers: []config.OCPPCharger{{ID: "wallbox", Password: "own"}}},
+	}
+	got := ocppManagedIDs(cfg)
+	if len(got) != 1 || got[0] != "garage" {
+		t.Fatalf("managed %v, want garage only", got)
+	}
+}
+
+// Setup measurement mode blocks every charger write, standdowns included, so
+// no charger may start at 0 A while Core runs in it. Start passes the config
+// Core booted with; a hot reload passes the saved config, which may already
+// have left the mode while the block holds until restart. Both must give none.
+func TestOCPPStartLimitIDsFollowMeasurementModeAtBoot(t *testing.T) {
+	loadpoints := []config.Loadpoint{{ID: "garage", DriverName: "garage"}}
+	measuring := &config.Config{Setup: &config.Setup{MeasurementOnly: true}, Loadpoints: loadpoints}
+	left := &config.Config{Loadpoints: loadpoints}
+
+	if got := ocppStartLimitIDs(measuring, measuring.MeasurementOnly()); len(got) != 0 {
+		t.Fatalf("start in measurement mode: start limit for %v, want none", got)
+	}
+	if got := ocppStartLimitIDs(left, true); len(got) != 0 {
+		t.Fatalf("reload that left measurement mode before restart: start limit for %v, want none", got)
+	}
+	if got := ocppStartLimitIDs(left, false); len(got) != 1 || got[0] != "garage" {
+		t.Fatalf("normal operation: start limit for %v, want garage", got)
+	}
+}
+
 func containsID(ids []string, want string) bool {
 	for _, id := range ids {
 		if id == want {
