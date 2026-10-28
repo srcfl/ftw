@@ -609,6 +609,23 @@ func simDay(p *sitesim.Plant) {
 }
 
 func simScenarios() []simScenario {
+	// A charger whose own load balancer holds each phase to balancerA.
+	loadBalancer := func(balancerA float64) simScenario {
+		name := "charger's own load balancer"
+		if balancerA != 25 {
+			name = fmt.Sprintf("%s at %.1f A", name, balancerA)
+		}
+		return simScenario{name: name, run: 20 * time.Minute,
+			plant: func(p *sitesim.Plant) {
+				p.HouseW, p.EVSE.LoadBalancerA = houseA(12, 12, 12), balancerA
+				p.Events = []sitesim.Event{
+					{At: 5 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(18, 12, 12) }},
+					{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(4, 4, 4) }},
+					{At: 15 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(20, 20, 20) }},
+				}
+			}}
+	}
+	const loadBalancerBug = "a cut comes off an offer the car does not draw, stepEVMeterLimit (ev_fuse_budget.go:769)"
 	slowCharger := func(delay time.Duration) func(*sitesim.Plant) {
 		return func(p *sitesim.Plant) { p.HouseW, p.EVSE.Delay = houseA(15, 15, 15), delay }
 	}
@@ -647,15 +664,11 @@ func simScenarios() []simScenario {
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW = houseA(2, 2, 2), -22*690 }},
 		{name: "export start, unsigned phase currents", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW, p.Meter.Unsigned = houseA(2, 2, 2), -22*690, true }},
-		{name: "charger's own load balancer", run: 20 * time.Minute,
-			plant: func(p *sitesim.Plant) {
-				p.HouseW, p.EVSE.LoadBalancerA = houseA(12, 12, 12), 25
-				p.Events = []sitesim.Event{
-					{At: 5 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(18, 12, 12) }},
-					{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(4, 4, 4) }},
-					{At: 15 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(20, 20, 20) }},
-				}
-			}},
+		loadBalancer(25),
+		// The balancer sits at the rating, so at the default 0 A margin it
+		// never lets the car past Core's line. Above the line the bug shows.
+		withKnown(withSafetyMarginA(loadBalancer(25), .5), loadBalancerBug),
+		withKnown(loadBalancer(25.5), loadBalancerBug),
 		{name: "slow cloud charger 60 s", run: 15 * time.Minute,
 			plant: slowCharger(time.Minute)},
 		{name: "slow cloud charger 120 s", run: 15 * time.Minute,
@@ -781,6 +794,12 @@ func simScenarios() []simScenario {
 			expect: []simExpect{{10*time.Minute - time.Second, carPhasesUnknown}}},
 		{name: "a day", start: time.Date(2026, 10, 21, 0, 0, 0, 0, time.Local), run: 24 * time.Hour, plant: simDay},
 	}
+}
+
+// withKnown marks sc as failing on the finding known.
+func withKnown(sc simScenario, known string) simScenario {
+	sc.known = known
+	return sc
 }
 
 // withSafetyMarginA runs sc with an opt-in fuse.safety_margin_a. The
