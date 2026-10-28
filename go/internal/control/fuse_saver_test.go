@@ -474,9 +474,8 @@ func TestPerPhaseClampHonorsSafetyMargin(t *testing.T) {
 	}
 	// Aggregate effFuseW = 11040 − 1.0×230×3 = 10350. Predicted =
 	// 5000 + 4000 − 0 = 9000 → no aggregate overage. Per-phase wins.
-	// Buffer = half-margin = 0.5×1×230×3 = 345 W (post-fix headroom).
-	// Charge 4000 − 550 − 345 = 3105.
-	expected := 3105.0
+	// Charge 4000 − 550 = 3450, which puts L1 on the 15 A line.
+	expected := 3450.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("charge after safety-margin clamp = %.0f W, want %.0f W",
 			guarded[0].TargetW, expected)
@@ -558,10 +557,10 @@ func TestPerPhaseReliefMatchesSinglePhaseSiteOnExport(t *testing.T) {
 	if !guarded[0].Clamped {
 		t.Fatalf("export-side per-phase overage must clamp the discharge target")
 	}
-	// Discharge 5000 − overage 1955 − buffer (half the 115 W margin)
-	// = 2987.5 W. Demanding 1955 × 3 leaves nothing: the discharge is
-	// zeroed and the site swings to 520 W of import.
-	expected := -2987.5
+	// Discharge 5000 − overage 1955 = 3045 W. Demanding 1955 × 3 leaves
+	// nothing: the discharge is zeroed and the site swings to 520 W of
+	// import.
+	expected := -3045.0
 	if math.Abs(guarded[0].TargetW-expected) > 1 {
 		t.Errorf("discharge after 1Φ export clamp = %.1f W, want %.1f W",
 			guarded[0].TargetW, expected)
@@ -653,33 +652,63 @@ func TestFuseSaverFiresInIdleMode(t *testing.T) {
 	}
 }
 
-// Operator-report 2026-04-30: with safety_margin_a=1 (threshold = 15 A)
-// the system stabilised with phase amps oscillating between 15.0 and
-// 15.8 A — fuse guard reactively scaled targets just enough to clear
-// the trip, then the planner re-ramped, then it re-tripped. Half-margin
-// buffer keeps post-clamp aggregate below the threshold by an explicit
-// margin so the next tick has room before re-tripping.
-func TestFuseGuardLeavesHeadroomBelowThreshold(t *testing.T) {
-	store, state, _ := setupPerPhase(-7000, 12, 18, 8, 0.6, 10000)
-	state.SiteFuseSafetyA = 1.0
-	state.SiteFusePhases = 3
-	soc := 0.6
-	store.Update("bat", telemetry.DerBattery, -5000, &soc, nil)
-	store.DriverHealthMut("bat").RecordSuccess()
+// A guard cut lands the worst phase on the line, In − safety_margin_a, and
+// stays there. It takes no extra headroom below the line: the prediction
+// from held targets and the 30 s hold keep the next dispatch from
+// re-ramping through it. 16 A fuse, margin 1.2 A, so the line is 14.8 A.
+// The battery follows each order; the loop runs 60 ticks of 5 s, so the
+// hold expires and fires again several times.
+func TestFuseGuardCutLandsOnTheLine(t *testing.T) {
+	const marginA, lineA = 1.2, 14.8
+	for _, tc := range []struct {
+		name     string
+		houseA   [3]float64 // signed: + import, − export
+		requestW float64
+		roomA    float64 // worst phase's room to the line before the battery moves
+	}{
+		{"charge on import", [3]float64{13, 7, 5}, 4000, lineA - 13},
+		{"discharge on export", [3]float64{-8, -12, -5}, -5000, lineA - 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewState(0, 50, "meter")
+			st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases, st.SiteFuseSafetyA = 16, 230, 3, marginA
+			st.DriverLimits = map[string]PowerLimits{"bat": {MaxChargeW: 10000, MaxDischargeW: 10000}}
+			now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+			st.clock = func() time.Time { return now }
+			store := telemetry.NewStore()
+			wantW := math.Copysign(tc.roomA*690, tc.requestW)
+			batW := 0.0
+			for tick := 0; tick < 60; tick++ {
+				a := tc.houseA
+				data := map[string]any{}
+				for i := range a {
+					a[i] += batW / 690
+					data[fmt.Sprintf("l%d_a", i+1)] = a[i]
+					data[fmt.Sprintf("l%d_w", i+1)] = a[i] * 230
+				}
+				raw, _ := json.Marshal(data)
+				store.Update("meter", telemetry.DerMeter, (a[0]+a[1]+a[2])*230, nil, raw)
+				store.DriverHealthMut("meter").RecordSuccess()
+				soc := 0.5
+				store.Update("bat", telemetry.DerBattery, batW, &soc, nil)
+				store.DriverHealthMut("bat").RecordSuccess()
 
-	out := applyFuseGuard(
-		[]DispatchTarget{{Driver: "bat", TargetW: -5000}},
-		store, state, 11040)
-	if !out[0].Clamped {
-		t.Fatalf("expected per-phase export clamp")
-	}
-	// perPhase = (18−15) × 230 × 3 = 2070 W
-	// half-margin buffer = 0.5 × 1A × 230V × 3p = 345 W
-	// totalDischarge = 5000 → newTotal = 5000 − 2070 − 345 = 2585
-	expected := -2585.0
-	if math.Abs(out[0].TargetW-expected) > 1 {
-		t.Errorf("post-clamp target = %.0f W, want %.0f W (overage + half-margin)",
-			out[0].TargetW, expected)
+				worstA := 0.0
+				for _, x := range a {
+					worstA = math.Max(worstA, math.Abs(x))
+				}
+				if tick > 0 && math.Abs(worstA-lineA) > 0.01 {
+					t.Fatalf("tick %d: worst phase %.3f A, want %.1f A (the line, not below it)", tick, worstA, lineA)
+				}
+
+				out := applyFuseGuard([]DispatchTarget{{Driver: "bat", TargetW: tc.requestW}}, store, st, 16*230*3)
+				if math.Abs(out[0].TargetW-wantW) > 1 {
+					t.Fatalf("tick %d: target %.1f W, want %.1f W (cut by the overage only)", tick, out[0].TargetW, wantW)
+				}
+				batW = out[0].TargetW
+				now = now.Add(5 * time.Second)
+			}
+		})
 	}
 }
 

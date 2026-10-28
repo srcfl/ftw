@@ -60,10 +60,9 @@ func TestIssue1868BatteryChargeYieldsBeforeTheCar(t *testing.T) {
 				}
 				// Charge mode asks for a raise. No phase reaches the 15.5 A
 				// line, so only the hour's limit binds: the guard cuts the
-				// 69 W overage and half the margin (172.5 W) to 3758.5 W,
-				// and the car's headroom then takes the same 69 W again
-				// (3689.5 W).
-				if mode == ModeCharge && target.TargetW < 3689 {
+				// 69 W overage to 3931 W, and the car's headroom then takes
+				// the same 69 W again (3862 W).
+				if mode == ModeCharge && target.TargetW < 3861 {
 					t.Fatalf("small overage needlessly stopped battery charging: %+v", target)
 				}
 			}

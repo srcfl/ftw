@@ -66,7 +66,10 @@ tariff import ceiling still applies.
 
 A phase's current takes its direction from the same phase's power. It
 counts as export only when that power shows it clearly and the phases'
-powers add up to the meter's total; otherwise it counts as import. An
+powers add up to the meter's total; otherwise it counts as import. The
+battery's fuse checks make one exception for a meter with no phase power
+while the total exports: a phase counts as export when the other phases'
+currents cannot carry that export alone. An
 exporting phase is never cut for: less EV load would raise its export. A
 rise or start on it reads its current as it is, without its heat.
 

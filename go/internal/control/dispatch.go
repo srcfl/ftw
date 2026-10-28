@@ -327,9 +327,10 @@ type State struct {
 	SiteFuseVoltage float64
 	SiteFusePhases  int
 
-	// SiteFuseSafetyA is amps held back from the breaker. Without it the
-	// inverter's own limiter trips first, output falls to 0, and dispatch
-	// ramps from idle. Zero disables the margin.
+	// SiteFuseSafetyA is an opt-in margin in amps per phase below the
+	// breaker; zero, the default, works to the rating. Set it for an
+	// inverter whose own limiter trips at the rating: output falls to 0
+	// and dispatch ramps from idle.
 	SiteFuseSafetyA float64
 
 	// Peak limit — enforced only in PeakShaving mode
@@ -372,7 +373,8 @@ type State struct {
 	EVCurtailHeadroomW float64
 	// BatteryCoversEV lets the battery discharge into the EV. Off, EV
 	// load is taken out of the meter before the PI so the battery does
-	// not feed the car.
+	// not feed the car. Either way the car comes before battery charge:
+	// the battery charges only from the surplus the car leaves.
 	BatteryCoversEV bool
 
 	// BatteryBoostEVChargingW is the live charging draw belonging to
@@ -400,6 +402,9 @@ type State struct {
 	// batteryCommands and evLimit.offers are our own recent commands, the
 	// only device input the EV hard limit and the EV/battery split use.
 	batteryCommands map[string]commandLog
+	// batteryReadings is each battery's own reading at our last commands,
+	// for the power the site meter may not show yet (unshownBatteryW).
+	batteryReadings map[string]commandLog
 	// batteryFuseRelief is the discharge the fuse guard added to each
 	// battery's last dispatched command (forceFuseDischarge). It ends once
 	// the site fits without it, so an EV rise or start never counts it as
@@ -1103,11 +1108,15 @@ func (s *State) SetPeakLimit(w float64) error {
 		return fmt.Errorf("peak_limit_w must be ≥ 0, got %.0f W", w)
 	}
 	if ceiling := s.peakLimitCeilingW(); ceiling > 0 && w > ceiling {
+		margin := ""
+		if s.SiteFuseSafetyA > 0 {
+			margin = fmt.Sprintf(", less a %.1f A safety margin", s.SiteFuseSafetyA)
+		}
 		return fmt.Errorf(
 			"peak_limit_w %.0f W is above the site's import ceiling %.0f W "+
-				"(fuse %.0f A × %.0f V × %d phases, less a %.1f A safety margin) "+
+				"(fuse %.0f A × %.0f V × %d phases%s) "+
 				"— a peak limit above the fuse can never bind",
-			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, s.SiteFuseSafetyA)
+			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, margin)
 	}
 	s.PeakLimitW = w
 	return nil
@@ -1494,11 +1503,15 @@ func ComputeDispatch(
 	// discharge keeps its old opt-in guard so Self does not fill the home
 	// battery from a car by default.
 	gridW := rawGridW
-	if state.Mode != ModeSelfConsumption && !state.BatteryCoversEV {
-		gridW -= state.uncoveredEVChargingW()
-	}
 	if !state.BatteryCoversEV {
 		gridW -= vehicleFlow.V2XDischargeW
+	}
+	// The car comes before battery charge: charge comes only from what the
+	// meter shows left after the car. The car leaves the signal below so
+	// the battery never discharges for it.
+	chargeGridW := gridW
+	if state.Mode != ModeSelfConsumption && !state.BatteryCoversEV {
+		gridW -= state.uncoveredEVChargingW()
 	}
 
 	// ---- Gather online batteries ----
@@ -1572,6 +1585,14 @@ func ComputeDispatch(
 	var currentTotal float64
 	for _, b := range onlineBats {
 		currentTotal += b.currentW
+	}
+	// Without the car the meter may show export the car is using. Where
+	// the battery would charge, it sees the meter with the car instead:
+	// it charges only from the surplus after the car, and never turns to
+	// discharge for it.
+	noCarGridW := gridW
+	if gridW < chargeGridW {
+		gridW = math.Max(gridW, math.Min(chargeGridW, currentTotal))
 	}
 	surplus := newSurplusAccounting(rawGridW, gridW, currentTotal, state)
 
@@ -1755,14 +1776,18 @@ func ComputeDispatch(
 
 		// Leave PV for a surplus-only EV. A planned import of at least
 		// 100 W keeps its charge. Discharge is left alone.
-		if state.EVSurplusOnlyReserveW > 0 && targetTotalW > 0 {
-			deliberateGridCharge := currentDirective.HasPlannedGridW && currentDirective.PlannedGridW >= 100
-			if !deliberateGridCharge {
-				ceiling := surplus.chargeCeilingAfterEVReserveW()
-				if targetTotalW > ceiling {
-					targetTotalW = ceiling
-				}
+		deliberateGridCharge := currentDirective.HasPlannedGridW && currentDirective.PlannedGridW >= 100
+		if state.EVSurplusOnlyReserveW > 0 && targetTotalW > 0 && !deliberateGridCharge {
+			ceiling := surplus.chargeCeilingAfterEVReserveW()
+			if targetTotalW > ceiling {
+				targetTotalW = ceiling
 			}
+		}
+		// The car before battery charge: a charge the plan makes from PV
+		// takes only the surplus the car leaves.
+		pvCharge := currentDirective.HasPlannedGridW && !deliberateGridCharge
+		if targetTotalW > 0 && pvCharge && gridW > noCarGridW {
+			targetTotalW = math.Min(targetTotalW, currentTotal-gridW)
 		}
 
 		// Charge slots only. If PV drops, the energy budget would hold the
@@ -1771,7 +1796,11 @@ func ComputeDispatch(
 		// Below 100 W is meter noise.
 		if currentDirective.HasPlannedGridW && targetTotalW > 0 {
 			const planGridDeadband = 100.0
-			projectedGridW := gridW + (targetTotalW - currentTotal)
+			// As before the car came first, the projection leaves out the
+			// car the battery does not cover, while the plan's grid counts
+			// the car it planned. The car's draw never starts this
+			// back-off.
+			projectedGridW := noCarGridW + (targetTotalW - currentTotal)
 			gridErr := projectedGridW - currentDirective.PlannedGridW
 			if gridErr > planGridDeadband {
 				adjusted := targetTotalW - gridErr
@@ -1865,6 +1894,12 @@ func ComputeDispatch(
 				errW = gridW - state.PeakLimitW
 			} else if gridW < 0 {
 				errW = gridW // exporting → charge with surplus
+			} else if chargeGridW > 0 && currentTotal > 0 && state.EVChargingW > evActiveThresholdW {
+				// The car before battery charge: the site imports while
+				// the car and the battery both charge. Take the charge
+				// down by the import, to 0 at most; under the peak limit
+				// the battery does not discharge.
+				errW = math.Min(chargeGridW, currentTotal)
 			} else {
 				errW = 0
 			}
@@ -1995,6 +2030,11 @@ func ComputeDispatch(
 				"mode", string(effectiveMode))
 		}
 		totalCorrection = allowed - currentTotal
+		// The house alone has surplus, so a discharge would feed the
+		// car. Stop it now rather than over several PI steps.
+		if gridW > noCarGridW && currentTotal+totalCorrection < 0 {
+			totalCorrection = -currentTotal
+		}
 
 		// Surplus-only EV reserve cap: stack on top of the meter clamp.
 		// Mirror the energy-path cap so the battery target on the
@@ -2394,6 +2434,7 @@ func applyDispatchSafetyPipeline(
 	}
 	// ---- Fuse guard (bidirectional, #145) ----
 	targets = applyFuseGuard(targets, store, state, fuseMaxW)
+	targets = fitBatteryRisesToFuse(targets, store, state)
 
 	// ---- Plan/exec sign-mismatch floor (energy planner modes only) ----
 	// Operator-report 2026-04-28 (08:00-08:15 CEST): planner_arbitrage
@@ -2443,6 +2484,7 @@ func applyDispatchSafetyPipeline(
 	recordDispatchTargets(targets, state, opts.updatePrevTargets, opts.recordDispatch)
 	if opts.recordDispatch {
 		state.recordFuseRelief(beforeRelief, targets)
+		state.recordBatteryReadings(targets, store)
 	}
 	return targets
 }
@@ -3862,20 +3904,11 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 		return out
 	}
 
-	// Headroom buffer: shrink targets by `overage + half the configured
-	// safety margin` so post-clamp the grid sits *below* the threshold
-	// instead of riding right at it. Without this, the next dispatch
-	// tick lets the planner re-ramp into the threshold and the system
-	// oscillates at the boundary — the operator's "safety margin"
-	// becomes the active steady-state instead of a buffer below it.
-	//
-	// Half-margin chosen so the post-clamp phase amps still cluster
-	// near the threshold (operator wants the fuse used efficiently)
-	// but with enough buffer to absorb load fluctuations and per-phase
-	// imbalance on the next tick. Operators wanting tighter or looser
-	// buffer just adjust safety_margin_a.
-	buffer := state.fuseSafetyMarginW() * 0.5
-
+	// Cut by the overage only, so the grid lands on the line, not below it.
+	// The prediction from the held targets above keeps the next dispatch
+	// from re-ramping through the line, and the 30 s hold below keeps the
+	// planner at the clamped total. A site that wants headroom sets
+	// safety_margin_a, which lowers the line itself.
 	switch {
 	case importOverage > 0:
 		// Too much import (aggregate or per-phase) → shrink charging.
@@ -3892,7 +3925,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 			// still flip idle batteries to discharge.
 			return out
 		}
-		newTotal := totalCharge - importOverage - buffer
+		newTotal := totalCharge - importOverage
 		if newTotal < 0 {
 			newTotal = 0
 		}
@@ -3920,7 +3953,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 			// is the lever in that scenario (annotateCurtailment).
 			return out
 		}
-		newTotal := totalDischarge - exportOverage - buffer
+		newTotal := totalDischarge - exportOverage
 		if newTotal < 0 {
 			newTotal = 0
 		}
@@ -4018,6 +4051,145 @@ func livePhaseSample(store *telemetry.Store, driver string, meter *telemetry.Der
 	return phaseSample{meter: meter, totalW: totalW, store: store}
 }
 
+// signedPhasesA is the sample's phase currents, import positive
+// (phaseCurrentsA). When no phase reads as export while the total does, the
+// meter gives no direction per phase. A phase then counts as export only
+// when it must: when the other phases' currents, at most V × A of real power
+// each, cannot carry the exported total on their own (tolerance as in
+// phasePowersAddUp). A phase that may import counts as import,
+// phaseCurrentsA's safe side, since a reactive load can draw its whole
+// current beside exporting phases. false without usable phase currents.
+func (p phaseSample) signedPhasesA(state *State) ([]float64, bool) {
+	if p.meter == nil || state == nil {
+		return nil, false
+	}
+	amps, _, valid := phaseCurrentsA(p.meter, state, p.totalW)
+	if !valid || len(amps) == 0 {
+		return nil, false
+	}
+	exports := p.totalW < 0
+	var sumW float64
+	for _, a := range amps {
+		exports = exports && a >= 0
+		sumW += a * state.SiteFuseVoltage
+	}
+	if !exports {
+		return amps, true
+	}
+	tolW := math.Max(250, sumW/10)
+	for i, a := range amps {
+		if sumW-a*state.SiteFuseVoltage < -p.totalW-tolW {
+			amps[i] = -a
+		}
+	}
+	return amps, true
+}
+
+// unshownBatteryW is the batteries' increase the site meter may not show
+// yet: each battery's latest order less the least the meter may show of it,
+// the lowest order of the last evSettle (as pendingBatteryCommandsW) or the
+// lowest of the battery's own readings over that time, the current one
+// included. A battery that ramps slower than evSettle has not reached an
+// order older than evSettle, so the order stays unshown until evSettle after
+// the battery reads it.
+func (s *State) unshownBatteryW(now time.Time, store *telemetry.Store) float64 {
+	var unshown float64
+	for driver, log := range s.batteryCommands {
+		low, _, latest, ok := log.span(now)
+		if !ok {
+			continue
+		}
+		if read, _, _, seen := s.batteryReadings[driver].span(now); seen {
+			low = math.Min(low, read)
+		}
+		if w, _, live := store.OnlineRawW(driver, telemetry.DerBattery); live {
+			low = math.Min(low, w)
+		}
+		unshown += math.Max(0, latest-low)
+	}
+	return unshown
+}
+
+// recordBatteryReadings logs each dispatched battery's reading for
+// unshownBatteryW.
+func (s *State) recordBatteryReadings(targets []DispatchTarget, store *telemetry.Store) {
+	if store == nil {
+		return
+	}
+	now := s.now()
+	for _, t := range targets {
+		w, _, live := store.OnlineRawW(t.Driver, telemetry.DerBattery)
+		if !live {
+			continue
+		}
+		if s.batteryReadings == nil {
+			s.batteryReadings = map[string]commandLog{}
+		}
+		s.batteryReadings[t.Driver] = s.batteryReadings[t.Driver].add(now, w)
+	}
+}
+
+// fitBatteryRisesToFuse keeps battery charge rises inside the room the site
+// meter shows on its busiest phase: the working limit (fuseLineA) less the
+// phase's reading and less our own rises that reading may not show yet, the
+// chargers' offers (counted as evShownW does) and the batteries' orders
+// (unshownBatteryW). A three-phase battery puts its power evenly on
+// every phase. A rise is charge above the battery's latest order, or above
+// its reading before our first order. Holding an order is never a rise, and
+// a discharge we end uses room first. Nothing here cuts below the hold: an
+// overage is the relief's (applyFuseGuard, forceFuseDischarge), which reads
+// the battery's own power. Without usable phase currents the aggregate guard
+// is the check.
+func fitBatteryRisesToFuse(targets []DispatchTarget, store *telemetry.Store, state *State) []DispatchTarget {
+	if store == nil || state == nil || len(targets) == 0 || state.SiteFuseVoltage <= 0 || state.SiteFusePhases <= 0 {
+		return targets
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	if meter == nil {
+		return targets
+	}
+	amps, ok := livePhaseSample(store, state.SiteMeterDriver, meter).signedPhasesA(state)
+	if !ok {
+		return targets
+	}
+	now := state.now()
+	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases)
+	unshownA := state.unshownBatteryW(now, store) / perA
+	for _, c := range state.evLimit.offers {
+		_, a := c.log.unshown(now, c.batterySettle())
+		unshownA += a // A one-phase offer may land on any phase.
+	}
+	worstA := math.Inf(-1)
+	for _, a := range amps {
+		worstA = math.Max(worstA, a)
+	}
+	roomW := (state.fuseLineA() - worstA - unshownA) * perA
+	holds := make([]float64, len(targets))
+	var riseW float64
+	for i, t := range targets {
+		var base float64
+		if _, _, latest, sent := state.batteryCommands[t.Driver].span(now); sent {
+			base = latest
+		} else if w, _, live := store.OnlineRawW(t.Driver, telemetry.DerBattery); live {
+			base = w
+		}
+		roomW -= math.Max(0, math.Min(0, t.TargetW)-math.Min(0, base))
+		holds[i] = math.Min(t.TargetW, math.Max(0, base))
+		riseW += t.TargetW - holds[i]
+	}
+	if riseW <= 0 || roomW >= riseW {
+		return targets
+	}
+	scale := math.Max(0, roomW) / riseW
+	out := append([]DispatchTarget(nil), targets...)
+	for i := range out {
+		if out[i].TargetW > holds[i] {
+			out[i].TargetW, out[i].Clamped = holds[i]+(out[i].TargetW-holds[i])*scale, true
+		}
+	}
+	return out
+}
+
 // moveW is the batteries' change from the raw power the phases hold to
 // the targets. The phase currents are raw, so the move is too. Each
 // battery's raw power comes live from the store and must be the reading in
@@ -4103,7 +4275,7 @@ func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget
 	importW, exportW = phaseFuseReliefW(p, state, moveW)
 	sentImportW, sentExportW := phaseSentReliefW(p, state, sentW)
 	importW, exportW = math.Max(importW, sentImportW), math.Max(exportW, sentExportW)
-	if amps, ok := p.signedA(state); ok {
+	if amps, ok := p.signedPhasesA(state); ok {
 		if worst, stuck, backTo := state.phaseUnresponsive(amps, p.totalW, rawW); stuck {
 			capW := sentW
 			if backTo != nil {
@@ -4246,7 +4418,7 @@ func batteriesMovedW(ref *map[string]float64, rawW map[string]float64) (movedW f
 // the import side gives way to phaseFuseReliefW's least-over move; the
 // same holds the other way round.
 func phaseSentReliefW(p phaseSample, state *State, sentW float64) (importW, exportW float64) {
-	amps, ok := p.signedA(state)
+	amps, ok := p.signedPhasesA(state)
 	if !ok {
 		return 0, 0
 	}
@@ -4269,29 +4441,6 @@ func phaseSentReliefW(p phaseSample, state *State, sentW float64) (importW, expo
 	return importW, exportW
 }
 
-// signedA is the phase currents, + import, from phaseCurrentsA. When no
-// phase reads as export while the total does, the meter gives no direction
-// per phase, and the phases take the total's.
-func (p phaseSample) signedA(state *State) ([]float64, bool) {
-	if p.meter == nil || state == nil {
-		return nil, false
-	}
-	amps, _, valid := phaseCurrentsA(p.meter, state, p.totalW)
-	if !valid || len(amps) == 0 {
-		return nil, false
-	}
-	exports := p.totalW < 0
-	for _, a := range amps {
-		exports = exports && a >= 0
-	}
-	if exports {
-		for i := range amps {
-			amps[i] = -amps[i]
-		}
-	}
-	return amps, true
-}
-
 // phaseFuseReliefW is the aggregate battery move that brings every phase
 // inside the working limit, fuseLineA: the fuse less safety_margin_a, the
 // same line the car uses. importW asks for less charge or more
@@ -4299,17 +4448,15 @@ func (p phaseSample) signedA(state *State) ([]float64, bool) {
 // the power this reading already holds (phaseSample.moveW); like the
 // relief, it spreads evenly over the site's phases.
 //
-// The phases are the meter's signed currents (phaseCurrentsA). When no
-// phase reads as export while the total does, the meter gives no direction
-// per phase, and the phases take the total's. When no move fits every
-// phase, the move leaves the worst phase least over, so on a meter that
-// gives each phase's direction a move never raises the current on the phase
-// it protects. Two limits remain: a meter without phase power that mixes
-// directions under an exporting total, where an importing phase is read as
-// export, and a battery on one phase, which is read as balanced. 0, 0
-// without usable phase currents.
+// The phases are the meter's signed currents (signedPhasesA). When no move
+// fits every phase, the move leaves the worst phase least over, so on a
+// meter that gives each phase's direction a move never raises the current
+// on the phase it protects. Two limits remain: a meter without phase power
+// under an exporting total, where a phase the total does not force to
+// export is read as import, and a battery on one phase, which is read as
+// balanced. 0, 0 without usable phase currents.
 func phaseFuseReliefW(p phaseSample, state *State, moveW float64) (importW, exportW float64) {
-	amps, ok := p.signedA(state)
+	amps, ok := p.signedPhasesA(state)
 	if !ok {
 		return 0, 0
 	}

@@ -7,8 +7,8 @@ import (
 )
 
 // SetPeakLimit is the one place the peak-shaving threshold is validated
-// against the site's fuse. A 16 A / 230 V / 3-phase site is 11040 W; the
-// default 0.5 A safety margin costs 345 W, so the highest limit that can
+// against the site's fuse. A 16 A / 230 V / 3-phase site is 11040 W; an
+// opt-in 0.5 A safety margin costs 345 W, so the highest limit that can
 // still be the first thing to bind is 10695 W.
 func fusedState() *State {
 	st := NewState(0, 50, "ferroamp")
@@ -60,6 +60,23 @@ func TestSetPeakLimitRejectsValueInsideTheSafetyMargin(t *testing.T) {
 	}
 	if err := st.SetPeakLimit(10800); err == nil {
 		t.Fatal("10800 W is above fuse−margin (10695 W) and must be rejected")
+	}
+}
+
+// The message names the margin only when the site has one. With the
+// default 0 the ceiling is the fuse itself.
+func TestSetPeakLimitMessageNamesOnlyARealMargin(t *testing.T) {
+	st := fusedState()
+	if err := st.SetPeakLimit(20000); err == nil || !strings.Contains(err.Error(), "less a 0.5 A safety margin") {
+		t.Fatalf("with a 0.5 A margin the message must name it, got %v", err)
+	}
+	st.SiteFuseSafetyA = 0
+	err := st.SetPeakLimit(20000)
+	if err == nil || strings.Contains(err.Error(), "margin") || !strings.Contains(err.Error(), "11040 W") {
+		t.Fatalf("with no margin the message must give the fuse as the ceiling and no margin, got %v", err)
+	}
+	if err := st.SetPeakLimit(11040); err != nil {
+		t.Fatalf("with no margin the fuse itself is the ceiling, got %v", err)
 	}
 }
 
