@@ -1802,8 +1802,8 @@ func ComputeDispatch(
 		// and the held-meter exit both fall through to cut it.
 		batteryBreaksLimit := (noSelfDischarge && anyBatteryDischarging(onlineBats)) ||
 			anyExplicitZeroDischargeViolation(onlineBats) ||
-			anyBelowOwnerFloorDischarging(onlineBats) ||
-			anyAtHardFloorDischarging(onlineBats) ||
+			anyBelowOwnerFloorDischarging(onlineBats, state.PrevTargets) ||
+			anyAtHardFloorDischarging(onlineBats, state.PrevTargets) ||
 			anyBlockedBatteryCharging(onlineBats, noSelfCharge)
 
 		// The PI acts on the meter alone. A held sample carries no new
@@ -2398,12 +2398,24 @@ func belowOwnerFloorDrivers(bats []batteryInfo) map[string]bool {
 	return out
 }
 
+// floorStandbyW is the largest draw a pack parked at its floor may read
+// without counting as a discharge. Packs report tens of watts of standby
+// draw there; treating that as a discharge sent an order every tick.
+const floorStandbyW = 50.0
+
+// dischargingAtFloor reports a real discharge on a pack at its floor: past
+// standby draw, or any measured discharge after FTW's own last order to it
+// was a discharge, which the driver would otherwise hold.
+func dischargingAtFloor(b batteryInfo, prev map[string]float64) bool {
+	return b.currentW < -floorStandbyW || b.currentW < -1 && prev[b.driver] < 0
+}
+
 // anyBelowOwnerFloorDischarging reports a battery at or under the owner
-// floor that is measured discharging. The deadband exit returns no targets,
-// and a driver keeps its last setpoint, so such a battery would drain on.
-func anyBelowOwnerFloorDischarging(bats []batteryInfo) bool {
+// floor that is discharging. The deadband exit returns no targets, and a
+// driver keeps its last setpoint, so such a battery would drain on.
+func anyBelowOwnerFloorDischarging(bats []batteryInfo, prev map[string]float64) bool {
 	for _, b := range bats {
-		if b.belowOwnerFloor && b.currentW < -1 {
+		if b.belowOwnerFloor && dischargingAtFloor(b, prev) {
 			return true
 		}
 	}
@@ -2411,11 +2423,11 @@ func anyBelowOwnerFloorDischarging(bats []batteryInfo) bool {
 }
 
 // anyAtHardFloorDischarging reports a battery at or under Core's 5 % floor
-// that is measured discharging, in any mode. The deadband exit would leave
-// the driver on its last discharge setpoint.
-func anyAtHardFloorDischarging(bats []batteryInfo) bool {
+// that is discharging, in any mode. The deadband exit would leave the
+// driver on its last discharge setpoint.
+func anyAtHardFloorDischarging(bats []batteryInfo, prev map[string]float64) bool {
 	for _, b := range bats {
-		if !b.socMissing && b.soc <= dischargeFloorSoC && b.currentW < -1 {
+		if !b.socMissing && b.soc <= dischargeFloorSoC && dischargingAtFloor(b, prev) {
 			return true
 		}
 	}

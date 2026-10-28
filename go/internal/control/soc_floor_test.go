@@ -1,6 +1,7 @@
 package control
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -413,5 +414,81 @@ func TestFuseReliefPipelineAtHardFloor(t *testing.T) {
 	}
 	if got := run(0.051, 0); got >= 0 {
 		t.Errorf("SoC 5.1 %%: got %.0f W, want discharge", got)
+	}
+}
+
+// floorStandbyWalk runs 300 ticks with a pack parked at its floor that
+// reads a -15 W standby draw while the grid wanders inside the 50 W
+// deadband. It returns how many ticks sent an order.
+func floorStandbyWalk(st *State, soc float64) int {
+	sent := 0
+	gridW := 0.0
+	seed := uint32(7)
+	for tick := 0; tick < 300; tick++ {
+		seed = seed*1664525 + 1013904223
+		gridW += float64(int(seed>>24)%21 - 10)
+		gridW = math.Max(-45, math.Min(45, gridW))
+		store := seedStore(gridW, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", -15, soc}})
+		if len(ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)) > 0 {
+			sent++
+		}
+	}
+	return sent
+}
+
+// A pack parked at Core's 5 % floor with standby draw is not discharging.
+// The deadband holds, so the PI does not chase meter noise.
+func TestHardFloorStandbyRandomWalk(t *testing.T) {
+	for _, soc := range []float64{0.05, 0.049} {
+		st := NewState(0, 50, "ferroamp")
+		st.Mode = ModeSelfConsumption
+		st.SlewEnabled = true
+		st.SlewRateW = 3000
+		st.MinDispatchIntervalS = 0
+		if sent := floorStandbyWalk(st, soc); sent != 0 {
+			t.Errorf("SoC %.3f, -15 W standby: %d of 300 ticks sent an order, want 0", soc, sent)
+		}
+	}
+}
+
+// The same at the owner floor, in a planner mode with a fresh plan.
+func TestOwnerFloorStandbyRandomWalk(t *testing.T) {
+	for _, energy := range []bool{false, true} {
+		st := NewState(0, 50, "ferroamp")
+		st.Mode = ModePlannerSelf
+		st.UseEnergyDispatch = energy
+		st.SlewEnabled = true
+		st.SlewRateW = 3000
+		st.MinDispatchIntervalS = 0
+		st.DriverLimits = map[string]PowerLimits{"bat": {SoCMin: 0.10}}
+		st.SlotDirective = func(now time.Time) (SlotDirective, bool) {
+			return SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), Strategy: "self_consumption"}, true
+		}
+		st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "self_consumption", 0, "self", true }
+		if sent := floorStandbyWalk(st, 0.10); sent != 0 {
+			t.Errorf("planner_self energy=%v, SoC 10 %%, -15 W standby: %d of 300 ticks sent an order, want 0", energy, sent)
+		}
+	}
+}
+
+// A small discharge that FTW itself ordered still stops at the floor,
+// though it reads under the standby threshold: the driver would hold it.
+func TestHardFloorStopsOwnSmallDischarge(t *testing.T) {
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewEnabled = true
+	st.SlewRateW = 3000
+	st.MinDispatchIntervalS = 0
+	st.PrevTargets["bat"] = -30
+	store := seedStore(10, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", -30, 0.05}})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+	if len(targets) == 0 || targets[0].TargetW < 0 {
+		t.Fatalf("own -30 W order at 5 %%: %+v, want a 0 W order", targets)
 	}
 }
