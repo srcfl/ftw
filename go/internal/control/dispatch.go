@@ -4090,8 +4090,11 @@ func (s *State) lastDispatchedW(driver string) (float64, bool) {
 // the batteries do not reach, each tick finds the same overage and adds it
 // to a battery already moved for it: the order runs out to the battery's
 // limit. Once the meter fails to show a move it should
-// (phaseUnresponsive), the relief toward the worst phase stops at the last
-// command.
+// (phaseUnresponsive), the relief toward the worst phase stops. On a
+// meter that repeats its reading it stops at the last command. On a
+// battery off the worst phase it goes back to the batteries' power when
+// that phase last moved: what they moved since did not reach it, and it
+// pushes their own phase toward its line.
 func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (importW, exportW float64) {
 	moveW, sentW, rawW, ok := p.moveW(state, targets, batteries)
 	if !ok {
@@ -4101,15 +4104,38 @@ func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget
 	sentImportW, sentExportW := phaseSentReliefW(p, state, sentW)
 	importW, exportW = math.Max(importW, sentImportW), math.Max(exportW, sentExportW)
 	if amps, ok := p.signedA(state); ok {
-		if worst, stuck := state.phaseUnresponsive(amps, rawW); stuck {
+		if worst, stuck, backTo := state.phaseUnresponsive(amps, p.totalW, rawW); stuck {
+			capW := sentW
+			if backTo != nil {
+				capW = targetsMoveFromW(targets, backTo, rawW)
+			}
 			if worst > 0 {
-				importW = math.Min(importW, math.Max(0, sentW))
+				importW = math.Min(importW, math.Max(0, capW))
 			} else {
-				exportW = math.Min(exportW, math.Max(0, -sentW))
+				exportW = math.Min(exportW, math.Max(0, -capW))
 			}
 		}
 	}
 	return importW, exportW
+}
+
+// targetsMoveFromW is the targets' change from the batteries' power in
+// from. A battery that from has not seen counts at its power in rawW.
+func targetsMoveFromW(targets []DispatchTarget, from, rawW map[string]float64) (moveW float64) {
+	seen := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		moveW += t.TargetW
+		if seen[t.Driver] {
+			continue
+		}
+		seen[t.Driver] = true
+		if w, ok := from[t.Driver]; ok {
+			moveW -= w
+		} else {
+			moveW -= rawW[t.Driver]
+		}
+	}
+	return moveW
 }
 
 // phaseResponseA is the current a battery move must change on every phase
@@ -4120,10 +4146,15 @@ const phaseResponseA = 1.0
 
 // phaseResponse holds the readings phaseUnresponsive measures from, each
 // with the batteries' raw power at that reading: the one in which the
-// worst phase last moved, and the one in which any phase last changed.
+// worst phase last moved (amps), and the one in which the meter's phases
+// or total last changed (changed: the phases, then the total). offPhase
+// is set once the batteries are found off the worst phase, phase
+// offPhaseAt, and holds until that phase's reference ends.
 type phaseResponse struct {
-	amps, changedAmps []float64
+	amps, changed     []float64
 	rawW, changedRawW map[string]float64
+	offPhase          bool
+	offPhaseAt        int
 }
 
 // phaseUnresponsive reports whether the meter fails to show the batteries
@@ -4131,19 +4162,27 @@ type phaseResponse struct {
 // import. It is stuck when the batteries' raw power has changed by
 // phaseResponseA or more per phase since either
 //
-//   - the meter's phases last changed at all: the meter repeats one
-//     reading (C5 makes such a meter stale), or
+//   - the meter last changed at all, phases or total: the meter repeats
+//     one reading (C5 makes such a meter stale). A P1 meter reports phase
+//     current in whole amperes, so a live one can repeat its phases while
+//     its total moves. backTo is nil: the relief holds the last command.
 //   - the worst phase last moved, while another phase moved by twice the
 //     even share of that change or more. A balanced battery moves each
 //     phase by that share, so this battery sits off the worst phase.
+//     backTo is the batteries' power when the worst phase last moved. The
+//     verdict holds until that reference ends, so the relief does not go
+//     out again once the batteries are back.
 //
 // A live meter on which the worst phase does not move is not enough: a
 // load on that phase can cancel the move, at once or step by step, and
-// there the relief must go on. A reading in which the worst phase moved
-// becomes the new reference.
-func (s *State) phaseUnresponsive(amps []float64, rawW map[string]float64) (worstA float64, stuck bool) {
+// there the relief must go on. The worst phase's reference ends when that
+// phase moves, when it is at or inside the line (fuseLineA), or when
+// another phase becomes the worst. Without the second, a reference kept
+// while the relief holds the phase at the line would count a load that
+// later changes on another phase against all the batteries moved since.
+func (s *State) phaseUnresponsive(amps []float64, totalW float64, rawW map[string]float64) (worstA float64, stuck bool, backTo map[string]float64) {
 	if s == nil || len(amps) == 0 {
-		return 0, false
+		return 0, false, nil
 	}
 	worst := 0
 	for i, a := range amps {
@@ -4153,26 +4192,31 @@ func (s *State) phaseUnresponsive(amps []float64, rawW map[string]float64) (wors
 	}
 	ref := &s.phaseResponse
 	perA := s.SiteFuseVoltage * float64(s.SiteFusePhases)
-	if !slices.Equal(amps, ref.changedAmps) {
-		ref.changedAmps, ref.changedRawW = slices.Clone(amps), maps.Clone(rawW)
+	if changed := append(slices.Clone(amps), totalW); !slices.Equal(changed, ref.changed) {
+		ref.changed, ref.changedRawW = changed, maps.Clone(rawW)
 	}
 	if math.Abs(batteriesMovedW(&ref.changedRawW, rawW)) >= phaseResponseA*perA {
-		return amps[worst], true
+		return amps[worst], true, nil
 	}
-	if len(ref.amps) != len(amps) || math.Abs(amps[worst]-ref.amps[worst]) >= phaseResponseA/2 {
-		ref.amps, ref.rawW = slices.Clone(amps), maps.Clone(rawW)
-		return amps[worst], false
+	if len(ref.amps) != len(amps) || math.Abs(amps[worst]-ref.amps[worst]) >= phaseResponseA/2 ||
+		math.Abs(amps[worst]) <= s.fuseLineA() || (ref.offPhase && worst != ref.offPhaseAt) {
+		ref.amps, ref.rawW, ref.offPhase = slices.Clone(amps), maps.Clone(rawW), false
+		return amps[worst], false, nil
 	}
 	movedW := batteriesMovedW(&ref.rawW, rawW)
+	if ref.offPhase {
+		return amps[worst], true, ref.rawW
+	}
 	if math.Abs(movedW) < phaseResponseA*perA {
-		return amps[worst], false
+		return amps[worst], false, nil
 	}
 	for i, a := range amps {
 		if i != worst && (a-ref.amps[i])/(movedW/perA) >= 2 {
-			return amps[worst], true
+			ref.offPhase, ref.offPhaseAt = true, worst
+			return amps[worst], true, ref.rawW
 		}
 	}
-	return amps[worst], false
+	return amps[worst], false, nil
 }
 
 // batteriesMovedW is the batteries' raw power change from ref. A battery
