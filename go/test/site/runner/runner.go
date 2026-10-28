@@ -64,9 +64,10 @@ func short(sha string) string {
 
 // pull is the part of a pull request the runner needs.
 type pull struct {
-	Number int  `json:"number"`
-	Draft  bool `json:"draft"`
-	Head   struct {
+	Number    int    `json:"number"`
+	Draft     bool   `json:"draft"`
+	UpdatedAt string `json:"updated_at"` // RFC 3339, so it sorts as text
+	Head      struct {
 		SHA  string `json:"sha"`
 		Repo struct {
 			FullName string `json:"full_name"`
@@ -112,8 +113,9 @@ func plan(gh github, cfg config, now time.Time, lastRandom string) ([]job, error
 	if err != nil {
 		return nil, err
 	}
-	// Oldest first: lower numbers come earlier in the merge order.
-	sort.Slice(pulls, func(i, j int) bool { return pulls[i].Number < pulls[j].Number })
+	// Most recently updated first: that is the work in review, and a pull
+	// request untouched for weeks can wait.
+	sort.SliceStable(pulls, func(i, j int) bool { return pulls[i].UpdatedAt > pulls[j].UpdatedAt })
 	for _, p := range pulls {
 		if p.Draft && !cfg.Drafts {
 			continue
