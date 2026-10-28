@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/lorenzodonini/ocpp-go/ocpp1.6/smartcharging"
@@ -281,34 +282,92 @@ func (s *Server) setLimit(ctx context.Context, id string, amps float64, numberPh
 // refusal; the error is reserved for the cases where no verdict exists —
 // transport failure, cancellation, silence.
 func (s *Server) attemptLimit(ctx context.Context, id, alias string, amps float64, numberPhases *int, connectorID int) (profileResult, error) {
-	// Buffered: the library's callback must never block if we have already
-	// stopped waiting.
-	done := make(chan profileResult, 1)
-
-	// The two versions describe the same intent with different types, so the
-	// request is built per dialect and the outcome normalised back.
-	var err error
-	switch version, _ := s.handler.Version(id); version {
-	case Version201:
-		err = s.sendProfileV201(alias, amps, numberPhases, connectorID, done)
-	default:
-		err = s.sendProfileV16(alias, amps, numberPhases, connectorID, done)
-	}
-	if err != nil {
-		return profileResult{}, fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)
-	}
-
 	timeout := time.NewTimer(commandTimeout)
 	defer timeout.Stop()
 
+	// One profile per charger at a time, from submission until the library
+	// answers it. The library keeps every queued request and sends them in
+	// order, so without this a stalled request pump collects one obsolete
+	// limit per control tick and replays them all once it clears, each a
+	// round trip ahead of the current one: a fuse cut would wait behind them.
+	// A command that cannot get the slot before its deadline is unconfirmed,
+	// as one whose answer did not arrive in time.
+	slot := s.profileSlot(id)
 	select {
-	case r := <-done:
-		return r, nil
+	case slot <- struct{}{}:
 	case <-ctx.Done():
-		return profileResult{}, fmt.Errorf("ocpp: charging profile for %s cancelled: %w", id, ctx.Err())
+		return profileResult{}, fmt.Errorf("ocpp: earlier charging profile for %s still unanswered: %w", id, ctx.Err())
 	case <-timeout.C:
-		return profileResult{}, fmt.Errorf("ocpp: %s did not confirm charging profile within %s", id, commandTimeout)
+		return profileResult{}, fmt.Errorf("ocpp: earlier charging profile for %s still unanswered after %s", id, commandTimeout)
 	}
+	var once sync.Once
+	release := func() { once.Do(func() { <-slot }) }
+	if err := ctx.Err(); err != nil {
+		release()
+		return profileResult{}, fmt.Errorf("ocpp: charging profile for %s cancelled: %w", id, err)
+	}
+
+	// Buffered: the library's callback must never block if we have already
+	// stopped waiting. The library calls back once for every request it
+	// queued, on the answer, its own timeout or a disconnect.
+	done := make(chan profileResult, 1)
+	answer := func(r profileResult) {
+		release()
+		done <- r
+	}
+
+	// The two versions describe the same intent with different types, so the
+	// request is built per dialect and the outcome normalised back. The
+	// library's send blocks while its request pump is stalled, so it runs on
+	// its own goroutine and the wait below still ends on ctx. The slot keeps
+	// this to one goroutine per charger.
+	version, _ := s.handler.Version(id)
+	sent := make(chan error, 1)
+	go func() {
+		var err error
+		if version == Version201 {
+			err = s.sendProfileV201(alias, amps, numberPhases, connectorID, answer)
+		} else {
+			err = s.sendProfileV16(alias, amps, numberPhases, connectorID, answer)
+		}
+		if err != nil {
+			// Not queued, so no answer will come.
+			release()
+		}
+		sent <- err
+	}()
+
+	for {
+		select {
+		case err := <-sent:
+			if err != nil {
+				return profileResult{}, fmt.Errorf("ocpp: send charging profile to %s: %w", id, err)
+			}
+			sent = nil
+		case r := <-done:
+			return r, nil
+		case <-ctx.Done():
+			return profileResult{}, fmt.Errorf("ocpp: charging profile for %s cancelled: %w", id, ctx.Err())
+		case <-timeout.C:
+			return profileResult{}, fmt.Errorf("ocpp: %s did not confirm charging profile within %s", id, commandTimeout)
+		}
+	}
+}
+
+// profileSlot returns the one-place channel that admits a single charging
+// profile to charger id at a time.
+func (s *Server) profileSlot(id string) chan struct{} {
+	s.profileMu.Lock()
+	defer s.profileMu.Unlock()
+	if s.profileSlots == nil {
+		s.profileSlots = map[string]chan struct{}{}
+	}
+	slot, ok := s.profileSlots[id]
+	if !ok {
+		slot = make(chan struct{}, 1)
+		s.profileSlots[id] = slot
+	}
+	return slot
 }
 
 // profileResult is a version-neutral answer to a charging profile request, so
@@ -321,7 +380,7 @@ type profileResult struct {
 }
 
 // sendProfileV16 issues the limit as an OCPP 1.6 TxDefaultProfile.
-func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, connectorID int, done chan<- profileResult) error {
+func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, connectorID int, answer func(profileResult)) error {
 	period := types.NewChargingSchedulePeriod(scheduleStartS, amps)
 	// Declared only when the loadpoint pinned single-phase charging. Left
 	// unset otherwise so a charger that can switch phases keeps deciding.
@@ -342,7 +401,7 @@ func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, conn
 			r.status = string(conf.Status)
 			r.accepted = conf.Status == smartcharging.ChargingProfileStatusAccepted
 		}
-		done <- r
+		answer(r)
 	}, connectorID, profile)
 }
 
@@ -351,7 +410,7 @@ func (s *Server) sendProfileV16(id string, amps float64, numberPhases *int, conn
 // 2.0.1 carries a list of schedules rather than one, and each schedule needs
 // its own id; a single-entry list with a stable id keeps the meaning identical
 // to the 1.6 request.
-func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, evseID int, done chan<- profileResult) error {
+func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, evseID int, answer func(profileResult)) error {
 	if s.csms == nil {
 		return fmt.Errorf("ocpp: %s speaks %s but no %s listener is configured", id, Version201, Version201)
 	}
@@ -374,7 +433,7 @@ func (s *Server) sendProfileV201(id string, amps float64, numberPhases *int, evs
 			r.status = string(conf.Status)
 			r.accepted = conf.Status == smartcharging201.ChargingProfileStatusAccepted
 		}
-		done <- r
+		answer(r)
 	}, evseID, profile)
 }
 

@@ -47,7 +47,8 @@ func sent(state *State, driver string, watts ...float64) {
 		log = log.add(at, w)
 	}
 	if driver == "ev" {
-		state.evOffers, state.EVCommandedW = log, watts[len(watts)-1]
+		state.evLimit.offers = map[string]chargerOffers{"car": {log: log, settle: evSettle}}
+		state.EVCommandedW = watts[len(watts)-1]
 		return
 	}
 	state.batteryCommands[driver] = log

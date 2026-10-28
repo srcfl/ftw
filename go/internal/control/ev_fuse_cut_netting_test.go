@@ -60,14 +60,19 @@ func TestEVFuseSlowChargerCutCoversItsOverage(t *testing.T) {
 }
 
 // cutRig feeds EVFuseBudget site readings one second apart and applies its
-// cap to the charger's offer, in 1 A steps, as the controller does.
+// cap to the charger's offer, in 1 A steps, as the controller does, or on
+// the charger's step table when snap is set.
 type cutRig struct {
 	t      *testing.T
 	store  *telemetry.Store
 	state  *State
 	now    time.Time
 	offerW float64
-	phases int // the phases the offer lands on
+	phases int                     // the phases the offer lands on
+	snap   func(w float64) float64 // nil: whole amps on three phases
+	// carPhases is the loadpoint's verdict on the car: 0 unknown, 1 one
+	// phase, 3 three phases.
+	carPhases int
 }
 
 func newCutRig(t *testing.T, offerW, declaredS float64) *cutRig {
@@ -99,19 +104,22 @@ func (r *cutRig) deliver(gridW float64, data []byte) float64 {
 	r.store.Update("meter", telemetry.DerMeter, gridW, nil, data)
 	r.store.Get("meter", telemetry.DerMeter).UpdatedAt = r.now
 	_, _, points, configs := evMeterBudgetFixture(r.t, 0, nil, r.offerW, "3p")
-	points[0].CommandedPhases = r.phases
+	points[0].CommandedPhases, points[0].CarPhases = r.phases, r.carPhases
 	capW, _ := EVFuseBudget(r.store, r.state, points, configs, 17250)
 	if capW < r.offerW {
 		r.offerW = math.Floor(capW/690) * 690
+		if r.snap != nil {
+			r.offerW = r.snap(capW)
+		}
 	}
 	return capW
 }
 
 // A raise on its way adds to the cut. The car draws 10 A while its 14 A
-// raise travels, and the house adds 8 A on L1: 26 A on the 24 A working
-// limit. Once the heat budget is spent, the cut takes the 2 A the meter
-// shows and the 4 A it does not show yet, so L1 ends at 24 A when the raise
-// lands. Taking the overage from the raise alone left L1 at 28 A.
+// raise travels, and the house adds 8 A on L1: 26 A on the 25 A working
+// limit. Once the heat budget is spent, the cut takes the 1 A the meter
+// shows and the 4 A it does not show yet, so L1 ends at 25 A when the raise
+// lands. Taking the overage from the raise alone left L1 at 29 A.
 func TestEVFuseRaiseOnItsWayAddsToCut(t *testing.T) {
 	r := newCutRig(t, 6900, 180)
 	for range 300 {
@@ -124,11 +132,11 @@ func TestEVFuseRaiseOnItsWayAddsToCut(t *testing.T) {
 		r.read([3]float64{26, 15, 15})
 		cutAt = i
 	}
-	if r.offerW != 5520 {
-		t.Fatalf("offer %.0f W after %d s over, want 9,660 W less 2 A measured and 4 A on its way = 5,520 W", r.offerW, cutAt)
+	if r.offerW != 6210 {
+		t.Fatalf("offer %.0f W after %d s over, want 9,660 W less 1 A measured and 4 A on its way = 6,210 W", r.offerW, cutAt)
 	}
 	for range 60 {
-		if r.read([3]float64{26, 15, 15}); r.offerW != 5520 {
+		if r.read([3]float64{26, 15, 15}); r.offerW != 6210 {
 			t.Fatalf("cut again to %.0f W while the first cut travels", r.offerW)
 		}
 	}
@@ -189,19 +197,20 @@ func TestEVFuseSevereOverageCutsWhateverIsOnItsWay(t *testing.T) {
 	}
 }
 
-// A cut covers only within the run over the limit it was sent in. A fast
+// A cut the meter shows covers no overage that comes after it. A fast
 // charger that declares nothing applies a cut in 5 s, but counts as slow
-// for 180 s. Once the meter has shown L1 under the limit for evSettle, a
-// second step on L1 is a new run, and the landed cut covers none of it.
-// Within evSettle of the landing it is the same run, and the landed cut
-// covers the step until the run's first cut has had 180 s: that is the
-// cost of trusting a cut on its way, at under 1.25 x In.
+// for 180 s. The meter shows the cut land as every phase falling 7 A. A
+// second step on L1, 30 s later in a new run or 10 s later in the same
+// one, then cuts once L1's heat budget is spent, about 22-28 s at 29 A on
+// the 24 A line. Before, a landed cut still covered the step in the same
+// run until the run's first cut had had 180 s: L1 sat at 29 A for 2 min
+// 55 s (#1914, TestSiteSimRandomHouse seed 1 at margin 0).
 func TestEVFuseLandedCutCoversOnlyItsRun(t *testing.T) {
 	for _, tc := range []struct {
 		after   time.Duration // the second step after the first cut
 		maxOver time.Duration
 	}{
-		{30 * time.Second, 30 * time.Second}, {10 * time.Second, evUnknownSettle},
+		{30 * time.Second, 30 * time.Second}, {10 * time.Second, 30 * time.Second},
 	} {
 		t.Run(fmt.Sprintf("step_after_%v", tc.after), func(t *testing.T) {
 			s := fuseHeatSite(t)
@@ -279,6 +288,40 @@ func TestEVFuseWithoutPhaseCurrentsCoversForSettle(t *testing.T) {
 	}
 }
 
+// The 22 Oct field site's Easee offers on a step table that is not whole
+// amps (fieldNightLoadpoint). With L1 0.6 A over a hot 25 A line, the first
+// cut takes 6,200 W to the 5,500 W step. While that cut travels to a slow
+// charger it covers the overage, so the offer it left stays: rounding to
+// whole amps applies to a new cut, not to an offer kept. Rounding the kept
+// offer down took the car 6,200 -> 5,500 -> 4,800 -> 0 W in 3 s.
+func TestEVFuseCoveredCutKeepsAStepTableOffer(t *testing.T) {
+	table := []float64{4800, 5500, 6200, 6900, 7600, 8300, 9000, 9700, 10400, 11100}
+	r := newCutRig(t, 6200, 180)
+	r.state.SiteFuseSafetyA = 0
+	r.snap = func(w float64) float64 {
+		best := 0.0
+		for _, step := range table {
+			if step <= w+1e-9 {
+				best = step
+			}
+		}
+		return best
+	}
+	for range 300 {
+		r.read([3]float64{25, 20, 20}) // heat at the line
+	}
+	var offers []float64
+	for range 90 {
+		r.read([3]float64{25.6, 20, 20})
+		if len(offers) == 0 || offers[len(offers)-1] != r.offerW {
+			offers = append(offers, r.offerW)
+		}
+	}
+	if len(offers) != 2 || offers[1] != 5500 {
+		t.Fatalf("offers %v, want one cut to 5,500 W held while it travels", offers)
+	}
+}
+
 // A change of phases is no cut. A 15 A single-phase order replaced by a 6 A
 // three-phase one lowers the current on the order's phase but adds 6 A to
 // the other two, so it covers nothing: with L2 at 32 A on the 25 A fuse the
@@ -314,4 +357,128 @@ func TestEVFuseRestartTakesFoundOfferAsShown(t *testing.T) {
 	if cuts := offerWatts(s.cutsSince(bootAt)); len(cuts) != 1 {
 		t.Fatalf("cuts %v while the first travels", cuts)
 	}
+}
+
+// A cut whose landing the meter cannot tell from an outside step covers a
+// phase only up to the reading it was sent on. A house step takes L2 to
+// 26 A; once its heat budget is spent, Core cuts 2 A. The second the cut
+// lands, the house adds 8 A on L3, so the meter shows L1 and L2 falling
+// 2 A and L3 rising 6 A: no charger's shape. L3 had no overage when the
+// cut went out, so the cut covers none of L3's 2 A over the 24 A line, and
+// L3 cuts once its own heat budget is spent (about 61 s from 20 A). Before,
+// the landed cut covered L3 until the charger's 180 s had passed
+// (TestSiteSimRandomHouse seed 68 at margin 0).
+func TestEVFuseCutCoversOnlyThePhaseOverageItWasSentFor(t *testing.T) {
+	s := fuseHeatSite(t)
+	s.run(time.Minute)
+	s.addHouseA(0, 6, 0) // L2 26 A
+	if took, offer := s.firstCut(2 * time.Minute); took < 0 || offer != 8970 {
+		t.Fatalf("L2 cut after %v to %.0f W, want 8,970 W", took, offer)
+	}
+	s.run(s.chargerDelay - time.Second)
+	s.addHouseA(0, 0, 8) // lands with the cut: L3 26 A
+	var over time.Duration
+	for range 4 * 60 {
+		s.step()
+		if s.phaseA()[2] > 24 {
+			over += time.Second
+		}
+	}
+	if a := s.phaseA(); over > 70*time.Second || a[2] > 24 {
+		t.Fatalf("L3 over the 24 A line for %v, phases %.1f A after; cuts %v", over, a, offerWatts(s.cutsSince(time.Time{})))
+	}
+	t.Logf("L3 over the working limit for %v", over)
+}
+
+// C4 (27 Oct triage, seeds 207537 and 207539): our own rise on its way that
+// no longer fits cuts before the meter shows it. On a 16 A fuse with no
+// margin, a charger that declares 40 s takes the car from 6 A to 16 A with
+// L1 at 6 A: the step fits under the line. 30 s later the house adds 9.7 A
+// on L1 and 3 A on L2 before the raise lands. L1 reads 15.7 A, under the
+// line, but the raise would take it to 25.7 A, over 1.2 x In: on that
+// reading the raise comes off as far as it takes L1 over the line, to 6 A
+// in whole amps. Before, Core waited for the meter to show it.
+func TestEVFuseRaiseOnItsWayThatNoLongerFitsCutsAtOnce(t *testing.T) {
+	r := newCutRig(t, 4140, 40)
+	r.state.SiteFuseAmps = 16
+	for range 60 {
+		r.read([3]float64{6, 6, 6})
+	}
+	r.offerW = 11040 // 6 -> 16 A
+	for i := range 30 {
+		if r.read([3]float64{6, 6, 6}); r.offerW != 11040 {
+			t.Fatalf("raise cut to %.0f W after %d s with L1 at 6 A", r.offerW, i+1)
+		}
+	}
+	if r.read([3]float64{15.7, 9, 6}); r.offerW != 4140 {
+		t.Fatalf("offer %.0f W with L1 at 15.7 A and 10 A on its way, want 4,140 W", r.offerW)
+	}
+}
+
+// The C4 case as the triage wrote it, with only L1 moving, for a car the
+// loadpoint has seen draw on three phases. A house step on L1 alone is then
+// not the raise landing: the raise would take L1 to 25.7 A, over 1.2 x In,
+// so it comes off on that reading. For a car not yet seen, a step on one
+// phase may be a one-phase car taking the raise; the meter judges it then.
+func TestEVFuseRaiseOnItsWayCutsForACarSeenOnThreePhases(t *testing.T) {
+	r := newCutRig(t, 4140, 40)
+	r.state.SiteFuseAmps, r.carPhases = 16, 3
+	for range 60 {
+		r.read([3]float64{6, 6, 6})
+	}
+	r.offerW = 11040 // 6 -> 16 A
+	for range 30 {
+		r.read([3]float64{6, 6, 6})
+	}
+	if r.read([3]float64{15.7, 6, 6}); r.offerW > 4140 {
+		t.Fatalf("offer %.0f W with L1 at 15.7 A and 10 A on its way, want 4,140 W or less", r.offerW)
+	}
+}
+
+// A house load that moves on one phase alone is not a three-phase cut
+// landing. While a cut travels to a charger that declares 40 s, such a move
+// must not take the cut's cover off the phase it was sent for. Before, a
+// 3 A load switching off on L2 read as the cut landing: Core cut again to
+// 7,590 W and left L1 2 A under the line for over 2 min. A 1.5 A load
+// cycling on L2 gave three cuts and two rises; one cut is enough.
+func TestEVFuseOnePhaseHouseMoveIsNotTheCutLanding(t *testing.T) {
+	t.Run("drop_on_L2", func(t *testing.T) {
+		s := fuseHeatSite(t)
+		s.chargerDelay, s.chargerMaxAgeS = 40*time.Second, 40
+		s.addHouseA(0, 3, 0) // L2 23 A
+		s.run(2 * time.Minute)
+		stepAt := s.now
+		s.addHouseA(6, 0, 0) // L1 26 A
+		if took, offer := s.firstCut(2 * time.Minute); took < 0 || offer != 8970 {
+			t.Fatalf("first cut after %v to %.0f W, want 8,970 W", took, offer)
+		}
+		s.run(10 * time.Second)
+		s.addHouseA(0, -3, 0)
+		s.run(5 * time.Minute)
+		if cuts := offerWatts(s.cutsSince(stepAt)); len(cuts) != 1 || s.offer() != 8970 {
+			t.Fatalf("cuts %v, offer %.0f W after; want one cut to 8,970 W", cuts, s.offer())
+		}
+	})
+	t.Run("cycling_on_L2", func(t *testing.T) {
+		s := fuseHeatSite(t)
+		s.chargerDelay, s.chargerMaxAgeS = 40*time.Second, 40
+		s.run(time.Minute)
+		stepAt := s.now
+		s.addHouseA(5, 0, 0) // L1 25 A on the 24 A line
+		for i := range 20 * 60 {
+			if i%7 == 0 {
+				s.addHouseA(0, []float64{1.5, -1.5}[i/7%2], 0)
+			}
+			s.step()
+		}
+		var offers []float64
+		for _, o := range s.offersSince(stepAt) {
+			if n := len(offers); n == 0 || o.w != offers[n-1] {
+				offers = append(offers, o.w)
+			}
+		}
+		if len(offers) != 2 || offers[1] != 9660 {
+			t.Fatalf("offers %v, want one cut to 9,660 W and no rise", offers)
+		}
+	})
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"time"
 
 	"github.com/srcfl/ftw/go/internal/state"
 	"gopkg.in/yaml.v3"
@@ -67,11 +68,48 @@ func decodeStored(c state.Configuration, database, baseDir string) (*Config, err
 	cfg.noteOldFuseMargin()
 	// This is the same typed config that was validated on save. Do not apply new
 	// defaults during a storage-only reload: nil, false and zero stay distinct.
+	// The only exception is the site timings, which have no meaning at zero.
+	cfg.Site.FillUnsetTimings()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("stored settings: %w", err)
 	}
 	cfg.ResolveDriverPaths(baseDir)
 	return cfg, nil
+}
+
+func restoredFromSnapshot(st *state.Store) bool {
+	for _, ev := range st.HealEvents() {
+		if ev.Tier == "state" && ev.Action == "restored" {
+			return true
+		}
+	}
+	return false
+}
+
+// HealSettingsDatabase runs state.HealBeforeLoad on the database a seed file
+// names. Boot calls it before Load, which reads settings before state.Open.
+func HealSettingsDatabase(path string) (*state.HealEvent, error) {
+	database := filepath.Join(filepath.Dir(path), "state.db")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		var source struct {
+			Database string `yaml:"config_database"`
+		}
+		if yaml.Unmarshal(data, &source) != nil || source.Database == "" {
+			return nil, nil // the seed holds the settings
+		}
+		database = source.Database
+		if !filepath.IsAbs(database) {
+			database = filepath.Join(filepath.Dir(path), database)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, nil // Load reports it
+	}
+	database, err = filepath.Abs(database)
+	if err != nil {
+		return nil, err
+	}
+	return state.HealBeforeLoad(database)
 }
 
 func loadStored(database, baseDir string) (*Config, error) {
@@ -99,7 +137,9 @@ func loadSettingsBesideSeed(seedPath string) (*Config, bool) {
 // InitializeStorage imports YAML once, then records the database location in
 // the seed file. If a crash interrupted this last step, reuse the committed
 // document instead of importing the old YAML again. A recovered database must
-// still contain the exact settings revision loaded before state.Open.
+// still contain the exact settings revision loaded before state.Open, unless
+// state.Open restored it from an older snapshot: then the snapshot's settings
+// run and /api/health reports the step back.
 func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Config, error) {
 	database, err := filepath.Abs(database)
 	if err != nil {
@@ -113,12 +153,20 @@ func InitializeStorage(path, database string, cfg *Config, st *state.Store) (*Co
 		return nil, err
 	}
 	if cfg.ConfigDatabase != "" {
-		if !found || doc.Revision != cfg.Revision {
+		rolledBack := found && doc.Revision < cfg.Revision && restoredFromSnapshot(st)
+		if !found || (doc.Revision != cfg.Revision && !rolledBack) {
 			return nil, errors.New("database recovery lost current settings; restore a full backup")
 		}
 		current, err := decodeStored(doc, database, filepath.Dir(path))
 		if err != nil {
 			return nil, err
+		}
+		if rolledBack {
+			// The next boot would load the snapshot's settings anyway; run them
+			// now instead of exiting, and say so.
+			st.RecordHealEvent(state.HealEvent{Tier: "state", Action: "restored", AtMs: time.Now().UnixMilli(),
+				Detail: fmt.Sprintf("state.db was corrupt — restored from last snapshot; settings went back from revision %d to %d", cfg.Revision, doc.Revision)})
+			cfg = current
 		}
 		if !reflect.DeepEqual(cfg, current) {
 			return nil, errors.New("database recovery changed current settings; restore a full backup")

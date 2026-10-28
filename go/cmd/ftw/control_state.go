@@ -21,6 +21,7 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 		ctrl.SlewEnabled = *cfg.Site.SlewEnabled
 	}
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
+	ctrl.ControlIntervalS = cfg.Site.ControlIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
 	ctrl.SolarFeedDrivers = solarFeedDriversFrom(cfg.Drivers)

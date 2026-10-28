@@ -13,7 +13,7 @@ var threePhaseSteps = []float64{0, 1380, 1610, 1840, 2070, 2300, 2530, 2760, 299
 	4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350, 11040}
 
 // meteredEVCap stands in for control.EVFuseBudget: the plugged cars' last
-// offers plus the room the meter shows below the fuse less 1 A, on the
+// offers plus the room the meter shows below the fuse, on the
 // phases FuseConfigs names for this tick.
 func meteredEVCap(c *Controller, worstA func() float64) func() (float64, bool) {
 	return func() (float64, bool) {
@@ -27,7 +27,7 @@ func meteredEVCap(c *Controller, worstA func() float64) func() (float64, bool) {
 				offersW += math.Max(0, st.CommandedW)
 			}
 		}
-		return math.Max(0, offersW+(site.MaxAmps-1-worstA())*site.Voltage*phases), true
+		return math.Max(0, offersW+(site.MaxAmps-worstA())*site.Voltage*phases), true
 	}
 }
 

@@ -131,6 +131,11 @@ func TestChargeNowSurvivesOCPPSocketBlip(t *testing.T) {
 			}
 			tick()
 			tick()
+			if tc.unplugAfter {
+				// The cable stays out for UnplugGrace.
+				now = now.Add(loadpoint.UnplugGrace)
+				tick()
+			}
 
 			after := commands[sent:]
 			hold, held := ctrl.GetManualHold("garage", now)

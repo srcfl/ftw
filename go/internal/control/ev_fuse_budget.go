@@ -3,6 +3,7 @@ package control
 import (
 	"log/slog"
 	"math"
+	"slices"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -32,10 +33,10 @@ const evUnknownSettle = 3 * time.Minute
 // pool starts again. It stays above Easee's ~30 s contactor minimum.
 const evRestartDwell = 35 * time.Second
 
-// evPhaseMarginA is the working margin below the breaker on each phase. One
-// amp on the pool's phases is also the rise step and the gap between the cut
-// and rise thresholds.
-const evPhaseMarginA = 1.0
+// evStepA is the EV rise step: one amp on each of the pool's phases. It is
+// the size of the next move, never current held back below the fuse's
+// working limit (fuseLineA).
+const evStepA = 1.0
 
 // fuseHourFactor is the phase current, as a multiple of the fuse rating,
 // that a gG fuse of 16-63 A carries for an hour. A cut on its way covers the
@@ -170,11 +171,173 @@ func (l commandLog) toCome(from, at time.Time, before sentCommand) (w, a float64
 type chargerOffers struct {
 	log    commandLog
 	settle time.Duration
+	// declared is true when the driver declares that time; settle is then
+	// not evUnknownSettle's guess (evShownW).
+	declared bool
 	// found is the offer in force before the limit's first site reading,
 	// after a restart: Core did not send it in this run. A rise counts the
 	// charger as 0 before it; a cut takes it as shown, since the reading is
 	// all Core knows of it.
 	found sentCommand
+	// driver is the charger's driver, whose power reading only the battery
+	// side reads, and only before any offer of this run has surely landed
+	// (evFoundDrawW).
+	driver string
+	// carPhases is how many phases the car draws on, as the loadpoint saw
+	// it on the site meter: 1 or 3, or 0 when unknown. carPhase is the phase
+	// a car on one phase draws on, 1-3.
+	carPhases, carPhase int
+	// shownA is the current on each phase of the charger's offers that the
+	// site meter shows, as far as it can tell (seeOffers); unsure while it
+	// cannot.
+	shownA [3]float64
+	unsure bool
+}
+
+// evMoveA is half a charger step. An order landing shows on the site meter
+// as every phase moving the same way, by evMoveA or more on their mean and
+// no more than a step apart, or as one phase alone moving a whole step
+// while the others hold within evMoveA (a car on one phase). Meter noise
+// rarely moves that far.
+const evMoveA = evStepA / 2
+
+// chargerMoveA is the move per phase from one reading to the next when it
+// has the shape of an order landing (evMoveA), signed: alikeA when every
+// phase moved alike, oneA and its phase when one phase moved alone.
+func chargerMoveA(prev, now []float64) (alikeA, oneA float64, phase int) {
+	var sum, held, moved, d1 float64
+	lo, hi, p1 := math.Inf(1), math.Inf(-1), 0
+	for i := range now {
+		d := now[i] - prev[i]
+		sum, lo, hi = sum+d, math.Min(lo, d), math.Max(hi, d)
+		switch {
+		case math.Abs(d) >= 2*evMoveA:
+			moved, d1, p1 = moved+1, d, i
+		case math.Abs(d) < evMoveA:
+			held++
+		}
+	}
+	n := float64(len(now))
+	switch {
+	case hi-lo <= 2*evMoveA && (lo > 0 && sum/n >= evMoveA || hi < 0 && sum/n <= -evMoveA):
+		return sum / n, 0, 0
+	case moved == 1 && held == n-1:
+		return 0, d1, p1 + 1
+	}
+	return 0, 0, 0
+}
+
+// seeOffers reads a new site reading against the last one. With one charger
+// in the pool and no change of phases in its log, a move shaped like an
+// order landing (chargerMoveA) moves the current the meter shows of the
+// charger on each phase (shownA), in a shape the offers can take there. A
+// car the loadpoint has seen draw on one phase, or a one-phase order, is
+// one level on every phase: every phase dropping alike moves it, and so
+// does a move on the car's phase alone, or on any one phase while that
+// phase is not known. A three-phase order moves every phase alike; for a
+// car not yet seen on three phases, a phase that moves alone moves only
+// its own level, since a one-phase car would draw there. A house load on
+// one phase then never moves the level of the other two.
+// The shown current moves only toward the latest offer, and stays within
+// the offers the reading may show. While our own battery order moves, a
+// move of every phase alike may be the battery's, so no reading counts;
+// after a reading that did not count, the shown current is known again
+// once only one offer may show. A house load that moves in a charger's
+// shape reads as ours. It can only take cover off a cut, or leave our rise
+// to the meter as before.
+func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
+	lim := &s.evLimit
+	amps, _, valid := phaseCurrentsA(meter, s, gridW)
+	var now [3]float64
+	copy(now[:], amps)
+	prev, read := lim.phasesA, valid && lim.phasesSeen && len(lim.offers) == 1 && len(amps) >= 2 && !s.batteryOrderMoves()
+	lim.phasesA, lim.phasesSeen = now, valid
+	var alikeA, oneA float64
+	var phase int
+	if read {
+		alikeA, oneA, phase = chargerMoveA(prev[:len(amps)], now[:len(amps)])
+	}
+	for id, c := range lim.offers {
+		if read && c.readable() {
+			var moveA [3]float64
+			switch {
+			case c.carPhase > 0 || c.log[0].n == 1:
+				// One car on one phase: one level, moved by a drop of
+				// either shape or by its phase alone.
+				m := math.Min(0, alikeA)
+				if c.carPhase == 0 || c.carPhase == phase {
+					m += oneA
+				}
+				moveA = [3]float64{m, m, m}
+			default:
+				// A three-phase order moves every phase alike. A car not
+				// yet seen may draw on one phase: a phase that moves alone
+				// moves only its own level.
+				moveA = [3]float64{alikeA, alikeA, alikeA}
+				if c.carPhases != 3 && phase > 0 {
+					moveA[phase-1] += oneA
+				}
+			}
+			// The charger moves toward its latest offer, never past it.
+			latestA := c.log[len(c.log)-1].a
+			for i, m := range moveA {
+				if m < 0 && c.shownA[i] > latestA {
+					c.shownA[i] = math.Max(latestA, c.shownA[i]+m)
+				} else if m > 0 && c.shownA[i] < latestA {
+					c.shownA[i] = math.Min(latestA, c.shownA[i]+m)
+				}
+			}
+		} else {
+			c.unsure = true
+		}
+		low, high := c.offerRangeA(lim.readingAt)
+		for i := range c.shownA {
+			c.shownA[i] = math.Min(high, math.Max(low, c.shownA[i]))
+		}
+		c.unsure = c.unsure && low < high
+		lim.offers[id] = c
+	}
+}
+
+// batteryOrderMoves reports whether one of our battery orders of the last
+// evSettle moves the site's phases by evMoveA or more.
+func (s *State) batteryOrderMoves() bool {
+	for _, log := range s.batteryCommands {
+		if low, high, _, ok := log.span(s.now()); ok && high-low >= evMoveA*s.SiteFuseVoltage*float64(s.SiteFusePhases) {
+			return true
+		}
+	}
+	return false
+}
+
+// readable reports whether the site meter can tell what it shows of the
+// charger's offers: every offer the log holds lands on the same phases.
+func (c chargerOffers) readable() bool {
+	for _, o := range c.log {
+		if o.n != c.log[0].n {
+			return false
+		}
+	}
+	return len(c.log) > 0
+}
+
+// offerRangeA is the lowest and highest current per phase among the
+// offers a reading taken at `at` may show: the one in force settle before
+// it and each one sent since. Before the first logged offer the charger
+// counts as before.
+func (c chargerOffers) offerRangeA(at time.Time) (low, high float64) {
+	from := at.Add(-c.settle)
+	low, high = c.found.a, c.found.a
+	for _, o := range c.log {
+		switch {
+		case o.at.After(at):
+		case !o.at.After(from):
+			low, high = o.a, o.a
+		default:
+			low, high = math.Min(low, o.a), math.Max(high, o.a)
+		}
+	}
+	return low, high
 }
 
 // pendingLoad is load we ordered that a site reading may not show yet:
@@ -185,6 +348,103 @@ type chargerOffers struct {
 type pendingLoad struct {
 	w      float64    // in total import
 	phaseA [3]float64 // on each phase
+}
+
+// evShownW is the EV load a reading taken at `at` surely shows: each
+// plugged charger's latest offer less what it may not show yet. The battery
+// side reads this. A raise stays unshown for the response time the
+// charger's driver declares, so the battery waits for a slow charger's raise
+// as long as the EV limit does. A charger that declares none gets evSettle,
+// not evUnknownSettle: the battery would otherwise reserve a local charger's
+// raise on top of the reading that already shows it, and stop charging for
+// three minutes after each one. Easee Cloud, the slow charger we know,
+// declares its 180 s.
+func (s *State) evShownW(at time.Time) float64 {
+	var w float64
+	for _, c := range s.evLimit.offers {
+		if n := len(c.log); n > 0 {
+			unshown, _ := c.log.unshown(at, c.batterySettle())
+			w += math.Max(0, c.log[n-1].w-unshown)
+		}
+	}
+	return w
+}
+
+// evFoundDrawW is EV draw the battery side may count as shown beyond
+// evShownW (shownW) while a charger has no order of this run that has
+// surely landed: after a restart or a plug-in, until its first logged offer
+// is older than its settle time. Core then does not know which offer the
+// charger runs on, and its first offers (often 0 A) say nothing of what the
+// meter shows. A car seen drawing in that window is in the reading when the
+// charger measured it within one control interval of the site reading: a
+// fast charger may have applied a 0 A offer since an older sample, and a
+// held reading after a failed poll says nothing of now. Each such charger
+// counts its measured draw, the lowest of the sample, raw and smoothed,
+// never above its latest offer, and in all no more than the consumption the
+// site meter shows (siteConsumptionW) less shownW. The car's own limit
+// never reads this; only how much of our latest offers the battery reserves
+// as a rise to come.
+func (s *State) evFoundDrawW(store *telemetry.Store, meter *telemetry.DerReading, at time.Time, shownW float64) float64 {
+	if store == nil || meter == nil {
+		return 0
+	}
+	consumptionW := siteConsumptionW(store, meter.RawW)
+	if !finiteFuseValue(consumptionW) {
+		return 0
+	}
+	skew := time.Duration(s.ControlIntervalS) * time.Second
+	if skew <= 0 {
+		skew = 2 * time.Second // config's default control_interval_s
+	}
+	var w float64
+	for _, c := range s.evLimit.offers {
+		n := len(c.log)
+		if n == 0 || c.found.at.IsZero() || at.Sub(c.found.at) >= c.settle || c.driver == "" {
+			continue
+		}
+		r := store.Get(c.driver, telemetry.DerEV)
+		if h := store.DriverHealth(c.driver); r == nil || !h.TelemetryLive() || h.LastReadFailed() {
+			continue
+		}
+		p, ok := qualifiedFuseObservation(r, at)
+		if !ok || p.Seen().Before(meter.UpdatedAt.Add(-skew)) || p.At.After(meter.UpdatedAt.Add(skew)) {
+			continue
+		}
+		drawW := math.Min(p.PowerW, math.Min(r.RawW, r.SmoothedW))
+		if !finiteFuseValue(drawW) {
+			continue
+		}
+		unshown, _ := c.log.unshown(at, c.batterySettle())
+		latest := c.log[n-1].w
+		w += math.Max(0, math.Min(latest, drawW)-math.Max(0, latest-unshown))
+	}
+	return math.Max(0, math.Min(w, consumptionW-shownW))
+}
+
+// siteConsumptionW is the consumption a site reading of gridW shows: grid
+// less each live battery, PV and V2X reading, each at the higher of raw and
+// smoothed. A smoothed value lags an output that just fell; the higher one
+// keeps the estimate at or below what the meter shows.
+func siteConsumptionW(store *telemetry.Store, gridW float64) float64 {
+	w := gridW
+	for _, t := range []telemetry.DerType{telemetry.DerBattery, telemetry.DerPV, telemetry.DerV2X} {
+		for _, r := range store.ReadingsByType(t) {
+			if store.DriverHealth(r.Driver).TelemetryLive() {
+				w -= math.Max(r.RawW, r.SmoothedW)
+			}
+		}
+	}
+	return w
+}
+
+// batterySettle is how long the battery side counts a raise of this
+// charger's as unshown: its declared response time, else evSettle
+// (evShownW).
+func (c chargerOffers) batterySettle() time.Duration {
+	if c.declared {
+		return c.settle
+	}
+	return evSettle
 }
 
 func (s *State) pendingLoad(at time.Time) pendingLoad {
@@ -210,7 +470,14 @@ func (s *State) pendingLoad(at time.Time) pendingLoad {
 // cannot see the hottest phase. A single-phase cut covers on the phase
 // it lands on, which Core does not know, so with other chargers in the pool
 // it covers no phase.
-func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingLoad, latestW float64) {
+//
+// Where the meter tells what it shows of the charger (seeOffers), a cut
+// covers no more than the meter has still to show on each phase: a cut the
+// meter shows covers no overage that comes after it. aheadA is then the
+// rise on each phase the meter has still to show of the latest offers,
+// which a raise's own trigger reads (stepEVMeterLimit), and rise counts at
+// least that much. Elsewhere aheadA is 0.
+func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingLoad, aheadA [3]float64, latestW float64) {
 	lim := &s.evLimit
 	for _, c := range lim.offers {
 		w, a := c.log.toCome(at.Add(-c.settle), at, c.found)
@@ -231,15 +498,27 @@ func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingL
 		if latest.n == 1 && len(lim.offers) > 1 {
 			coverA = 0
 		}
+		riseA := math.Max(0, a)
+		phaseCoverA, phaseRiseA, ahead := [3]float64{coverA, coverA, coverA}, [3]float64{riseA, riseA, riseA}, [3]float64{}
+		if perPhase && lim.phasesSeen && len(lim.offers) == 1 && s.SiteFusePhases >= 2 && c.readable() && !c.unsure {
+			low, high := c.offerRangeA(at)
+			for i := range min(s.SiteFusePhases, len(ahead)) {
+				toComeA := latest.a - math.Min(high, math.Max(low, c.shownA[i]))
+				phaseCoverA[i] = math.Min(coverA, math.Max(0, -toComeA))
+				ahead[i] = math.Max(0, toComeA)
+				phaseRiseA[i] = math.Max(riseA, ahead[i])
+			}
+		}
 		rise.w += math.Max(0, w)
 		cover.w += math.Max(0, math.Min(-w, -runW))
 		for i := range rise.phaseA {
-			rise.phaseA[i] += math.Max(0, a)
-			cover.phaseA[i] += coverA
+			rise.phaseA[i] += phaseRiseA[i]
+			cover.phaseA[i] += phaseCoverA[i]
+			aheadA[i] += ahead[i]
 		}
 		latestW += latest.w
 	}
-	return rise, cover, latestW
+	return rise, cover, aheadA, latestW
 }
 
 // recordEVOffers keeps each plugged charger's offers, with the current each
@@ -258,10 +537,10 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 			continue
 		}
 		c := s.evLimit.offers[point.ID]
-		c.settle = evUnknownSettle
+		c.settle, c.declared, c.carPhases, c.carPhase, c.driver = evUnknownSettle, false, point.CarPhases, point.CarPhase, point.DriverName
 		if r := store.Get(point.DriverName, telemetry.DerEV); r != nil {
 			if declared := telemetry.DeclaredPowerMaxAge(r.Data); declared > 0 {
-				c.settle = max(evSettle, declared)
+				c.settle, c.declared = max(evSettle, declared), true
 			}
 		}
 		w := math.Max(0, point.CommandedW)
@@ -269,7 +548,7 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 		sent := sentCommand{at: now, w: w, a: a, n: phases}
 		if n := len(c.log); n == 0 || c.log[n-1].w != sent.w || c.log[n-1].a != sent.a || c.log[n-1].n != sent.n {
 			if n == 0 && !s.evLimit.set {
-				c.found = sent
+				c.found, c.shownA = sent, [3]float64{sent.a, sent.a, sent.a}
 			}
 			c.log = c.log.keep(sent, read.Add(-c.settle))
 		}
@@ -292,7 +571,7 @@ func (s *State) offerPhaseA(w float64, phases int) (float64, int) {
 }
 
 // EVFusePhaseRoomA is the current the chargers may still add on the
-// busiest phase: below the fuse less its margin, the last reading's
+// busiest phase: below the fuse's working limit (fuseLineA), the last reading's
 // current or heat, and every charger's offers that reading may not show.
 // For an idle pool the heat counts only over the working limit, as the
 // start reads it. false when the site meter reports no phase currents.
@@ -316,13 +595,17 @@ type evMeterLimit struct {
 	offers         map[string]chargerOffers // each plugged charger's, by loadpoint
 	phaseRoomA     float64                  // below the working limit on the busiest phase at readingAt; an idle pool's as a start reads it
 	phaseRoomKnown bool                     // the meter reports phase currents
-	overSince      time.Time                // first reading of a run over the hour's import limit
-	fuseOverAt     time.Time                // first reading of a run with a phase, or the total, over the fuse's working limit
-	fuseCutAt      time.Time                // the first cut of that run
-	fuseUnderAt    time.Time                // first reading of a stretch under that limit
-	overOffers     map[string]float64       // each charger's offer when that run began
-	idleWh         float64                  // import since roomSince, for the ceiling's start test
-	byImport       bool                     // the hour's import limit, not the fuse, left less room at readingAt
+	phasesA        [3]float64               // the phase currents at readingAt, when phasesSeen
+	phasesSeen     bool
+	cutForA        [3]float64 // each phase's highest reading that a cut still on its way was sent on, when cutForSet
+	cutForSet      bool
+	overSince      time.Time          // first reading of a run over the hour's import limit
+	fuseOverAt     time.Time          // first reading of a run with a phase, or the total, over the fuse's working limit
+	fuseCutAt      time.Time          // the first cut of that run
+	fuseUnderAt    time.Time          // first reading of a stretch under that limit
+	overOffers     map[string]float64 // each charger's offer when that run began
+	idleWh         float64            // import since roomSince, for the ceiling's start test
+	byImport       bool               // the hour's import limit, not the fuse, left less room at readingAt
 	batteryYield   evBatteryYield
 }
 
@@ -337,14 +620,18 @@ type evPool struct {
 // shared freshness gate must already allow dispatch. A fuse overage in total
 // import cuts at once; a phase overage cuts once that phase's heat budget is
 // spent, or at once above fuseInstantFactor. Otherwise the cap holds; it
-// rises one step on a fresh reading with room for two, at least evSettle
+// rises one step, or the rest of the demand when that is less, on a fresh
+// reading with room for that rise below the working limit, at least evSettle
 // after the last cut. Room counts every
 // offer sent above what the reading may show as flowing until its charger
 // can have applied it; a cut never frees room before the meter shows it.
 // A cut counts our orders both ways: a raise on its way adds to the overage,
 // and a cut on its way covers the overage it was sent for until its charger
 // can have applied it, within its run over the limit and while the phases
-// stay at or below fuseHourFactor (unshownOrders).
+// stay at or below fuseHourFactor (unshownOrders), but never once the meter
+// shows it. Our own rise on its way cuts before the meter shows it where it
+// would read above fuseInstantFactor, or over the working limit on a phase
+// whose heat budget is spent.
 // EVFusePhaseRoomA gives the same room per phase to the split between cars.
 // An idle pool starts only after the meter has kept showing
 // room for its minimum below the working limit. Each reading acts once, so a silent
@@ -368,9 +655,6 @@ func EVFuseBudget(store *telemetry.Store, state *State, points []loadpoint.State
 		*lim = evMeterLimit{}
 		return 0, true
 	}
-	if pool.offerKnown {
-		state.evOffers = state.evOffers.add(state.now(), pool.offerW)
-	}
 	state.recordEVOffers(store, points)
 	if !lim.set || meter.UpdatedAt.After(lim.readingAt) {
 		state.stepEVMeterLimit(store, meter, gridW, pool, fuseMaxW)
@@ -383,15 +667,20 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	first, prevAt := !lim.set, lim.readingAt
 	gap := first || at.Sub(prevAt) > evSettle
 	lim.readingAt = at
+	s.seeOffers(meter, gridW)
 	prev := math.Inf(1)
 	if !first {
 		prev = lim.capW
 	}
 	lim.set = true
 	peakW := pool.offerW
-	if _, high, _, ok := s.evOffers.span(now); ok {
-		peakW = math.Max(peakW, high)
+	var logPeakW float64
+	for _, c := range s.evLimit.offers {
+		if _, high, _, ok := c.log.span(now); ok {
+			logPeakW += high
+		}
 	}
+	peakW = math.Max(peakW, logPeakW)
 	// Our own battery orders the meter may not show yet count beside the
 	// chargers' offers, in total import and on each phase.
 	pending := s.pendingBatteryCommandsW(now)
@@ -409,7 +698,7 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 			lim.phaseRoomA = r.startRoomA // The split between idle cars reads the start's room.
 		}
 	}
-	step := evPhaseMarginA * s.SiteFuseVoltage * pool.phases
+	step := evStepA * s.SiteFuseVoltage * pool.phases
 	// The label follows whichever limit leaves less room.
 	lim.byImport = math.Min(r.limitW, r.riseW) < r.fuseW
 	// The fuse cuts on every reading over it, by its heat budget where the
@@ -431,22 +720,65 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	case at.Sub(lim.fuseUnderAt) >= evSettle:
 		lim.fuseOverAt, lim.fuseCutAt = time.Time{}, time.Time{}
 	}
-	rise, cover, latestW := s.unshownOrders(at, r.perPhase)
-	fuseCutW := r.fuseOverW + rise.w - cover.w
-	if r.perPhase {
+	rise, cover, aheadA, latestW := s.unshownOrders(at, r.perPhase)
+	fuseCutW, over := r.fuseOverW+rise.w-cover.w, r.fuseOverW > 0
+	if r.perPhase && lim.phasesSeen {
 		// A single-phase order may land on any phase, so the cut takes the
-		// most a rise adds to a phase and the least a cut takes off one.
-		// Past the current a gG fuse carries for an hour, nothing on its
-		// way holds back a cut.
-		coverA := min(cover.phaseA[0], cover.phaseA[1], cover.phaseA[2])
+		// most a rise adds to a phase. A cut covers each phase by what it
+		// takes off there, the same on every phase unless the meter tells
+		// the phases apart (unshownOrders). Past the current a gG fuse
+		// carries for an hour, nothing on its way holds back a cut.
+		coverA := cover.phaseA
 		if s.fuseHeat.worstA() > fuseHourFactor*s.SiteFuseAmps {
-			coverA = 0
+			coverA = [3]float64{}
 		}
-		fuseCutW = (r.fuseOverA + max(rise.phaseA[0], rise.phaseA[1], rise.phaseA[2]) - coverA) * s.SiteFuseVoltage * pool.phases
+		if slices.Max(coverA[:s.SiteFusePhases]) <= 0 {
+			lim.cutForSet = false
+		}
+		riseA := max(rise.phaseA[0], rise.phaseA[1], rise.phaseA[2])
+		lineA, instantA, cutA := s.fuseLineA(), fuseInstantFactor*s.SiteFuseAmps, 0.0
+		for i, a := range lim.phasesA[:s.SiteFusePhases] {
+			// Cuts on their way cover a phase up to the reading they were
+			// sent for. A phase that has risen since by more than noise
+			// carries an overage that came later: they cover only the
+			// part of it that phase had then.
+			phaseCoverA, aheadA := coverA[i], aheadA[i]
+			if lim.cutForSet && a > lim.cutForA[i]+evMoveA {
+				phaseCoverA = math.Min(phaseCoverA, math.Max(0, lim.cutForA[i]-lineA))
+			}
+			// Where the heat budget is spent, the overage the meter shows
+			// comes off with our rise on its way. Elsewhere our own rise on
+			// its way is judged as the reading it will make: above
+			// fuseInstantFactor, or over the line on a phase whose heat
+			// budget is spent, it comes off now, as far as it takes the
+			// phase over the line. Under that, the heat budget judges it
+			// once the meter shows it, as any other reading.
+			hot, needA := s.fuseHeat.sq[i] > lineA*lineA, 0.0
+			if landA := a + aheadA - phaseCoverA; landA > instantA || hot && landA > lineA {
+				needA = math.Min(aheadA-phaseCoverA, landA-lineA)
+			}
+			if a > lineA && (hot || a > instantA) {
+				needA = math.Max(needA, a+riseA-phaseCoverA-lineA)
+			}
+			cutA = math.Max(cutA, needA)
+		}
+		fuseCutW, over = cutA*s.SiteFuseVoltage*pool.phases, over || cutA > 0
 	}
-	over, capW, byImport := r.fuseOverW > 0, math.Inf(1), false
+	capW, byImport := math.Inf(1), false
 	if over {
-		capW = latestW - math.Max(0, fuseCutW)
+		capW = latestW
+		if fuseCutW > 0 {
+			capW -= fuseCutW
+			if r.perPhase {
+				// A charger rounds to the nearest amp, so a cut that leaves
+				// half an amp would round back up and stay over the line.
+				// Only a new cut rounds. When cuts on their way cover the
+				// overage, the offer stays as it is, whole amps or not (a
+				// step table, a PV surplus); rounding it would lower it
+				// again on every reading.
+				capW = wholeStepsW(capW, step)
+			}
+		}
 	}
 	if r.limitW >= 0 {
 		lim.overSince = time.Time{}
@@ -473,23 +805,38 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 		lim.capW, lim.roomSince = math.Min(prev, math.Max(0, capW)), time.Time{}
 		if lim.capW < prev {
 			lim.cutAt = now
+			if lim.phasesSeen {
+				for i, a := range lim.phasesA {
+					if !lim.cutForSet || a > lim.cutForA[i] {
+						lim.cutForA[i] = a
+					}
+				}
+				lim.cutForSet = true
+			}
 			if r.fuseOverW > 0 && lim.fuseCutAt.IsZero() {
 				lim.fuseCutAt = now
 			}
 			slog.Info("EV hard limit: site meter over limit", "grid_w", gridW, "worst_phase_a", r.worstA,
 				"fuse_heat_a", s.fuseHeat.worstA(), "import_limit_w", s.effectiveImportCeilingW(fuseMaxW),
 				"overage_w", r.fuseOverW, "import_overage_w", math.Max(0, -r.limitW),
-				"unshown_rise_w", rise.w, "unshown_cut_w", cover.w, "offer_w", latestW, "cap_w", lim.capW)
+				"unshown_rise_w", rise.w, "unshown_cut_w", cover.w, "rise_on_its_way_a", aheadA, "offer_w", latestW, "cap_w", lim.capW)
 		}
 		return
 	}
 	// An increase needs a fresh reading and room below the level increases
 	// may reach, left after our own battery commands that the meter may not
 	// show yet (in r). Between that level and the import limit the cap holds.
-	room := 0.0
-	if fresh {
-		room = math.Max(0, math.Min(r.fuseW, r.riseW))
+	// Battery discharge the fuse guard added ends once the site fits without
+	// it, so it is no room: a car that took it would keep the battery
+	// feeding the car at the line.
+	if reliefW := s.evFuseReliefW(store); reliefW > 0 {
+		r = s.evMeterRoom(meter, gridW, pool.phases, fuseMaxW, s.withBatteryOrders(s.pendingLoad(at), pending+reliefW))
 	}
+	fuseRoom, importRoom := 0.0, 0.0
+	if fresh {
+		fuseRoom, importRoom = math.Max(0, r.fuseW), math.Max(0, r.riseW)
+	}
+	room := math.Min(fuseRoom, importRoom)
 	if pool.offerW <= 0 {
 		s.stepEVIdleStart(r, gridW, pool, first, gap, fresh, at, prevAt, pending, step)
 		return
@@ -498,16 +845,52 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	// within what this reading measured.
 	lim.capW, lim.roomSince = math.Min(prev, peakW+room), time.Time{}
 	// Right after a cut the meter may show battery relief that covers it.
-	if lim.capW < pool.wantW && room >= 2*step && now.Sub(lim.cutAt) >= evSettle {
-		// One step at most, and a step of room stays free.
-		lim.capW = math.Max(lim.capW, math.Min(lim.capW+step, peakW+room-step))
+	remaining := pool.wantW - peakW
+	if lim.capW < pool.wantW && remaining > 0 && now.Sub(lim.cutAt) >= evSettle {
+		// The fuse: a rise moves one step, or the rest of the demand when
+		// that is less, once that move fits under the working limit. No
+		// room is held back below the line; evSettle after a cut and the
+		// heat the rise reads keep it from undoing a cut.
+		fits, riseW := fuseRoom+1e-6 >= math.Min(step, remaining), math.Min(lim.capW+step, peakW+fuseRoom)
+		// The hour's import limit keeps its own margin: a rise needs room
+		// for two steps, and one stays free.
+		if !math.IsInf(importRoom, 1) {
+			fits, riseW = fits && importRoom >= 2*step, math.Min(riseW, peakW+importRoom-step)
+		}
+		if fits {
+			lim.capW = math.Max(lim.capW, riseW)
+		}
 	}
-	// The battery leaves room for the car's demand, not a further unused
-	// step. Let the last step use that measured room below the working
-	// limit, or concurrent battery charge can keep the car short forever.
-	if remaining := pool.wantW - peakW; s.hasBatteryCharge() && remaining > 0 && remaining <= step && room+1e-6 >= remaining && now.Sub(lim.cutAt) >= evSettle {
+	// The import limit's rise keeps a step free, but the battery leaves room
+	// for the car's demand, not a further unused step. Let the last step use
+	// that measured room, or concurrent battery charge can keep the car
+	// short forever. Under the fuse alone the rise above already does this.
+	if s.hasBatteryCharge() && remaining > 0 && remaining <= step && room+1e-6 >= remaining && now.Sub(lim.cutAt) >= evSettle {
 		lim.capW = math.Max(lim.capW, pool.wantW)
 	}
+}
+
+// evFuseReliefW is the fuse guard's battery relief the meter may show now:
+// each battery's recorded relief, at most the discharge it reads.
+func (s *State) evFuseReliefW(store *telemetry.Store) float64 {
+	var w float64
+	for driver, relief := range s.batteryFuseRelief {
+		if r := store.Get(driver, telemetry.DerBattery); r != nil && finiteFuseValue(r.RawW) {
+			w += math.Min(relief, math.Max(0, -r.RawW))
+		}
+	}
+	return w
+}
+
+// wholeStepsW rounds w down to whole charger amps on the pool's phases, one
+// step each. Chargers round an offer to the nearest amp, so a cap at the
+// line's exact room could land half an amp over it. This is step
+// quantisation, not a margin: a cap that is already whole amps stays.
+func wholeStepsW(w, step float64) float64 {
+	if !(step > 0) || math.IsInf(w, 0) {
+		return w
+	}
+	return math.Floor(w/step+1e-9) * step
 }
 
 // stepEVIdleStart starts an idle pool once the meter has kept showing room
@@ -531,11 +914,14 @@ func (s *State) stepEVIdleStart(r evMeterRoom, gridW float64, pool evPool, first
 	if fresh {
 		room = math.Max(0, perReadingW) // r holds our battery orders.
 	}
-	minimumRoom := pool.minW
+	// The fuse holds back nothing below its working limit: the charger
+	// rounds the cap down to a step it can draw. The hour's import limit
+	// keeps its separate rise margin.
+	keepW := 0.0
 	if !r.hourly && r.riseW < r.startW {
-		minimumRoom += step // Keep the hour's separate rise margin.
+		keepW = step
 	}
-	if room+1e-6 < minimumRoom {
+	if room+1e-6 < pool.minW+keepW {
 		lim.roomSince = time.Time{}
 		return
 	}
@@ -552,7 +938,7 @@ func (s *State) stepEVIdleStart(r evMeterRoom, gridW float64, pool evPool, first
 	if dwell < evRestartDwell {
 		return
 	}
-	lim.capW = math.Max(pool.minW, room-step)
+	lim.capW = math.Max(pool.minW, wholeStepsW(room-keepW, step))
 	if !r.hourly {
 		return
 	}
@@ -577,7 +963,7 @@ func EVLimitReason(state *State) string {
 // evMeterRoom is the measured room in EV watts. The fuse's part holds on
 // every reading. The import ceiling's parts are +Inf while it is off.
 type evMeterRoom struct {
-	fuseW          float64 // below the fuse less its margin and the worst phase, read or heat, and what we sent; rises
+	fuseW          float64 // below the working limit (fuseLineA) and the worst phase, read or heat, and what we sent; rises
 	fuseOverW      float64 // the fuse's measured overage that cuts now, 0 under it; see fuseHeat
 	fuseOverA      float64 // the same on the worst phase, with perPhase
 	perPhase       bool    // the phase currents measure the fuse
@@ -615,7 +1001,7 @@ func (s *State) evMeterRoom(meter *telemetry.DerReading, gridW, phases, fuseMaxW
 	}
 	r.measured = true
 	if present {
-		limitA := s.SiteFuseAmps - evPhaseMarginA
+		limitA := s.fuseLineA()
 		for _, a := range amps {
 			r.worstA = math.Max(r.worstA, a)
 		}
