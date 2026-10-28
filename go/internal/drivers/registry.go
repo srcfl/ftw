@@ -297,6 +297,10 @@ type runningDriver struct {
 	evPauseRevision uint64
 	evPauseCycleID  uint64
 	evPausePending  bool
+	// Default-recovery backoff bounds; zero means defaultRetryInitial and
+	// defaultRetryMax. Tests set them.
+	retryInitial time.Duration
+	retryMax     time.Duration
 	// Poll loop coordination
 	cmdCh     chan driverCmd
 	defaultCh chan driverCmd
@@ -894,7 +898,17 @@ func (r *Registry) runLoop(rd *runningDriver) {
 	}
 	var recoveryTimer *time.Timer
 	var recoveryC <-chan time.Time
-	retryDelay := defaultRetryInitial
+	retryInitial, retryMax := rd.retryInitial, rd.retryMax
+	if retryInitial <= 0 {
+		retryInitial = defaultRetryInitial
+	}
+	if retryMax <= 0 {
+		retryMax = defaultRetryMax
+	}
+	retryDelay := retryInitial
+	// pollFailed holds while the device's reads fail. The first good poll
+	// after it is the device's return.
+	pollFailed := false
 	clearRecoveryTimer := func() {
 		if recoveryTimer != nil {
 			if !recoveryTimer.Stop() {
@@ -905,12 +919,12 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 		}
 		recoveryC = nil
-		retryDelay = defaultRetryInitial
+		retryDelay = retryInitial
 	}
 	scheduleRecovery := func() {
 		d := retryDelay
 		if d <= 0 {
-			d = defaultRetryInitial
+			d = retryInitial
 		}
 		if recoveryTimer == nil {
 			recoveryTimer = time.NewTimer(d)
@@ -925,10 +939,10 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		}
 		recoveryC = recoveryTimer.C
 		rd.markDefaultRecoveryPending()
-		if retryDelay < defaultRetryMax {
+		if retryDelay < retryMax {
 			retryDelay *= 2
-			if retryDelay > defaultRetryMax {
-				retryDelay = defaultRetryMax
+			if retryDelay > retryMax {
+				retryDelay = retryMax
 			}
 		}
 	}
@@ -1180,6 +1194,8 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			pollCtx, finishPoll := rd.beginCommand(ctx)
 			returned, err := rd.driver.Poll(pollCtx)
 			finishPoll()
+			returnedFromOutage := err == nil && pollFailed
+			pollFailed = err != nil
 			if r.tel != nil {
 				r.tel.CountPoll(err != nil)
 			}
@@ -1207,6 +1223,17 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			// Re-arm at the interval the poll returned, or the standing one.
 			interval = rd.env.nextPollInterval(returned)
 			timer.Reset(interval)
+			// A default that failed while the device was away is retried
+			// on its first good poll, not when the backoff (up to 30 s)
+			// next allows. Once per return: a device that reads but still
+			// refuses waits for the backoff again.
+			if returnedFromOutage && recoveryC != nil {
+				if err := attemptDefault(); err != nil {
+					slog.Error("driver default failed on its first good poll after an outage; control remains blocked", "name", rd.cfg.Name, "err", err)
+				} else {
+					slog.Info("driver default confirmed on its first good poll after an outage", "name", rd.cfg.Name)
+				}
+			}
 		case <-recoveryC:
 			if err := attemptDefault(); err != nil {
 				slog.Error("driver default recovery failed; control remains blocked", "name", rd.cfg.Name, "err", err)
