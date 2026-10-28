@@ -445,6 +445,7 @@ func (c forcedCase) run() *runData {
 // and Core's first good read is Core's to take.
 func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
 	const forced = "no forced battery mode FTW does not dispatch"
+	read207539 := 182 + reconnectBackoffMaxS - 4
 	for _, c := range []forcedCase{
 		// 207533: offline 576.6-644.7 s, Core reads 9 s later, 187 /
 		// 2668 W until FTW dispatches again 236 s after the return (C1).
@@ -464,15 +465,16 @@ func TestInvariantsNoForcedBatteryWithoutDispatch(t *testing.T) {
 		// 10 s of Core's first good read.
 		{name: "default 8 s after Core reads again", outage: "offline", outFrom: 100, outFor: 68, readAt: 177,
 			cmd: 187, setW: 2668, forcedTo: 185, want: true},
-		// 207539: offline 508.5-590.0 s, the Modbus backoff holds Core's
-		// first good read back 55.7 s, and FTW dispatches 20 s after it.
+		// 207539: offline 508.5-590.0 s, the Modbus backoff (60 s then)
+		// holds Core's first good read back 55.7 s, and FTW dispatches 20 s
+		// after it. Here the read comes 4 s before the backoff's cap ends.
 		// Inside Core's timers; it fails once #1915 (C11) lands.
-		{name: "207539: Core's reconnect backoff and default retry", outage: "offline", outFrom: 100, outFor: 82, readAt: 238,
-			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 258, want: true},
-		{name: "past the registry's 30 s retry", outage: "offline", outFrom: 100, outFor: 82, readAt: 238,
-			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 285, want: false},
-		// Core never reads the inverter again: the count starts 60 s after
-		// the return all the same.
+		{name: "207539: Core's reconnect backoff and default retry", outage: "offline", outFrom: 100, outFor: 82, readAt: read207539,
+			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: read207539 + 20, want: true},
+		{name: "past the registry's 30 s retry", outage: "offline", outFrom: 100, outFor: 82, readAt: read207539,
+			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: read207539 + 47, want: false},
+		// Core never reads the inverter again: the count starts at the
+		// backoff's cap after the return all the same.
 		{name: "Core never reads it again", outage: "offline", outFrom: 100, outFor: 82, readAt: 1201,
 			cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 290, want: false},
 		{name: "FTW dispatches the discharge", cmd: 187, setW: 3000, forcedTo: 1201, dispatchFrom: 1, want: true},
@@ -556,20 +558,22 @@ func TestInvariantsForcedBatteryCountsFromTheLatestReturn(t *testing.T) {
 // The triage line is 10 s from the return, so the judge records what it
 // forgave beyond that line instead of hiding it.
 func TestInvariantsRecordForcedSecondsInsideCoreTimers(t *testing.T) {
-	// 207539's shape: back at 182, Core reads at 238 and dispatches at 245,
-	// inside the backoff alone. Forced 183-244 with no dispatch; past
-	// 182+10 that is 193-244.
-	c := forcedCase{outage: "offline", outFrom: 100, outFor: 82, readAt: 238,
-		cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: 245}
+	// 207539's shape: back at 182, Core reads 4 s before the backoff's cap
+	// ends (238 with 60 s) and dispatches 7 s later, inside the backoff
+	// alone. Forced with no dispatch until then; past 182+10 that is from
+	// 193 (52 s with 60 s).
+	read := 182 + reconnectBackoffMaxS - 4
+	c := forcedCase{outage: "offline", outFrom: 100, outFor: 82, readAt: read,
+		cmd: 187, setW: 814, forcedTo: 1201, dispatchFrom: read + 7}
 	m, _ := judgeInvariants(c.run())
-	if in, past := m["battery_forced_in_core_timers_s"], m["battery_forced_past_allowance_s"]; in != 52.0 || past != 0.0 {
-		t.Errorf("in Core's timers %v s, past the allowance %v s; want 52 and 0", in, past)
+	if in, past, want := m["battery_forced_in_core_timers_s"], m["battery_forced_past_allowance_s"], read+6-192; in != want || past != 0.0 {
+		t.Errorf("in Core's timers %v s, past the allowance %v s; want %v and 0", in, past, want)
 	}
 	// Forced to 299: from 193 to the allowance's end inside the timers,
 	// the rest past them.
 	c.dispatchFrom = 300
 	m, _ = judgeInvariants(c.run())
-	end := 238 + defaultRetryMaxS + forcedBudgetS
+	end := read + defaultRetryMaxS + forcedBudgetS
 	if in, past := m["battery_forced_in_core_timers_s"], m["battery_forced_past_allowance_s"]; in != end-192 || past != 299-end {
 		t.Errorf("in Core's timers %v s, past the allowance %v s; want %v and %v", in, past, end-192, 299-end)
 	}
@@ -595,8 +599,10 @@ func TestForcedAllowancesMatchCore(t *testing.T) {
 		n, _ := strconv.Atoi(m[1])
 		return float64(n)
 	}
-	if got := seconds(src("modbus/client.go"), "reconnectBackoffMax"); got != reconnectBackoffMaxS {
-		t.Errorf("reconnectBackoffMaxS = %v, Core's reconnectBackoffMax is %v s", reconnectBackoffMaxS, got)
+	// reconnectBackoffMaxS is read from Core's source; the 207539 shapes
+	// below need a backoff that can hold Core's first read back past 4 s.
+	if reconnectBackoffMaxS < 5 {
+		t.Errorf("Core's reconnectBackoffMax is %v s; rework the 207539 shapes", reconnectBackoffMaxS)
 	}
 	registry := src("drivers/registry.go")
 	// Today the registry sends the default on a failure and on its retry

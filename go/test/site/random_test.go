@@ -9,7 +9,9 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -310,11 +312,31 @@ const (
 
 	// R8: how long a battery FTW does not dispatch may hold a forced mode,
 	// and the Core timers that may delay it after the inverter returns.
-	inverterDriver       = "sungrow" // the rig's inverter driver (stack_test.go)
-	forcedBudgetS        = 10.0
-	reconnectBackoffMaxS = 60.0 // modbus/client.go reconnectBackoffMax
-	defaultRetryMaxS     = 30.0 // drivers/registry.go defaultRetryMax; 0 once #1915 (C11) lands
+	inverterDriver   = "sungrow" // the rig's inverter driver (stack_test.go)
+	forcedBudgetS    = 10.0
+	defaultRetryMaxS = 30.0 // drivers/registry.go defaultRetryMax; 0 once #1915 (C11) lands
 )
+
+// reconnectBackoffMaxS is Core's Modbus reconnect backoff cap
+// (modbus/client.go reconnectBackoffMax), read from the source the rig
+// builds Core from, so R8 follows Core when the cap changes (60 s, then
+// 10 s with #1930).
+var reconnectBackoffMaxS = coreSeconds("modbus/client.go", "reconnectBackoffMax")
+
+// coreSeconds reads "name = N * time.Second" from a file under go/internal.
+// It panics when the line is gone: the judge has no number to fall back on.
+func coreSeconds(file, name string) float64 {
+	b, err := os.ReadFile(filepath.Join("..", "..", "internal", file))
+	if err != nil {
+		panic(err)
+	}
+	m := regexp.MustCompile(name + `\s*=\s*(\d+)\s*\*\s*time\.Second`).FindSubmatch(b)
+	if m == nil {
+		panic(fmt.Sprintf("no %s = N * time.Second in Core's %s", name, file))
+	}
+	n, _ := strconv.Atoi(string(m[1]))
+	return float64(n)
+}
 
 // dispatchW is Core's battery order on r, + charge; false when Core
 // dispatched no battery.
