@@ -419,6 +419,9 @@ type State struct {
 	// dispatchMeterAt is the UpdatedAt of the last site-meter sample the
 	// battery dispatch acted on. See siteMeterHeld.
 	dispatchMeterAt time.Time
+	// meterFreeze finds a site meter that repeats one reading while FTW's
+	// orders move. See ObserveSiteMeterFreeze.
+	meterFreeze meterFreeze
 
 	// Slew + holdoff
 	SlewRateW float64
@@ -1475,6 +1478,8 @@ func ComputeDispatch(
 		rawGridW = siteMeter.SmoothedW
 	}
 	meterHeld := state.siteMeterHeld(siteMeter)
+	// A repeat that ignores FTW's own move is no new sample either.
+	meterHeld = meterHeld || state.siteMeterRepeatsAfterMove(siteMeter)
 	// Live EV/V2X charger readings override the manual slider on each tick —
 	// hardware truth beats guesses. Positive V2X is a vehicle charging load;
 	// negative V2X is kept separate so the default controller does not

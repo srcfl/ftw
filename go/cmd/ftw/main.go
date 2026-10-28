@@ -2612,7 +2612,10 @@ func main() {
 			if timeout <= 0 {
 				timeout = 60 * time.Second
 			}
-			if gate := evaluateSiteDispatchFreshnessAt(tel, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now()); !gate.Allowed() {
+			ctrlMu.Lock()
+			gate := siteMeterGateLocked(tel, ctrl, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now())
+			ctrlMu.Unlock()
+			if !gate.Allowed() {
 				return fmt.Errorf("measure before enabling control: %s", gate.Reason)
 			}
 			return nil
@@ -3050,15 +3053,11 @@ func main() {
 			// standdown/default commands remain permitted.
 			ctrlMu.Lock()
 			ctrl.ObserveSiteImport(tel)
+			freshness := siteDispatchGateLocked(tel, ctrl, watchdogTimeout, tickNow)
 			siteMeterDriver := ctrl.SiteMeterDriver
-			siteFuseAmps := ctrl.SiteFuseAmps
-			siteFusePhases := ctrl.SiteFusePhases
 			forecastIntent := forecastCurtailmentActive(ctrl, tickNow)
 			ctrlMu.Unlock()
 			forecastCurtail.ObserveIntent(forecastIntent)
-			freshness := evaluateSiteDispatchFreshnessAt(
-				tel, siteMeterDriver, siteFuseAmps, siteFusePhases, watchdogTimeout, tickNow,
-			)
 			if reason := setupRuntimeBlockReason(); reason != "" {
 				freshness.Reason = reason
 			}

@@ -711,6 +711,38 @@ func (s *Store) OnlineRawW(driver string, t DerType) (w float64, at time.Time, o
 	return r.RawW, r.UpdatedAt, true
 }
 
+// OnlineMeterSample is OnlineMeterW with the reading's data, which holds
+// the phase values.
+func (s *Store) OnlineMeterSample(driver string) (w float64, data json.RawMessage, at time.Time, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, found := s.readings[key(driver, DerMeter)]
+	if !found || math.IsNaN(r.RawW) || math.IsInf(r.RawW, 0) {
+		return 0, nil, time.Time{}, false
+	}
+	if h, known := s.health[driver]; !known || !h.TelemetryLive() {
+		return 0, nil, time.Time{}, false
+	}
+	return r.RawW, r.Data, r.UpdatedAt, true
+}
+
+// OnlineRawWByType returns the latest raw power of every driver of one type
+// that is still reporting. A watchdog-offline driver is left out.
+func (s *Store) OnlineRawWByType(t DerType) map[string]float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]float64)
+	for _, r := range s.readings {
+		if r.DerType != t || math.IsNaN(r.RawW) || math.IsInf(r.RawW, 0) {
+			continue
+		}
+		if h, known := s.health[r.Driver]; known && h.TelemetryLive() {
+			out[r.Driver] = r.RawW
+		}
+	}
+	return out
+}
+
 // ReadingsByDriver returns all readings from one driver.
 func (s *Store) ReadingsByDriver(driver string) []*DerReading {
 	s.mu.RLock()
