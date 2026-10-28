@@ -49,6 +49,7 @@ func TestSoCMaxManualHoldAndSibling(t *testing.T) {
 		t.Fatalf("charge must go to the battery below its own ceiling: %+v", got)
 	}
 	st.SetBatteryManualHold(BatteryManualHold{PowerW: -2000, ExpiresAt: time.Now().Add(time.Hour)})
+	tel.Update("ferroamp", telemetry.DerMeter, -1000, nil, nil) // a new sample allows the reversal
 	got = ComputeDispatch(tel, st, capacities, 13800)
 	if targetFor(t, got, "battery").TargetW >= 0 {
 		t.Fatalf("charge ceiling blocked discharge: %+v", got)

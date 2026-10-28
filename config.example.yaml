@@ -12,7 +12,7 @@ site:
   smoothing_alpha: 0.3
   slew_rate_w: 3000             # W per cycle. Both Ferroamp and Sungrow ramp internally — this is a soft ceiling, not the primary protection
   # slew_enabled: false         # disable the external slew limiter entirely and trust the inverter's internal ramp control (experimental)
-  min_dispatch_interval_s: 2    # debounce; keep == control_interval_s
+  min_dispatch_interval_s: 2    # least time between battery commands; at or below control_interval_s it never skips a tick
 
 fuse:
   max_amps: 16
@@ -284,3 +284,11 @@ fleet_ping:
 # price:
 #   demand_price_per_kw: 7000
 #   demand_top_n: 3
+
+# Tests and development only: read elprisetjustnu-format prices from another
+# server, with no Nord Pool fallback. The site rig serves pinned prices this
+# way (go/test/site/prices_test.go). Leave it unset on a real site.
+# Only the elprisetjustnu provider reads base_url; other providers ignore it.
+# price:
+#   provider: elprisetjustnu
+#   base_url: http://127.0.0.1:8099

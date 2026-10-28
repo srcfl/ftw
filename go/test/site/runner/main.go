@@ -1,7 +1,7 @@
 // siterig-runner runs FTW's site test (go/test/site) on a machine of its own
 // and publishes the result as a GitHub commit status on the exact commit:
 // siterig/full on each new master commit, siterig/short on the head of each
-// open pull request that touches control, loadpoint, OCPP or telemetry code,
+// open pull request that touches code on the control path (watchedPaths),
 // and siterig/random for a night's random seeds. native-release.yml reads
 // siterig/full before it publishes a beta. See README.md.
 package main
