@@ -96,8 +96,7 @@ var scenarios = []scenario{
 	{name: "s16-25", dir: "s16-import-ceiling-idle-start-25A", minutes: 68,
 		run: func(c *runCtx) (map[string]any, error) { return s16(c, 25) }, judge: judgeS16},
 	{name: "s17-25", dir: "s17-two-equal-batteries-25A", minutes: 30,
-		run: func(c *runCtx) (map[string]any, error) { return s17(c, 25) }, judge: judgeS17,
-		tolerate: map[string]string{"Energyplan's plan moves the batteries half the time": "the day's prices: within the hour's wait the plan may keep both batteries idle for later, dearer hours"}},
+		run: func(c *runCtx) (map[string]any, error) { return s17(c, 25) }, judge: judgeS17},
 }
 
 // runCtx is where one scenario runs.
@@ -1147,11 +1146,11 @@ func judgeS16(d *runData) (metrics, []criterion) {
 // turns under the plan, one discharging while the other stood at 0 W.
 // Energyplan's plan puts each quarter's discharge on one battery; Core must
 // share it. Core DP plans one battery only, so this runs Energyplan, as a
-// beta box does. A 3 kW house with no PV. Over 48 h the plan keeps the
-// batteries for the dearest hours, often tomorrow's; over 6 h they hold
-// more than the house needs, so it discharges now. The run still waits up
-// to an hour for a quarter the plan discharges, then runs 15 min. It keeps
-// the plan's order for each battery every 30 s in plan.jsonl.
+// beta box does. A 3 kW house with no PV. The pinned prices open with a
+// 4 h evening peak, and over a 6 h horizon the batteries hold less than
+// the house needs in it, so the plan discharges now. The run still waits
+// up to an hour for a quarter the plan discharges, then runs 15 min. It
+// keeps the plan's order for each battery every 30 s in plan.jsonl.
 func s17(c *runCtx, fuse float64) (map[string]any, error) {
 	err := with(c, stackSpec{fuseA: fuse, loadsW: [3]float64{1000, 1000, 1000}, socPct: 74, soc2Pct: 60,
 		engine: "energyplan", horizonH: 6}, func(st *stack) error {
