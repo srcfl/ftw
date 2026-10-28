@@ -66,12 +66,12 @@ func TestIdleOnePhasePoolStartsOnSixAmpsOfRoom(t *testing.T) {
 // 1,380 W, its least order, once the worst phase leaves 6 A of room under the
 // working line, and waits while it leaves 5.7 A. A hidden margin on the
 // one-phase minimum would move the start and fail here. The cases are set
-// from the working line, so they follow it if the line moves.
+// from the working line as EVFuseBudget reports it, not from the constant
+// that sets it, so they follow the line if it moves.
 func TestIdleOnePhasePoolStartBoundary(t *testing.T) {
 	steps := []float64{0, 1380, 1610, 1840, 2070, 2300, 2530, 2760, 2990, 3220, 3450, 3680,
 		4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350, 11040}
 	const fuseA = 16.0
-	lineA := fuseA - evPhaseMarginA // the EV working line on each phase
 	site := func(t *testing.T, houseA float64, mode string) *phaseSite {
 		cfg := loadpoint.Config{ID: "garage", DriverName: "easee", MinChargeW: 4140, MaxChargeW: 11040,
 			PhaseMode: "auto", AllowedStepsW: steps}
@@ -83,6 +83,14 @@ func TestIdleOnePhasePoolStartBoundary(t *testing.T) {
 		})
 		s.ctrl.SetManualHold(cfg.ID, loadpoint.ManualHold{PowerW: 3680, PhaseMode: mode, Persistent: true})
 		return s
+	}
+	// With no house load, an idle pool's room on its busiest phase is the
+	// whole working line.
+	probe := site(t, 0, "1p")
+	probe.tick()
+	lineA := probe.state.evLimit.phaseRoomA
+	if !probe.state.evLimit.phaseRoomKnown || lineA <= 6 || lineA > fuseA {
+		t.Fatalf("working line %.2f A (known %v) on a %.0f A fuse", lineA, probe.state.evLimit.phaseRoomKnown, fuseA)
 	}
 	for _, mode := range []string{"1p", "auto"} {
 		t.Run(mode+" 6.0 A of room starts", func(t *testing.T) {
