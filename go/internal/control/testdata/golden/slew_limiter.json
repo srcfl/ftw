@@ -2174,7 +2174,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1500,
+          "target_w": 0,
           "clamped": true
         },
         {
@@ -2205,9 +2205,9 @@
       },
       "site_totals": {
         "battery_current_w": -2000,
-        "battery_target_sum_w": -2000,
+        "battery_target_sum_w": -500,
         "raw_grid_w": 2500,
-        "projected_grid_w": 2500
+        "projected_grid_w": 4000
       }
     },
     {
