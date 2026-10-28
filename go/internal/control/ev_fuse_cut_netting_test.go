@@ -482,3 +482,33 @@ func TestEVFuseOnePhaseHouseMoveIsNotTheCutLanding(t *testing.T) {
 		}
 	})
 }
+
+// While our own battery order moves the phases, a move of every phase
+// alike may be the battery's, so it is not read as the car's cut landing.
+// A 3 A cut travels to a charger that declares 40 s. A battery order of
+// 1 A a phase discharge lands and goes back: L1 reads 28, 27, then 28 A
+// again. Read as the cut landing, the 1 A drop took a third of the cut's
+// cover, and Core cut a second time, to 8,280 W, for an overage the first
+// cut already covers.
+func TestEVFuseBatteryOrderMoveIsNotTheCutLanding(t *testing.T) {
+	r := newCutRig(t, 11040, 40) // 16 A
+	for range 120 {
+		r.read([3]float64{20, 15, 15})
+	}
+	for i := 0; i < 120 && r.offerW == 11040; i++ {
+		r.read([3]float64{28, 15, 15}) // 3 A over the 25 A line
+	}
+	if r.offerW != 8970 {
+		t.Fatalf("heat cut to %.0f W, want 8,970 W", r.offerW)
+	}
+	r.state.batteryCommands = map[string]commandLog{"bat": commandLog{}.add(r.now.Add(-time.Minute), 0).add(r.now, -690)}
+	for range 3 {
+		r.read([3]float64{27, 14, 14})
+	}
+	r.state.batteryCommands["bat"] = r.state.batteryCommands["bat"].add(r.now, 0)
+	for range 8 {
+		if r.read([3]float64{28, 15, 15}); r.offerW != 8970 {
+			t.Fatalf("offer %.0f W after our battery order came and went, want the one cut to 8,970 W", r.offerW)
+		}
+	}
+}
