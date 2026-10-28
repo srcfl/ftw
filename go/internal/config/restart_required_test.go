@@ -174,6 +174,16 @@ func TestRestartRequiredFor_PriceZoneSwapNeedsRestart(t *testing.T) {
 	}
 }
 
+func TestRestartRequiredFor_PriceBaseURLChangeNeedsRestart(t *testing.T) {
+	old := baseCfg()
+	old.Price = &Price{Provider: "elprisetjustnu", Zone: "SE3", BaseURL: "http://127.0.0.1:8099"}
+	n := baseCfg()
+	n.Price = &Price{Provider: "elprisetjustnu", Zone: "SE3", BaseURL: "http://127.0.0.1:8100"}
+	if !containsSubstring(RestartRequiredFor(old, n), "price") {
+		t.Fatal("changing price.base_url should require restart")
+	}
+}
+
 func TestRestartRequiredFor_NilInputs(t *testing.T) {
 	if r := RestartRequiredFor(nil, baseCfg()); r != nil {
 		t.Fatalf("expected nil reasons for nil old, got %v", r)

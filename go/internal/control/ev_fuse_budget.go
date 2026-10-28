@@ -196,10 +196,6 @@ type chargerOffers struct {
 	riseBaseA [3]float64
 	riseFromA float64
 	riseSet   bool
-	// aloneA is each phase's rise since riseBaseA counted only over the
-	// readings in which the other phases moved less than a step: the rise
-	// a car on that one phase may have made (riseAheadA).
-	aloneA [3]float64
 }
 
 // evMoveA is half a charger step. An order landing shows on the site meter
@@ -241,8 +237,9 @@ func chargerMoveA(prev, now []float64) (alikeA, oneA float64, phase int) {
 // charger on each phase (shownA), in a shape the offers can take there. A
 // car the loadpoint has seen draw on one phase, or a one-phase order, is
 // one level on every phase: every phase dropping alike moves it, and so
-// does a move on the car's phase alone, or on any one phase while that
-// phase is not known. A three-phase order moves only on every phase alike:
+// does a move on the car's phase alone where that phase is known. A move on
+// one phase while the car's phase is not known may be a house load, so it
+// does not count. A three-phase order moves only on every phase alike:
 // a phase that moves alone is a house load, or a car not yet seen that
 // draws on one phase, and Core cannot tell which. The shown current moves
 // only toward the latest offer, and stays within the offers the reading
@@ -265,17 +262,14 @@ func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
 		alikeA, oneA, phase = chargerMoveA(prev[:len(amps)], now[:len(amps)])
 	}
 	for id, c := range lim.offers {
-		if read && c.riseSet {
-			c.aloneA = addAloneA(c.aloneA, prev[:len(amps)], now[:len(amps)])
-		}
 		if read && c.readable() {
 			var moveA [3]float64
 			switch {
 			case c.carPhase > 0 || c.log[0].n == 1:
 				// One car on one phase: one level, moved by a drop of
-				// either shape or by its phase alone.
+				// every phase alike or by its known phase alone.
 				m := math.Min(0, alikeA)
-				if c.carPhase == 0 || c.carPhase == phase {
+				if c.carPhase == phase {
 					m += oneA
 				}
 				moveA = [3]float64{m, m, m}
@@ -308,22 +302,6 @@ func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
 		}
 		lim.offers[id] = c
 	}
-}
-
-// addAloneA adds to each phase's alone rise its move from one reading to
-// the next when every other phase moved less than a step (evStepA): no
-// charger step landed there, so the move may be a car on that one phase.
-func addAloneA(aloneA [3]float64, prev, now []float64) [3]float64 {
-	for p := range now {
-		held := true
-		for q := range now {
-			held = held && (q == p || math.Abs(now[q]-prev[q]) < evStepA)
-		}
-		if held {
-			aloneA[p] += now[p] - prev[p]
-		}
-	}
-	return aloneA
 }
 
 // batteryOrderMoves reports whether one of our battery orders of the last
@@ -484,18 +462,14 @@ func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingL
 // riseAheadA is the rise on each phase the site meter has still to show
 // of the charger's latest offer: the raise since riseFromA less the meter's
 // own rise since the raise went out, within the offers the reading may
-// show. A three-phase order takes the smallest rise across the phases: a
-// house step on some phases does not show the raise on the rest. A car on
-// one phase takes its own phase's rise, or the largest where the phase is
-// not known. For a car not yet seen on three phases, a phase that has
-// risen a step or more alone may be the car taking the raise on one phase:
-// its rise over the readings in which the other phases moved less than a
-// step (aloneA). Each reading is judged against the one before, so house
-// drift on another phase while the raise travels, or under a step in the
-// landing reading, does not hide it. A landing counts in whatever shape
-// it comes, a slow ramp or beside a house load that moves in the same
-// reading. A house load that drops while the raise travels still reads as
-// raise not shown yet, by as much as it dropped.
+// show. A car the loadpoint has seen draw on three phases takes the
+// smallest rise across the phases: a house step on some phases does not
+// show the raise on the rest. A car on one phase takes its own phase's
+// rise. Any other car takes the largest rise: until the loadpoint has seen
+// it, it may draw on one phase Core does not know. A landing counts in
+// whatever shape it comes, a slow ramp or beside a house load that moves
+// in the same reading. A house load that drops while the raise travels
+// still reads as raise not shown yet, by as much as it dropped.
 func (s *State) riseAheadA(c chargerOffers) (ahead [3]float64) {
 	lim := &s.evLimit
 	n := min(s.SiteFusePhases, len(ahead))
@@ -511,15 +485,8 @@ func (s *State) riseAheadA(c chargerOffers) (ahead [3]float64) {
 	switch {
 	case c.carPhase > 0 && c.carPhase <= n:
 		riseA, phases = rises[c.carPhase-1], ahead[c.carPhase-1:c.carPhase]
-	case c.carPhases == 1 || latest.n == 1:
+	case c.carPhases != 3 || latest.n == 1:
 		riseA = slices.Max(rises)
-	case c.carPhases != 3:
-		// A car not yet seen may draw on a phase that rose alone.
-		for i := range rises {
-			if c.aloneA[i] >= 2*evMoveA {
-				riseA = math.Max(riseA, math.Min(c.aloneA[i], rises[i]))
-			}
-		}
 	}
 	low, high := c.offerRangeA(lim.readingAt)
 	toComeA := math.Max(0, latest.a-math.Min(high, math.Max(low, c.riseFromA+riseA)))
@@ -558,7 +525,7 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 			if n == 0 && !s.evLimit.set {
 				c.found, c.shownA = sent, [3]float64{sent.a, sent.a, sent.a}
 			} else if _, high := c.offerRangeA(now); sent.a > high && !c.riseSet && s.evLimit.phasesSeen {
-				c.riseBaseA, c.riseFromA, c.riseSet, c.aloneA = s.evLimit.phasesA, high, true, [3]float64{}
+				c.riseBaseA, c.riseFromA, c.riseSet = s.evLimit.phasesA, high, true
 			}
 			c.log = c.log.keep(sent, read.Add(-c.settle))
 		}

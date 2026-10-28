@@ -103,7 +103,11 @@ func (r *cutRig) deliver(gridW float64, data []byte) float64 {
 	r.now = r.now.Add(time.Second)
 	r.store.Update("meter", telemetry.DerMeter, gridW, nil, data)
 	r.store.Get("meter", telemetry.DerMeter).UpdatedAt = r.now
-	_, _, points, configs := evMeterBudgetFixture(r.t, 0, nil, r.offerW, "3p")
+	mode := "3p"
+	if r.phases == 1 {
+		mode = "1p"
+	}
+	_, _, points, configs := evMeterBudgetFixture(r.t, 0, nil, r.offerW, mode)
 	points[0].CommandedPhases, points[0].CarPhases = r.phases, r.carPhases
 	capW, _ := EVFuseBudget(r.store, r.state, points, configs, 17250)
 	if capW < r.offerW {
@@ -394,13 +398,14 @@ func TestEVFuseCutCoversOnlyThePhaseOverageItWasSentFor(t *testing.T) {
 // no longer fits cuts before the meter shows it. On a 16 A fuse with no
 // margin, a charger that declares 40 s takes the car from 6 A to 16 A with
 // L1 at 6 A: the step fits under the line. 30 s later the house adds 9.7 A
-// on L1 and 3 A on L2 before the raise lands. L1 reads 15.7 A, under the
-// line, but the raise would take it to 25.7 A, over 1.2 x In: on that
-// reading the raise comes off as far as it takes L1 over the line, to 6 A
-// in whole amps. Before, Core waited for the meter to show it.
+// on L1 and 3 A on L2 before the raise lands. For a car the loadpoint has
+// seen draw on three phases, L1 reads 15.7 A, under the line, but the raise
+// would take it to 25.7 A, over 1.2 x In: on that reading the raise comes
+// off as far as it takes L1 over the line, to 6 A in whole amps. Before,
+// Core waited for the meter to show it.
 func TestEVFuseRaiseOnItsWayThatNoLongerFitsCutsAtOnce(t *testing.T) {
 	r := newCutRig(t, 4140, 40)
-	r.state.SiteFuseAmps = 16
+	r.state.SiteFuseAmps, r.carPhases = 16, 3
 	for range 60 {
 		r.read([3]float64{6, 6, 6})
 	}
@@ -575,9 +580,9 @@ func TestEVFuseRaiseThatLandedIsNotCountedTwice(t *testing.T) {
 // of its reading when the raise went out, over the whole response time:
 // 0.6 A of drift made the raise count as still to come, L1 read 34 A, and
 // Core cut to 4,830 W one second after the landing (field matrix with
-// 0.7 A on L2 every 17 s: car1p cut 11,100 -> 0 W). The landing now counts
-// when L2 moves less than a step in the reading it lands on, or drifts
-// before it.
+// 0.7 A on L2 every 17 s: car1p cut 11,100 -> 0 W). A house load of a
+// step or more on L2 in the landing reading hid it too. Until the loadpoint
+// has seen the car on three phases, the largest rise counts as the landing.
 func TestEVFuseUnseenOnePhaseCarLandsBesideDrift(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -589,6 +594,8 @@ func TestEVFuseUnseenOnePhaseCarLandsBesideDrift(t *testing.T) {
 		{"drift_-0.6A_before", -0.6, 0},
 		{"drift_0.7A_in_the_landing_reading", 0, 0.7},
 		{"drift_-0.7A_in_the_landing_reading", 0, -0.7},
+		{"house_1.2A_on_L2_in_the_landing_reading", 0, 1.2},
+		{"house_-1.2A_on_L2_in_the_landing_reading", 0, -1.2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newCutRig(t, 4140, 40) // 6 A a phase ordered
@@ -637,5 +644,33 @@ func TestEVFuseLoadCyclingOnTheOverPhaseDoesNotHunt(t *testing.T) {
 				t.Fatalf("cuts %v; one is enough", cuts)
 			}
 		})
+	}
+}
+
+// A one-phase order's car phase is not known, so a house load that moves
+// alone on another phase is not its cut landing. 25 A fuse, a charger that
+// declares 40 s, 16 A ordered on one phase: L1 reads 28 A and the heat cut
+// takes it to 13 A. While that cut travels, a 3 A load on L2 switches off.
+// Before, that move took 3 A of cover off the cut still on its way, and
+// Core cut again for an overage the first cut already covered.
+func TestEVFuseOnePhaseOrderHouseMoveIsNotTheCutLanding(t *testing.T) {
+	r := newCutRig(t, 3680, 40) // 16 A on one phase
+	r.phases = 1
+	r.snap = func(w float64) float64 { return math.Floor(w/230) * 230 }
+	for range 120 {
+		r.read([3]float64{20, 15, 12})
+	}
+	for i := 0; i < 120 && r.offerW == 3680; i++ {
+		r.read([3]float64{28, 15, 12}) // 3 A over the 25 A line
+	}
+	first := r.offerW
+	if first >= 3680 {
+		t.Fatalf("no heat cut with L1 3 A over the line")
+	}
+	r.read([3]float64{28, 15, 12})
+	for i := range 20 {
+		if r.read([3]float64{28, 12, 12}); r.offerW != first {
+			t.Fatalf("offer %.0f W %d s after a 3 A house load on L2 switched off, want the one cut to %.0f W", r.offerW, i+1, first)
+		}
 	}
 }
