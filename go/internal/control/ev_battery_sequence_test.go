@@ -581,6 +581,95 @@ func TestOfflineBatteryReliefEndsAfterSettle(t *testing.T) {
 	}
 }
 
+// Two batteries: "b2" goes offline holding 1500 W of fuse relief while
+// "bat" stays online. Its relief counts whole for evSettle and then ends,
+// whether dispatch sits in the deadband and sends nothing or sends "bat" a
+// command every tick. Before, a quiet dispatch kept it for as long as the site
+// stayed quiet, and a command dropped it on the first tick.
+func TestOfflineBatteryReliefEndsBesideAnOnlineBattery(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		gridW float64
+	}{
+		{"deadband", 0},
+		{"commanded", 3000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, state, caps := setupPerPhase(tc.gridW, 6, 6, 6, 0.6, 10000)
+			soc := 0.6
+			store.Update("b2", telemetry.DerBattery, -1500, &soc, nil)
+			caps["b2"] = 15200
+			state.DriverLimits["b2"] = PowerLimits{MaxChargeW: 10000, MaxDischargeW: 10000}
+			state.Mode = ModeSelfConsumption
+			now := time.Now()
+			state.clock = func() time.Time { return now }
+			state.batteryFuseRelief = map[string]float64{"b2": 1500}
+			store.DriverHealthMut("b2").SetOffline()
+			commands := 0
+			for start := now; now.Sub(start) < 2*time.Minute; {
+				now = now.Add(time.Second)
+				store.Update("meter", telemetry.DerMeter, tc.gridW, nil, []byte(`{"l1_a":6,"l2_a":6,"l3_a":6}`))
+				store.Get("meter", telemetry.DerMeter).UpdatedAt = now
+				store.DriverHealthMut("meter").RecordSuccess()
+				store.Update("bat", telemetry.DerBattery, 0, &soc, nil)
+				store.Get("bat", telemetry.DerBattery).UpdatedAt = now
+				store.DriverHealthMut("bat").RecordSuccess()
+				if len(ComputeDispatch(store, state, caps, 11040)) > 0 {
+					commands++
+				}
+				// The first dispatch, a second in, finds b2 offline.
+				want := 0.0
+				if now.Sub(start) <= evSettle {
+					want = 1500
+				}
+				if got := state.evFuseReliefW(store); got != want {
+					t.Fatalf("%v offline, %d commands: relief %.0f W, want %.0f W (%v)", now.Sub(start), commands, got, want, state.batteryFuseRelief)
+				}
+			}
+			if (commands > 0) != (tc.gridW != 0) {
+				t.Fatalf("setup: %d dispatches with a command", commands)
+			}
+		})
+	}
+}
+
+// The battery goes offline in relief, its relief ends, it comes back and
+// takes new relief, and it goes offline again. The second offline period
+// counts the new relief whole for evSettle: Core ordered that discharge a
+// second ago, and the old offline clock must not end it at once.
+func TestReturningBatteryReliefCountsWholeAgain(t *testing.T) {
+	s := newIdleBatteryEVSite(t, 3000, 0)
+	s.run(5 * time.Minute)
+	s.houseW += 8000
+	s.run(3 * time.Second)
+	if s.state.batteryFuseRelief["pixii"] <= 0 {
+		t.Fatalf("setup: no relief %v", s.state.batteryFuseRelief)
+	}
+	s.store.DriverHealthMut("pixii").SetOffline()
+	s.batteryOffline, s.batteryW = true, 0
+	s.run(2 * time.Minute)
+	if got := s.state.evFuseReliefW(s.store); got != 0 {
+		t.Fatalf("first offline period: relief %.0f W still counted", got)
+	}
+	s.batteryOffline = false
+	s.run(2 * time.Minute)
+	s.houseW += 2000
+	s.run(3 * time.Second)
+	reliefW := s.state.batteryFuseRelief["pixii"]
+	if reliefW <= 0 {
+		t.Fatalf("setup: no new relief, battery %.0f W relief %v", s.batteryW, s.state.batteryFuseRelief)
+	}
+	s.store.DriverHealthMut("pixii").SetOffline()
+	s.batteryOffline = true
+	offlineAt := s.now
+	for s.now.Sub(offlineAt) < evSettle-time.Second {
+		s.step()
+		if got := s.state.evFuseReliefW(s.store); math.Abs(got-reliefW) > 1e-6 {
+			t.Fatalf("%v into the second offline period: relief %.0f W, want the whole %.0f W", s.now.Sub(offlineAt), got, reliefW)
+		}
+	}
+}
+
 // Relief is only the discharge the fuse guard added: a cancelled charge or
 // the planner's own discharge stays room for the car.
 func TestFuseReliefIsOnlyAddedDischarge(t *testing.T) {

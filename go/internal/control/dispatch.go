@@ -403,9 +403,9 @@ type State struct {
 	// the site fits without it, so an EV rise or start never counts it as
 	// room (evFuseReliefW).
 	batteryFuseRelief map[string]float64
-	// batteriesOfflineSince is when dispatch first found no battery online
-	// (expireOfflineFuseRelief).
-	batteriesOfflineSince time.Time
+	// batteriesOfflineSince is, per battery whose relief still counts,
+	// when dispatch first found it offline (expireOfflineFuseRelief).
+	batteriesOfflineSince map[string]time.Time
 
 	// PI controller (outer, site-level)
 	PI *PIController
@@ -1542,13 +1542,12 @@ func ComputeDispatch(
 			onlineBats = append(onlineBats, b)
 		}
 	}
+	state.expireOfflineFuseRelief(onlineBats)
 	if len(onlineBats) == 0 {
-		state.expireOfflineFuseRelief()
 		publishBatterylessEVFuseBudget(store, state, fuseMaxW)
 		state.LastTargets = nil
 		return nil
 	}
-	state.batteriesOfflineSince = time.Time{}
 	// Planner slots that are idle/charge-only must not leave an individual
 	// battery discharging just because slew anchored from a negative live
 	// reading. Plain self_consumption remains the classic grid-zero mode:
@@ -2445,7 +2444,9 @@ func applyDispatchSafetyPipeline(
 
 // recordFuseRelief keeps, per battery, the discharge in the final command
 // that the fuse guard added: below both the command before forceFuseDischarge
-// and 0 W. Planner or operator discharge is not relief.
+// and 0 W. Planner or operator discharge is not relief. An offline battery
+// gets no command, so its relief carries over until
+// expireOfflineFuseRelief ends it.
 func (s *State) recordFuseRelief(before, after []DispatchTarget) {
 	if s == nil {
 		return
@@ -2462,6 +2463,11 @@ func (s *State) recordFuseRelief(before, after []DispatchTarget) {
 	for driver, w := range post {
 		if r := math.Min(pre[driver]-w, -w); r > 0 {
 			relief[driver] = r
+		}
+	}
+	for driver := range s.batteriesOfflineSince {
+		if _, ok := post[driver]; !ok && s.batteryFuseRelief[driver] > 0 {
+			relief[driver] = s.batteryFuseRelief[driver]
 		}
 	}
 	s.batteryFuseRelief = relief
