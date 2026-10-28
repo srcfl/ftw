@@ -139,3 +139,39 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 		t.Fatalf("without a step: %v", f)
 	}
 }
+
+// s18 at margin 0: Core holds the phases at the 16 A line, so the house's own
+// 0.1 A step lands over it until Core cuts. That stretch is the house's, not
+// an own command. The same overage at any other time is Core's and fails.
+func TestS18OwnCommandsSkipTheHouseStep(t *testing.T) {
+	const own = "own commands stay inside the rated fuse"
+	mk := func(overFrom float64) *runData {
+		d := &runData{marks: map[string]float64{"charge_now": 0, "small_step": 100, "no_room": 200, "room_returns": 300, "end": 450}}
+		for i := 0; i <= 450; i++ {
+			a := 16.0
+			if float64(i) >= overFrom && float64(i) < overFrom+4 {
+				a = 16.1
+			}
+			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}})
+		}
+		return d
+	}
+	ok := func(d *runData) bool {
+		_, cs := judgeS18(d)
+		for _, c := range cs {
+			if c.Name == own {
+				return c.OK
+			}
+		}
+		t.Fatalf("no %q criterion", own)
+		return false
+	}
+	if !ok(mk(100)) {
+		t.Error("4 s at 16.1 A right after the house's step failed")
+	}
+	for _, at := range []float64{50, 150} {
+		if ok(mk(at)) {
+			t.Errorf("4 s at 16.1 A from %.0f s with no outside step passed", at)
+		}
+	}
+}
