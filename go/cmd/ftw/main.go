@@ -1118,6 +1118,30 @@ func main() {
 		newCfg.ModbusProxyWriteOwners = oldCfg.ModbusProxyWriteOwners
 		forecastConfigMu.Lock()
 		defer forecastConfigMu.Unlock()
+		// Limits first: Reload can spend seconds per changed driver, and a
+		// lowered limit must not wait for that. configreload.Apply has
+		// already written the battery fuse and export limits. A driver that
+		// leaves the config keeps its old limits until Reload stops it.
+		limits := driverLimitsFrom(newCfg.ModbusControlDrivers(), newCfg.Batteries, newCfg.Planner)
+		ctrlMu.Lock()
+		reloadLimits := make(map[string]control.PowerLimits, len(ctrl.DriverLimits)+len(limits))
+		for name, lim := range ctrl.DriverLimits {
+			reloadLimits[name] = lim
+		}
+		for name, lim := range limits {
+			reloadLimits[name] = lim
+		}
+		ctrl.DriverLimits = reloadLimits
+		ctrlMu.Unlock()
+		// Keep the loadpoint controller's per-phase EV fuse clamp in step
+		// with the battery side. SetSiteFuse takes its own lock.
+		if lpController != nil {
+			lpController.SetSiteFuse(loadpoint.SiteFuse{
+				MaxAmps:  newCfg.Fuse.MaxAmps,
+				Voltage:  newCfg.Fuse.Voltage,
+				PhaseCnt: newCfg.Fuse.Phases,
+			})
+		}
 		// Driver paths are already resolved by config.Load; no extra
 		// work needed here. Re-apply the battery SoC-window → driver
 		// config mapping so a hot-edited soc_max reaches the driver too.
@@ -1164,19 +1188,7 @@ func main() {
 		ctrl.InverterGroups = inverterGroupsFrom(newCfg.Drivers)
 		ctrl.SupportsPVCurtail = supportsPVCurtailFrom(newCfg.Drivers)
 		ctrl.SolarFeedDrivers = solarFeedDriversFrom(newCfg.Drivers)
-		ctrl.DriverLimits = driverLimitsFrom(newCfg.ModbusControlDrivers(), newCfg.Batteries, newCfg.Planner)
-		// Fuse params + safety margin: previously startup-only.
-		// Hot-reload them so operators can tune the per-phase margin
-		// from the UI without restarting (e.g. raising it after the
-		// inverter's own protection trips, lowering it to recover
-		// last few hundred W of arbitrage headroom).
-		ctrl.SiteFuseAmps = newCfg.Fuse.MaxAmps
-		ctrl.SiteFuseVoltage = newCfg.Fuse.Voltage
-		ctrl.SiteFusePhases = newCfg.Fuse.Phases
-		// Mirror the startup path: nil → 0 (work to the fuse rating), an
-		// explicit value wins. See EffectiveSafetyMarginA.
-		ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
-		ctrl.MaxExportW = newCfg.Site.MaxExportW
+		ctrl.DriverLimits = limits
 		// Lowering the fuse can strand a peak limit that was legal when it
 		// was set. SetPeakLimit refuses to create that state; only a reload
 		// can arrive at it from the other side, and it is silent — the
@@ -1190,20 +1202,6 @@ func main() {
 		if peakDead && peakMode {
 			slog.Warn("peak limit is now above the site's import ceiling and cannot bind",
 				"peak_limit_w", peakLimitW, "import_ceiling_w", peakCeilingW)
-		}
-
-		// Keep the loadpoint controller's per-phase EV fuse clamp in
-		// sync with hot-reloaded fuse params — previously startup-only,
-		// so an operator tuning max_amps / margin from the UI updated
-		// the control-package battery lever (above) but left the EV
-		// clamp on the stale startup value until restart. SetSiteFuse
-		// takes its own lock; call it outside ctrlMu.
-		if lpController != nil {
-			lpController.SetSiteFuse(loadpoint.SiteFuse{
-				MaxAmps:  newCfg.Fuse.MaxAmps,
-				Voltage:  newCfg.Fuse.Voltage,
-				PhaseCnt: newCfg.Fuse.Phases,
-			})
 		}
 
 		// Site-meter swap propagation. The config apply callback
