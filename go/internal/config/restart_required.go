@@ -33,7 +33,7 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 		reasons = append(reasons, "state.path / state.cold_dir — database files are opened at startup")
 	}
 	if priceNeedsRestart(oldCfg.Price, newCfg.Price) {
-		reasons = append(reasons, "price.provider / zone / API key — spot-price client is constructed at startup")
+		reasons = append(reasons, "price.provider / zone / API key / base_url — spot-price client is constructed at startup")
 	}
 	if plannerNeedsRestart(oldCfg.Planner, newCfg.Planner) {
 		reasons = append(reasons, "planner.enabled / engine — planner process is constructed at startup")
@@ -84,7 +84,7 @@ func priceNeedsRestart(oldP, newP *Price) bool {
 	if !oldOn {
 		return false
 	}
-	return oldP.Provider != newP.Provider || oldP.Zone != newP.Zone || oldP.APIKey != newP.APIKey || oldP.Currency != newP.Currency
+	return oldP.Provider != newP.Provider || oldP.Zone != newP.Zone || oldP.APIKey != newP.APIKey || oldP.Currency != newP.Currency || oldP.BaseURL != newP.BaseURL
 }
 
 func plannerNeedsRestart(oldP, newP *Planner) bool {
