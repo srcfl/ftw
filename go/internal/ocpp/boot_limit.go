@@ -91,6 +91,17 @@ func (h *Handler) resolveBootLimit(id string) {
 	time.AfterFunc(h.bootLimitSettle, func() { h.fireBootLimit(id, epoch) })
 }
 
+// meterCancelsBootLimitLocked drops a pending start limit when a 1.6 meter
+// value shows a car: it names a transaction, or it measures power above zero.
+// After a Core restart a two-socket charger may send the running socket's
+// meter values before that socket's status, and 0 A for the whole charger
+// would pause its car. The caller holds h.mu.
+func (s *chargerState) meterCancelsBootLimitLocked(txID *int, w float64) {
+	if txID != nil || w > 0 {
+		s.bootLimitPending = false
+	}
+}
+
 // cancelBootLimit drops a pending start limit when FTW orders the charger
 // during the settle wait. That order is newer, and a 0 A landing after it
 // would undo it.

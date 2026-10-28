@@ -431,3 +431,62 @@ func TestV201TwoEVSECoreRestartCarOnEVSE2GetsNoBootLimit(t *testing.T) {
 		t.Fatalf("two-EVSE restart with a car on EVSE 2 got %d profile(s); want none", n)
 	}
 }
+
+// A Core restart while a car charges on socket 2 of a two-socket 1.6
+// charger, where socket 2's status comes only after the wait. Socket 1
+// reports Available, then meter values for socket 2's car arrive inside the
+// wait. They show the car, so the start limit must not go out to the whole
+// charger. The meter values may name the transaction, or carry only power.
+func TestMeterValuesShowingACarDuringWaitCancelBootLimit(t *testing.T) {
+	tx := 7
+	for _, c := range []struct {
+		name  string
+		txID  *int
+		power string
+	}{
+		{"transaction and 7 kW", &tx, "7000"},
+		{"transaction at 0 W", &tx, "0"},
+		{"7 kW without transaction", nil, "7000"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := startManagedServer(t, false)
+			srv.handler.mu.Lock()
+			srv.handler.bootLimitSettle = 200 * time.Millisecond
+			srv.handler.mu.Unlock()
+			cp, fake, _ := connectCharger(t, srv, srv.cfg.Port, "garage")
+			reportStatus16(t, cp, core.ChargePointStatusAvailable)
+			if _, err := cp.MeterValues(2, meterValues16(c.power), func(r *core.MeterValuesRequest) { r.TransactionId = c.txID }); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(400 * time.Millisecond)
+			if n := fake.count(); n != 0 {
+				t.Fatalf("car on socket 2 shown by meter values got %d profile(s), last %v A; want none", n, fake.lastLimit(t))
+			}
+		})
+	}
+}
+
+// Meter values with no transaction and 0 W show no car: the start limit
+// still goes out.
+func TestIdleMeterValuesDuringWaitKeepBootLimit(t *testing.T) {
+	srv := startManagedServer(t, false)
+	cp, fake, _ := connectCharger(t, srv, srv.cfg.Port, "garage")
+	reportStatus16(t, cp, core.ChargePointStatusAvailable)
+	if _, err := cp.MeterValues(1, meterValues16("0")); err != nil {
+		t.Fatal(err)
+	}
+	awaitProfiles(t, fake.count, 1)
+	if got := fake.lastLimit(t); got != 0 {
+		t.Fatalf("start limit after idle meter values = %v A; want 0", got)
+	}
+}
+
+func meterValues16(powerW string) []types.MeterValue {
+	return []types.MeterValue{{
+		Timestamp: types.NewDateTime(time.Now()),
+		SampledValue: []types.SampledValue{
+			{Value: powerW, Measurand: types.MeasurandPowerActiveImport, Unit: types.UnitOfMeasureW},
+			{Value: "12345", Measurand: types.MeasurandEnergyActiveImportRegister, Unit: types.UnitOfMeasureWh},
+		},
+	}}
+}

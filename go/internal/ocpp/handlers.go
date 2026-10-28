@@ -640,8 +640,10 @@ func (h *Handler) OnMeterValues(id string, req *core.MeterValuesRequest) (*core.
 		}
 		if w, ok := meterPowerW(samples); ok {
 			s.recordPower(w, measured, received)
+			s.meterCancelsBootLimitLocked(nil, w)
 		}
 	}
+	s.meterCancelsBootLimitLocked(req.TransactionId, 0)
 	h.mu.Unlock()
 
 	h.pushReading(id, s)
