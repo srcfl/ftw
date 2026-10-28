@@ -458,7 +458,9 @@ func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingL
 // show. A three-phase order takes the smallest rise across the phases: a
 // house step on some phases does not show the raise on the rest. A car on
 // one phase takes its own phase's rise, or the largest where the phase is
-// not known. A landing counts in whatever shape it comes, a slow ramp or
+// not known. For a car not yet seen on three phases, one phase that has
+// risen alone, the others within evMoveA, may be the car taking the raise
+// on one phase. A landing counts in whatever shape it comes, a slow ramp or
 // beside a house load that moves in the same reading. A house load that
 // drops while the raise travels still reads as raise not shown yet, by
 // as much as it dropped.
@@ -474,11 +476,14 @@ func (s *State) riseAheadA(c chargerOffers) (ahead [3]float64) {
 		rises[i] = lim.phasesA[i] - c.riseBaseA[i]
 	}
 	riseA, phases := slices.Min(rises), ahead[:n]
+	_, oneA, _ := chargerMoveA(c.riseBaseA[:n], lim.phasesA[:n])
 	switch {
 	case c.carPhase > 0 && c.carPhase <= n:
 		riseA, phases = rises[c.carPhase-1], ahead[c.carPhase-1:c.carPhase]
 	case c.carPhases == 1 || latest.n == 1:
 		riseA = slices.Max(rises)
+	case c.carPhases != 3 && oneA > 0:
+		riseA = oneA // A car not yet seen may draw on the one phase that rose.
 	}
 	low, high := c.offerRangeA(lim.readingAt)
 	toComeA := math.Max(0, latest.a-math.Min(high, math.Max(low, c.riseFromA+riseA)))

@@ -415,24 +415,23 @@ func TestEVFuseRaiseOnItsWayThatNoLongerFitsCutsAtOnce(t *testing.T) {
 	}
 }
 
-// The C4 case as the triage wrote it, with only L1 moving. L2 and L3 have
-// not risen, so the three-phase raise has not landed, whether or not the
-// loadpoint has seen the car draw on three phases: the raise would take L1
-// to 25.7 A, over 1.2 x In, so it comes off on that reading.
-func TestEVFuseRaiseOnItsWayCutsOnAOnePhaseHouseStep(t *testing.T) {
-	for _, carPhases := range []int{0, 3} {
-		r := newCutRig(t, 4140, 40)
-		r.state.SiteFuseAmps, r.carPhases = 16, carPhases
-		for range 60 {
-			r.read([3]float64{6, 6, 6})
-		}
-		r.offerW = 11040 // 6 -> 16 A
-		for range 30 {
-			r.read([3]float64{6, 6, 6})
-		}
-		if r.read([3]float64{15.7, 6, 6}); r.offerW > 4140 {
-			t.Fatalf("car phases %d: offer %.0f W with L1 at 15.7 A and 10 A on its way, want 4,140 W or less", carPhases, r.offerW)
-		}
+// The C4 case as the triage wrote it, with only L1 moving, for a car the
+// loadpoint has seen draw on three phases. A house step on L1 alone is then
+// not the raise landing: the raise would take L1 to 25.7 A, over 1.2 x In,
+// so it comes off on that reading. For a car not yet seen, a step on one
+// phase may be a one-phase car taking the raise; the meter judges it then.
+func TestEVFuseRaiseOnItsWayCutsForACarSeenOnThreePhases(t *testing.T) {
+	r := newCutRig(t, 4140, 40)
+	r.state.SiteFuseAmps, r.carPhases = 16, 3
+	for range 60 {
+		r.read([3]float64{6, 6, 6})
+	}
+	r.offerW = 11040 // 6 -> 16 A
+	for range 30 {
+		r.read([3]float64{6, 6, 6})
+	}
+	if r.read([3]float64{15.7, 6, 6}); r.offerW > 4140 {
+		t.Fatalf("offer %.0f W with L1 at 15.7 A and 10 A on its way, want 4,140 W or less", r.offerW)
 	}
 }
 
