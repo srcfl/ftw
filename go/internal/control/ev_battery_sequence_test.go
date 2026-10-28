@@ -555,6 +555,23 @@ func TestFuseReliefIsOnlyAddedDischarge(t *testing.T) {
 	}
 }
 
+// The car's room counts a battery's relief only as far as a live reading
+// shows it. An offline battery's cached discharge is no reading: its whole
+// relief counts, since Core can no longer hold that discharge.
+func TestEVFuseReliefReadsOnlyLiveBatteries(t *testing.T) {
+	store := telemetry.NewStore()
+	store.Update("live", telemetry.DerBattery, -500, nil, nil)
+	store.DriverHealthMut("live").RecordSuccess()
+	store.Update("offline", telemetry.DerBattery, -500, nil, nil)
+	store.DriverHealthMut("offline").RecordSuccess()
+	store.DriverHealthMut("offline").SetOffline()
+	s := &State{batteryFuseRelief: map[string]float64{"live": 2000, "offline": 2000, "unread": 300}}
+	// live: min(2000, 500); offline and unread: the whole relief.
+	if got := s.evFuseReliefW(store); math.Abs(got-(500+2000+300)) > 1e-9 {
+		t.Fatalf("relief %.0f W, want 2,800 W", got)
+	}
+}
+
 // Only the hour's import limit leaves watts to an EV cut, only those the cut
 // removes, and only during the first evSettle of the overage it was sent
 // for. The fuse acts on every reading, on each phase too.
