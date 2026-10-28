@@ -60,6 +60,11 @@ import (
 // per-driver staleness window. Tesla's 5-minute BLE proxy fits; a year does not.
 const maxDriverWatchdogTimeout = 15 * time.Minute
 
+// driverInitTimeout bounds driver_init. An init that runs past it fails like
+// any other init error, so a looping or hung init cannot block boot, a reload
+// or a settings save.
+var driverInitTimeout = 30 * time.Second
+
 // LuaDriver wraps a running Lua VM bound to a HostEnv.
 type LuaDriver struct {
 	Env  *HostEnv
@@ -213,7 +218,7 @@ func (d *LuaDriver) callInitLocked(ctx context.Context) error {
 	if d.initConfig != nil {
 		arg = goToLua(d.L, d.initConfig)
 	}
-	cleanup := d.setLifecycleContext(ctx)
+	cleanup := d.setLuaCallContext(ctx, driverInitTimeout)
 	defer cleanup()
 	return d.L.CallByParam(lua.P{Fn: fn, NRet: 0, Protect: true}, arg)
 }
