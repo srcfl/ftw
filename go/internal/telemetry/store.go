@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -684,6 +685,35 @@ func (s *Store) SumOnlineV2XW() float64 {
 	}
 	if math.Abs(sum) < 1.0 {
 		return 0
+	}
+	return sum
+}
+
+// OnlineLowerW returns the lower of a driver's raw and smoothed power of
+// one type, while the driver is still reporting and its latest poll
+// succeeded. A held reading after a failed poll returns false.
+func (s *Store) OnlineLowerW(driver string, t DerType) (float64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, found := s.readings[key(driver, t)]
+	h, known := s.health[driver]
+	if !found || !known || !h.TelemetryLive() || h.LastReadFailed() {
+		return 0, false
+	}
+	w := math.Min(r.RawW, r.SmoothedW)
+	return w, !math.IsNaN(w) && !math.IsInf(w, 0)
+}
+
+// SumOnlineHigherW sums the higher of raw and smoothed power over the
+// readings of these types whose drivers are still reporting.
+func (s *Store) SumOnlineHigherW(types ...DerType) float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var sum float64
+	for _, r := range s.readings {
+		if h, ok := s.health[r.Driver]; ok && h.TelemetryLive() && slices.Contains(types, r.DerType) {
+			sum += math.Max(r.RawW, r.SmoothedW)
+		}
 	}
 	return sum
 }

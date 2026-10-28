@@ -54,8 +54,9 @@ type Config struct {
 	LoadWarnings      []string `yaml:"-" json:"-"`
 	LoadpointWarnings []string `yaml:"-" json:"-"`
 	// Retired names settings of removed features that loading dropped so
-	// they cannot steer the site. Startup warns once for each;
-	// DropRetiredSettings deletes them from stored settings.
+	// they cannot steer the site, and stored values that match an old
+	// default. Startup warns once for each; DropRetiredSettings deletes the
+	// removed settings from stored settings and leaves the values alone.
 	Retired []string `yaml:"-" json:"-"`
 	// Used once at startup to end an old calendar's persisted away selection.
 	RetiredCalendarEnabled bool   `yaml:"-" json:"-"`
@@ -868,11 +869,16 @@ type Site struct {
 	MaxExportW float64 `yaml:"max_export_w,omitempty" json:"max_export_w,omitempty"`
 }
 
-// DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom
-// applied when fuse.safety_margin_a is unset (nil) in the YAML.
-// Single source of truth — main.go routes through Fuse.Effective-
-// SafetyMarginA() rather than re-declaring it.
-const DefaultFuseSafetyMarginA = 0.5
+// DefaultFuseSafetyMarginA is the per-phase margin applied when
+// fuse.safety_margin_a is unset (nil). Core works to the fuse rating by
+// default; a margin is opt-in. Single source of truth: main.go routes
+// through Fuse.EffectiveSafetyMarginA() rather than re-declaring it.
+const DefaultFuseSafetyMarginA = 0.0
+
+// oldDefaultFuseSafetyMarginA was the default until FTW worked to the fuse
+// rating. A stored value equal to it may be the settings form's old prefill
+// rather than a choice, so loading names it once and keeps it.
+const oldDefaultFuseSafetyMarginA = 0.5
 
 // Fuse describes the shared breaker limit used by the fuse guard.
 type Fuse struct {
@@ -880,15 +886,11 @@ type Fuse struct {
 	Phases  int     `yaml:"phases" json:"phases"`
 	Voltage float64 `yaml:"voltage" json:"voltage"`
 
-	// SafetyMarginA reserves headroom (per-phase amps) below MaxAmps
-	// inside the dispatch fuse guard. Pointer so we can distinguish
-	// "unset" (nil → DefaultFuseSafetyMarginA) from "explicitly
-	// disabled" (non-nil 0.0). Inverters often have their own per-
-	// phase current protection that trips before the breaker; without
-	// a margin the dispatch can ride right up to MaxAmps and the
-	// inverter cuts to 0 W in one tick, then dispatch ramps back up —
-	// visible as a flap. 0.5 A × 230 V × 3 phases ≈ 345 W of aggregate
-	// headroom.
+	// SafetyMarginA is an opt-in per-phase margin below MaxAmps: each
+	// phase's working limit is MaxAmps − SafetyMarginA. Pointer so an
+	// explicit value, 0 included, always wins over the default (nil →
+	// DefaultFuseSafetyMarginA, which is 0). Set it for an inverter whose
+	// own per-phase limiter trips at the rating and cuts to 0 W.
 	SafetyMarginA *float64 `yaml:"safety_margin_a,omitempty" json:"safety_margin_a,omitempty"`
 }
 
@@ -897,15 +899,25 @@ func (f Fuse) MaxPowerW() float64 {
 	return f.MaxAmps * f.Voltage * float64(f.Phases)
 }
 
-// EffectiveSafetyMarginA returns the per-phase amp headroom to apply,
-// resolving nil ("unset → use default") vs an explicit value (including
-// 0.0 to disable the margin entirely). Single read site so the default
-// can never drift across consumers.
+// EffectiveSafetyMarginA returns the per-phase margin to apply: the
+// explicit value when set, otherwise DefaultFuseSafetyMarginA. Single read
+// site so the default can never drift across consumers.
 func (f Fuse) EffectiveSafetyMarginA() float64 {
 	if f.SafetyMarginA == nil {
 		return DefaultFuseSafetyMarginA
 	}
 	return *f.SafetyMarginA
+}
+
+// noteOldFuseMargin adds one notice when fuse.safety_margin_a holds FTW's
+// old default. The value stays: from April to September 2026 the settings
+// form saved its 0.5 A prefill on any save, but a value saved later is the
+// user's choice, and the stored document cannot tell the two apart.
+func (c *Config) noteOldFuseMargin() {
+	if m := c.Fuse.SafetyMarginA; m != nil && *m == oldDefaultFuseSafetyMarginA {
+		c.Retired = append(c.Retired,
+			"fuse.safety_margin_a is 0.5 A, FTW's old default. FTW now works to the fuse rating. Set 0 to use it.")
+	}
 }
 
 // Driver is one driver entry. Each driver is a Lua script loaded by
@@ -1496,6 +1508,7 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	var retiredControl retiredControlSettings
 	_ = doc.Decode(&retiredControl)
 	c.applyRetiredControl(retiredControl)
+	c.noteOldFuseMargin()
 	// An omitted app_link section follows the new default. An explicit YAML
 	// null was a valid opt-out before that default changed, so retain it as an
 	// explicit disabled section instead of letting applyDefaults turn it on.
@@ -2074,7 +2087,7 @@ func (c *Config) Validate() error {
 	}
 	// safety_margin_a must be in [0, max_amps) when explicitly set.
 	// Negative would *raise* the per-phase threshold above the breaker
-	// rating (defeating the guard); >= max_amps zeroes the headroom
+	// rating (defeating the guard); >= max_amps leaves no working limit
 	// and silently disables the per-phase clamp — both are real safety
 	// holes if reached through a typo'd config. nil (unset) is OK and
 	// resolves to DefaultFuseSafetyMarginA at the consumer.
