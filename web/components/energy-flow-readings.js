@@ -73,11 +73,9 @@ function placeholderPlanet(partial) {
  * @param {object} status  GET /api/status body
  * @param {object} [opts]
  * @param {number} [opts.idleW]
- * @param {(name: string, driver: object, batW: number) => string} [opts.batterySub]
  */
 export function flowReadingsFromStatus(status, opts) {
   const thresholdW = (opts && opts.idleW) || idleW();
-  const batterySub = opts && opts.batterySub;
   const planets = [];
   const today = (status && status.energy && status.energy.today) || {};
   const importWh = num(today.import_wh);
@@ -155,10 +153,10 @@ export function flowReadingsFromStatus(status, opts) {
     if (batW !== null) {
       const bIdle = isIdle(batW, thresholdW);
       const soc = num(d.bat_soc);
-      const defaultSub = d.observe_only === true
-        ? "observe only"
-        : bIdle ? "idle" : batW >= 0 ? "charging" : "discharging";
-      const sub = batterySub ? batterySub(name, d, batW) : defaultSub;
+      // The bubble prints a size, so this line says the direction. The
+      // bubble has no room for "observe only" on the same line; the
+      // component puts it under the title.
+      const sub = bIdle ? "idle" : batW >= 0 ? "charging" : "discharging";
       const planet = {
         id: `bat-${name}`, corner: "top-right", title: "BATTERY", role: "battery", name,
         kw: batW / 1000, toHub: batW < 0,
@@ -169,6 +167,7 @@ export function flowReadingsFromStatus(status, opts) {
         dailyScope: "aggregate",
         dailyAggregateMembers: batDailyMembers,
         clickable: d.observe_only !== true,
+        observeOnly: d.observe_only === true,
       };
       if (online) {
         live.battery = true;

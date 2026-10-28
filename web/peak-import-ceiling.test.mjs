@@ -9,6 +9,8 @@ import vm from "node:vm";
 // ceiling and nothing this browser stored.
 
 const source = readFileSync(new URL("./app.js", import.meta.url), "utf8");
+// index.html loads the shared power words before app.js.
+const powerWords = readFileSync(new URL("./power-words.js", import.meta.url), "utf8");
 
 function element(id) {
   const listeners = new Map();
@@ -100,6 +102,7 @@ function rig(status) {
   window.localStorage = storage;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
+  vm.runInContext(powerWords, sandbox);
   vm.runInContext(source, sandbox);
 
   const settle = () => new Promise((resolve) => setImmediate(resolve));

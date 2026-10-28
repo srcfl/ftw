@@ -1637,6 +1637,14 @@ body.ftw-app .live-stat-value.is-export   { color: var(--green-e); }
 body.ftw-app .live-stat-value.is-charging { color: var(--cyan); }
 body.ftw-app .live-stat-value.is-discharging { color: var(--energy-gives); }
 body.ftw-app .live-stat-value.is-neutral { color: var(--fg-dim); }
+/* The direction word under a two-way value, so a narrow cell keeps the
+   size on one line. */
+body.ftw-app .live-stat-dir {
+  display: block;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+}
 
 /* 24 h battery + SoC history block — sits below the live power chart.
  * Section label matches the Plan card's chart-section labels. */
