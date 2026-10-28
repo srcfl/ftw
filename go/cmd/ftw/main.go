@@ -2369,8 +2369,8 @@ func main() {
 	// install, started by the launcher from its release slots, updates
 	// itself (ADR 0007). Docker changes FTW_VERSION and rebuilds, and the
 	// Home Assistant app follows Supervisor. Deps.SelfUpdate stays nil there,
-	// which makes every /api/version/* handler return 503 and the UI hide
-	// the badge.
+	// which makes every /api/version/* handler return 503; the UI then says
+	// who updates FTW instead of offering an update.
 	var selfUpdater *selfupdate.Checker
 	if nativeRoot != "" {
 		// FTW_SELFUPDATE_CURRENT_VERSION overrides what the checker thinks
