@@ -139,6 +139,7 @@ func (h *handlerV201) OnStatusNotification(id string, req *availability.StatusNo
 		h.telSuccess(id)
 	}
 	h.pushReading(id, s)
+	h.resolveBootLimit(id)
 	return availability.NewStatusNotificationResponse(), nil
 }
 

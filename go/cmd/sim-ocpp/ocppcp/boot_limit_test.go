@@ -79,6 +79,10 @@ func TestChargerHoldsZeroAmpsFromBootUntilFTWOrder(t *testing.T) {
 			if err := sim.Boot(); err != nil {
 				t.Fatal(err)
 			}
+			// After an accepted boot a charger reports its connectors.
+			if err := sim.statusPlugged(false); err != nil {
+				t.Fatal(err)
+			}
 			waitFor(t, "the 0 A start limit", func() bool { return sim.LimitA() == 0 })
 
 			if err := sim.Plug(); err != nil {
