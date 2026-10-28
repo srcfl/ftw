@@ -71,11 +71,11 @@ header h1 {
 }
 .tab-btn:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
 }
 .tab-btn.active {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
   border-color: var(--border);
 }
 
@@ -378,9 +378,9 @@ header h1 {
   color: var(--fg-dim);
 }
 .diag-reason-reactive-pv .diag-row-reason,
-.diag-reason-reactive-pv.diag-pill { background: rgba(251,146,60,0.20); color: #fdba74; }
+.diag-reason-reactive-pv.diag-pill { background: color-mix(in srgb, var(--amber) 18%, transparent); color: var(--amber); }
 .diag-reason-reactive-load .diag-row-reason,
-.diag-reason-reactive-load.diag-pill { background: rgba(250,204,21,0.20); color: #facc15; }
+.diag-reason-reactive-load.diag-pill { background: color-mix(in srgb, var(--fg) 12%, transparent); color: var(--fg); }
 .diag-reason-manual .diag-row-reason,
 .diag-reason-manual.diag-pill {
   background: color-mix(in srgb, var(--cyan) 18%, transparent);
@@ -400,9 +400,9 @@ header h1 {
   font-weight: 600;
   margin-right: 0.4rem;
 }
-.diag-ev { background: rgba(6,182,212,0.18); color: #67e8f9; }
-.diag-lp-policy { background: rgba(34,197,94,0.16); color: #86efac; }
-.diag-lp-warn { background: rgba(251,191,36,0.18); color: #fde68a; }
+.diag-ev { background: color-mix(in srgb, var(--violet) 18%, transparent); color: var(--violet); }
+.diag-lp-policy { background: color-mix(in srgb, var(--fg-muted) 18%, transparent); color: var(--fg-dim); }
+.diag-lp-warn { background: color-mix(in srgb, var(--fg) 12%, transparent); color: var(--fg); }
 
 /* Detail pane — single scroll container so the chart can roll out
    of view on short viewports (small laptops); the sticky thead still
@@ -517,21 +517,22 @@ header h1 {
 }
 
 /* ---- Setup banner (bootstrap / no-config) ---- */
+/* A first step, not a failure: ink, as .self-tune-warning. */
 .setup-banner {
-  background: rgba(245, 158, 11, 0.15);
-  border-bottom: 1px solid rgba(245, 158, 11, 0.4);
-  color: #fbbf24;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 30%, transparent);
+  color: var(--fg);
   text-align: center;
   padding: 10px 16px;
   font-size: 0.9rem;
 }
 .setup-banner a {
-  color: #f59e0b;
+  color: var(--fg);
   font-weight: 600;
   text-decoration: underline;
 }
 .setup-banner a:hover {
-  color: #fbbf24;
+  color: var(--fg-dim);
 }
 
 /* ---- Storage-health banner (DB corruption auto-recovered) ---- */
@@ -574,7 +575,7 @@ header h1 {
   padding: 12px 16px;
   font-size: 0.85rem;
   color: var(--text-dim);
-  background: rgba(255, 255, 255, 0.03);
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
   border: 1px dashed var(--border);
   border-radius: var(--radius);
 }
@@ -583,7 +584,7 @@ header h1 {
   text-decoration: underline;
 }
 .no-devices-prompt a:hover {
-  color: #7788ff;
+  color: var(--fg);
 }
 
 /* ---- Main ---- */
@@ -646,7 +647,7 @@ main {
   gap: 16px;
   padding: 4px 16px;
   background: var(--bg-card, #161616);
-  border-top: 1px solid rgba(255,255,255,0.06);
+  border-top: 1px solid var(--line);
   font-size: 0.72rem;
   color: var(--text-dim, #a0a0a0);
   z-index: 50;
@@ -670,9 +671,9 @@ main {
 #sb-drivers > span {
   white-space: nowrap;
 }
-.sb-ok { color: #22c55e; }
-.sb-warn { color: #f59e0b; }
-.sb-err { color: #ef4444; }
+.sb-ok { color: var(--live); }
+.sb-warn { color: var(--fg); }
+.sb-err { color: var(--alarm); }
 
 /* Make room so content doesn't hide behind the fixed bar */
 body { padding-bottom: 28px; }
@@ -945,7 +946,7 @@ body { padding-bottom: 28px; }
 }
 .driver-stats .stat-warn {
   margin-left: 0.4rem;
-  color: #f59e0b;
+  color: var(--fg);
   font-size: 0.75rem;
 }
 
@@ -1114,20 +1115,14 @@ footer {
   overflow: hidden;
 }
 
-.soc-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #ef4444 0%, #f59e0b 30%, #22c55e 60%);
-  transition: width 0.3s;
-}
-
+/* The grid's hue, as the iPhone's meter; alarm only near the limit. */
 .fuse-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--green-e);
   transition: width 0.3s, background 0.3s;
 }
 
-.fuse-fill.warn { background: #f59e0b; }
-.fuse-fill.crit { background: #ef4444; }
+.fuse-fill.crit { background: var(--alarm); }
 
 /* Per-phase fuse bars — one row per phase configured in fuse.phases. */
 .fuse-phases {
@@ -1155,16 +1150,12 @@ footer {
 }
 .fuse-phase-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--green-e);
   transition: width 0.3s, background 0.3s;
 }
-.fuse-phase-fill.warn { background: #f59e0b; }
-.fuse-phase-fill.crit { background: #ef4444; }
-/* When the phase is exporting (current flowing out of site), tint the
-   bar blue so the direction is visible at a glance. */
-.fuse-phase-fill.export { background: #3b82f6; }
-.fuse-phase-fill.export.warn { background: #60a5fa; }
-.fuse-phase-fill.export.crit { background: #93c5fd; }
+.fuse-phase-fill.crit { background: var(--alarm); }
+/* The grid is one hue both ways; the signed value says export. */
+.fuse-phase-fill.export { background: var(--green-e); }
 .fuse-phase-val {
   font-size: 11px;
   color: var(--text);
@@ -1690,7 +1681,7 @@ footer {
   flex-wrap: wrap;
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px dashed rgba(255,255,255,0.08);
+  border-top: 1px dashed var(--line);
 }
 .card-hint {
   font-size: 0.72rem;
@@ -1698,30 +1689,36 @@ footer {
   margin-top: 6px;
   display: none;
 }
-.card-hint-warn { color: #fbbf24; }
+.card-hint-warn { color: var(--alarm); }
 
 .ha-status-indicator {
   padding: 8px 10px;
   border-radius: 5px;
   font-size: 0.82rem;
   margin-bottom: 10px;
-  border: 1px solid rgba(255,255,255,0.1);
-  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
   color: var(--text-dim, #a0a0a0);
 }
 .ha-status-indicator.ha-ok {
-  border-color: rgba(34,197,94,0.4);
-  background: rgba(34,197,94,0.08);
-  color: #86efac;
+  border-color: color-mix(in srgb, var(--live) 40%, transparent);
+  background: color-mix(in srgb, var(--live) 8%, transparent);
+  color: var(--live);
 }
 .ha-status-indicator.ha-warn {
-  border-color: rgba(251,191,36,0.4);
-  background: rgba(251,191,36,0.08);
-  color: #fbbf24;
+  border-color: color-mix(in srgb, var(--alarm) 40%, transparent);
+  background: color-mix(in srgb, var(--alarm) 8%, transparent);
+  color: var(--alarm);
+}
+/* A change waiting for Save is not a failure. */
+.ha-status-indicator.ha-pending {
+  border-color: color-mix(in srgb, var(--fg) 30%, transparent);
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  color: var(--fg);
 }
 .ha-status-indicator.ha-off {
-  border-color: rgba(148,163,184,0.3);
-  background: rgba(148,163,184,0.08);
+  border-color: color-mix(in srgb, var(--fg-muted) 30%, transparent);
+  background: color-mix(in srgb, var(--fg-muted) 8%, transparent);
   color: var(--fg-dim, #a0a0a0);
 }
 
@@ -2056,14 +2053,14 @@ footer {
   border: 1px solid transparent;
 }
 .creds-badge.creds-saved {
-  color: #86efac;
-  background: rgba(34,197,94,0.08);
-  border-color: rgba(34,197,94,0.3);
+  color: var(--live);
+  background: color-mix(in srgb, var(--live) 8%, transparent);
+  border-color: color-mix(in srgb, var(--live) 30%, transparent);
 }
 .creds-badge.creds-missing {
-  color: #fbbf24;
-  background: rgba(251,191,36,0.08);
-  border-color: rgba(251,191,36,0.3);
+  color: var(--accent-e);
+  background: color-mix(in srgb, var(--accent-e) 8%, transparent);
+  border-color: color-mix(in srgb, var(--accent-e) 30%, transparent);
 }
 
 /* Disabled driver card — faded out so it's obvious at a glance that
@@ -2071,14 +2068,14 @@ footer {
    actionable thing on the card. */
 .driver-card-disabled {
   opacity: 0.55;
-  background: rgba(148,163,184,0.04);
+  background: color-mix(in srgb, var(--fg-muted) 4%, transparent);
 }
 
 /* Configured but not running — spawn failed (typically cloud auth).
-   Warmer colour than disabled to draw attention. */
+   A failure, so it takes the alarm state. */
 .driver-card-warn {
-  border-color: rgba(251,191,36,0.4);
-  background: rgba(251,191,36,0.04);
+  border-color: color-mix(in srgb, var(--alarm) 40%, transparent);
+  background: color-mix(in srgb, var(--alarm) 4%, transparent);
 }
 
 /* Help "?" badges with hover bubble. Uses native `title` attr too for
@@ -2157,14 +2154,14 @@ footer {
   min-width: 180px;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
 }
-.plan-tip .tip-head { font-weight: 600; margin-bottom: 4px; color: #fff; }
+.plan-tip .tip-head { font-weight: 600; margin-bottom: 4px; color: var(--fg); }
 .plan-tip .tip-row { display: flex; justify-content: space-between; padding: 1px 0; }
 .plan-tip .tip-row span { color: var(--text-dim, #a0a0a0); }
 .plan-tip .tip-breakdown {
   margin: 4px 0 2px;
   padding: 4px 0 2px;
-  border-top: 1px dashed rgba(255,255,255,0.08);
-  border-bottom: 1px dashed rgba(255,255,255,0.08);
+  border-top: 1px dashed var(--line);
+  border-bottom: 1px dashed var(--line);
   font-size: 0.72rem;
 }
 .plan-tip .tip-break-row {
@@ -2185,12 +2182,12 @@ footer {
   margin-right: 6px;
   flex-shrink: 0;
 }
-.plan-tip .tip-break-row b { color: #ddd; font-weight: 500; }
+.plan-tip .tip-break-row b { color: var(--fg-label); font-weight: 500; }
 .plan-tip .tip-reason {
   margin-top: 6px;
   padding-top: 6px;
-  border-top: 1px dashed rgba(255,255,255,0.1);
-  color: #86efac;
+  border-top: 1px dashed var(--line);
+  color: var(--fg-dim);
   font-style: italic;
 }
 
@@ -2198,7 +2195,7 @@ footer {
    body.advanced reveals them. Default is simple. */
 body.simple .advanced-only { display: none !important; }
 #ui-mode-toggle { margin-right: 8px; }
-body.advanced #ui-mode-toggle { color: #fbbf24; }
+body.advanced #ui-mode-toggle { color: var(--accent-e); }
 
 .twins-grid {
   display: grid;
@@ -2207,8 +2204,8 @@ body.advanced #ui-mode-toggle { color: #fbbf24; }
   margin-top: 10px;
 }
 .twin-card {
-  background: rgba(255,255,255,0.03);
-  border: 1px solid rgba(255,255,255,0.08);
+  background: color-mix(in srgb, var(--fg) 3%, transparent);
+  border: 1px solid var(--line);
   border-radius: 6px;
   padding: 12px;
 }
@@ -2428,13 +2425,13 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
   background: var(--surface2);
 }
 .self-tune-warning {
-  background: rgba(245, 158, 11, 0.1);
-  border: 1px solid #f59e0b;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 30%, transparent);
   border-radius: 4px;
   padding: 10px 12px;
   margin: 12px 0;
   font-size: 0.85rem;
-  color: #fbbf24;
+  color: var(--fg);
 }
 .self-tune-progress {
   margin: 12px 0;
@@ -2454,7 +2451,7 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 }
 .self-tune-bar-fill {
   height: 100%;
-  background: #3b82f6;
+  background: var(--fg);
   transition: width 0.5s linear;
 }
 .self-tune-bar-overall {
@@ -2466,7 +2463,7 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
 }
 .self-tune-bar-overall-fill {
   height: 100%;
-  background: #22c55e;
+  background: var(--fg-dim);
   transition: width 0.5s linear;
 }
 .self-tune-meta {
@@ -2494,8 +2491,9 @@ body.ftw-app .forecast-card .twin-profile-toggle button { min-height: 40px; font
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
-.tune-delta-positive { color: #22c55e; }
-.tune-delta-negative { color: #ef4444; }
+/* A change is not a state: the sign says which way. */
+.tune-delta-positive,
+.tune-delta-negative { color: var(--fg); }
 .tune-delta-neutral { color: var(--text-dim); }
 
 /* "Are we in control?" — Core's answer comes first in each device sheet.

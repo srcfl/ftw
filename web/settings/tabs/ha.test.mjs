@@ -29,7 +29,7 @@ describe("Home Assistant status", () => {
 
   it("marks a checked but unsaved form without calling it disabled", () => {
     assert.deepEqual(statusView({ enabled: false }, true), {
-      className: "ha-status-indicator ha-warn",
+      className: "ha-status-indicator ha-pending",
       text: "○  unsaved change — Save to enable",
     });
   });

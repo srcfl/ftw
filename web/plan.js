@@ -36,14 +36,30 @@ import {
     return window.ftwThemeColors
       ? window.ftwThemeColors.palette()
       : {
-          text: '#e8e8e8',
-          dim: '#a0a0a0',
-          muted: '#858585',
-          line: '#2a2a2a',
-          panel: '#161616',
-          accent: '#f5b942',
+          text: '#eef3ff',
+          dim: '#9aa5b8',
+          muted: '#727d90',
+          line: '#1b2433',
+          panel: '#0b111c',
+          accent: '#eef3ff',
+          solar: '#ffe14d',
+          stores: '#18d9ff',
+          gives: '#ffb000',
+          grid: '#ff5fa8',
+          car: '#b69cff',
+          live: '#83f52c',
+          alarm: '#ff453a',
         };
   }
+
+  // A price is a level of ink, the dearer the stronger, as Theme.price on
+  // the phone. The grid tariff and VAT are fixed parts, fainter still.
+  const PRICE_INK = { cheap: 0.32, flat: 0.5, dear: 0.8, tariff: 0.35, vat: 0.2 };
+  const inkSwatch = (role, alpha) =>
+    `color-mix(in srgb, var(${role}) ${Math.round(alpha * 100)}%, transparent)`;
+  // A plan's marks take their hue at this strength, weaker than the full
+  // one that says live (Theme.plan on the phone).
+  const PLAN_INK = 0.75;
 
   function escapeHTML(value) {
     return String(value)
@@ -345,7 +361,7 @@ import {
       alert = document.createElement('div');
       alert.id = 'plan-optimizer-fallback';
       alert.setAttribute('role', 'alert');
-      alert.style.cssText = 'margin:8px 0;padding:9px 11px;border:1px solid #f59e0b;border-radius:6px;background:rgba(245,158,11,.12);font-size:12px;line-height:1.45;overflow-wrap:anywhere';
+      alert.style.cssText = 'margin:8px 0;padding:9px 11px;border:1px solid color-mix(in srgb, var(--fg) 30%, transparent);border-radius:6px;background:color-mix(in srgb, var(--fg) 6%, transparent);font-size:12px;line-height:1.45;overflow-wrap:anywhere';
       const help = section.querySelector('.plan-help');
       section.insertBefore(alert, help || section.firstChild);
     }
@@ -483,7 +499,7 @@ import {
     // Now-line
     if (now >= tMin && now <= tMax) {
       const xNow = xScale(now);
-      ctx.strokeStyle = '#ef4444';
+      ctx.strokeStyle = C.text;
       ctx.lineWidth = 1.2;
       ctx.setLineDash([3, 3]);
       ctx.beginPath();
@@ -494,15 +510,16 @@ import {
     }
 
     // ---- Price bars ----
-    // Stacked: spot (bottom, tercile-colored) + grid tariff (middle,
-    // neutral slate) + VAT (top, lighter slate). Reads grid tariff +
+    // Stacked: spot (bottom, ink by tercile) + grid tariff (middle,
+    // faint ink3) + VAT (top, fainter ink3). Reads grid tariff +
     // VAT % from /api/config so the split matches the real tariff
     // engine (prices.Applier). Spot does all the visual work —
     // it's the part that drives the planner's timing decisions —
-    // while the fixed portions stay quiet in neutral slate so they
-    // don't distract from the cheap/expensive signal. Falls back to
-    // one opaque bar when spot_ore isn't available (legacy price
-    // points from before the Action.SpotOre surface, or a tariff
+    // while the fixed portions stay quiet so they don't distract from
+    // the cheap/expensive signal. A price is a level, not a state: no
+    // red and no green, the dearer the stronger, as on the phone.
+    // Falls back to one bar when spot_ore isn't available (legacy
+    // price points from before the Action.SpotOre surface, or a tariff
     // engine configured with zero grid tariff + VAT).
     const sortedTotals = [...totals].sort((a, b) => a - b);
     const p25 = sortedTotals[Math.floor(sortedTotals.length * 0.25)] || priceMin;
@@ -523,26 +540,20 @@ import {
       // the bar reads as a breakdown. Otherwise render a single flat
       // tercile-colored bar (legacy behavior).
       const spotOre = bar.spot_ore ?? bar.spot_ore_kwh ?? null;
-      let parts; // [{ore, rgb, alpha, label}] bottom→top
+      // The tercile sets the SPOT portion only — that's the number the
+      // planner is actually deciding against.
+      const level = priceVal <= p25 ? PRICE_INK.cheap
+        : priceVal >= p75 ? PRICE_INK.dear : PRICE_INK.flat;
+      let parts; // [{ore, color, alpha, label}] bottom→top
       if (spotOre != null && (gridTariff > 0 || vatPct > 0)) {
         const vatOre = Math.max(0, (spotOre + gridTariff) * (vatPct / 100));
-        // Tercile color is applied to the SPOT portion only — that's
-        // the number the planner is actually deciding against.
-        let spotRgb;
-        if (priceVal <= p25) spotRgb = '34,197,94';       // green
-        else if (priceVal >= p75) spotRgb = '239,68,68';  // red
-        else spotRgb = '148,163,184';                     // slate
         parts = [
-          { ore: spotOre,    rgb: spotRgb,       alpha: 0.72, label: 'spot' },
-          { ore: gridTariff, rgb: '100,116,139', alpha: 0.45, label: 'grid' },
-          { ore: vatOre,     rgb: '100,116,139', alpha: 0.25, label: 'vat' },
+          { ore: spotOre,    color: C.text,  alpha: level, label: 'spot' },
+          { ore: gridTariff, color: C.muted, alpha: PRICE_INK.tariff, label: 'grid' },
+          { ore: vatOre,     color: C.muted, alpha: PRICE_INK.vat, label: 'vat' },
         ];
       } else {
-        let baseRgb;
-        if (priceVal <= p25) baseRgb = '34,197,94';
-        else if (priceVal >= p75) baseRgb = '239,68,68';
-        else baseRgb = '148,163,184';
-        parts = [{ ore: priceVal, rgb: baseRgb, alpha: 0.60, label: 'price' }];
+        parts = [{ ore: priceVal, color: C.text, alpha: level, label: 'price' }];
       }
       const rectX = x0;
       const rectW = Math.max(1, x1 - x0 - 1);
@@ -556,8 +567,10 @@ import {
         const segTopY    = priceY(runningOre + part.ore);
         const segY = Math.min(segBottomY, segTopY);
         const segH = Math.abs(segBottomY - segTopY);
-        ctx.fillStyle = `rgba(${part.rgb},${part.alpha})`;
+        ctx.globalAlpha = part.alpha;
+        ctx.fillStyle = part.color;
         ctx.fillRect(rectX, segY, rectW, segH);
+        ctx.globalAlpha = 1;
         runningOre += part.ore;
       }
       // Track for hover hit-test.
@@ -585,7 +598,8 @@ import {
     // the battery behaves unexpectedly (e.g. plan says 0.8 kW PV,
     // reality is 4.6 kW, so the battery absorbs the unforecast surplus).
     // Fall back to the raw weather forecast when there's no plan.
-    ctx.strokeStyle = 'rgba(34,197,94,0.9)';
+    ctx.strokeStyle = C.solar;
+    ctx.globalAlpha = PLAN_INK;
     ctx.lineWidth = 2;
     ctx.beginPath();
     let first = true;
@@ -610,10 +624,10 @@ import {
     ctx.stroke();
 
     // Load forecast from the plan's per-slot predictions (twin-driven).
-    // Rendered above the PV curve as a pale-yellow dashed line so we can
+    // Rendered above the PV curve in ink, the home's colour, so we can
     // see what the optimizer expects the house to consume each slot.
     if (plan && plan.actions && plan.actions.length) {
-      ctx.strokeStyle = '#fde68a';
+      ctx.strokeStyle = C.text;
       ctx.lineWidth = 1.8;
       ctx.setLineDash([]);
       ctx.beginPath();
@@ -629,6 +643,7 @@ import {
       ctx.stroke();
       ctx.setLineDash([]);
     }
+    ctx.globalAlpha = 1;
 
     // The margin the plan holds back is shaded between the forecast line and
     // the value the plan counts on: sun it does not count on, and use it
@@ -637,11 +652,12 @@ import {
     const hasPointForecast = Boolean(plan?.actions?.some(a => Number.isFinite(a.forecast_pv_w)));
     if (hasPointForecast) {
       const bands = [
-        ["forecast_pv_w", "pv_w", "rgba(34,197,94,0.22)", (v) => v],
-        ["forecast_load_w", "load_w", "rgba(253,230,138,0.22)", siteLoadW],
+        ["forecast_pv_w", "pv_w", C.solar, (v) => v],
+        ["forecast_load_w", "load_w", C.text, siteLoadW],
       ];
       ctx.save();
       ctx.beginPath(); ctx.rect(pad.l, powerY0, plotW, powerH); ctx.clip();
+      ctx.globalAlpha = 0.22;
       for (const [forecastField, planField, fill, value] of bands) {
         const points = [];
         for (const a of plan.actions) {
@@ -663,14 +679,14 @@ import {
     if (legend?.classList.contains("chart-legend")) {
       const pvLegend = legend.querySelector('[title*="solar forecast"]');
       const loadLegend = legend.querySelector('[title*="load twin"]');
-      if (pvLegend) pvLegend.innerHTML = '<span class="legend-color" style="background:#22c55e"></span> ' + (hasPointForecast ? "PV forecast" : "PV the plan counts on");
-      if (loadLegend) loadLegend.innerHTML = '<span class="legend-color" style="background:#fde68a"></span> ' + (hasPointForecast ? "Load forecast" : "Load the plan prepares for");
+      if (pvLegend) pvLegend.innerHTML = '<span class="legend-color" style="background:var(--amber)"></span> ' + (hasPointForecast ? "PV forecast" : "PV the plan counts on");
+      if (loadLegend) loadLegend.innerHTML = '<span class="legend-color" style="background:var(--fg)"></span> ' + (hasPointForecast ? "Load forecast" : "Load the plan prepares for");
       let item = legend.querySelector(".planning-margin-legend");
       if (!item) {
         item = document.createElement("span");
         item.className = "legend-item planning-margin-legend";
         item.title = "Sun the plan does not count on, and use it prepares for beyond the forecast";
-        item.innerHTML = '<span class="legend-color" style="background:rgba(34,197,94,0.35)"></span> Shaded: margin the plan holds back';
+        item.innerHTML = '<span class="legend-color" style="background:' + inkSwatch('--amber', 0.35) + '"></span> Shaded: margin the plan holds back';
         legend.appendChild(item);
       }
       item.hidden = !hasPointForecast;
@@ -684,8 +700,8 @@ import {
     if (evLegend) evLegend.hidden = !evActions.some(a => plannedEVWatts(a) > 0);
     ctx.save();
     ctx.beginPath(); ctx.rect(pad.l, powerY0, plotW, powerH); ctx.clip();
-    ctx.strokeStyle = 'rgba(34,211,238,0.95)';
-    ctx.fillStyle = 'rgba(34,211,238,0.15)';
+    ctx.strokeStyle = C.car;
+    ctx.fillStyle = C.car;
     ctx.lineWidth = 1.8;
     for (const a of evActions) {
       const watts = plannedEVWatts(a);
@@ -694,7 +710,9 @@ import {
       if (watts <= 0 || end <= tMin || start >= tMax || end <= start) continue;
       const x0 = xScale(Math.max(start, tMin)), x1 = xScale(Math.min(end, tMax));
       const y = powerY(watts);
+      ctx.globalAlpha = 0.15;
       ctx.fillRect(x0, y, x1 - x0, powerYCenter - y);
+      ctx.globalAlpha = PLAN_INK;
       ctx.beginPath(); ctx.moveTo(x0, powerYCenter); ctx.lineTo(x0, y);
       ctx.lineTo(x1, y); ctx.lineTo(x1, powerYCenter); ctx.stroke();
     }
@@ -733,13 +751,14 @@ import {
         if (a.slot_start_ms > tMax) break;
         const x0 = xScale(a.slot_start_ms);
         const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        let color;
-        if (a.battery_w > 100)       color = 'rgba(245,158,11,0.6)';   // amber = charging
-        else if (a.battery_w < -100) color = 'rgba(139,92,246,0.6)';   // purple = discharging
-        else                         color = 'rgba(100,116,139,0.2)';  // slate = idle
-        ctx.fillStyle = color;
+        // The battery stores in one hue and gives in another; idle is a
+        // trace of ink.
+        if (a.battery_w > 100)       { ctx.fillStyle = C.stores; ctx.globalAlpha = PLAN_INK; }
+        else if (a.battery_w < -100) { ctx.fillStyle = C.gives; ctx.globalAlpha = PLAN_INK; }
+        else                         { ctx.fillStyle = C.text; ctx.globalAlpha = 0.08; }
         ctx.fillRect(x0, modeBandY0, Math.max(1, x1 - x0 - 1), modeBandH);
       }
+      ctx.globalAlpha = 1;
       ctx.fillStyle = C.dim;
       ctx.font = '9px system-ui, sans-serif';
       ctx.textAlign = 'left';
@@ -753,17 +772,19 @@ import {
         const x0 = xScale(a.slot_start_ms);
         const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
         const y = powerY(a.battery_w);
-        const color = a.battery_w >= 0 ? 'rgba(245,158,11,0.65)' : 'rgba(139,92,246,0.65)';
-        ctx.fillStyle = color;
+        ctx.fillStyle = a.battery_w >= 0 ? C.stores : C.gives;
+        ctx.globalAlpha = PLAN_INK;
         ctx.fillRect(x0, Math.min(y, powerYCenter), Math.max(1, x1 - x0 - 1), Math.abs(y - powerYCenter));
       }
+      ctx.globalAlpha = 1;
       // SoC line — clip to the SoC band so a reconstructed point past
       // 0–100% cannot paint through the power bars.
       ctx.save();
       ctx.beginPath();
       ctx.rect(pad.l, socY0, plotW, socH);
       ctx.clip();
-      ctx.strokeStyle = 'rgba(96,165,250,0.95)';
+      // The battery's level takes its storing hue.
+      ctx.strokeStyle = C.stores;
       ctx.lineWidth = 2;
       ctx.beginPath();
       first = true;
@@ -995,13 +1016,13 @@ import {
         const tipVatOre = Math.max(0, (tipSpot + tipGrid) * (tipVat / 100));
         lines.push(
           `<div class="tip-breakdown">` +
-            `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(148,163,184,0.72)"></span>` +
+            `<div class="tip-break-row"><span class="tip-break-sw" style="background:${inkSwatch('--fg', PRICE_INK.flat)}"></span>` +
               `<span title="Raw Nord Pool wholesale price — the part that varies hour by hour and drives the planner's timing decisions">spot</span>` +
               `<b>${inUnit(tipSpot)} ${u.label}</b></div>` +
-            `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(100,116,139,0.45)"></span>` +
+            `<div class="tip-break-row"><span class="tip-break-sw" style="background:${inkSwatch('--fg-muted', PRICE_INK.tariff)}"></span>` +
               `<span title="Fixed transport / network fee added by the grid operator — doesn't change hour to hour">grid tariff</span>` +
               `<b>+${inUnit(tipGrid)} ${u.label}</b></div>` +
-            `<div class="tip-break-row"><span class="tip-break-sw" style="background:rgba(100,116,139,0.25)"></span>` +
+            `<div class="tip-break-row"><span class="tip-break-sw" style="background:${inkSwatch('--fg-muted', PRICE_INK.vat)}"></span>` +
               `<span title="Value-added tax (moms) applied on spot + grid tariff">VAT ${tipVat.toFixed(0)}%</span>` +
               `<b>+${inUnit(tipVatOre)} ${u.label}</b></div>` +
           `</div>`

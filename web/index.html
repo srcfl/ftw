@@ -443,11 +443,11 @@
           <p id="chart-history-quality" class="history-data-warning" role="status" hidden></p>
         </div>
         <div class="chart-legend" id="chart-legend">
-          <span class="legend-item" data-toggle="grid"><span class="legend-color" style="background:#ef4444"></span> Grid</span>
-          <span class="legend-item" data-toggle="pv"><span class="legend-color" style="background:#22c55e"></span> PV</span>
-          <span class="legend-item" data-toggle="pv_fc"><span class="legend-color legend-dash" style="border-color:#86efac"></span> PV fc</span>
+          <span class="legend-item" data-toggle="grid"><span class="legend-color" style="background:var(--red-e)"></span> Grid</span>
+          <span class="legend-item" data-toggle="pv"><span class="legend-color" style="background:var(--amber)"></span> PV</span>
+          <span class="legend-item" data-toggle="pv_fc"><span class="legend-color legend-dash" style="border-color:var(--amber)"></span> PV fc</span>
           <span class="legend-item" data-toggle="load"><span class="legend-color" style="background:var(--white-s)"></span> Load</span>
-          <span class="legend-item" data-toggle="load_fc"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load fc</span>
+          <span class="legend-item" data-toggle="load_fc"><span class="legend-color legend-dash" style="border-color:var(--fg)"></span> Load fc</span>
           <!-- Battery driver legend items are appended dynamically by app.js
                as each battery-capable driver appears in /api/status. -->
         </div>
@@ -622,16 +622,16 @@
           <canvas id="plan-chart" width="800" height="260"></canvas>
         </div>
         <div class="chart-legend">
-          <span class="legend-item" title="Raw Nord Pool wholesale price — bottom segment of each stacked bar, colour shifts green→red with the horizon's price tercile"><span class="legend-color" style="background:rgba(34,197,94,0.72)"></span> Spot (cheap)</span>
-          <span class="legend-item" title="Raw Nord Pool wholesale price in the most expensive third of the horizon"><span class="legend-color" style="background:rgba(239,68,68,0.72)"></span> Spot (expensive)</span>
-          <span class="legend-item" title="Fixed transport / network fee from the grid operator — stacked on top of spot, doesn't change hour to hour"><span class="legend-color" style="background:rgba(100,116,139,0.45)"></span> Grid tariff</span>
-          <span class="legend-item" title="Value-added tax (moms) on spot + grid tariff — top segment of each stacked bar"><span class="legend-color" style="background:rgba(100,116,139,0.25)"></span> VAT</span>
-          <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
-          <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
-          <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:#22d3ee"></span> Car charging</span>
-          <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
-          <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
-          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price — bottom segment of each stacked bar, ink by the horizon's price tercile: the dearer, the stronger"><span class="legend-color" style="background:color-mix(in srgb, var(--fg) 32%, transparent)"></span> Spot (cheap)</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price in the most expensive third of the horizon"><span class="legend-color" style="background:color-mix(in srgb, var(--fg) 80%, transparent)"></span> Spot (expensive)</span>
+          <span class="legend-item" title="Fixed transport / network fee from the grid operator — stacked on top of spot, doesn't change hour to hour"><span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 35%, transparent)"></span> Grid tariff</span>
+          <span class="legend-item" title="Value-added tax (moms) on spot + grid tariff — top segment of each stacked bar"><span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 20%, transparent)"></span> VAT</span>
+          <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:var(--amber)"></span> PV forecast</span>
+          <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:var(--fg)"></span> Load forecast</span>
+          <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:var(--violet)"></span> Car charging</span>
+          <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:var(--cyan)"></span> Charge</span>
+          <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:var(--energy-gives)"></span> Discharge</span>
+          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:var(--cyan)"></span> SoC</span>
         </div>
         <!-- The escape hatch for "why is it doing that?". Downloads one
              Markdown file holding the live state, the active plan slot,
@@ -916,15 +916,15 @@
       <p>Each bar is one 15-minute slot, stacked as the three pieces of your real consumer price:</p>
       <ul>
         <li>
-          <span class="legend-color" style="background:rgba(148,163,184,0.72);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
-          <b>spot</b> — raw Nord Pool wholesale price. Colours green / slate / red by tercile across the horizon (cheap / mid / expensive). This is the part the planner actually optimises against.
+          <span class="legend-color" style="background:color-mix(in srgb, var(--fg) 50%, transparent);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <b>spot</b> — raw Nord Pool wholesale price, in ink by tercile across the horizon: the dearer the slot, the stronger the bar. This is the part the planner actually optimises against.
         </li>
         <li>
-          <span class="legend-color" style="background:rgba(100,116,139,0.45);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 35%, transparent);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
           <b>grid tariff</b> — fixed transport / network fee from the grid operator (öre/kWh). Same value every slot.
         </li>
         <li>
-          <span class="legend-color" style="background:rgba(100,116,139,0.25);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 20%, transparent);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
           <b>VAT</b> — moms applied to spot + grid tariff. Set in <em>Settings → Price</em>.
         </li>
       </ul>

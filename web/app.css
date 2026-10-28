@@ -3123,7 +3123,7 @@ body.ftw-app .twin-profile-toggle button:focus-visible {
 .ev-charge-levels > div { display: flex; flex-direction: column; gap: 5px; }
 .ev-charge-levels span, .ev-charge-levels small { font-size: .78rem; color: var(--text-dim); }
 .ev-charge-levels strong { font-size: 1.8rem; font-weight: 600; line-height: 1.2; }
-.ev-timeline { --ev-plan-color: #22d3ee; margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.ev-timeline { --ev-plan-color: var(--violet); margin: 16px 0; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
 .ev-timeline-heading { display: flex; justify-content: space-between; gap: 12px; font-size: .85rem; }
 .ev-timeline-heading > span { color: var(--text-dim); white-space: nowrap; }
 .ev-plan-track { position: relative; height: 28px; margin-top: 14px; border-radius: 5px; overflow: hidden; background: color-mix(in srgb, var(--line) 65%, transparent); }
@@ -3144,5 +3144,4 @@ body.ftw-app .twin-profile-toggle button:focus-visible {
 .ev-plan-ticks > span:first-child { text-align: left; }
 .ev-plan-ticks > span:last-child { text-align: right; }
 .ev-plan-ticks small { display: block; font: inherit; margin-top: 3px; }
-[data-theme="light"] .ev-timeline { --ev-plan-color: #0891b2; }
 .ev-charge-levels[hidden] { display: none; }

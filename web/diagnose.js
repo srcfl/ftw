@@ -51,12 +51,19 @@
     return window.ftwThemeColors
       ? window.ftwThemeColors.palette()
       : {
-          text: '#e8e8e8',
-          dim: '#a0a0a0',
-          muted: '#858585',
-          line: '#2a2a2a',
-          panel: '#161616',
-          accent: '#f5b942',
+          text: '#eef3ff',
+          dim: '#9aa5b8',
+          muted: '#727d90',
+          line: '#1b2433',
+          panel: '#0b111c',
+          accent: '#eef3ff',
+          solar: '#ffe14d',
+          stores: '#18d9ff',
+          gives: '#ffb000',
+          grid: '#ff5fa8',
+          car: '#b69cff',
+          live: '#83f52c',
+          alarm: '#ff453a',
         };
   }
 
@@ -516,18 +523,18 @@
     ctx.fillRect(pad.l, socY0, plotW, socH);
     ctx.restore();
 
-    // Price bars — green cheap, red expensive (relative to horizon mean)
+    // Price bars — a level of ink against the horizon mean, the dearer
+    // the stronger. A price is not a state, so no red and no green.
     const priceMean = slots.reduce((a, s) => a + s.price_ore, 0) / nSlots;
+    ctx.fillStyle = C.text;
     slots.forEach((s, i) => {
       const x = pad.l + i * barW;
       const h = (s.price_ore / maxPrice) * priceH;
       const y = priceY0 + priceH - h;
-      // Cheap slots (below mean) in green, expensive in red
-      ctx.fillStyle = s.price_ore < priceMean
-        ? 'rgba(34,197,94,0.75)'
-        : 'rgba(239,68,68,0.75)';
+      ctx.globalAlpha = s.price_ore < priceMean ? 0.32 : 0.8;
       ctx.fillRect(x, y, barW, h);
     });
+    ctx.globalAlpha = 1;
 
     // Power zero line
     const powerMidY = powerY0 + powerH / 2;
@@ -542,11 +549,12 @@
     const powerScale = (powerH / 2) / maxAbsPower;
     slots.forEach((s, i) => {
       const x = pad.l + i * barW;
-      // Battery — orange charge up, purple discharge down
+      // Battery — stores up, gives down, in its two hues
       const bw = s.battery_w || 0;
+      ctx.globalAlpha = 0.75;
       if (bw !== 0) {
         const h = bw * powerScale;
-        ctx.fillStyle = bw > 0 ? 'rgba(245,158,11,0.75)' : 'rgba(139,92,246,0.75)';
+        ctx.fillStyle = bw > 0 ? C.stores : C.gives;
         ctx.fillRect(x, powerMidY - h, barW, h);
       }
       // EV — stacked atop battery when both charging
@@ -554,13 +562,14 @@
       if (ew > 0) {
         const bh = (bw > 0 ? bw : 0) * powerScale;
         const h = ew * powerScale;
-        ctx.fillStyle = 'rgba(6,182,212,0.75)';
+        ctx.fillStyle = C.car;
         ctx.fillRect(x, powerMidY - bh - h, barW, h);
       }
+      ctx.globalAlpha = 1;
     });
 
     // Grid line — overlay
-    ctx.strokeStyle = '#ef4444';
+    ctx.strokeStyle = C.grid;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     slots.forEach((s, i) => {
@@ -571,8 +580,8 @@
     });
     ctx.stroke();
 
-    // PV line — green, negative is pulled up visually (PV is −W site sign)
-    ctx.strokeStyle = '#22c55e';
+    // PV line — solar, negative is pulled up visually (PV is −W site sign)
+    ctx.strokeStyle = C.solar;
     ctx.lineWidth = 1;
     ctx.beginPath();
     slots.forEach((s, i) => {
@@ -583,8 +592,8 @@
     });
     ctx.stroke();
 
-    // SoC line — blue, in bottom band
-    ctx.strokeStyle = '#60a5fa';
+    // SoC line — the battery's storing hue, in bottom band
+    ctx.strokeStyle = C.stores;
     ctx.lineWidth = 2;
     ctx.beginPath();
     slots.forEach((s, i) => {
