@@ -271,6 +271,9 @@ type stackSpec struct {
 	// engine is the planner's: core or energyplan. Empty takes
 	// FTW_SITE_ENGINE, else energyplan, as a beta or stable box runs.
 	engine string
+	// mode is the control mode the run selects: planner_self or empty for
+	// planner_passive_arbitrage, as the web app chooses.
+	mode string
 	// horizonH is the planner's horizon_hours; 0 leaves Core's 48 h.
 	horizonH int
 }
@@ -393,7 +396,7 @@ func (st *stack) up() error {
 	if err := st.startFTW(); err != nil {
 		return err
 	}
-	if _, err := call("POST", st.ftw+"/api/mode", map[string]any{"mode": "planner_passive_arbitrage"}, nil); err != nil {
+	if _, err := call("POST", st.ftw+"/api/mode", map[string]any{"mode": st.mode()}, nil); err != nil {
 		return err
 	}
 	st.rec = &recorder{ftw: st.ftw, path: filepath.Join(st.rundir, "ftw.jsonl")}
@@ -524,6 +527,22 @@ func (st *stack) engine() string {
 	return "energyplan"
 }
 
+// mode is the control mode this run selects, and plannerMode the planner
+// mode in its config that matches it.
+func (st *stack) mode() string {
+	if st.spec.mode != "" {
+		return st.spec.mode
+	}
+	return "planner_passive_arbitrage"
+}
+
+func (st *stack) plannerMode() string {
+	if st.mode() == "planner_self" {
+		return "self_consumption"
+	}
+	return "passive_arbitrage"
+}
+
 func (st *stack) ftwConfig() (string, error) {
 	var lps []map[string]any
 	for i := range st.spec.chargers {
@@ -566,7 +585,7 @@ func (st *stack) ftwConfig() (string, error) {
 		// battery chases the raw meter and covers the car (dispatch.go),
 		// which hides the stress on the fuse. Passive arbitrage is the
 		// mode the web app and a Charge restart return to.
-		"planner": map[string]any{"enabled": true, "engine": st.engine(), "mode": "passive_arbitrage"},
+		"planner": map[string]any{"enabled": true, "engine": st.engine(), "mode": st.plannerMode()},
 		"price":   map[string]any{"provider": "elprisetjustnu", "zone": "SE3", "base_url": st.prices.url()},
 	}
 	if st.spec.horizonH > 0 {

@@ -9,7 +9,8 @@ car on them. FTW talks to it over Modbus and OCPP as on a real site. Each
 scenario starts a fresh house and a fresh `state.db`, drives the house and
 FTW, and judges the run against fixed criteria from what flowed through the
 fuse (the house's record) and what FTW said (its API, once a second). FTW
-runs what a beta box runs: Energyplan in `planner_passive_arbitrage`. Its
+runs what a beta box runs: Energyplan in `planner_passive_arbitrage`, or in
+`planner_self` where a scenario needs PV surplus to charge the battery. Its
 prices are pinned: the test serves 24 h of fixed prices from the quarter the
 run starts in ([`prices_test.go`](prices_test.go)) through `price.base_url`,
 so a run does not depend on the day or the internet.
@@ -99,7 +100,7 @@ tick as 2 s more.
 | `s13-25` Socket reconnect | Charge now 16 A, the charger's connection gone for 10 s | Charge now goes on after the charger returns; no unplug seen | |
 | `s15-25` One-phase charger, Charge now | 25 A, 3 A per phase, an Easee wired on L1 (6-16 A, steps to 3 680 W, no phase mode); Charge now on the phases `/api/loadpoints` reports, as the app sends it, 180 s | 16 A on L1 within 60 s; held 95 %; fuse holds; no `fuse_limit` | yes |
 | `s15b-25`, `s15c-25` | as s15, phase mode `1p` and `auto` | as s15 | |
-| `s15bat-16` One-phase charger, battery rising | 16 A, 3 A per phase, the s15 charger, battery at 50 % following its EMS 8 s late; PV 2.1 kW rising every 30 s (+2.5 kW, then 1.5 kW) so Core charges the battery in steps; Charge now 6 s after the second step, while the raise is on its way | the battery order rose over 1 150 W in the 20 s before (setup check); car charging within 10 s; fuse holds; over the limit at most 3 s | |
+| `s15bat-16` One-phase charger, battery rising | 16 A, 3 A per phase, the s15 charger, battery at 50 % following its EMS 8 s late, `planner_self`; PV 2.1 kW rising every 30 s (+2.5 kW, then 1.5 kW) so Core charges the battery in steps; Charge now 6 s after the second step, while the raise is on its way | the battery order rose over 1 150 W in the 20 s before (setup check); car charging within 10 s; fuse holds; over the limit at most 3 s | |
 | `s15p-25` One-phase charger, planned | as s15, a plan for 600 Wh by the first quarter hour 15 min out | fuse holds; 90 % of the plan by the ready time; never called not following | |
 | `s14-25` One-phase car | an 11 kW charger with a one-phase car, a plan it cannot meet, 20 min | 3.4–3.8 kW over the last 10 min; never called not following | |
 | `s16-25` Import ceiling | 25 A, house 1.3 kW, battery idle at its floor, `peak_import_ceiling_w` 4 500, Charge now 16 A: house and the car's 4 140 W minimum are above the ceiling. Starts in an hour's first minutes or waits for :56, then runs one whole clock hour and 3 min | the car starts on the hour's room before :45; every clock hour's recorded import averages at most the ceiling + 1 %; the next hour stops the car within 60 s; while held it says `import_limit` 90 % of the time and never `fuse_limit`; fuse holds | |
