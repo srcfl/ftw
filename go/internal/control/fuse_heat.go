@@ -129,7 +129,9 @@ func (s *State) stepFuseHeat(meter *telemetry.DerReading, totalW float64) {
 // the phases' powers add up to the reading's total. Otherwise its current
 // counts as import, the safe side: a phase near 0 W, a reactive phase, a
 // meter without phase power, or a driver whose phase power has the wrong
-// sign. totalW is the same reading's site total. present is false when the
+// sign. A phase's current is at least its power over its measured voltage
+// (|P| ≤ V·I): many P1 meters report whole amperes and hide up to 1 A.
+// totalW is the same reading's site total. present is false when the
 // meter reports no phase currents; valid is false when they cannot be used.
 func phaseCurrentsA(meter *telemetry.DerReading, state *State, totalW float64) (amps []float64, present, valid bool) {
 	// DER data uses snake case; separate fields retain absent-vs-zero.
@@ -140,6 +142,9 @@ func phaseCurrentsA(meter *telemetry.DerReading, state *State, totalW float64) (
 		L1W *float64 `json:"l1_w"`
 		L2W *float64 `json:"l2_w"`
 		L3W *float64 `json:"l3_w"`
+		L1V *float64 `json:"l1_v"`
+		L2V *float64 `json:"l2_v"`
+		L3V *float64 `json:"l3_v"`
 	}
 	if json.Unmarshal(meter.Data, &data) != nil || (data.L1 == nil && data.L2 == nil && data.L3 == nil) {
 		return nil, false, false
@@ -149,17 +154,28 @@ func phaseCurrentsA(meter *telemetry.DerReading, state *State, totalW float64) (
 	}
 	powers := []*float64{data.L1W, data.L2W, data.L3W}[:state.SiteFusePhases]
 	signs := phasePowersAddUp(powers, totalW)
+	volts := []*float64{data.L1V, data.L2V, data.L3V}
 	for i, a := range []*float64{data.L1, data.L2, data.L3}[:state.SiteFusePhases] {
 		if a == nil || !finiteFuseValue(*a) {
 			return nil, true, false
 		}
 		signed := math.Abs(*a)
+		if v := volts[i]; signs && v != nil && plausiblePhaseVoltage(*v, state.SiteFuseVoltage) {
+			signed = math.Max(signed, math.Abs(*powers[i]) / *v)
+		}
 		if w := powers[i]; signs && *w < -math.Max(exportSignMinW, signed*state.SiteFuseVoltage/4) {
 			signed = -signed
 		}
 		amps = append(amps, signed)
 	}
 	return amps, true, true
+}
+
+// plausiblePhaseVoltage reports whether a measured phase voltage is within
+// a fifth of the fuse's nominal voltage. Grids stay within a tenth; a value
+// outside the band is a driver or scale fault and bounds nothing.
+func plausiblePhaseVoltage(v, nominal float64) bool {
+	return finiteFuseValue(v) && v >= 0.8*nominal && v <= 1.2*nominal
 }
 
 // exportSignMinW is the least export a phase's power must show before its
