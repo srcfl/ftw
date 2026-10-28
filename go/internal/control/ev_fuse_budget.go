@@ -794,15 +794,58 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 }
 
 // evFuseReliefW is the fuse guard's battery relief the meter may show now:
-// each battery's recorded relief, at most the discharge it reads.
+// each battery's recorded relief, at most the discharge it reads. A battery
+// with no live reading (watchdog-offline, or none yet) counts its whole
+// relief: Core can no longer hold that discharge, and the car must not
+// build on it. expireOfflineFuseRelief ends it evSettle after it went offline.
 func (s *State) evFuseReliefW(store *telemetry.Store) float64 {
 	var w float64
 	for driver, relief := range s.batteryFuseRelief {
-		if r := store.Get(driver, telemetry.DerBattery); r != nil && finiteFuseValue(r.RawW) {
-			w += math.Min(relief, math.Max(0, -r.RawW))
+		if raw, _, ok := store.OnlineRawW(driver, telemetry.DerBattery); ok {
+			relief = math.Min(relief, math.Max(0, -raw))
 		}
+		w += relief
 	}
 	return w
+}
+
+// expireOfflineFuseRelief ends each offline battery's recorded relief
+// evSettle after dispatch first finds that battery offline. Core sent it its
+// default mode then, and that command reaches the meter within evSettle, as
+// ours do. Until then the car must not build on a discharge that may still
+// stand; after it, holding the car below the line for relief Core no longer
+// orders would be a hidden margin. It runs on every dispatch, whatever the
+// other batteries do, so a dispatch that sends no command still ends it. A
+// battery back online drops out of the clock: the next time it goes offline
+// its relief counts whole again.
+func (s *State) expireOfflineFuseRelief(online []batteryInfo) {
+	now := s.now()
+	live := make(map[string]bool, len(online))
+	for _, b := range online {
+		live[b.driver] = true
+	}
+	var relief map[string]float64
+	var since map[string]time.Time
+	for driver, w := range s.batteryFuseRelief {
+		if !live[driver] {
+			at, ok := s.batteriesOfflineSince[driver]
+			if !ok {
+				at = now
+			}
+			if now.Sub(at) >= evSettle {
+				continue
+			}
+			if since == nil {
+				since = make(map[string]time.Time)
+			}
+			since[driver] = at
+		}
+		if relief == nil {
+			relief = make(map[string]float64)
+		}
+		relief[driver] = w
+	}
+	s.batteryFuseRelief, s.batteriesOfflineSince = relief, since
 }
 
 // wholeStepsW rounds w down to whole charger amps on the pool's phases, one
