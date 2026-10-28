@@ -712,10 +712,10 @@ func judgeS12(d *runData) (metrics, []criterion) {
 		if p.Limit > 0 && p.phasesOr3() == 1 {
 			ones++
 		}
-		// A lower order while every phase has room is a cut on room alone,
-		// unless the plan itself asked for less (a pause between slots).
+		// A lower order while every phase is under the fuse is a cut on room
+		// alone, unless the plan itself asked for less (a pause between slots).
 		if i > 0 && p.offerW() < prs[i-1].offerW()-1 {
-			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-1-0.5 {
+			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-0.1 {
 				if after := d.at(t0 + p.T + 2); after == nil || firstLP(after).CommandedReason != "plan" {
 					cuts++
 				}
@@ -726,7 +726,7 @@ func judgeS12(d *runData) (metrics, []criterion) {
 	// recorded, not judged, since a slow charger's pending order may hold it.
 	limited := 0
 	for _, r := range w {
-		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-1-6 {
+		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-6 {
 			limited++
 		}
 	}
