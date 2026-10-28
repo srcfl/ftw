@@ -15,9 +15,10 @@ import (
 // no margin, a battery FTW found discharging 5 kW, and a charger whose first
 // logged offers of this run are 0 A, sent while the meter was stale, then
 // 6,210 W (9 A on three phases) 2 s ago. The charger takes 40 s to apply an
-// order, so the car still draws what it drew before the restart. evW is
-// what the charger measures; the site meter reads gridW with the phase
-// currents phaseA, and the PV inverter pvW.
+// order, so the car still draws what it drew before the restart. Its
+// max_charge_w is 11,040 W (16 A). evW is what the charger measures; the
+// site meter reads gridW with the phase currents phaseA, and the PV
+// inverter pvW.
 func restartFixture(t *testing.T, gridW float64, phaseA [3]float64, batteryW, pvW, evW float64) (*telemetry.Store, *State) {
 	t.Helper()
 	store := telemetry.NewStore()
@@ -45,7 +46,7 @@ func restartFixture(t *testing.T, gridW float64, phaseA [3]float64, batteryW, pv
 	state.evLimit.set = true
 	state.evLimit.offers = map[string]chargerOffers{"garage": {
 		log:    commandLog{found, {at: now.Add(-4 * time.Second), w: 0, a: 0, n: 3}, {at: now.Add(-2 * time.Second), w: 6210, a: 9, n: 3}},
-		settle: evUnknownSettle, found: found, driver: "charger",
+		settle: evUnknownSettle, found: found, driver: "charger", maxW: 11040,
 	}}
 	return store, state
 }
@@ -54,14 +55,35 @@ func restartFixture(t *testing.T, gridW float64, phaseA [3]float64, batteryW, pv
 // while the meter was stale counted as the EV base the meter shows, while
 // the meter showed the car at 8.2 kW. The new 6.2 kW order then counted as
 // a 9 A rise to come, and the battery was held in discharge for the car
-// with battery_covers_ev off, down toward its floor. The car's measured
-// draw is in the reading: the 6.2 kW order is a cut, and ending the
-// discharge needs no room for it.
+// with battery_covers_ev off, down toward its floor (-3,599 W here). The
+// car's measured draw is in the reading: the 6.2 kW order is a cut. Until
+// it lands the car may still rise to the 16 A of an offer Core does not
+// know, so the battery keeps only the discharge that rise needs on L2.
 func TestEVBaseAfterRestartCreditsMeasuredDraw(t *testing.T) {
 	store, state := restartFixture(t, 780, [3]float64{2.03, 4.97, .47}, -5000, -3000, 8222)
 	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "sungrow", TargetW: 0}}, store, state, 16*230*3)
-	if got := targetW(out, "sungrow"); got < -1 {
-		t.Fatalf("battery held at %.0f W for a car the meter already shows at 8.2 kW; want 0 W", got)
+	riseA := (11040 - 8222) / 690.0
+	want := -(5000 - (16-4.97-riseA)*690)
+	if got := targetW(out, "sungrow"); math.Abs(got-want) > 1 {
+		t.Fatalf("battery %.0f W, want %.0f W: only the car's rise to its 16 A max needs room", got, want)
+	}
+}
+
+// Review of #1926: a car below the offer in force. The car draws 8.2 kW,
+// fresh and inside what the meter shows, but the charger's offer from
+// before the restart, or its own default, is 16 A. Until Core's 6.2 kW
+// order lands the car may rise to 11 kW (a ramp, a heater). The battery
+// keeps the discharge that rise needs.
+func TestEVBaseAfterRestartCarBelowOfferInForce(t *testing.T) {
+	houseA := 3.0
+	evW, batW := 8222.0, -5000.0
+	gridW := houseA*690 + evW + batW
+	phaseA := gridW / 690
+	store, state := restartFixture(t, gridW, [3]float64{phaseA, phaseA, phaseA}, batW, 0, evW)
+	out := clampEVBatteryHeadroom([]DispatchTarget{{Driver: "sungrow", TargetW: 0}}, store, state, 16*230*3)
+	got := targetW(out, "sungrow")
+	if afterA := phaseA + (got-batW)/690 + (11040-evW)/690; afterA > 16+1e-6 {
+		t.Fatalf("battery ends discharge to %.0f W; a car rising to its offer in force puts %.2f A on each phase", got, afterA)
 	}
 }
 
@@ -81,20 +103,46 @@ func TestEVBaseAfterRestartCreditStaysInsideTheMeter(t *testing.T) {
 	}
 }
 
-// The credit never exceeds the latest offer, needs a live charger reading,
-// and ends once the charger's first offer of this run has had its settle
-// time: then the offers alone say what the meter shows.
+// setMaxW sets the fixture charger's max_charge_w.
+func setMaxW(state *State, w float64) {
+	c := state.evLimit.offers["garage"]
+	c.maxW = w
+	state.evLimit.offers["garage"] = c
+}
+
+// The credit never exceeds the latest offer, keeps room for the car's rise
+// to its max, takes the lowest of the sample, raw and smoothed draw, needs
+// a live charger reading, and ends once the charger's first offer of this
+// run has had its settle time: then the offers alone say what the meter
+// shows.
 func TestEVFoundDrawWBounds(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		edit func(*telemetry.Store, *State)
 		want float64
 	}{
-		{"latest offer bounds the draw", func(*telemetry.Store, *State) {}, 6210},
+		{"the car may still rise to its max", func(*telemetry.Store, *State) {}, 8222 - (11040 - 6210)},
+		{"no max_charge_w", func(_ *telemetry.Store, state *State) { setMaxW(state, 0) }, 0},
+		{"latest offer bounds the draw", func(_ *telemetry.Store, state *State) { setMaxW(state, 6210) }, 6210},
 		{"measured draw below the offer", func(store *telemetry.Store, state *State) {
+			setMaxW(state, 6210)
 			store.Update("charger", telemetry.DerEV, 4000, nil, nil)
 			store.Get("charger", telemetry.DerEV).UpdatedAt = state.now()
 		}, 4000},
+		{"smoothed draw below the sample", func(store *telemetry.Store, state *State) {
+			setMaxW(state, 6210)
+			store.Get("charger", telemetry.DerEV).SmoothedW = 5000
+		}, 5000},
+		{"raw draw below the sample", func(store *telemetry.Store, state *State) {
+			setMaxW(state, 6210)
+			r := store.Get("charger", telemetry.DerEV)
+			r.Data = json.RawMessage(`{"control_power_w":8222}`)
+			r.RawW = 5000
+		}, 5000},
+		{"control sample below raw and smoothed", func(store *telemetry.Store, state *State) {
+			setMaxW(state, 6210)
+			store.Get("charger", telemetry.DerEV).Data = json.RawMessage(`{"control_power_w":5000}`)
+		}, 5000},
 		{"charger offline", func(store *telemetry.Store, _ *State) {
 			store.DriverHealthMut("charger").SetOffline()
 		}, 0},
@@ -114,7 +162,7 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 			c.found.at = state.now().Add(-30 * time.Second)
 			c.log[0].at = c.found.at
 			state.evLimit.offers["garage"] = c
-		}, 6210},
+		}, 8222 - (11040 - 6210)},
 		{"the shown part of the latest offer is not counted twice", func(_ *telemetry.Store, state *State) {
 			c := state.evLimit.offers["garage"]
 			c.found.at = state.now().Add(-60 * time.Second)
@@ -126,7 +174,8 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 			store, state := restartFixture(t, 780, [3]float64{2.03, 4.97, .47}, -5000, -3000, 8222)
 			tc.edit(store, state)
 			shownW := state.evShownW(state.now())
-			if got := state.evFoundDrawW(store, store.Get("meter", telemetry.DerMeter), state.now(), shownW); math.Abs(got-tc.want) > 1e-6 {
+			meter := store.Get("meter", telemetry.DerMeter)
+			if got := state.evFoundDrawW(store, meter.RawW, meter.UpdatedAt, state.now(), shownW); math.Abs(got-tc.want) > 1e-6 {
 				t.Fatalf("credit %.0f W beside %.0f W shown, want %.0f W", got, shownW, tc.want)
 			}
 		})
@@ -138,7 +187,9 @@ func TestEVFoundDrawWBounds(t *testing.T) {
 // shows as consumption only 3,780 W is left for this car.
 func TestEVFoundDrawWLeavesOutShownOffers(t *testing.T) {
 	store, state := restartFixture(t, 780, [3]float64{2.03, 4.97, .47}, -5000, -3000, 8222)
-	if got := state.evFoundDrawW(store, store.Get("meter", telemetry.DerMeter), state.now(), 5000); math.Abs(got-3780) > 1e-6 {
+	setMaxW(state, 6210)
+	meter := store.Get("meter", telemetry.DerMeter)
+	if got := state.evFoundDrawW(store, meter.RawW, meter.UpdatedAt, state.now(), 5000); math.Abs(got-3780) > 1e-6 {
 		t.Fatalf("credit %.0f W, want 3780 W", got)
 	}
 }
@@ -210,16 +261,27 @@ func TestEVBaseAfterRestartConsumptionReadsCurrentOutput(t *testing.T) {
 	}
 }
 
-// Seed 207532's shape on the plant: Core restarts beside a car drawing
-// 12 A from before, on a charger that takes 40 s to apply an order. For
-// its first 6 s the meter is silent and the inverter unreachable, holding
-// the 5 kW discharge it had (C1), so Core logs 0 A offers. Then Core asks
-// 9 A for the car. PV covers the house, the plan is stale and
-// battery_covers_ev is off: the battery ends its discharge as fast as its
-// slew allows, and no phase passes the fuse line on the way.
-func TestSiteSimRestartEndsDischargeForACarAlreadyDrawing(t *testing.T) {
+// The consumption bound subtracts each output at the higher of raw and
+// smoothed. A battery whose reading already shows a new 3 kW discharge,
+// smoothed still at 1 kW, may be ahead of the site reading; so may PV.
+func TestSiteConsumptionWTakesTheSmallerOutput(t *testing.T) {
+	store, _ := restartFixture(t, 680, [3]float64{4.97, -1, -1}, -3000, -2000, 8222)
+	store.Get("sungrow", telemetry.DerBattery).SmoothedW = -1000
+	store.Get("pv", telemetry.DerPV).SmoothedW = -500
+	if got := siteConsumptionW(store, 680); math.Abs(got-2180) > 1e-6 {
+		t.Fatalf("consumption %.0f W, want 2180 W: 680 W less -1,000 W battery and -500 W PV", got)
+	}
+}
+
+// restartSim is seed 207532's shape on the plant: Core restarts beside a
+// car drawing 12 A from before, on a charger that takes 40 s to apply an
+// order. For its first 6 s the meter is silent and the inverter
+// unreachable, holding the 5 kW discharge it had (C1), so Core logs 0 A
+// offers. Then Core asks 9 A for the car. PV covers the house total, the
+// plan is stale and battery_covers_ev is off.
+func restartSim(house [3]float64) *simSite {
 	p := simPlant(simStart)
-	p.Fuse.RatingA, p.HouseW, p.PVW = 16, houseA(4, 9, 2), -6000
+	p.Fuse.RatingA, p.HouseW, p.PVW = 16, house, -6000
 	p.EVSE.Delay, p.EVSE.ReadbackLag = 40*time.Second, 0
 	p.EVSE.OfferA, p.EVSE.OfferPhases = 12, 3
 	p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 5000, MaxDischargeW: 5000, CapacityWh: 10000, SoC: .3, Latency: 2 * time.Second, W: -5000}
@@ -233,16 +295,67 @@ func TestSiteSimRestartEndsDischargeForACarAlreadyDrawing(t *testing.T) {
 		s.state.SiteFuseSafetyA = 0
 		s.ctrl.SetManualHold(s.lp.ID, loadpoint.ManualHold{PowerW: 6210, PhaseMode: "3p", Persistent: true, StartedAt: s.p.Now, UpdatedAt: s.p.Now})
 	}
+	return s
+}
+
+// The seed on the plant: the battery ends its discharge as fast as its
+// slew allows, down to what the car's rise to its 16 A max still needs on
+// L2 (the 9 A of house load PV does not cover there), and no phase passes
+// the fuse line on the way.
+func TestSiteSimRestartEndsDischargeForACarAlreadyDrawing(t *testing.T) {
+	s := restartSim(houseA(4, 9, 2))
 	s.boot()
 	s.run(14 * time.Second)
 	if s.offerW != 6210 || s.p.EVSE.DrawW != 8280 {
 		t.Fatalf("not the seed's state: offer %.0f W, car %.0f W", s.offerW, s.p.EVSE.DrawW)
 	}
-	if s.batteryCmdW < -1 {
-		t.Fatalf("battery held at %.0f W 8 s after the meter returned, with the car already in the reading", s.batteryCmdW)
+	if want := -(9*230 - 2000.0) * 3; s.batteryCmdW < want-1 {
+		t.Fatalf("battery held at %.0f W 8 s after the meter returned, with the car already in the reading; want %.0f W", s.batteryCmdW, want)
 	}
 	s.run(2 * time.Minute)
 	if s.failure != "" {
 		t.Fatal(s.failure)
+	}
+}
+
+// The seed's charger is OCPP and samples every 10 s (MeterValues). Its
+// sample counts only on the ticks just after it, so the battery holds its
+// discharge between samples. It still ends it before the 9 A order counts
+// as shown (evSettle after it went out, about 28 s in), and no phase
+// passes the fuse line. A charger sampling every 30 s or more gets no
+// credit in that time: the fix is partial for it.
+func TestSiteSimRestartTenSecondSamples(t *testing.T) {
+	s := restartSim(houseA(4, 9, 2))
+	s.evEvery = 10 * time.Second
+	s.boot()
+	s.run(20 * time.Second)
+	if s.offerW != 6210 || s.p.EVSE.DrawW != 8280 {
+		t.Fatalf("not the seed's state: offer %.0f W, car %.0f W", s.offerW, s.p.EVSE.DrawW)
+	}
+	if want := -(9*230 - 2000.0) * 3; s.batteryCmdW < want-1 {
+		t.Fatalf("battery held at %.0f W 14 s after the meter returned; want %.0f W", s.batteryCmdW, want)
+	}
+	s.run(2 * time.Minute)
+	if s.failure != "" {
+		t.Fatal(s.failure)
+	}
+}
+
+// Review of #1926 on the plant: the charger's offer in force is 16 A, and
+// the car limits itself to 12 A at the restart, then lifts that 14 s
+// later, before the 40 s charger has applied Core's order. L2 carries 12 A
+// of house. The battery keeps the discharge the car's rise needs: no phase
+// reaches 1.2 x In, and time over In stays within the heat model.
+func TestSiteSimRestartCarRisesUnderOfferInForce(t *testing.T) {
+	s := restartSim(houseA(4, 12, 2))
+	s.p.EVSE.OfferA, s.p.Car.MaxW = 16, 8280
+	s.p.Events = append(s.p.Events, sitesim.Event{At: 14 * time.Second, Kind: sitesim.Change, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }})
+	s.boot()
+	s.run(2 * time.Minute)
+	if s.failure != "" {
+		t.Fatal(s.failure)
+	}
+	if s.peakA >= fuseInstantFactor*16 {
+		t.Fatalf("a phase reached %.2f A", s.peakA)
 	}
 }

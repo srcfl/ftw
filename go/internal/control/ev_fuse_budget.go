@@ -181,8 +181,10 @@ type chargerOffers struct {
 	found sentCommand
 	// driver is the charger's driver, whose power reading only the battery
 	// side reads, and only before any offer of this run has surely landed
-	// (evFoundDrawW).
+	// (evFoundDrawW). maxW is the loadpoint's max_charge_w, the most the car
+	// may draw on an offer Core does not know; zero when not configured.
 	driver string
+	maxW   float64
 	// carPhases is how many phases the car draws on, as the loadpoint saw
 	// it on the site meter: 1 or 3, or 0 when unknown. carPhase is the phase
 	// a car on one phase draws on, 1-3.
@@ -403,23 +405,31 @@ func (s *State) evShownW(at time.Time) float64 {
 
 // evFoundDrawW is EV draw the battery side may count as shown beyond
 // evShownW (shownW) while a charger has no order of this run that has
-// surely landed: after a restart or a plug-in, until its first logged offer
-// is older than its settle time. Core then does not know which offer the
-// charger runs on, and its first offers (often 0 A) say nothing of what the
-// meter shows. A car seen drawing in that window is in the reading when the
-// charger measured it within one control interval of the site reading: a
-// fast charger may have applied a 0 A offer since an older sample, and a
-// held reading after a failed poll says nothing of now. Each such charger
-// counts its measured draw, the lowest of the sample, raw and smoothed,
-// never above its latest offer, and in all no more than the consumption the
+// surely landed: from the first offer Core logs for it with no fuse limit
+// set (at Core's start, or at a plug-in once no other managed charger was
+// plugged), until that offer is older than the charger's settle time. Core
+// then does not know which offer the charger runs on, and its first offers
+// (often 0 A) say nothing of what the meter shows. A car seen drawing in
+// that window is in the reading when the charger measured it within one
+// control interval of the site reading: a fast charger may have applied a
+// 0 A offer since an older sample, and a held reading after a failed poll
+// says nothing of now. A charger that samples less often (OCPP MeterValues
+// every 10 s or more) counts only on the ticks just after a sample, and
+// holds its battery's discharge between them. The measured draw is the
+// lowest of the sample, raw and smoothed. Until the latest offer lands, the
+// car may still rise from that draw to the offer in force, up to the
+// loadpoint's max_charge_w; that rise past the latest offer stays reserved,
+// and a charger with no max_charge_w counts nothing. Each charger counts no
+// more than its latest offer, and in all no more than the consumption the
 // site meter shows (siteConsumptionW) less shownW. The car's own limit
 // never reads this; only how much of our latest offers the battery reserves
 // as a rise to come.
-func (s *State) evFoundDrawW(store *telemetry.Store, meter *telemetry.DerReading, at time.Time, shownW float64) float64 {
-	if store == nil || meter == nil {
+// gridW is the site reading, taken at meterAt.
+func (s *State) evFoundDrawW(store *telemetry.Store, gridW float64, meterAt, at time.Time, shownW float64) float64 {
+	if store == nil {
 		return 0
 	}
-	consumptionW := siteConsumptionW(store, meter.RawW)
+	consumptionW := siteConsumptionW(store, gridW)
 	if !finiteFuseValue(consumptionW) {
 		return 0
 	}
@@ -430,24 +440,25 @@ func (s *State) evFoundDrawW(store *telemetry.Store, meter *telemetry.DerReading
 	var w float64
 	for _, c := range s.evLimit.offers {
 		n := len(c.log)
-		if n == 0 || c.found.at.IsZero() || at.Sub(c.found.at) >= c.settle || c.driver == "" {
+		if n == 0 || c.found.at.IsZero() || at.Sub(c.found.at) >= c.settle || c.driver == "" || !(c.maxW > 0) || !finiteFuseValue(c.maxW) {
 			continue
 		}
-		r := store.Get(c.driver, telemetry.DerEV)
-		if h := store.DriverHealth(c.driver); r == nil || !h.TelemetryLive() || h.LastReadFailed() {
+		lowerW, live := store.OnlineLowerW(c.driver, telemetry.DerEV)
+		if !live {
 			continue
 		}
-		p, ok := qualifiedFuseObservation(r, at)
-		if !ok || p.Seen().Before(meter.UpdatedAt.Add(-skew)) || p.At.After(meter.UpdatedAt.Add(skew)) {
+		p, ok := qualifiedFuseObservation(store.Get(c.driver, telemetry.DerEV), at)
+		if !ok || p.Seen().Before(meterAt.Add(-skew)) || p.At.After(meterAt.Add(skew)) {
 			continue
 		}
-		drawW := math.Min(p.PowerW, math.Min(r.RawW, r.SmoothedW))
+		drawW := math.Min(p.PowerW, lowerW)
 		if !finiteFuseValue(drawW) {
 			continue
 		}
 		unshown, _ := c.log.unshown(at, c.batterySettle())
 		latest := c.log[n-1].w
-		w += math.Max(0, math.Min(latest, drawW)-math.Max(0, latest-unshown))
+		inLatestW := math.Min(latest, drawW-math.Max(0, c.maxW-latest))
+		w += math.Max(0, inLatestW-math.Max(0, latest-unshown))
 	}
 	return math.Max(0, math.Min(w, consumptionW-shownW))
 }
@@ -457,15 +468,7 @@ func (s *State) evFoundDrawW(store *telemetry.Store, meter *telemetry.DerReading
 // smoothed. A smoothed value lags an output that just fell; the higher one
 // keeps the estimate at or below what the meter shows.
 func siteConsumptionW(store *telemetry.Store, gridW float64) float64 {
-	w := gridW
-	for _, t := range []telemetry.DerType{telemetry.DerBattery, telemetry.DerPV, telemetry.DerV2X} {
-		for _, r := range store.ReadingsByType(t) {
-			if store.DriverHealth(r.Driver).TelemetryLive() {
-				w -= math.Max(r.RawW, r.SmoothedW)
-			}
-		}
-	}
-	return w
+	return gridW - store.SumOnlineHigherW(telemetry.DerBattery, telemetry.DerPV, telemetry.DerV2X)
 }
 
 // batterySettle is how long the battery side counts a raise of this
@@ -616,7 +619,7 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 			continue
 		}
 		c := s.evLimit.offers[point.ID]
-		c.settle, c.declared, c.carPhases, c.carPhase, c.driver = evUnknownSettle, false, point.CarPhases, point.CarPhase, point.DriverName
+		c.settle, c.declared, c.carPhases, c.carPhase, c.driver, c.maxW = evUnknownSettle, false, point.CarPhases, point.CarPhase, point.DriverName, point.MaxChargeW
 		if r := store.Get(point.DriverName, telemetry.DerEV); r != nil {
 			if declared := telemetry.DeclaredPowerMaxAge(r.Data); declared > 0 {
 				c.settle, c.declared = max(evSettle, declared), true
