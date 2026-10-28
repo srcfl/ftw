@@ -143,6 +143,7 @@ func TestDispatchWrongDirectionWindupDecaysPIIntegral(t *testing.T) {
 	// every subsequent cycle (that's the 2026-05-25 sunrise regression).
 	var lastTarget float64
 	for i := 0; i < 5; i++ {
+		store.Update("ferroamp", telemetry.DerMeter, -1000, nil, nil) // the PI acts once per new sample
 		targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
 		if len(targets) == 1 {
 			lastTarget = targets[0].TargetW

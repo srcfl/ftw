@@ -48,6 +48,9 @@ type Handler struct {
 	// it is (BootNotification) — main.go writes its row in the device
 	// registry from it. See identity.go.
 	identityReported func(ChargerIdentity)
+	// later, set by the Server, runs the three callbacks above after the
+	// charger's socket lock is released. See boundCall.
+	later func(id string, fn func())
 
 	// capabilityProbe, set by the Server, asks a charger which feature
 	// profiles it supports (see capabilities.go). Fired from OnConnect and
@@ -310,7 +313,7 @@ func (h *Handler) noteVehicleID(id, vehicleID, source string, started bool) {
 	approved := h.approved[id]
 	h.mu.Unlock()
 	if (changed || started) && approved && fn != nil {
-		fn(id, vehicleID, source)
+		h.callback(id, func() { fn(id, vehicleID, source) })
 	}
 }
 
