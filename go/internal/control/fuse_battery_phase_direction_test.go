@@ -872,7 +872,10 @@ func TestFuseReliefGoesOnWhenAWholeAmpereMeterRepeatsItsPhases(t *testing.T) {
 // one-phase load on L3 then switches off, which moves L3 by 6.9 balanced
 // shares of that move, and a 0.4 A load starts on L1. Before, that read as
 // a battery off L1: the order stayed at -3904 W and L1 at 16.4 A to the
-// end. L1 at or inside the line ends the reference, so the relief goes on.
+// end. L1 at or inside the line ends the reference, so no verdict comes:
+// L1 is over the line only on the tick the 0.4 A load starts. (Without
+// that end, the step back of the next test ends the hold too, at the cost
+// of two ticks with L1 at 16.8 and 17.7 A.)
 func TestFuseReliefFollowsALoadAfterADriftAtTheLine(t *testing.T) {
 	r := pvDropRun(pvDropCase{
 		ticks: 50,
@@ -898,7 +901,8 @@ func TestFuseReliefFollowsALoadAfterADriftAtTheLine(t *testing.T) {
 			return e
 		},
 	})
-	assertL1AtTheLine(t, r, 24, 50)
+	assertL1AtTheLine(t, r, 20, 22)
+	assertL1AtTheLine(t, r, 23, 50)
 }
 
 // The same with a PV fall of 23 W a tick that goes on through the load
