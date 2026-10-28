@@ -572,6 +572,49 @@ func TestSumOnlineV2XWIsSignedAndSkipsOffline(t *testing.T) {
 	}
 }
 
+func TestOnlineLowerWNeedsALivePoll(t *testing.T) {
+	s := NewStore()
+	s.Update("charger", DerEV, 8000, nil, nil)
+	s.DriverHealthMut("charger").RecordSuccess()
+	s.Get("charger", DerEV).SmoothedW = 5000
+	if w, ok := s.OnlineLowerW("charger", DerEV); !ok || w != 5000 {
+		t.Fatalf("got %v %v, want the lower 5000 W", w, ok)
+	}
+	s.Get("charger", DerEV).RawW = 4000
+	if w, ok := s.OnlineLowerW("charger", DerEV); !ok || w != 4000 {
+		t.Fatalf("got %v %v, want the lower 4000 W", w, ok)
+	}
+	s.DriverHealthMut("charger").RecordError("timeout")
+	if _, ok := s.OnlineLowerW("charger", DerEV); ok {
+		t.Fatal("a reading held after a failed poll counted")
+	}
+	s.DriverHealthMut("charger").RecordSuccess()
+	s.DriverHealthMut("charger").SetOffline()
+	if _, ok := s.OnlineLowerW("charger", DerEV); ok {
+		t.Fatal("an offline driver's reading counted")
+	}
+	if _, ok := s.OnlineLowerW("missing", DerEV); ok {
+		t.Fatal("a missing reading counted")
+	}
+}
+
+func TestSumOnlineHigherWSumsTheNamedTypes(t *testing.T) {
+	s := NewStore()
+	s.Update("battery", DerBattery, -3000, nil, nil)
+	s.Update("pv", DerPV, -2000, nil, nil)
+	s.Update("ev", DerEV, 7000, nil, nil)
+	s.Update("offline", DerBattery, -9000, nil, nil)
+	for _, d := range []string{"battery", "pv", "ev"} {
+		s.DriverHealthMut(d).RecordSuccess()
+	}
+	s.DriverHealthMut("offline").SetOffline()
+	s.Get("battery", DerBattery).SmoothedW = -1000
+	s.Get("pv", DerPV).SmoothedW = -2500
+	if got := s.SumOnlineHigherW(DerBattery, DerPV); got != -3000 {
+		t.Fatalf("got %v, want -1000 W battery plus -2000 W PV", got)
+	}
+}
+
 func TestWatchdogPerDriverOverride(t *testing.T) {
 	s := NewStore()
 	// Two drivers: one with the site-default tolerance, one with a

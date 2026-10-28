@@ -45,6 +45,14 @@ type simSite struct {
 	// evMaxAge is the power_max_age_s the charger driver declares outside
 	// the field matrix; zero declares none.
 	evMaxAge time.Duration
+	// evEvery is how often the charger samples its draw, as OCPP
+	// MeterValues do: between samples each poll repeats the last sample
+	// with its own time. Zero samples on every poll.
+	evEvery time.Duration
+	// evClockLag is how far the charger's clock runs behind Core's: it
+	// stamps each sample that much early, as an OCPP charger stamps
+	// MeterValues with its own clock (or cuts the stamp to whole seconds).
+	evClockLag time.Duration
 	// meterNoise is added to each phase current Core reads, not to the
 	// plant's own; nil reads the plant exactly.
 	meterNoise func() float64
@@ -240,8 +248,18 @@ func (s *simSite) step() {
 			s.emit("battery", telemetry.DerBattery, b.W, &b.SoC, nil)
 		}
 		if e := tick.EV; e != nil {
-			s.ev, s.evAt = *e, now
-			s.emit(s.lp.DriverName, telemetry.DerEV, e.W, nil, s.evData())
+			if s.evEvery <= 0 || s.evAt.IsZero() || now.Sub(s.evAt) >= s.evEvery {
+				s.ev, s.evAt = *e, now
+			}
+			data := s.evData()
+			if s.evEvery > 0 || s.evClockLag > 0 {
+				data = maps.Clone(data)
+				if data == nil {
+					data = map[string]any{}
+				}
+				data["control_power_observed_at"] = s.evAt.Add(-s.evClockLag).Format(time.RFC3339Nano)
+			}
+			s.emit(s.lp.DriverName, telemetry.DerEV, s.ev.W, nil, data)
 		}
 		if !now.Before(s.nextTick) {
 			s.nextTick = now.Add(s.coreEvery())
