@@ -10653,7 +10653,7 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 635.7936507936507,
+          "target_w": 0,
           "clamped": false
         }
       ],
@@ -10678,9 +10678,9 @@
       },
       "site_totals": {
         "battery_current_w": -2923,
-        "battery_target_sum_w": 491.7936507936507,
+        "battery_target_sum_w": -144,
         "raw_grid_w": -1903,
-        "projected_grid_w": 1511.7936507936506
+        "projected_grid_w": 876
       }
     },
     {
