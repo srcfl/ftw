@@ -559,3 +559,71 @@ func TestExportingPhaseLevelIsItsReading(t *testing.T) {
 // stepFuseHeat0 folds a reading with phase currents but no phase power, so
 // its total does not matter.
 func (s *State) stepFuseHeat0(meter *telemetry.DerReading) { s.stepFuseHeat(meter, 0) }
+
+// Many P1 meters report phase current in whole amperes and hide up to 1 A.
+// The same reading's phase power over its measured voltage bounds the
+// current from below (|P| ≤ V·I). The measured voltage, not the nominal,
+// keeps a high grid from reading as extra current.
+func TestPhaseCurrentsReadWholeAmpMetersFromPhasePower(t *testing.T) {
+	_, state := fuseHeatState()
+	for _, tc := range []struct {
+		name   string
+		data   map[string]float64
+		totalW float64
+		want   []float64
+	}{
+		{"truncated 16.6 A", map[string]float64{"l1_a": 16, "l2_a": 1, "l3_a": 1, "l1_w": 3818, "l2_w": 230, "l3_w": 230, "l1_v": 230, "l2_v": 230, "l3_v": 230}, 4278, []float64{16.6, 1, 1}},
+		{"exporting 16.6 A", map[string]float64{"l1_a": 16, "l2_a": 1, "l3_a": 1, "l1_w": -3818, "l2_w": 230, "l3_w": 230, "l1_v": 230, "l2_v": 230, "l3_v": 230}, -3358, []float64{-16.6, 1, 1}},
+		{"16 A on a 240 V grid", map[string]float64{"l1_a": 16, "l2_a": 1, "l3_a": 1, "l1_w": 3840, "l2_w": 240, "l3_w": 240, "l1_v": 240, "l2_v": 240, "l3_v": 240}, 4320, []float64{16, 1, 1}},
+		{"no phase voltage", map[string]float64{"l1_a": 16, "l2_a": 1, "l3_a": 1, "l1_w": 3818, "l2_w": 230, "l3_w": 230}, 4278, []float64{16, 1, 1}},
+		{"voltage off scale", map[string]float64{"l1_a": 16, "l2_a": 1, "l3_a": 1, "l1_w": 3818, "l2_w": 230, "l3_w": 230, "l1_v": 23, "l2_v": 23, "l3_v": 23}, 4278, []float64{16, 1, 1}},
+		{"phase power against the total", map[string]float64{"l1_a": 16, "l2_a": 1, "l3_a": 1, "l1_w": 3818, "l2_w": 230, "l3_w": 230, "l1_v": 230, "l2_v": 230, "l3_v": 230}, 1000, []float64{16, 1, 1}},
+		{"reactive load", map[string]float64{"l1_a": 16.6, "l2_a": 1, "l3_a": 1, "l1_w": 3000, "l2_w": 230, "l3_w": 230, "l1_v": 230, "l2_v": 230, "l3_v": 230}, 3460, []float64{16.6, 1, 1}},
+	} {
+		raw, _ := json.Marshal(tc.data)
+		amps, present, valid := phaseCurrentsA(&telemetry.DerReading{Data: raw}, state, tc.totalW)
+		ok := present && valid && len(amps) == 3
+		for i := 0; ok && i < 3; i++ {
+			ok = math.Abs(amps[i]-tc.want[i]) < 1e-9
+		}
+		if !ok {
+			t.Errorf("%s: %v (present %v, valid %v), want %v", tc.name, amps, present, valid, tc.want)
+		}
+	}
+}
+
+// A whole-ampere meter reads 26 A on L1 while it carries 26.9 A. The car's
+// fuse cut is the one a meter showing 26.9 A gets. On a 240 V grid a phase
+// at 26.0 A cuts as 26.0 A, not as its power over 230 V.
+func TestEVHardLimitCutsWhatAWholeAmpMeterHides(t *testing.T) {
+	capFor := func(data map[string]float64, totalW float64) float64 {
+		t.Helper()
+		store, state, points, configs := evMeterBudgetFixture(t, 0, nil, 10350, "3p")
+		raw, _ := json.Marshal(data)
+		store.Update("meter", telemetry.DerMeter, totalW, nil, raw)
+		got, known := EVFuseBudget(store, state, points, configs, 17250)
+		if !known {
+			t.Fatalf("%v: cap unknown", data)
+		}
+		return got
+	}
+	for _, tc := range []struct {
+		name         string
+		volts, trueA float64
+	}{
+		{"26.9 A at 230 V", 230, 26.9},
+		{"26.0 A at 240 V", 240, 26},
+	} {
+		totalW := (tc.trueA + 40) * tc.volts
+		whole := capFor(map[string]float64{"l1_a": math.Trunc(tc.trueA), "l2_a": 20, "l3_a": 20,
+			"l1_w": tc.trueA * tc.volts, "l2_w": 20 * tc.volts, "l3_w": 20 * tc.volts,
+			"l1_v": tc.volts, "l2_v": tc.volts, "l3_v": tc.volts}, totalW)
+		exact := capFor(map[string]float64{"l1_a": tc.trueA, "l2_a": 20, "l3_a": 20}, totalW)
+		if exact >= 10350 {
+			t.Fatalf("%s: setup: %.1f A on L1 does not cut (cap %.0f W)", tc.name, tc.trueA, exact)
+		}
+		if math.Abs(whole-exact) > .01 {
+			t.Errorf("%s: whole-ampere meter cap %.1f W, exact meter %.1f W", tc.name, whole, exact)
+		}
+	}
+}
