@@ -2444,6 +2444,7 @@ func applyDispatchSafetyPipeline(
 		targets = floorNegativeTargets(targets)
 	}
 	targets = floorBlockedCharge(targets, opts.noSelfCharge, opts.chargeBlocked)
+	targets = floorBlockedDischarge(targets, store, state, driverCapacities, fuseMaxW)
 
 	// A battery-boost lease may never draw the stationary fleet below its
 	// explicit reserve. Apply this immediately before forceFuseDischarge:
@@ -3493,7 +3494,7 @@ func floorNegativeTargets(targets []DispatchTarget) []DispatchTarget {
 // toward charge after noSelfCharge set 0. The snap-to-zero list inside
 // slew never grew the later charge gates, which is how an idle slot
 // commanded +1500 W. This only moves a target toward zero. Discharge
-// stays out: the fuse saver may need it.
+// has its own twin, floorBlockedDischarge, which yields to the fuse.
 func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlocked map[string]bool) []DispatchTarget {
 	if !noSelfCharge && len(chargeBlocked) == 0 {
 		return targets
@@ -3508,6 +3509,97 @@ func floorBlockedCharge(targets []DispatchTarget, noSelfCharge bool, chargeBlock
 		}
 	}
 	return targets
+}
+
+// floorBlockedDischarge is the discharge twin of floorBlockedCharge. Slew
+// anchors on measured watts, so a pack the distributor parked at 0 W (SoC
+// below the floor, discharge_capable=false) is walked back toward its live
+// discharge. Stop it at 0 W. If the stop would put the site or one phase
+// over the fuse or import limit, the blocked packs keep only the discharge
+// the capable packs cannot cover, and never more than their slewed ramp.
+// forceFuseDischarge then takes the rest from the capable packs.
+func floorBlockedDischarge(
+	targets []DispatchTarget,
+	store *telemetry.Store,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) []DispatchTarget {
+	if store == nil || state == nil {
+		return targets
+	}
+	var out []DispatchTarget
+	var rampW float64 // discharge the slewed ramp still asks of blocked packs
+	blocked := make([]bool, len(targets))
+	readings := make(map[string]*telemetry.DerReading, len(targets))
+	for i, t := range targets {
+		r := store.Get(t.Driver, telemetry.DerBattery)
+		readings[t.Driver] = r
+		if t.TargetW >= 0 || r == nil {
+			continue
+		}
+		if lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver]); lower < 0 {
+			continue
+		}
+		if out == nil {
+			out = append([]DispatchTarget(nil), targets...)
+		}
+		blocked[i] = true
+		rampW -= t.TargetW
+		out[i].TargetW = 0
+		out[i].Clamped = true
+	}
+	if out == nil {
+		return targets
+	}
+	if fuseMaxW <= 0 {
+		return out
+	}
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	keepW := blockedDischargeKeepW(store, out, blocked, readings, meter, state, driverCapacities, fuseMaxW)
+	if keepW <= 0 {
+		return out
+	}
+	if keepW >= rampW {
+		return targets
+	}
+	for i, t := range targets {
+		if blocked[i] {
+			out[i].TargetW = t.TargetW * keepW / rampW
+		}
+	}
+	return out
+}
+
+// blockedDischargeKeepW is the discharge the blocked packs must keep after
+// floorBlockedDischarge set them to 0 W. forceFuseDischarge covers the
+// aggregate overage from capable packs, so only the part beyond their room
+// stays with the blocked packs. Both read the phases as the stop leaves
+// them (phaseReliefForTargets), so a phase that only the stop puts over the
+// line is covered the same way.
+func blockedDischargeKeepW(
+	store *telemetry.Store,
+	out []DispatchTarget,
+	blocked []bool,
+	readings map[string]*telemetry.DerReading,
+	meter *telemetry.DerReading,
+	state *State,
+	driverCapacities map[string]float64,
+	fuseMaxW float64,
+) float64 {
+	reliefW := math.Max(0, fuseReliefFromSnapshot(out, readings, meter, livePhaseSample(store, state.SiteMeterDriver, meter), state, fuseMaxW))
+	var roomW float64
+	for i, t := range out {
+		r := readings[t.Driver]
+		if blocked[i] || r == nil || driverCapacities[t.Driver] <= 0 {
+			continue
+		}
+		lower, _ := fuseTargetBounds(r, state.DriverLimits[t.Driver])
+		roomW += math.Max(0, t.TargetW-lower)
+	}
+	_, _, predicted := predictedGridFromSnapshot(out, readings, meter)
+	roomW = math.Min(roomW, math.Max(0, predicted+state.effectiveExportCeilingW(fuseMaxW)))
+	return reliefW - roomW
 }
 
 // coverLoadChargeSlot reports whether the current plan slot is a charge-from-
@@ -3773,7 +3865,7 @@ func applyFuseGuard(targets []DispatchTarget, store *telemetry.Store, state *Sta
 
 	// Per phase, each way, once the targets replace the batteries' power
 	// in the same raw reading.
-	phaseImportW, phaseExportW := phaseFuseReliefW(phases, state, phaseMoveW(out, batteries))
+	phaseImportW, phaseExportW := phaseReliefForTargets(phases, state, out, batteries)
 	// Aggregate budget honours the safety margin too — keep dispatch
 	// commands strictly inside the breaker envelope so the inverter's
 	// own per-phase limiter doesn't fire first and cause a flap.
@@ -3921,6 +4013,7 @@ func (s *State) effectiveExportCeilingW(fuseMaxW float64) float64 {
 type phaseSample struct {
 	meter  *telemetry.DerReading
 	totalW float64
+	store  *telemetry.Store
 }
 
 // livePhaseSample pairs meter with its raw total while the meter still
@@ -3935,7 +4028,7 @@ func livePhaseSample(store *telemetry.Store, driver string, meter *telemetry.Der
 	if !ok || !at.Equal(meter.UpdatedAt) {
 		return phaseSample{}
 	}
-	return phaseSample{meter: meter, totalW: totalW}
+	return phaseSample{meter: meter, totalW: totalW, store: store}
 }
 
 // signedPhasesA is the sample's phase currents, import positive
@@ -4077,41 +4170,123 @@ func fitBatteryRisesToFuse(targets []DispatchTarget, store *telemetry.Store, sta
 	return out
 }
 
-// phaseMoveW is the batteries' change from the raw power their readings hold
-// to the targets. The phase currents are raw, so the move is too.
-func phaseMoveW(targets []DispatchTarget, batteries map[string]*telemetry.DerReading) float64 {
-	var moveW float64
+// moveW is the batteries' change from the raw power the phases hold to
+// the targets. The phase currents are raw, so the move is too. Each
+// battery's raw power comes live from the store and must be the reading in
+// batteries. false when a targeted battery has no reading, has gone
+// offline or has moved on to a newer reading: its power in the phases is
+// then unknown.
+//
+// sentW is the same change from the command each battery got in the last
+// dispatch, for a battery that got one, and from its reading otherwise.
+func (p phaseSample) moveW(state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (moveW, sentW float64, ok bool) {
+	if p.store == nil {
+		return 0, 0, false
+	}
 	seen := make(map[string]bool, len(targets))
 	for _, t := range targets {
 		moveW += t.TargetW
-		if r := batteries[t.Driver]; r != nil && !seen[t.Driver] {
-			moveW -= r.RawW
+		sentW += t.TargetW
+		if seen[t.Driver] {
+			continue
 		}
 		seen[t.Driver] = true
+		r := batteries[t.Driver]
+		if r == nil {
+			return 0, 0, false
+		}
+		rawW, at, ok := p.store.OnlineRawW(t.Driver, telemetry.DerBattery)
+		if !ok || !at.Equal(r.UpdatedAt) {
+			return 0, 0, false
+		}
+		moveW -= rawW
+		if w, sent := state.lastDispatchedW(t.Driver); sent {
+			sentW -= w
+		} else {
+			sentW -= rawW
+		}
 	}
-	return moveW
+	return moveW, sentW, true
+}
+
+// lastDispatchedW is the command driver got in the last dispatch, if it
+// got one.
+func (s *State) lastDispatchedW(driver string) (float64, bool) {
+	if s == nil {
+		return 0, false
+	}
+	log := s.batteryCommands[driver]
+	if len(log) == 0 || s.LastDispatch == nil || !log[len(log)-1].at.Equal(*s.LastDispatch) {
+		return 0, false
+	}
+	return log[len(log)-1].w, true
+}
+
+// phaseReliefForTargets is the relief that keeps every phase inside
+// fuseLineA once the targets replace the batteries' power. 0, 0 when that
+// power is unknown.
+//
+// The relief counts the batteries' move from their readings
+// (phaseFuseReliefW). A reading can lag the meter: the meter already shows
+// the battery at its last command while the reading still holds the power
+// before it. The phase then sits at the line, the reading shows no relief
+// in force, and the relief is taken back; on the next tick the reading
+// shows it and the relief goes on top of it. The order runs further out
+// each time. So a move from the last command may not pass the room the
+// meter shows either (phaseSentReliefW).
+func phaseReliefForTargets(p phaseSample, state *State, targets []DispatchTarget, batteries map[string]*telemetry.DerReading) (importW, exportW float64) {
+	moveW, sentW, ok := p.moveW(state, targets, batteries)
+	if !ok {
+		return 0, 0
+	}
+	importW, exportW = phaseFuseReliefW(p, state, moveW)
+	sentImportW, sentExportW := phaseSentReliefW(p, state, sentW)
+	return math.Max(importW, sentImportW), math.Max(exportW, sentExportW)
+}
+
+// phaseSentReliefW is the relief that keeps sentW, the batteries' move from
+// their last commands, inside the room the meter shows on each phase. A
+// phase already over the line has no room; its overage is
+// phaseFuseReliefW's. So this relief never asks for more than to stay at
+// the last command, and a battery that cannot reach its command does not
+// wind the relief up.
+func phaseSentReliefW(p phaseSample, state *State, sentW float64) (importW, exportW float64) {
+	amps, ok := p.signedPhasesA(state)
+	if !ok {
+		return 0, 0
+	}
+	perA := state.SiteFuseVoltage * float64(state.SiteFusePhases)
+	limitA := state.fuseLineA()
+	hi, lo := math.Inf(-1), math.Inf(1)
+	for _, a := range amps {
+		a = math.Max(-limitA, math.Min(limitA, a)) + sentW/perA
+		hi, lo = math.Max(hi, a), math.Min(lo, a)
+	}
+	importW, exportW = math.Max(0, hi-limitA)*perA, math.Max(0, -limitA-lo)*perA
+	if importW < 1 {
+		importW = 0
+	}
+	if exportW < 1 {
+		exportW = 0
+	}
+	return importW, exportW
 }
 
 // phaseFuseReliefW is the aggregate battery move that brings every phase
 // inside the working limit, fuseLineA: the fuse less safety_margin_a, the
 // same line the car uses. importW asks for less charge or more
 // discharge, exportW for the reverse. moveW is the batteries' change from
-// the power this reading already holds (phaseMoveW); like the relief, it
-// spreads evenly over the site's phases.
+// the power this reading already holds (phaseSample.moveW); like the
+// relief, it spreads evenly over the site's phases.
 //
-// The phases are the meter's signed currents (phaseCurrentsA). When no
-// phase reads as export while the total does, the meter gives no direction
-// per phase, and the phases take the total's. When no move fits every
-// phase, the move leaves the worst phase least over, so on a meter that
-// gives each phase's direction a move never raises the current on the phase
-// it protects. Two limits remain: a meter without phase power that mixes
-// directions under an exporting total, where an importing phase is read as
-// export, and a battery on one phase, which is read as balanced. 0, 0
-// without usable phase currents.
+// The phases are the meter's signed currents (signedPhasesA). When no move
+// fits every phase, the move leaves the worst phase least over, so on a
+// meter that gives each phase's direction a move never raises the current
+// on the phase it protects. Two limits remain: a meter without phase power
+// under an exporting total, where a phase the total does not force to
+// export is read as import, and a battery on one phase, which is read as
+// balanced. 0, 0 without usable phase currents.
 func phaseFuseReliefW(p phaseSample, state *State, moveW float64) (importW, exportW float64) {
-	if state == nil {
-		return 0, 0
-	}
 	amps, ok := p.signedPhasesA(state)
 	if !ok {
 		return 0, 0
@@ -4730,7 +4905,7 @@ func fuseReliefFromSnapshot(
 	if ceilingW := state.effectiveImportCeilingW(fuseMaxW); ceilingW < fuseW {
 		overage = math.Max(overage, predicted-ceilingW-state.pendingEVCutW())
 	}
-	phaseW, _ := phaseFuseReliefW(phases, state, phaseMoveW(targets, batteryReadings))
+	phaseW, _ := phaseReliefForTargets(phases, state, targets, batteryReadings)
 	return math.Max(overage, phaseW)
 }
 

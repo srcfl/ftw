@@ -6,8 +6,29 @@ the result as a GitHub commit status on the exact commit it tested:
 | Status | When | What runs |
 |---|---|---|
 | `siterig/full` | each new commit on `master` | every scenario |
-| `siterig/short` | the head of each open pull request from this repository that touches `go/internal/{control,loadpoint,ocpp,telemetry}` or `go/test/site` | the short set |
+| `siterig/short` | the head of each open pull request from this repository that touches a watched path (below) | the short set |
 | `siterig/random` | once a night on `master` | that night's random seeds |
+
+The watched paths are the control packages, every internal package they
+import, and the rig itself:
+
+- `go/cmd/ftw` (control tick wiring)
+- `go/internal/{control,loadpoint,ocpp,telemetry}`
+- `go/internal/{drivers,mdnsresolve}` (driver host, command deadlines)
+- `go/internal/{mpc,optimizercontract}` (plans)
+- `go/internal/{gridcost,forecasting,sunpos}` (plan inputs)
+- `go/internal/{config,configreload}` (limits)
+- `go/internal/units` (charge steps)
+- `go/internal/{cars,sitepower,events,state}`
+- `drivers/` and `optimizer/native/bundle/` (the bundled drivers and solver)
+- `go/test/site`
+
+`go/cmd/ftw` imports every package, the API and UI among them; only its own
+files are watched. A change to the API or UI alone does not run the rig.
+
+`watchedPaths` in `runner.go` is the list; `TestTouchesWatched` pins it.
+`TestWatchedPathsCoverImports` fails when a control package starts to
+import an internal package that is not on the list.
 
 A commit that already has the status is not run again. To run one again,
 post a new `pending` status or remove the result and wait a day. No GitHub
@@ -25,43 +46,76 @@ rig's timing, and the rig then fails the run as "host paused". Not the home
 energy box: the rig needs the CPU, and the box is production.
 
 The rig uses 100 ports per lane from `-port-base` (default 18700) on
-127.0.0.1. Leave them free.
+127.0.0.1: lane k uses `port-base + 100k` up to 99 above it, so three lanes
+take 18700 to 18999. Leave them free. `make siterig` uses the same default,
+so on the runner's host run it with `FTW_SITE_PORT_BASE=19700`. A second
+runner on one host needs its own `-port-base` and `-work`.
 
 Pull requests from forks are skipped unless `-allow-forks` is set: the rig
 builds and runs the pull request's code on this machine.
 
 ## Install
 
+The runner keeps its clone in `~/siterig/ftw` (`-work` plus `ftw`) and
+clones it there on first start if it is missing. Build the binary from the
+same clone:
+
 ```bash
 gh auth login        # an account that may write commit statuses on srcfl/ftw
 mkdir -p ~/siterig/bin
-git clone https://github.com/srcfl/ftw ~/siterig/src
-cd ~/siterig/src/go && go build -o ~/siterig/bin/siterig-runner ./test/site/runner
+git clone https://github.com/srcfl/ftw ~/siterig/ftw
+cd ~/siterig/ftw/go && go build -o ~/siterig/bin/siterig-runner ./test/site/runner
 ~/siterig/bin/siterig-runner -once     # one pass in the foreground
 ```
+
+To rebuild after a change to this directory:
+
+```bash
+cd ~/siterig/ftw && git pull --quiet origin master
+cd go && go build -o ~/siterig/bin/siterig-runner ./test/site/runner
+```
+
+then restart the service. The scenarios themselves always come from the
+commit under test.
 
 macOS (launchd):
 
 ```bash
-sed "s/USER/$USER/g" ~/siterig/src/go/test/site/runner/energy.ftw.siterig-runner.plist \
+sed "s/USER/$USER/g" ~/siterig/ftw/go/test/site/runner/energy.ftw.siterig-runner.plist \
   > ~/Library/LaunchAgents/energy.ftw.siterig-runner.plist
 launchctl load ~/Library/LaunchAgents/energy.ftw.siterig-runner.plist
 ```
 
-Linux (systemd): edit `siterig-runner.service`, copy it to
-`/etc/systemd/system/` and run `sudo systemctl enable --now siterig-runner`.
+The log is `~/siterig/runner.log`.
 
-The log is `~/siterig/runner.log` (launchd) or `journalctl -u
-siterig-runner` (systemd). Rebuild the binary after a change to this
-directory; the scenarios themselves always come from the commit under test.
+Linux, as a system service: replace `USER` in `siterig-runner.service`,
+copy it to `/etc/systemd/system/` and run
+`sudo systemctl enable --now siterig-runner`. The log is
+`journalctl -u siterig-runner`.
+
+Linux, as a user service. Root is needed once, for
+`loginctl enable-linger`, which keeps the service running after you log out
+and starts it at boot:
+
+```bash
+mkdir -p ~/.config/systemd/user
+sed -e '/^User=/d' -e "s/USER/$USER/g" -e 's/multi-user.target/default.target/' \
+  ~/siterig/ftw/go/test/site/runner/siterig-runner.service \
+  > ~/.config/systemd/user/siterig-runner.service
+systemctl --user daemon-reload
+systemctl --user enable --now siterig-runner
+sudo loginctl enable-linger "$USER"
+```
+
+The log is `journalctl --user -u siterig-runner`. Check `HOME` and `PATH`
+in the unit if your home is not `/home/$USER` or Go lives elsewhere.
 
 ## How long it takes
 
-On an M5 MacBook (10 cores), 22 October 2026: the 23 scenarios of that
-morning took 72 minutes in three lanes. With the one-phase charger cases the
-set adds up to about 270 minutes, so three lanes need about 90 and four
-about 70; `s12-20` alone takes up to 56, so more than four do not help.
-Each lane is one `ftw` and one `simulator run`, both mostly idle.
+On an M5 MacBook (10 cores), 27 October 2026: the full set took about
+2 h 20 min in three lanes. `s12-20` alone took up to 56 minutes on
+22 October, so more than four lanes do not help. Each lane is one `ftw` and
+one `simulator run`, both mostly idle.
 
 ## Flags
 
