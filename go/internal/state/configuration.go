@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"modernc.org/sqlite"
 )
 
 const configurationKey = "settings/config_v1"
@@ -126,18 +128,28 @@ func (s *Store) durableConfigWriteContext(parent context.Context, write func(*sq
 		return err
 	}
 	defer conn.Close()
-	var synchronous int
+	var synchronous, busyMS int
 	if err := conn.QueryRowContext(ctx, `PRAGMA synchronous`).Scan(&synchronous); err != nil {
+		return err
+	}
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyMS); err != nil {
 		return err
 	}
 	defer func() {
 		restore, stop := context.WithTimeout(context.Background(), time.Second)
 		defer stop()
-		if _, err := conn.ExecContext(restore, fmt.Sprintf(`PRAGMA synchronous=%d`, synchronous)); err != nil {
+		_, syncErr := conn.ExecContext(restore, fmt.Sprintf(`PRAGMA synchronous=%d`, synchronous))
+		_, busyErr := conn.ExecContext(restore, fmt.Sprintf(`PRAGMA busy_timeout=%d`, busyMS))
+		if syncErr != nil || busyErr != nil {
 			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 		}
 	}()
 	if _, err := conn.ExecContext(ctx, `PRAGMA synchronous=FULL`); err != nil {
+		return err
+	}
+	// SQLite's busy handler can outlive cancellation. Wait in Go instead,
+	// within the same call deadline, and restore this pooled connection above.
+	if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=0`); err != nil {
 		return err
 	}
 	tx, err := conn.BeginTx(ctx, nil)
@@ -145,14 +157,11 @@ func (s *Store) durableConfigWriteContext(parent context.Context, write func(*sq
 		return err
 	}
 	defer tx.Rollback()
-	// Take the write lock before write reads anything. SQLite does not wait
-	// out busy_timeout for a transaction that read first and then writes: it
-	// returns SQLITE_BUSY at once while another connection is writing, since
-	// waiting there could deadlock. SaveDriverSecret and SaveConfiguration
-	// both read first, so a rotated OAuth token was refused by any
-	// concurrent write. The statement changes no row.
-	if _, err := tx.ExecContext(ctx, `UPDATE config SET value = value WHERE 0`); err != nil {
-		return err
+	// Take the WAL writer before a callback reads state. A deferred read
+	// cannot wait when another writer prevents its upgrade. This reserves
+	// the writer even when config is empty, without changing any rows.
+	if err := reserveConfigWriter(ctx, tx); err != nil {
+		return errors.Join(fmt.Errorf("reserve state writer: %w", err), ctx.Err())
 	}
 	err = write(tx)
 	if err == nil {
@@ -162,6 +171,26 @@ func (s *Store) durableConfigWriteContext(parent context.Context, write func(*sq
 		return errors.Join(err, ctx.Err())
 	}
 	return err
+}
+
+func reserveConfigWriter(ctx context.Context, tx *sql.Tx) error {
+	wait := time.NewTicker(10 * time.Millisecond)
+	defer wait.Stop()
+	for {
+		_, err := tx.ExecContext(ctx, `UPDATE config SET value=value WHERE 0`)
+		if err == nil {
+			return nil
+		}
+		var busy *sqlite.Error
+		if !errors.As(err, &busy) || busy.Code()&0xff != 5 {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return errors.Join(err, ctx.Err())
+		case <-wait.C:
+		}
+	}
 }
 
 // SaveConfigContext preserves the durable config contract while allowing a
