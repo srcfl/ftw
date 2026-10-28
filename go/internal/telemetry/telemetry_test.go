@@ -572,6 +572,49 @@ func TestSumOnlineV2XWIsSignedAndSkipsOffline(t *testing.T) {
 	}
 }
 
+func TestOnlineLowerWNeedsALivePoll(t *testing.T) {
+	s := NewStore()
+	s.Update("charger", DerEV, 8000, nil, nil)
+	s.DriverHealthMut("charger").RecordSuccess()
+	s.Get("charger", DerEV).SmoothedW = 5000
+	if w, ok := s.OnlineLowerW("charger", DerEV); !ok || w != 5000 {
+		t.Fatalf("got %v %v, want the lower 5000 W", w, ok)
+	}
+	s.Get("charger", DerEV).RawW = 4000
+	if w, ok := s.OnlineLowerW("charger", DerEV); !ok || w != 4000 {
+		t.Fatalf("got %v %v, want the lower 4000 W", w, ok)
+	}
+	s.DriverHealthMut("charger").RecordError("timeout")
+	if _, ok := s.OnlineLowerW("charger", DerEV); ok {
+		t.Fatal("a reading held after a failed poll counted")
+	}
+	s.DriverHealthMut("charger").RecordSuccess()
+	s.DriverHealthMut("charger").SetOffline()
+	if _, ok := s.OnlineLowerW("charger", DerEV); ok {
+		t.Fatal("an offline driver's reading counted")
+	}
+	if _, ok := s.OnlineLowerW("missing", DerEV); ok {
+		t.Fatal("a missing reading counted")
+	}
+}
+
+func TestSumOnlineHigherWSumsTheNamedTypes(t *testing.T) {
+	s := NewStore()
+	s.Update("battery", DerBattery, -3000, nil, nil)
+	s.Update("pv", DerPV, -2000, nil, nil)
+	s.Update("ev", DerEV, 7000, nil, nil)
+	s.Update("offline", DerBattery, -9000, nil, nil)
+	for _, d := range []string{"battery", "pv", "ev"} {
+		s.DriverHealthMut(d).RecordSuccess()
+	}
+	s.DriverHealthMut("offline").SetOffline()
+	s.Get("battery", DerBattery).SmoothedW = -1000
+	s.Get("pv", DerPV).SmoothedW = -2500
+	if got := s.SumOnlineHigherW(DerBattery, DerPV); got != -3000 {
+		t.Fatalf("got %v, want -1000 W battery plus -2000 W PV", got)
+	}
+}
+
 func TestWatchdogPerDriverOverride(t *testing.T) {
 	s := NewStore()
 	// Two drivers: one with the site-default tolerance, one with a
@@ -703,5 +746,59 @@ func TestOnlineMeterWSkipsOfflineMeter(t *testing.T) {
 	s.DriverHealthMut("meter").SetOffline()
 	if _, _, ok := s.OnlineMeterW("meter"); ok {
 		t.Fatal("an offline meter's last reading was returned")
+	}
+}
+
+// A battery's raw power, like the meter's, stops counting once its driver
+// goes offline.
+func TestOnlineRawWSkipsOfflineBattery(t *testing.T) {
+	s := NewStore()
+	s.Update("bat", DerBattery, -3000, nil, nil)
+	s.DriverHealthMut("bat").RecordSuccess()
+	if w, _, ok := s.OnlineRawW("bat", DerBattery); !ok || w != -3000 {
+		t.Fatalf("online battery: %v %v, want -3000 W", w, ok)
+	}
+	if _, _, ok := s.OnlineRawW("bat", DerMeter); ok {
+		t.Fatal("a battery driver reported a meter reading")
+	}
+	s.DriverHealthMut("bat").SetOffline()
+	if _, _, ok := s.OnlineRawW("bat", DerBattery); ok {
+		t.Fatal("an offline battery's last reading was returned")
+	}
+}
+
+// The meter's sample comes with its phase data, and both stop once the
+// meter goes offline.
+func TestOnlineMeterSampleSkipsOfflineMeter(t *testing.T) {
+	s := NewStore()
+	data := json.RawMessage(`{"l1_a":2.4}`)
+	s.Update("meter", DerMeter, 2667, nil, data)
+	if _, _, _, ok := s.OnlineMeterSample("meter"); ok {
+		t.Fatal("a meter with no health record was returned")
+	}
+	s.DriverHealthMut("meter").RecordSuccess()
+	w, got, at, ok := s.OnlineMeterSample("meter")
+	if !ok || w != 2667 || string(got) != string(data) || at.IsZero() {
+		t.Fatalf("online meter: %v %s %v %v", w, got, at, ok)
+	}
+	s.DriverHealthMut("meter").SetOffline()
+	if _, _, _, ok := s.OnlineMeterSample("meter"); ok {
+		t.Fatal("an offline meter's last sample was returned")
+	}
+}
+
+// Every reporting driver of one type, and none that went offline.
+func TestOnlineRawWByTypeSkipsOfflineDrivers(t *testing.T) {
+	s := NewStore()
+	for name, w := range map[string]float64{"a": -3000, "b": 1500} {
+		s.Update(name, DerBattery, w, nil, nil)
+		s.DriverHealthMut(name).RecordSuccess()
+	}
+	s.Update("charger", DerEV, 4140, nil, nil)
+	s.DriverHealthMut("charger").RecordSuccess()
+	s.DriverHealthMut("b").SetOffline()
+	got := s.OnlineRawWByType(DerBattery)
+	if len(got) != 1 || got["a"] != -3000 {
+		t.Fatalf("online batteries = %v, want only a at -3000 W", got)
 	}
 }

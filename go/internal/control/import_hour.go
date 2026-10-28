@@ -178,7 +178,7 @@ func (s *State) stepHourImportLimits(at time.Time, gap bool) {
 			"imported_wh", h.importedWh, "limit_w", rateW, "was_w", h.limitW)
 	}
 	h.limitW, h.riseW, h.changedAt = rateW, math.Min(h.riseW, rateW), at
-	step := evPhaseMarginA * s.SiteFuseVoltage * float64(s.SiteFusePhases)
+	step := evStepA * s.SiteFuseVoltage * float64(s.SiteFusePhases)
 	left := h.start.Add(time.Hour).Sub(at)
 	if gap || !(step > 0) || at.Sub(h.cutAt) < importHourRiseGap || left < importHourRiseMinLeft || rateW < h.riseW+2*step {
 		return
@@ -241,7 +241,7 @@ func PlanningImportCeiling(s *State) mpc.ImportCeiling {
 	if h := &s.importHour; s.importHourMeasured() {
 		elapsedWh = h.importedWh + ceiling*h.unknown.Hours()
 	}
-	step := evPhaseMarginA * s.SiteFuseVoltage * float64(s.SiteFusePhases)
+	step := evStepA * s.SiteFuseVoltage * float64(s.SiteFusePhases)
 	return mpc.ImportCeiling{W: ceiling, MeanW: max(0, ceiling-step/2), HourStart: start, ElapsedWh: elapsedWh}
 }
 

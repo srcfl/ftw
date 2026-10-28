@@ -4,7 +4,11 @@ package site
 
 import (
 	"encoding/json"
+	"os"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 )
 
 // These run in every go test, without a simulator.
@@ -113,7 +117,7 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 		for i := 0; i <= 100; i++ {
 			a := 10.0
 			if i >= 50 && i < 56 {
-				a = 26 // 6 s over the 24 A limit
+				a = 26 // 6 s over the 25 A fuse
 			}
 			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}, Bat: plantDevice{SoCPct: 50}})
 		}
@@ -137,5 +141,147 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 	_, cs := judgeInvariants(mk(false))
 	if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
 		t.Fatalf("without a step: %v", f)
+	}
+}
+
+// s18 at margin 0: Core holds the phases at the 16 A line, so the house's own
+// 0.1 A step lands over it until Core cuts. That stretch is the house's, not
+// an own command. The same overage at any other time is Core's and fails.
+func TestS18OwnCommandsSkipTheHouseStep(t *testing.T) {
+	const own = "own commands stay inside the rated fuse"
+	mk := func(overFrom float64) *runData {
+		d := &runData{marks: map[string]float64{"charge_now": 0, "small_step": 100, "no_room": 200, "room_returns": 300, "end": 450}}
+		for i := 0; i <= 450; i++ {
+			a := 16.0
+			if float64(i) >= overFrom && float64(i) < overFrom+4 {
+				a = 16.1
+			}
+			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}})
+		}
+		return d
+	}
+	ok := func(d *runData) bool {
+		_, cs := judgeS18(d)
+		for _, c := range cs {
+			if c.Name == own {
+				return c.OK
+			}
+		}
+		t.Fatalf("no %q criterion", own)
+		return false
+	}
+	if !ok(mk(100)) {
+		t.Error("4 s at 16.1 A right after the house's step failed")
+	}
+	for _, at := range []float64{50, 150} {
+		if ok(mk(at)) {
+			t.Errorf("4 s at 16.1 A from %.0f s with no outside step passed", at)
+		}
+	}
+}
+
+// s8 at margin 0: the car settles at the fuse rating, as the owner's rule
+// says. A phase at exactly the fuse for the whole run passes; 0.1 A above
+// it for longer than the charger's delay + 7 s fails. Before, the judge
+// counted every second above fuse - 1 A, and s8-60-25 failed at 25 A.
+func TestS8JudgesAtTheFuse(t *testing.T) {
+	const over = "no longer than the charger's delay + 7 s"
+	ok := func(a float64) bool {
+		d := &runData{marks: map[string]float64{"charge_now": 0, "end": 300}, meta: map[string]any{"fuse": 25.0, "charger_delay_s": 60.0}}
+		for i := 0; i <= 300; i++ {
+			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, 15, 15}})
+		}
+		_, cs := judgeS8(d)
+		for _, c := range cs {
+			if strings.HasSuffix(c.Name, over) {
+				return c.OK
+			}
+		}
+		t.Fatalf("no criterion ending %q", over)
+		return false
+	}
+	if !ok(25) {
+		t.Error("a phase at exactly the 25 A fuse failed")
+	}
+	if ok(25.1) {
+		t.Error("a phase 0.1 A over the 25 A fuse for 300 s passed")
+	}
+}
+
+// The limit is the fuse rating: a phase may sit at exactly the fuse until
+// the end of the run, and 0.1 A above it fails once the time budget is up.
+func TestInvariantsJudgeAtTheFuse(t *testing.T) {
+	const fuse = 25.0
+	const own = "over the limit at most 3 s after FTW's own raise"
+	const step = "over the limit no longer than an outside step allows"
+	for _, c := range []struct {
+		name     string
+		a        float64
+		to       int // the level holds from 50 s until this second
+		withStep bool
+		want     []string
+	}{
+		{"at the fuse", fuse, 101, false, nil},
+		{"at the fuse after a step", fuse, 101, true, nil},
+		// 20 s is past the 3 s for FTW's own raise, and past the
+		// 2 + 2 + 3 s a step allows while the battery can answer.
+		{"0.1 A over", fuse + 0.1, 70, false, []string{own}},
+		{"0.1 A over after a step", fuse + 0.1, 70, true, []string{step}},
+	} {
+		d := &runData{marks: map[string]float64{"start": 0, "end": 100}, meta: map[string]any{"fuse": fuse}}
+		for i := 0; i <= 100; i++ {
+			a := 10.0
+			if i >= 50 && i < c.to {
+				a = c.a
+			}
+			d.samples = append(d.samples, &sample{T: float64(i), PhaseA: [3]float64{a, a, a}, Bat: plantDevice{SoCPct: 50}})
+		}
+		if c.withStep {
+			d.events = append(d.events, houseEventLine{T: 49.5, Event: houseEvent{Do: "loads"}})
+		}
+		var failed []string
+		_, cs := judgeInvariants(d)
+		for _, x := range cs {
+			if !x.OK {
+				failed = append(failed, x.Name)
+			}
+		}
+		if !slices.Equal(failed, c.want) {
+			t.Errorf("%s: failed %v, want %v", c.name, failed, c.want)
+		}
+	}
+}
+
+// A run that selects planner_self plans in self_consumption; any other run
+// selects planner_passive_arbitrage and plans in passive_arbitrage. s15bat
+// needs Self, where PV surplus charges the battery (#1875).
+func TestRigModeMatchesItsPlannerConfig(t *testing.T) {
+	for _, tc := range []struct{ spec, mode, planner string }{
+		{"", "planner_passive_arbitrage", "passive_arbitrage"},
+		{"planner_self", "planner_self", "self_consumption"},
+	} {
+		st := newStack(nil, lane(21700), t.TempDir(), stackSpec{fuseA: 16, mode: tc.spec})
+		st.prices = newPriceServer(time.Now())
+		path, err := st.ftwConfig()
+		st.prices.close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg struct {
+			Planner struct {
+				Mode string `json:"mode"`
+			} `json:"planner"`
+		}
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if st.mode() != tc.mode || cfg.Planner.Mode != tc.planner {
+			t.Errorf("spec mode %q: selects %q and plans in %q, want %q and %q",
+				tc.spec, st.mode(), cfg.Planner.Mode, tc.mode, tc.planner)
+		}
 	}
 }

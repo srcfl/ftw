@@ -20,10 +20,11 @@ const fuseInstantFactor = 1.2
 // fuseHeat models each phase of the main fuse as a first-order low-pass on
 // I², fed only by the site meter's phase currents. A breaker and a fuse both
 // trip on heat, not on one reading. FTW does not know which one a site has,
-// so the EV hard limit holds the filtered current under the working limit,
-// below both types' one-hour ratings (a miniature circuit breaker does not
-// trip at 1.13 × In, a gG fuse does not blow at 1.25 × In), and gives no
-// budget above fuseInstantFactor.
+// so the EV hard limit holds the filtered current at or under the working
+// limit, the rating less the user's optional margin (fuseLineA). That is at
+// or below both types' one-hour ratings (a miniature circuit breaker does not
+// trip at 1.13 × In, a gG fuse does not blow at 1.25 × In). A reading above
+// the line spends heat budget first; above fuseInstantFactor there is none.
 //
 // A reading stands for the time until the next one. A meter gap counts at
 // the last current seen: the reading after it neither fills the gap with its
@@ -140,7 +141,7 @@ func (s *State) stepFuseHeat(meter *telemetry.DerReading, totalW float64) {
 		return
 	}
 	if !s.fuseHeat.set {
-		s.fuseHeat.start(meter.UpdatedAt, amps, math.Max(0, s.SiteFuseAmps-evPhaseMarginA)) // evMeterRoom's limitA
+		s.fuseHeat.start(meter.UpdatedAt, amps, s.fuseLineA()) // evMeterRoom's limitA
 		return
 	}
 	s.fuseHeat.step(meter.UpdatedAt, amps)

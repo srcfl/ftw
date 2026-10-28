@@ -7,16 +7,17 @@ import (
 )
 
 // clampEVBatteryHeadroom keeps optional battery charge out of room an EV
-// still needs. It reads only the site meter and our own commands; no charger
-// reading takes part, and a battery's own reading only bounds how much of a
-// discharge we ordered it may keep. The EV still needs its demand less the
-// offers the meter surely shows (evShownW).
+// still needs. It reads the site meter and our own commands. A battery's own
+// reading only bounds how much of a discharge we ordered it may keep. A
+// charger's reading counts only before any of its offers of this run has
+// surely landed, and only up to what the meter shows (evFoundDrawW). The EV
+// still needs its demand less the offers the meter surely shows (evShownW)
+// and that draw.
 func clampEVBatteryHeadroom(targets []DispatchTarget, store *telemetry.Store, state *State, fuseMaxW float64) []DispatchTarget {
 	if store == nil || state == nil || len(targets) == 0 || fuseMaxW <= 0 {
 		return targets
 	}
 	now := state.now()
-	offeredW := state.evShownW(now)
 	var demandW float64
 	phases := 3.0 // No phase placement promise for 1p or auto chargers.
 	for _, demand := range state.evFuseDemands {
@@ -28,7 +29,6 @@ func clampEVBatteryHeadroom(targets []DispatchTarget, store *telemetry.Store, st
 	if len(state.evFuseDemands) == 0 {
 		return targets
 	}
-	needW := math.Max(0, demandW-offeredW)
 	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
 	if meter == nil {
 		return floorPositiveEVBatteryTargets(targets)
@@ -37,6 +37,9 @@ func clampEVBatteryHeadroom(targets []DispatchTarget, store *telemetry.Store, st
 	if !finiteFuseValue(gridW) || !finiteFuseValue(fuseMaxW) {
 		return floorPositiveEVBatteryTargets(targets)
 	}
+	offeredW := state.evShownW(now)
+	offeredW += state.evFoundDrawW(store, gridW, meter.UpdatedAt, now, offeredW)
+	needW := math.Max(0, demandW-offeredW)
 	latest := make(map[string]float64, len(targets))
 	lowest := make(map[string]float64, len(targets))
 	targeted := make(map[string]bool, len(targets))
@@ -171,8 +174,8 @@ func evBatteryPhaseSpareW(meter *telemetry.DerReading, state *State, gridW, evIn
 	if !valid {
 		return math.Inf(-1), true
 	}
-	margin := math.Max(1, state.SiteFuseSafetyA) // Same working margin as the EV phase guard.
-	return (state.SiteFuseAmps - margin - worst - evIncreaseA) * state.SiteFuseVoltage * float64(state.SiteFusePhases), true
+	// The same working limit as the EV phase guard, with no floor under it.
+	return (state.fuseLineA() - worst - evIncreaseA) * state.SiteFuseVoltage * float64(state.SiteFusePhases), true
 }
 
 func floorPositiveEVBatteryTargets(targets []DispatchTarget) []DispatchTarget {

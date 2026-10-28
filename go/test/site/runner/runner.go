@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -15,10 +16,28 @@ const (
 )
 
 // watchedPaths are the parts of the tree whose changes get the short set on
-// a pull request.
+// a pull request: the control packages, every internal package they import,
+// and the rig itself. TestWatchedPathsCoverImports keeps the imports in.
 var watchedPaths = []string{
+	"go/cmd/ftw/", // control tick wiring
 	"go/internal/control/", "go/internal/loadpoint/", "go/internal/ocpp/", "go/internal/telemetry/",
+	"go/internal/drivers/", "go/internal/mdnsresolve/", // driver host, command deadlines
+	"go/internal/mpc/", "go/internal/optimizercontract/", // plans
+	"go/internal/gridcost/", "go/internal/forecasting/", "go/internal/sunpos/", // plan inputs
+	"go/internal/config/", "go/internal/configreload/", // limits
+	"go/internal/units/", // charge steps
+	"go/internal/cars/", "go/internal/sitepower/",
+	"go/internal/events/", "go/internal/state/",
+	"drivers/", "optimizer/native/bundle/", // bundled drivers and solver
 	"go/test/site/",
+}
+
+// controlPackages are the watched packages whose imports must be watched
+// too. go/cmd/ftw is left out: it imports every package, the API and UI
+// among them.
+var controlPackages = []string{
+	"control", "loadpoint", "ocpp", "telemetry", "drivers", "mpc",
+	"optimizercontract", "config", "configreload", "cars", "sitepower",
 }
 
 // job is one run of the rig on one commit.
@@ -45,9 +64,10 @@ func short(sha string) string {
 
 // pull is the part of a pull request the runner needs.
 type pull struct {
-	Number int  `json:"number"`
-	Draft  bool `json:"draft"`
-	Head   struct {
+	Number    int    `json:"number"`
+	Draft     bool   `json:"draft"`
+	UpdatedAt string `json:"updated_at"` // RFC 3339, so it sorts as text
+	Head      struct {
 		SHA  string `json:"sha"`
 		Repo struct {
 			FullName string `json:"full_name"`
@@ -93,6 +113,9 @@ func plan(gh github, cfg config, now time.Time, lastRandom string) ([]job, error
 	if err != nil {
 		return nil, err
 	}
+	// Most recently updated first: that is the work in review, and a pull
+	// request untouched for weeks can wait.
+	sort.SliceStable(pulls, func(i, j int) bool { return pulls[i].UpdatedAt > pulls[j].UpdatedAt })
 	for _, p := range pulls {
 		if p.Draft && !cfg.Drafts {
 			continue
@@ -122,6 +145,17 @@ func plan(gh github, cfg config, now time.Time, lastRandom string) ([]job, error
 		jobs = append(jobs, job{Context: ctxRandom, SHA: master, Set: fmt.Sprintf("random:%d:%d", first, cfg.RandomSeeds)})
 	}
 	return jobs, nil
+}
+
+// next is the first job not yet run in this tick. A job whose status failed
+// to post is planned again; this keeps it from running twice.
+func next(jobs []job, ran map[string]bool) (job, bool) {
+	for _, j := range jobs {
+		if !ran[j.Context+" "+j.SHA] {
+			return j, true
+		}
+	}
+	return job{}, false
 }
 
 func touchesWatched(files []string) bool {
