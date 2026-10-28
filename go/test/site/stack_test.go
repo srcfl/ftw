@@ -269,7 +269,7 @@ type stackSpec struct {
 	// charge; 0 leaves one.
 	soc2Pct float64
 	// engine is the planner's: core or energyplan. Empty takes
-	// FTW_SITE_ENGINE, else core.
+	// FTW_SITE_ENGINE, else energyplan, as a beta or stable box runs.
 	engine string
 	// horizonH is the planner's horizon_hours; 0 leaves Core's 48 h.
 	horizonH int
@@ -286,6 +286,7 @@ type stack struct {
 	sim    string // the house's API base URL
 	rec    *recorder
 	cfg    string
+	prices *priceServer
 	// markErr is the first mark the house did not take; the run cannot be
 	// judged without it.
 	markErr error
@@ -353,6 +354,7 @@ func (st *stack) up() error {
 	if err := os.MkdirAll(st.rundir, 0o755); err != nil {
 		return err
 	}
+	st.prices = newPriceServer(time.Now())
 	spec, _ := json.MarshalIndent(st.houseSpec(), "", "  ")
 	specPath := filepath.Join(st.rundir, "house.json")
 	if err := os.WriteFile(specPath, spec, 0o644); err != nil {
@@ -391,7 +393,7 @@ func (st *stack) up() error {
 	if err := st.startFTW(); err != nil {
 		return err
 	}
-	if _, err := call("POST", st.ftw+"/api/mode", map[string]any{"mode": "planner_self"}, nil); err != nil {
+	if _, err := call("POST", st.ftw+"/api/mode", map[string]any{"mode": "planner_passive_arbitrage"}, nil); err != nil {
 		return err
 	}
 	st.rec = &recorder{ftw: st.ftw, path: filepath.Join(st.rundir, "ftw.jsonl")}
@@ -417,6 +419,9 @@ func (st *stack) down() {
 	st.ps.stop("ftw", syscall.SIGTERM, 30*time.Second)
 	st.ps.stop("house", syscall.SIGTERM, 15*time.Second)
 	st.ps.stopAll()
+	if st.prices != nil {
+		st.prices.close()
+	}
 }
 
 // event changes the house now.
@@ -516,7 +521,7 @@ func (st *stack) engine() string {
 	if e := os.Getenv("FTW_SITE_ENGINE"); e != "" {
 		return e
 	}
-	return "core"
+	return "energyplan"
 }
 
 func (st *stack) ftwConfig() (string, error) {
@@ -559,9 +564,10 @@ func (st *stack) ftwConfig() (string, error) {
 		"device_repository": map[string]any{"enabled": false},
 		// A real box plans. A box without a planner runs Self, where the
 		// battery chases the raw meter and covers the car (dispatch.go),
-		// which hides the stress on the fuse.
-		"planner": map[string]any{"enabled": true, "engine": st.engine(), "mode": "self_consumption"},
-		"price":   map[string]any{"provider": "elprisetjustnu", "zone": "SE3"},
+		// which hides the stress on the fuse. Passive arbitrage is the
+		// mode the web app and a Charge restart return to.
+		"planner": map[string]any{"enabled": true, "engine": st.engine(), "mode": "passive_arbitrage"},
+		"price":   map[string]any{"provider": "elprisetjustnu", "zone": "SE3", "base_url": st.prices.url()},
 	}
 	if st.spec.horizonH > 0 {
 		cfg["planner"].(map[string]any)["horizon_hours"] = st.spec.horizonH
