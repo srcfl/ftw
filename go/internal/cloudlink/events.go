@@ -222,13 +222,14 @@ type notice struct{ kind, client string }
 // to the box changed, and goes whenever the box is linked. client is the
 // name of the client given access, on agent.added; it leaves the box only
 // while the readable copy is on and carries events. False means the box is
-// not linked or the kind is not a notice.
+// not linked, its grant is for statistics only, which carries no notice, or
+// the kind is not a notice.
 func (l *Link) Notice(kind, client string) bool {
 	if !slices.Contains(cloudwire.NoticeKinds, kind) {
 		return false
 	}
 	l.mu.Lock()
-	if l.link == nil || l.link.Ending || l.closing {
+	if l.link == nil || l.link.Ending || l.closing || l.grant.statisticsOnly() {
 		l.mu.Unlock()
 		return false
 	}

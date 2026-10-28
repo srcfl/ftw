@@ -146,18 +146,17 @@ type agentPorts struct {
 	warned map[string]bool
 }
 
-// push tells every owner about a change to who may reach the box: through
-// the box's own transports, and as a notice through FTW Cloud. client names
-// the client given access, on agent.added.
+// push tells every owner about a change to who may reach the box: as a
+// notice through FTW Cloud, and through the box's own transports, whose
+// history also counts the notice FTW Cloud took. client names the client
+// given access, on agent.added.
 func (p *agentPorts) push(kind, client string) {
-	if p.notice != nil {
-		p.notice(kind, client)
-	}
+	viaCloud := p.notice != nil && p.notice(kind, client)
 	if p.notices == nil {
 		return
 	}
 	if svc := p.notices.svc.Load(); svc != nil {
-		svc.NotifyAgents(kind)
+		svc.NotifyAgents(kind, viaCloud)
 	}
 }
 

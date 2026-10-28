@@ -23,20 +23,24 @@ func (s *Service) NotifyCloudGrant(kind string) {
 // catalogue's sentence for kind. These are security notices: they go
 // whether or not the owner turned notifications on, and whatever the rule
 // says, to every transport the box has.
-func (s *Service) NotifyAgents(kind string) {
+//
+// FTW Cloud carries them on a path of its own, queued before this is called.
+// viaCloud says it took this one, which counts as a delivery: a phone paired
+// as the first owner finds no other transport with anyone to tell (#1785).
+func (s *Service) NotifyAgents(kind string, viaCloud bool) {
 	switch kind {
 	case PushAgentAdded, PushAgentRequest, PushAgentExpiring, PushApprovalKeySet, PushOwnerAdded:
 	default:
 		return
 	}
-	s.notify(kind, true)
+	s.notify(kind, true, viaCloud)
 }
 
-func (s *Service) notifyOwners(kind string) { s.notify(kind, false) }
+func (s *Service) notifyOwners(kind string) { s.notify(kind, false, false) }
 
 // notify sends kind to every owner. A security notice passes the master
 // switch and its rule.
-func (s *Service) notify(kind string, security bool) {
+func (s *Service) notify(kind string, security, viaCloud bool) {
 	if s == nil {
 		return
 	}
@@ -72,8 +76,18 @@ func (s *Service) notify(kind string, security bool) {
 		s.emitDispatched(kind, "", Message{Priority: prio}, "failed", err.Error())
 		return
 	}
-	s.deliver(kind, "", Message{Kind: kind, Title: title, Body: body, Priority: prio, Tags: splitTags(rule.Tags)})
+	pubs := s.publishers()
+	if viaCloud {
+		pubs = append(pubs, cloudNotice{})
+	}
+	s.deliverTo(pubs, kind, "", Message{Kind: kind, Title: title, Body: body, Priority: prio, Tags: splitTags(rule.Tags)})
 }
+
+// cloudNotice is FTW Cloud's security notice, already queued for the owners'
+// phones when the box's own transports hear of it.
+type cloudNotice struct{}
+
+func (cloudNotice) Publish(context.Context, Message) error { return nil }
 
 // CloudPublisher hands each catalogue-worded message to FTW Cloud's uplink,
 // which signs it and sends it as an event for the owners' phones. It only

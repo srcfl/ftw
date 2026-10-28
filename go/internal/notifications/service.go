@@ -1073,15 +1073,20 @@ func (s *Service) dispatch(cfg *config.Notifications, rule config.NotificationRu
 
 // deliver fans one rendered message out to every installed transport and
 // settles the counters and the history trail once for the lot.
+func (s *Service) deliver(eventType, device string, msg Message) {
+	s.deliverTo(s.publishers(), eventType, device, msg)
+}
+
+// deliverTo hands msg to pubs and records the outcome.
 //
 // One delivery anywhere counts as sent — the operator was told. A transport
 // answering ErrNothingToSend was absent, not failing: web push with no
-// stored subscription has not had a push fail. No transport at all is the
-// old nil-publisher case — cold-start / reload can leave notifications
-// enabled with no provider installed — and stays a truthful failure in the
-// history rather than a panic or a silence.
-func (s *Service) deliver(eventType, device string, msg Message) {
-	sent, errs := publishAll(s.publishers(), msg)
+// stored subscription has not had a push fail. When every transport was
+// absent, or none is installed — cold-start / reload can leave
+// notifications enabled with no provider — nobody was told, and that stays
+// a truthful failure in the history rather than a panic or a silence.
+func (s *Service) deliverTo(pubs []Publisher, eventType, device string, msg Message) {
+	sent, errs := publishAll(pubs, msg)
 	switch {
 	case sent > 0:
 		if len(errs) > 0 {
@@ -1095,6 +1100,10 @@ func (s *Service) deliver(eventType, device string, msg Message) {
 		slog.Warn("notifications: publish failed", "event", eventType, "driver", device, "err", err)
 		s.bumpFailed()
 		s.emitDispatched(eventType, device, msg, "failed", err.Error())
+	case len(pubs) > 0:
+		slog.Warn("notifications: no phone or service to send to", "event", eventType, "driver", device)
+		s.bumpFailed()
+		s.emitDispatched(eventType, device, msg, "failed", "no phone or service to send to")
 	default:
 		slog.Warn("notifications: no publisher installed — skipping", "event", eventType, "driver", device)
 		s.bumpFailed()
