@@ -327,9 +327,10 @@ type State struct {
 	SiteFuseVoltage float64
 	SiteFusePhases  int
 
-	// SiteFuseSafetyA is amps held back from the breaker. Without it the
-	// inverter's own limiter trips first, output falls to 0, and dispatch
-	// ramps from idle. Zero disables the margin.
+	// SiteFuseSafetyA is an opt-in margin in amps per phase below the
+	// breaker; zero, the default, works to the rating. Set it for an
+	// inverter whose own limiter trips at the rating: output falls to 0
+	// and dispatch ramps from idle.
 	SiteFuseSafetyA float64
 
 	// Peak limit — enforced only in PeakShaving mode
@@ -1107,11 +1108,15 @@ func (s *State) SetPeakLimit(w float64) error {
 		return fmt.Errorf("peak_limit_w must be ≥ 0, got %.0f W", w)
 	}
 	if ceiling := s.peakLimitCeilingW(); ceiling > 0 && w > ceiling {
+		margin := ""
+		if s.SiteFuseSafetyA > 0 {
+			margin = fmt.Sprintf(", less a %.1f A safety margin", s.SiteFuseSafetyA)
+		}
 		return fmt.Errorf(
 			"peak_limit_w %.0f W is above the site's import ceiling %.0f W "+
-				"(fuse %.0f A × %.0f V × %d phases, less a %.1f A safety margin) "+
+				"(fuse %.0f A × %.0f V × %d phases%s) "+
 				"— a peak limit above the fuse can never bind",
-			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, s.SiteFuseSafetyA)
+			w, ceiling, s.SiteFuseAmps, s.SiteFuseVoltage, s.SiteFusePhases, margin)
 	}
 	s.PeakLimitW = w
 	return nil
