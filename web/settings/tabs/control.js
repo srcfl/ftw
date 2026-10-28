@@ -96,8 +96,8 @@
         '</div><div>' +
         field("Phase-to-neutral voltage (V)", "fuse.voltage", "number", 230) +
         '</div></div>' +
-        decimalField("Safety margin (A)", "fuse.safety_margin_a", 0.5,
-          "Headroom below max amps so the inverter's own per-phase limiter doesn't trip first. Defaults to 0.5 A.",
+        decimalField("Safety margin (A)", "fuse.safety_margin_a", 0,
+          "Optional. Amps to keep below the fuse rating, for an inverter whose own phase limiter trips at the rating. 0 works to the rating.",
           "0.1") +
         '</details></fieldset>';
     },

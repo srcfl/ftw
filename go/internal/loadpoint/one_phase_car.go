@@ -51,7 +51,7 @@ type phaseTest struct {
 }
 
 // carPhases is one session's evidence. phase is 1-3 once the car is seen on
-// that phase alone.
+// that phase alone; three is set once it is seen on all three.
 type carPhases struct {
 	orderA float64 // per phase, the order the next rise is measured from
 	// rising is set once the order has gone above orderA, and before is the
@@ -67,6 +67,7 @@ type carPhases struct {
 	seen      bool
 	test      *phaseTest
 	phase     int
+	three     bool
 }
 
 // phaseVerdict reads one meter reading against the baseline of a rise of
@@ -196,7 +197,7 @@ func (m *Manager) observePhases(id string, meter SitePhases, drawA, voltage floa
 	if t.verdict == 0 || now.Sub(t.since) < onePhaseHold {
 		return
 	}
-	s.phase = max(t.verdict, 0)
+	s.phase, s.three = max(t.verdict, 0), t.verdict < 0
 	s.test = nil
 }
 

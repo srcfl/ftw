@@ -775,7 +775,7 @@
         "fuse_hold_latched": false,
         "fuse_hold_max_charge_w": 0,
         "fuse_hold_max_discharge_w": 0,
-        "per_phase_overage_w": 2300,
+        "per_phase_overage_w": 2070,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
         "import_ceiling_binding": false,
