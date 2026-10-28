@@ -225,10 +225,11 @@ func testFuseLineIdleStart(t *testing.T, inA float64, phases int, marginA, lineA
 	}
 }
 
-// fitScenario runs a 3 × 16 A site, safety margin 0.5 A, with houseLoadA of
-// house on each phase. At 3.5 A twelve steps of the car fit exactly under
-// the 15.5 A line. The car asks for 16 A.
-func fitScenario(houseLoadA float64, run time.Duration, noise func() float64) *simSite {
+// fitScenario runs a 3 × 16 A site with the default safety margin and
+// enough house on each phase to leave roomA under the line. With 12 A of
+// room, twelve steps of the car fit exactly. The car asks for 16 A.
+func fitScenario(roomA float64, run time.Duration, noise func() float64) *simSite {
+	houseLoadA := 16 - simFuseSafetyA - roomA
 	sc := simScenario{name: "exact fit", run: run,
 		plant: func(p *sitesim.Plant) {
 			p.Fuse.RatingA = 16
@@ -240,12 +241,12 @@ func fitScenario(houseLoadA float64, run time.Duration, noise func() float64) *s
 
 // Closed loop: the car climbs to the line and stays there for 30 min.
 func TestSiteSimCarEndsAtTheLine(t *testing.T) {
-	s := fitScenario(3.5, 30*time.Minute, nil)
+	s := fitScenario(12, 30*time.Minute, nil)
 	if s.failure != "" {
 		t.Fatal(s.failure)
 	}
 	lineA := s.state.fuseLineA()
-	if want := (lineA - 3.5) * 690; s.p.EVSE.DrawW != want || s.peakA > lineA+1e-6 {
+	if want := 12.0 * 690; s.p.EVSE.DrawW != want || s.peakA > lineA+1e-6 {
 		t.Fatalf("car %.0f W, peak phase %.3f A; want %.0f W with every phase at most %.1f A", s.p.EVSE.DrawW, s.peakA, want, lineA)
 	}
 	var last float64
@@ -275,16 +276,16 @@ func TestSiteSimCarEndsAtTheLine(t *testing.T) {
 // faster hunt fails.
 func TestSiteSimNoisyLineCyclesSlowly(t *testing.T) {
 	for _, tc := range []struct {
-		houseA, sigma float64
-		cutsPerHour   float64 // the most allowed after the climb
-		dropSteps     float64 // the furthest below the top
+		roomA, sigma float64
+		cutsPerHour  float64 // the most allowed after the climb
+		dropSteps    float64 // the furthest below the top
 	}{
-		{3.25, .1, 0, 0}, {3.75, .2, 0, 0}, // part of a step left
-		{3.5, .03, 5, 1}, {3.5, .1, 5, 1}, {3.5, .2, 5, 2}, // exact fit
+		{12.25, .1, 0, 0}, {11.75, .2, 0, 0}, // part of a step left
+		{12, .03, 5, 1}, {12, .1, 5, 1}, {12, .2, 5, 2}, // exact fit
 	} {
-		t.Run(fmt.Sprintf("house_%.2fA/noise_%.2fA", tc.houseA, tc.sigma), func(t *testing.T) {
+		t.Run(fmt.Sprintf("room_%.2fA/noise_%.2fA", tc.roomA, tc.sigma), func(t *testing.T) {
 			rng := rand.New(rand.NewPCG(1, 0))
-			s := fitScenario(tc.houseA, 2*time.Hour, func() float64 { return tc.sigma * rng.NormFloat64() })
+			s := fitScenario(tc.roomA, 2*time.Hour, func() float64 { return tc.sigma * rng.NormFloat64() })
 			if s.failure != "" {
 				t.Fatal(s.failure)
 			}

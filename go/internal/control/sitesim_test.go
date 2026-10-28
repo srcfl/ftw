@@ -21,7 +21,7 @@ import (
 const simCoreEvery = 2 * time.Second
 
 // simFuseSafetyA is the site's fuse.safety_margin_a, the config default.
-const simFuseSafetyA = .5
+const simFuseSafetyA = 0
 
 // simSite runs Core's control tick against a sitesim.Plant in main.go's
 // order: site import, charger tick, then battery dispatch. Core's settings
@@ -647,7 +647,7 @@ func simScenarios() []simScenario {
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW = houseA(2, 2, 2), -22*690 }},
 		{name: "export start, unsigned phase currents", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW, p.Meter.Unsigned = houseA(2, 2, 2), -22*690, true }},
-		{name: "charger's own load balancer", known: "a cut comes off an offer the car does not draw, ev_fuse_budget.go:172", run: 20 * time.Minute,
+		{name: "charger's own load balancer", run: 20 * time.Minute,
 			plant: func(p *sitesim.Plant) {
 				p.HouseW, p.EVSE.LoadBalancerA = houseA(12, 12, 12), 25
 				p.Events = []sitesim.Event{
