@@ -139,6 +139,7 @@ func Start(ctx context.Context, cfg *Config, tel *telemetry.Store) (_ *Server, e
 	h.later = sockets.later
 	h.SetManagedIDs(cfg.ManagedIDs)
 	h.bootLimit = s.sendBootLimit
+	h.bootLimitSettle = defaultBootLimitSettle
 
 	// OCPP 2.0.1 on its own port, when configured. Same handler and therefore
 	// the same charger state and telemetry — only the message encoding differs.

@@ -163,7 +163,6 @@ func NewHandler(tel *telemetry.Store, heartbeatIntervalS int) *Handler {
 		approved:            map[string]bool{},
 		probing:             map[string]bool{},
 		identityProbeTiming: defaultIdentityProbeTiming,
-		bootLimitSettle:     defaultBootLimitSettle,
 		nextTxID:            1,
 	}
 }
