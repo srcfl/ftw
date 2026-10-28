@@ -188,6 +188,18 @@ type chargerOffers struct {
 	// cannot.
 	shownA [3]float64
 	unsure bool
+	// riseBaseA is the site meter's phase currents when a raise went out
+	// with no other raise still to show, and riseFromA the most of the
+	// charger's offers that reading may have shown. riseAheadA measures the
+	// rise still to come against them; riseSet is false while no raise is
+	// on its way.
+	riseBaseA [3]float64
+	riseFromA float64
+	riseSet   bool
+	// aloneA is each phase's rise since riseBaseA counted only over the
+	// readings in which the other phases moved less than a step: the rise
+	// a car on that one phase may have made (riseAheadA).
+	aloneA [3]float64
 }
 
 // evMoveA is half a charger step. An order landing shows on the site meter
@@ -230,17 +242,16 @@ func chargerMoveA(prev, now []float64) (alikeA, oneA float64, phase int) {
 // car the loadpoint has seen draw on one phase, or a one-phase order, is
 // one level on every phase: every phase dropping alike moves it, and so
 // does a move on the car's phase alone, or on any one phase while that
-// phase is not known. A three-phase order moves every phase alike; for a
-// car not yet seen on three phases, a phase that moves alone moves only
-// its own level, since a one-phase car would draw there. A house load on
-// one phase then never moves the level of the other two.
-// The shown current moves only toward the latest offer, and stays within
-// the offers the reading may show. While our own battery order moves, a
-// move of every phase alike may be the battery's, so no reading counts;
-// after a reading that did not count, the shown current is known again
-// once only one offer may show. A house load that moves in a charger's
-// shape reads as ours. It can only take cover off a cut, or leave our rise
-// to the meter as before.
+// phase is not known. A three-phase order moves only on every phase alike:
+// a phase that moves alone is a house load, or a car not yet seen that
+// draws on one phase, and Core cannot tell which. The shown current moves
+// only toward the latest offer, and stays within the offers the reading
+// may show. While our own battery order moves, a move of every phase alike
+// may be the battery's, so no reading counts; after a reading that did not
+// count, the shown current is known again once only one offer may show. A
+// house load that moves in a charger's shape reads as ours. It can only
+// take cover off a cut. The rise a raise has still to show reads the meter
+// differently (riseAheadA).
 func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
 	lim := &s.evLimit
 	amps, _, valid := phaseCurrentsA(meter, s, gridW)
@@ -254,6 +265,9 @@ func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
 		alikeA, oneA, phase = chargerMoveA(prev[:len(amps)], now[:len(amps)])
 	}
 	for id, c := range lim.offers {
+		if read && c.riseSet {
+			c.aloneA = addAloneA(c.aloneA, prev[:len(amps)], now[:len(amps)])
+		}
 		if read && c.readable() {
 			var moveA [3]float64
 			switch {
@@ -266,13 +280,11 @@ func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
 				}
 				moveA = [3]float64{m, m, m}
 			default:
-				// A three-phase order moves every phase alike. A car not
-				// yet seen may draw on one phase: a phase that moves alone
-				// moves only its own level.
+				// A three-phase order moves every phase alike. Read as the
+				// car, a load cycling on the phase over the line took the
+				// cut's cover off there on each drop and never gave it
+				// back, and Core cut again and again.
 				moveA = [3]float64{alikeA, alikeA, alikeA}
-				if c.carPhases != 3 && phase > 0 {
-					moveA[phase-1] += oneA
-				}
 			}
 			// The charger moves toward its latest offer, never past it.
 			latestA := c.log[len(c.log)-1].a
@@ -291,8 +303,27 @@ func (s *State) seeOffers(meter *telemetry.DerReading, gridW float64) {
 			c.shownA[i] = math.Min(high, math.Max(low, c.shownA[i]))
 		}
 		c.unsure = c.unsure && low < high
+		if ahead := s.riseAheadA(c); low >= high || ahead == [3]float64{} {
+			c.riseSet = false
+		}
 		lim.offers[id] = c
 	}
+}
+
+// addAloneA adds to each phase's alone rise its move from one reading to
+// the next when every other phase moved less than a step (evStepA): no
+// charger step landed there, so the move may be a car on that one phase.
+func addAloneA(aloneA [3]float64, prev, now []float64) [3]float64 {
+	for p := range now {
+		held := true
+		for q := range now {
+			held = held && (q == p || math.Abs(now[q]-prev[q]) < evStepA)
+		}
+		if held {
+			aloneA[p] += now[p] - prev[p]
+		}
+	}
+	return aloneA
 }
 
 // batteryOrderMoves reports whether one of our battery orders of the last
@@ -403,9 +434,9 @@ func (s *State) pendingLoad(at time.Time) pendingLoad {
 // Where the meter tells what it shows of the charger (seeOffers), a cut
 // covers no more than the meter has still to show on each phase: a cut the
 // meter shows covers no overage that comes after it. aheadA is then the
-// rise on each phase the meter has still to show of the latest offers,
-// which a raise's own trigger reads (stepEVMeterLimit), and rise counts at
-// least that much. Elsewhere aheadA is 0.
+// rise on each phase the meter has still to show of the latest offers
+// (riseAheadA), which a raise's own trigger reads (stepEVMeterLimit), and
+// rise counts at least that much. Elsewhere aheadA is 0.
 func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingLoad, aheadA [3]float64, latestW float64) {
 	lim := &s.evLimit
 	for _, c := range lim.offers {
@@ -431,10 +462,10 @@ func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingL
 		phaseCoverA, phaseRiseA, ahead := [3]float64{coverA, coverA, coverA}, [3]float64{riseA, riseA, riseA}, [3]float64{}
 		if perPhase && lim.phasesSeen && len(lim.offers) == 1 && s.SiteFusePhases >= 2 && c.readable() && !c.unsure {
 			low, high := c.offerRangeA(at)
+			ahead = s.riseAheadA(c)
 			for i := range min(s.SiteFusePhases, len(ahead)) {
 				toComeA := latest.a - math.Min(high, math.Max(low, c.shownA[i]))
 				phaseCoverA[i] = math.Min(coverA, math.Max(0, -toComeA))
-				ahead[i] = math.Max(0, toComeA)
 				phaseRiseA[i] = math.Max(riseA, ahead[i])
 			}
 		}
@@ -448,6 +479,54 @@ func (s *State) unshownOrders(at time.Time, perPhase bool) (rise, cover pendingL
 		latestW += latest.w
 	}
 	return rise, cover, aheadA, latestW
+}
+
+// riseAheadA is the rise on each phase the site meter has still to show
+// of the charger's latest offer: the raise since riseFromA less the meter's
+// own rise since the raise went out, within the offers the reading may
+// show. A three-phase order takes the smallest rise across the phases: a
+// house step on some phases does not show the raise on the rest. A car on
+// one phase takes its own phase's rise, or the largest where the phase is
+// not known. For a car not yet seen on three phases, a phase that has
+// risen a step or more alone may be the car taking the raise on one phase:
+// its rise over the readings in which the other phases moved less than a
+// step (aloneA). Each reading is judged against the one before, so house
+// drift on another phase while the raise travels, or under a step in the
+// landing reading, does not hide it. A landing counts in whatever shape
+// it comes, a slow ramp or beside a house load that moves in the same
+// reading. A house load that drops while the raise travels still reads as
+// raise not shown yet, by as much as it dropped.
+func (s *State) riseAheadA(c chargerOffers) (ahead [3]float64) {
+	lim := &s.evLimit
+	n := min(s.SiteFusePhases, len(ahead))
+	if !c.riseSet || !lim.phasesSeen || n < 2 || len(c.log) == 0 {
+		return ahead
+	}
+	latest := c.log[len(c.log)-1]
+	rises := make([]float64, n)
+	for i := range rises {
+		rises[i] = lim.phasesA[i] - c.riseBaseA[i]
+	}
+	riseA, phases := slices.Min(rises), ahead[:n]
+	switch {
+	case c.carPhase > 0 && c.carPhase <= n:
+		riseA, phases = rises[c.carPhase-1], ahead[c.carPhase-1:c.carPhase]
+	case c.carPhases == 1 || latest.n == 1:
+		riseA = slices.Max(rises)
+	case c.carPhases != 3:
+		// A car not yet seen may draw on a phase that rose alone.
+		for i := range rises {
+			if c.aloneA[i] >= 2*evMoveA {
+				riseA = math.Max(riseA, math.Min(c.aloneA[i], rises[i]))
+			}
+		}
+	}
+	low, high := c.offerRangeA(lim.readingAt)
+	toComeA := math.Max(0, latest.a-math.Min(high, math.Max(low, c.riseFromA+riseA)))
+	for i := range phases {
+		phases[i] = toComeA
+	}
+	return ahead
 }
 
 // recordEVOffers keeps each plugged charger's offers, with the current each
@@ -478,6 +557,8 @@ func (s *State) recordEVOffers(store *telemetry.Store, points []loadpoint.State)
 		if n := len(c.log); n == 0 || c.log[n-1].w != sent.w || c.log[n-1].a != sent.a || c.log[n-1].n != sent.n {
 			if n == 0 && !s.evLimit.set {
 				c.found, c.shownA = sent, [3]float64{sent.a, sent.a, sent.a}
+			} else if _, high := c.offerRangeA(now); sent.a > high && !c.riseSet && s.evLimit.phasesSeen {
+				c.riseBaseA, c.riseFromA, c.riseSet, c.aloneA = s.evLimit.phasesA, high, true, [3]float64{}
 			}
 			c.log = c.log.keep(sent, read.Add(-c.settle))
 		}
