@@ -80,13 +80,21 @@ func (r *runner) prepare() error {
 // tick runs everything that is due, one job at a time.
 func (r *runner) tick() {
 	stateFile := filepath.Join(r.work, "last-random")
-	last, _ := os.ReadFile(stateFile)
-	jobs, err := plan(r.gh, r.cfg, time.Now(), strings.TrimSpace(string(last)))
-	if err != nil {
-		log.Printf("plan: %v", err)
-		return
-	}
-	for _, j := range jobs {
+	// Plan again before each job: a run takes about 20 minutes, in which a
+	// pull request can move on or a second runner can take the same commit.
+	ran := map[string]bool{}
+	for {
+		last, _ := os.ReadFile(stateFile)
+		jobs, err := plan(r.gh, r.cfg, time.Now(), strings.TrimSpace(string(last)))
+		if err != nil {
+			log.Printf("plan: %v", err)
+			break
+		}
+		j, ok := next(jobs, ran)
+		if !ok {
+			break
+		}
+		ran[j.Context+" "+j.SHA] = true
 		log.Printf("start %s", j)
 		state, desc := r.runJob(j)
 		log.Printf("done %s: %s, %s", j, state, desc)

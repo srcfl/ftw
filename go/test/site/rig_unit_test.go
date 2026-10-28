@@ -4,7 +4,9 @@ package site
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
+	"time"
 )
 
 // These run in every go test, without a simulator.
@@ -137,5 +139,39 @@ func TestInvariantsTellStepsFromOwnRaises(t *testing.T) {
 	_, cs := judgeInvariants(mk(false))
 	if f := failed(cs); len(f) != 1 || f[0] != "over the limit at most 3 s after FTW's own raise" {
 		t.Fatalf("without a step: %v", f)
+	}
+}
+
+// A run that selects planner_self plans in self_consumption; any other run
+// selects planner_passive_arbitrage and plans in passive_arbitrage. s15bat
+// needs Self, where PV surplus charges the battery (#1875).
+func TestRigModeMatchesItsPlannerConfig(t *testing.T) {
+	for _, tc := range []struct{ spec, mode, planner string }{
+		{"", "planner_passive_arbitrage", "passive_arbitrage"},
+		{"planner_self", "planner_self", "self_consumption"},
+	} {
+		st := newStack(nil, lane(21700), t.TempDir(), stackSpec{fuseA: 16, mode: tc.spec})
+		st.prices = newPriceServer(time.Now())
+		path, err := st.ftwConfig()
+		st.prices.close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg struct {
+			Planner struct {
+				Mode string `json:"mode"`
+			} `json:"planner"`
+		}
+		if err := json.Unmarshal(b, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if st.mode() != tc.mode || cfg.Planner.Mode != tc.planner {
+			t.Errorf("spec mode %q: selects %q and plans in %q, want %q and %q",
+				tc.spec, st.mode(), cfg.Planner.Mode, tc.mode, tc.planner)
+		}
 	}
 }
