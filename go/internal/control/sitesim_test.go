@@ -21,7 +21,7 @@ import (
 const simCoreEvery = 2 * time.Second
 
 // simFuseSafetyA is the site's fuse.safety_margin_a, the config default.
-const simFuseSafetyA = .5
+const simFuseSafetyA = 0
 
 // simSite runs Core's control tick against a sitesim.Plant in main.go's
 // order: site import, charger tick, then battery dispatch. Core's settings
@@ -627,6 +627,23 @@ func simDay(p *sitesim.Plant) {
 }
 
 func simScenarios() []simScenario {
+	// A charger whose own load balancer holds each phase to balancerA.
+	loadBalancer := func(balancerA float64) simScenario {
+		name := "charger's own load balancer"
+		if balancerA != 25 {
+			name = fmt.Sprintf("%s at %.1f A", name, balancerA)
+		}
+		return simScenario{name: name, run: 20 * time.Minute,
+			plant: func(p *sitesim.Plant) {
+				p.HouseW, p.EVSE.LoadBalancerA = houseA(12, 12, 12), balancerA
+				p.Events = []sitesim.Event{
+					{At: 5 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(18, 12, 12) }},
+					{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(4, 4, 4) }},
+					{At: 15 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(20, 20, 20) }},
+				}
+			}}
+	}
+	const loadBalancerBug = "a cut comes off an offer the car does not draw, stepEVMeterLimit (ev_fuse_budget.go:769)"
 	slowCharger := func(delay time.Duration) func(*sitesim.Plant) {
 		return func(p *sitesim.Plant) { p.HouseW, p.EVSE.Delay = houseA(15, 15, 15), delay }
 	}
@@ -642,42 +659,40 @@ func simScenarios() []simScenario {
 			c.AllowedStepsW = append(steps, c.AllowedStepsW[1:]...)
 		}
 	}
+	replay1761 := simScenario{name: "#1761 replay", run: 20 * time.Minute,
+		plant: func(p *sitesim.Plant) {
+			p.HouseW, p.Car.MaxW = houseA(1, 1, 1), 4200
+			p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 9400, MaxDischargeW: 9400, CapacityWh: 20000, SoC: .3, Latency: 3 * time.Second}
+			p.Events = []sitesim.Event{{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }}}
+		},
+		lp: func(c *loadpoint.Config) {
+			c.MaxChargeW, c.AllowedStepsW = 10350, c.AllowedStepsW[:len(c.AllowedStepsW)-1]
+		},
+		setup: planBatteryCharge(9400),
+		expect: []simExpect{{9*time.Minute + 50*time.Second, func(s *simSite) error {
+			p := s.p
+			offerW := p.EVSE.OfferA * p.Voltage * float64(p.EVSE.OfferPhases)
+			if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || math.Abs(p.Battery.W-9400) > 200 {
+				return fmt.Errorf("not the #1761 state before the car takes its offer: offer %.0f W, car %.0f W, battery %.0f W", offerW, p.EVSE.DrawW, p.Battery.W)
+			}
+			return nil
+		}}}}
 	return []simScenario{
 		{name: "export start", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW = houseA(2, 2, 2), -22*690 }},
 		{name: "export start, unsigned phase currents", run: 5 * time.Minute,
 			plant: func(p *sitesim.Plant) { p.HouseW, p.PVW, p.Meter.Unsigned = houseA(2, 2, 2), -22*690, true }},
-		{name: "charger's own load balancer", known: "a cut comes off an offer the car does not draw, ev_fuse_budget.go:172", run: 20 * time.Minute,
-			plant: func(p *sitesim.Plant) {
-				p.HouseW, p.EVSE.LoadBalancerA = houseA(12, 12, 12), 25
-				p.Events = []sitesim.Event{
-					{At: 5 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(18, 12, 12) }},
-					{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(4, 4, 4) }},
-					{At: 15 * time.Minute, Do: func(p *sitesim.Plant) { p.HouseW = houseA(20, 20, 20) }},
-				}
-			}},
+		loadBalancer(25),
+		// The balancer sits at the rating, so at the default 0 A margin it
+		// never lets the car past Core's line. Above the line the bug shows.
+		withKnown(withSafetyMarginA(loadBalancer(25), .5), loadBalancerBug),
+		withKnown(loadBalancer(25.5), loadBalancerBug),
 		{name: "slow cloud charger 60 s", run: 15 * time.Minute,
 			plant: slowCharger(time.Minute)},
 		{name: "slow cloud charger 120 s", run: 15 * time.Minute,
 			plant: slowCharger(2 * time.Minute)},
-		{name: "#1761 replay", run: 20 * time.Minute,
-			plant: func(p *sitesim.Plant) {
-				p.HouseW, p.Car.MaxW = houseA(1, 1, 1), 4200
-				p.Battery = &sitesim.Battery{Phases: 3, MaxChargeW: 9400, MaxDischargeW: 9400, CapacityWh: 20000, SoC: .3, Latency: 3 * time.Second}
-				p.Events = []sitesim.Event{{At: 10 * time.Minute, Do: func(p *sitesim.Plant) { p.Car.MaxW = 11040 }}}
-			},
-			lp: func(c *loadpoint.Config) {
-				c.MaxChargeW, c.AllowedStepsW = 10350, c.AllowedStepsW[:len(c.AllowedStepsW)-1]
-			},
-			setup: planBatteryCharge(9400),
-			expect: []simExpect{{9*time.Minute + 50*time.Second, func(s *simSite) error {
-				p := s.p
-				offerW := p.EVSE.OfferA * p.Voltage * float64(p.EVSE.OfferPhases)
-				if offerW != 10350 || math.Abs(p.EVSE.DrawW-4200) > 50 || math.Abs(p.Battery.W-9400) > 200 {
-					return fmt.Errorf("not the #1761 state before the car takes its offer: offer %.0f W, car %.0f W, battery %.0f W", offerW, p.EVSE.DrawW, p.Battery.W)
-				}
-				return nil
-			}}}},
+		replay1761,
+		withSafetyMarginA(replay1761, .5),
 		{name: "meter every 30 s after a cut", known: "a meter slower than evSettle makes every reading a gap, ev_fuse_budget.go:141", run: 10 * time.Minute,
 			plant: func(p *sitesim.Plant) {
 				p.HouseW = houseA(3, 3, 3)
@@ -797,6 +812,26 @@ func simScenarios() []simScenario {
 			expect: []simExpect{{10*time.Minute - time.Second, carPhasesUnknown}}},
 		{name: "a day", start: time.Date(2026, 10, 21, 0, 0, 0, 0, time.Local), run: 24 * time.Hour, plant: simDay},
 	}
+}
+
+// withKnown marks sc as failing on the finding known.
+func withKnown(sc simScenario, known string) simScenario {
+	sc.known = known
+	return sc
+}
+
+// withSafetyMarginA runs sc with an opt-in fuse.safety_margin_a. The
+// default is 0; a site that keeps the old 0.5 A must still pass.
+func withSafetyMarginA(sc simScenario, a float64) simScenario {
+	setup := sc.setup
+	sc.name = fmt.Sprintf("%s, safety_margin_a %.1f A", sc.name, a)
+	sc.setup = func(s *simSite) {
+		if setup != nil {
+			setup(s)
+		}
+		s.state.SiteFuseSafetyA = a
+	}
+	return sc
 }
 
 // runSimScenario runs sc from start and returns the site, with the first
