@@ -385,6 +385,9 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		}
 	}
 	m["car_starts_ftw_did_not_order"] = carStarts
+	// In time order, so a new step after a stretch's allowance is told
+	// from a window inside it (judgeStretch).
+	sort.SliceStable(windows, func(i, j int) bool { return windows[i].from < windows[j].from })
 
 	// chargerLever is how long the charger takes to answer from t: its own
 	// time, after the rest of any outage it is in.
@@ -441,15 +444,16 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 	// starts when the heat passes the fuse, as Core's cut does. A stretch
 	// runs on across dips under the fuse while the heat stays over it.
 	blownAny := anyBlown(run)
-	// raisedIn is whether FTW sent the car a higher order in (a, b]; with
-	// over, only one sent while the meter showed the fuse passed.
-	raisedIn := func(a, b float64, over bool) bool {
+	// carMovedIn is whether FTW sent the car a higher order (dir +1, toward
+	// import) or a lower one (dir -1, toward export) in (a, b]; with over,
+	// only one sent while the meter showed the fuse passed.
+	carMovedIn := func(a, b float64, over bool, dir float64) bool {
 		prev, ok := 0.0, false
 		for _, p := range orders {
 			if p.T > b {
 				break
 			}
-			if ok && p.T > a && p.offerW() > prev+1 && (!over || maxAbsI(d.at(p.T)) > fuse) {
+			if ok && p.T > a && dir*(p.offerW()-prev) > 1 && (!over || maxAbsI(d.at(p.T)) > fuse) {
 				return true
 			}
 			prev, ok = p.offerW(), true
@@ -483,16 +487,18 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 		return false
 	}
 	// ownRaise is whether FTW pushed a stretch from s to end over the fuse
-	// itself: it moved the battery toward the stretch's direction in
-	// (a, s], or moved it, or raised the car on import, while the stretch
-	// was over the fuse. On import a car raise in (a, s] counts too. On
-	// export, raising the car is the right answer.
+	// itself: it moved the car or the battery toward the stretch's
+	// direction in (a, s], or while the stretch was over the fuse. On
+	// import that is a car raise; on export a car cut (owner, 28 Oct 2026),
+	// as a battery move toward export already was. Raising the car on
+	// export is the right answer.
 	ownRaise := func(a, s, end float64, export bool) bool {
+		dir := 1.0
 		if export {
-			return batMovedIn(a, s, false, -1) || batMovedIn(s, end, true, -1)
+			dir = -1
 		}
-		return raisedIn(a, s, false) || batMovedIn(a, s, false, 1) ||
-			raisedIn(s, end, true) || batMovedIn(s, end, true, 1)
+		return carMovedIn(a, s, false, dir) || batMovedIn(a, s, false, dir) ||
+			carMovedIn(s, end, true, dir) || batMovedIn(s, end, true, dir)
 	}
 	// raisedAt is whether the worst phase rose 0.5 A or more in the 3 s
 	// from t.
@@ -563,11 +569,27 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 			}
 			return math.Inf(1)
 		}
+		// heatCap is the most that windows opening from t on may add: once
+		// a phase's 60 s heat is over the fuse, Core's cut has its lever's
+		// time, and no further event extends the stretch (owner, 28 Oct
+		// 2026). Unbounded while the heat stays under the fuse.
+		heatCap := func(t float64) float64 {
+			for _, r := range stretch {
+				if r.T >= t && max(r.HeatA[0], r.HeatA[1], r.HeatA[2]) > fuse {
+					return r.T + lever(r.T, overA, export) + 2 + 3
+				}
+			}
+			return math.Inf(1)
+		}
 		// A window that opens inside the stretch before it broke its
 		// allowance extends it: a second step, an outage or a Core restart.
 		// A plain house event counts only if it raised the current. Inside
 		// FTW's own raise a window counts only once the raise is answered:
 		// after its 3 s, with the current under the fuse until the window.
+		// What windows add stops at the heat's cap, however many there are.
+		// A window that opens once the allowance has run out, with the
+		// current under the fuse since, is a new step: its cap runs from it.
+		capT := heatCap(s)
 		for grown := true; grown; {
 			grown = false
 			for _, w := range windows {
@@ -577,7 +599,10 @@ func judgeInvariants(d *runData) (metrics, []criterion) {
 				if w.plain && !raisedAt(w.from) {
 					continue
 				}
-				if x := until(w, w.from, overA, export); x > to {
+				if w.from > to {
+					capT = math.Max(capT, heatCap(w.from))
+				}
+				if x := math.Min(until(w, w.from, overA, export), capT); x > to {
 					to, grown, own = x, true, false
 				}
 			}
