@@ -249,3 +249,18 @@ func TestCarBeforeBatteryPeakShavingChargesTheSurplusAfterTheCar(t *testing.T) {
 		}
 	}
 }
+
+// On the PI path with battery_covers_ev off, a discharge stops at once
+// when the house alone has surplus: what it gives now goes to the car. The
+// battery was discharging 2,900 W; 5 kW of PV beats the 3.6 kW house, and
+// the car draws 11 kW. No order may discharge, not even as a PI step on
+// the way to 0 W.
+func TestCarBeforeBatteryCoverOffStopsADischargeForTheCarAtOnce(t *testing.T) {
+	const pv, house, car = 5000.0, 3611.0, 11040.0
+	got := runPeakShavingCar(t, false, house+car-pv, car, -2900)
+	for i, w := range got {
+		if w < -1 {
+			t.Fatalf("tick %d: battery discharges %.0f W into the car with battery_covers_ev off: %v", i, w, got)
+		}
+	}
+}

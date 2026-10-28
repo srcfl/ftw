@@ -482,3 +482,160 @@ func TestEVFuseOnePhaseHouseMoveIsNotTheCutLanding(t *testing.T) {
 		}
 	})
 }
+
+// While our own battery order moves the phases, a move of every phase
+// alike may be the battery's, so it is not read as the car's cut landing.
+// A 3 A cut travels to a charger that declares 40 s. A battery order of
+// 1 A a phase discharge lands and goes back: L1 reads 28, 27, then 28 A
+// again. Read as the cut landing, the 1 A drop took a third of the cut's
+// cover, and Core cut a second time, to 8,280 W, for an overage the first
+// cut already covers.
+func TestEVFuseBatteryOrderMoveIsNotTheCutLanding(t *testing.T) {
+	r := newCutRig(t, 11040, 40) // 16 A
+	for range 120 {
+		r.read([3]float64{20, 15, 15})
+	}
+	for i := 0; i < 120 && r.offerW == 11040; i++ {
+		r.read([3]float64{28, 15, 15}) // 3 A over the 25 A line
+	}
+	if r.offerW != 8970 {
+		t.Fatalf("heat cut to %.0f W, want 8,970 W", r.offerW)
+	}
+	r.state.batteryCommands = map[string]commandLog{"bat": commandLog{}.add(r.now.Add(-time.Minute), 0).add(r.now, -690)}
+	for range 3 {
+		r.read([3]float64{27, 14, 14})
+	}
+	r.state.batteryCommands["bat"] = r.state.batteryCommands["bat"].add(r.now, 0)
+	for range 8 {
+		if r.read([3]float64{28, 15, 15}); r.offerW != 8970 {
+			t.Fatalf("offer %.0f W after our battery order came and went, want the one cut to 8,970 W", r.offerW)
+		}
+	}
+}
+
+// A raise that fits lands, and no phase passes the line, so nothing cuts.
+// 16 A fuse, charger that declares 40 s, car from 6 A to 14 A while every
+// phase has 8 A of room. Before, C4 counted a landing only when the move
+// had a charger's shape. A house load on L2 that switched off in the
+// landing reading, or a car that ramped 0.4 A a reading, left the whole
+// raise counted as on its way on top of a reading that already held it:
+// 14 + 8 A read as over 1.2 x In, and Core cut to 5,520 or 6,900 W.
+func TestEVFuseRaiseThatLandedIsNotCountedTwice(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		l2        float64 // L2 before the landing; it reads 14 A after
+		carPhases int
+	}{
+		{"clean", 6, 0},
+		{"house_off_on_L2_1.2A", 7.2, 0},
+		{"house_off_on_L2_2A", 8, 0},
+		{"house_off_on_L2_2A_car_seen_on_three_phases", 8, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newCutRig(t, 4140, 40)
+			r.state.SiteFuseAmps, r.carPhases = 16, tc.carPhases
+			for range 60 {
+				r.read([3]float64{6, tc.l2, 6})
+			}
+			r.offerW = 9660 // 6 -> 14 A
+			for range 10 {
+				r.read([3]float64{6, tc.l2, 6})
+			}
+			for i := range 120 {
+				if r.read([3]float64{14, 14, 14}); r.offerW != 9660 {
+					t.Fatalf("raise that landed at 14/14/14 A cut to %.0f W after %d s", r.offerW, i+1)
+				}
+			}
+		})
+	}
+	for _, carPhases := range []int{0, 3} {
+		t.Run(fmt.Sprintf("slow_ramp_car_phases_%d", carPhases), func(t *testing.T) {
+			r := newCutRig(t, 4140, 40)
+			r.state.SiteFuseAmps, r.carPhases = 16, carPhases
+			for range 60 {
+				r.read([3]float64{6, 6, 6})
+			}
+			r.offerW = 9660
+			r.read([3]float64{6, 6, 6})
+			a := 6.0
+			for i := range 120 {
+				a = math.Min(14, a+0.4)
+				if r.read([3]float64{a, a, a}); r.offerW != 9660 {
+					t.Fatalf("raise ramping to 14 A cut to %.0f W at %.1f A after %d s", r.offerW, a, i+1)
+				}
+			}
+		})
+	}
+}
+
+// A one-phase car the loadpoint has not seen yet takes a three-phase raise
+// on L1 while the house drifts on L2. 25 A fuse, 40 s charger: the car goes
+// from 6 to 16 A, L1 lands at 24 A, and no phase is ever over the line.
+// Before, the one-phase landing counted only while L2 stayed within 0.5 A
+// of its reading when the raise went out, over the whole response time:
+// 0.6 A of drift made the raise count as still to come, L1 read 34 A, and
+// Core cut to 4,830 W one second after the landing (field matrix with
+// 0.7 A on L2 every 17 s: car1p cut 11,100 -> 0 W). The landing now counts
+// when L2 moves less than a step in the reading it lands on, or drifts
+// before it.
+func TestEVFuseUnseenOnePhaseCarLandsBesideDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		before, landA float64 // L2 drift before the landing, and in its reading
+	}{
+		{"no_drift", 0, 0},
+		{"drift_0.6A_before", 0.6, 0},
+		{"drift_1A_before", 1, 0},
+		{"drift_-0.6A_before", -0.6, 0},
+		{"drift_0.7A_in_the_landing_reading", 0, 0.7},
+		{"drift_-0.7A_in_the_landing_reading", 0, -0.7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newCutRig(t, 4140, 40) // 6 A a phase ordered
+			for range 120 {
+				r.read([3]float64{14, 5, 5}) // car 6 A on L1, house 8 A
+			}
+			r.offerW = 11040 // 16 A
+			r.read([3]float64{14, 5, 5})
+			for range 10 {
+				r.read([3]float64{14, 5 + tc.before, 5})
+			}
+			l2 := 5 + tc.before + tc.landA
+			for i := range 120 {
+				if r.read([3]float64{24, l2, 5}); r.offerW != 11040 {
+					t.Fatalf("one-phase car landed at 24 A on a 25 A fuse, L2 %.1f A: cut to %.0f W after %d s", l2, r.offerW, i+1)
+				}
+			}
+		})
+	}
+}
+
+// A one-phase load that cycles on a phase is not a three-phase cut landing,
+// even for a car not yet seen on three phases. The house falls from 18 to
+// 10 A a phase, so the car rises toward the line, while 1.5 A on L2
+// toggles. Before, each drop of the load read as the cut landing on L2 and
+// took its cover off there; the load's return could not give it back, so
+// Core cut again and again: 9,660 down to 4,830 W and up, 21 cuts in 20 min
+// with a 40 s charger. #1913 cut once.
+func TestEVFuseLoadCyclingOnTheOverPhaseDoesNotHunt(t *testing.T) {
+	for _, period := range []int{3, 11} {
+		t.Run(fmt.Sprintf("every_%ds", period), func(t *testing.T) {
+			s := newEVMeterSite(t, 0, 18*690)
+			s.chargerDelay, s.chargerMaxAgeS = 40*time.Second, 40
+			s.run(5 * time.Minute)
+			s.setHouse(10 * 690)
+			stepAt := s.now
+			loadA := 1.5
+			for i := range 20 * 60 {
+				if i%period == 0 {
+					s.addHouseA(0, loadA, 0)
+					loadA = -loadA
+				}
+				s.step()
+			}
+			if cuts := offerWatts(s.cutsSince(stepAt)); len(cuts) > 1 {
+				t.Fatalf("cuts %v; one is enough", cuts)
+			}
+		})
+	}
+}
