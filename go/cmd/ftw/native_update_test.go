@@ -80,6 +80,37 @@ func TestNativeTrialCommitsOnlyAfterReadiness(t *testing.T) {
 	}
 }
 
+func TestNativeCurrentBuildMetadataKeepsReleaseUpdates(t *testing.T) {
+	root := t.TempDir()
+	current := "v0.154.0-beta.1"
+	nativeFixtureRelease(t, root, current)
+	if err := (nativeupdate.Manager{Root: root}).Init(current); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []string{current, current + "+history-repair.6f71db1"} {
+		trial, err := beginNativeTrial(root, "", version)
+		if err != nil || trial != nil {
+			t.Fatalf("installed release build %q rejected: %v", version, err)
+		}
+	}
+	previousVersion := Version
+	Version = current + "+history-repair.6f71db1"
+	t.Cleanup(func() { Version = previousVersion })
+	markNativeCleanExit(root)
+	mark, err := os.ReadFile(filepath.Join(root, ".clean-exit"))
+	if err != nil || strings.TrimSpace(string(mark)) != current {
+		t.Fatalf("clean exit did not identify installed release: %q %v", mark, err)
+	}
+	for _, version := range []string{"v0.153.0-beta.1+history-repair", current + "+", current + "+bad..metadata", current + "+bad/metadata"} {
+		if _, err := beginNativeTrial(root, "", version); err == nil {
+			t.Fatalf("wrong release or malformed metadata accepted: %q", version)
+		}
+	}
+	if _, err := beginNativeTrial(root, current, current+"+history-repair"); err == nil {
+		t.Fatal("published trial identity must remain exact")
+	}
+}
+
 func TestNativeFallbackReportsFailedTrial(t *testing.T) {
 	root := t.TempDir()
 	current, next := "v0.131.0-beta.1", "v0.131.0-beta.2"

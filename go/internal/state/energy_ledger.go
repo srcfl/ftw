@@ -501,6 +501,19 @@ func (s *Store) LoadEnergyHistoryContext(ctx context.Context, q EnergyHistoryQue
 	if err != nil {
 		return nil, false, err
 	}
+	out, err = s.applyHistoricalLoadLedger(ctx, q, out)
+	if err != nil {
+		return nil, false, err
+	}
+	rank := 0
+	for i, p := range out {
+		if i == 0 || p.BucketStartMS != out[i-1].BucketStartMS {
+			rank++
+		}
+		if rank > q.Limit {
+			return out[:i], true, nil
+		}
+	}
 	return out, truncated || sourceTruncated, nil
 }
 

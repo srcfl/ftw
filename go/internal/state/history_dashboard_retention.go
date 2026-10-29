@@ -194,7 +194,12 @@ func (s *Store) rollSiteEnergyStorage(ctx context.Context, cutoff int64, table, 
 	cutoff = bucketStart(cutoff, width)
 	for {
 		var first sql.NullInt64
-		if err := s.history.QueryRowContext(ctx, `SELECT MIN(start_ms) FROM `+table+` WHERE resolution_ms=? AND start_ms<?`, ArchiveResolutionMS, cutoff).Scan(&first); err != nil {
+		// A repaired minute remains additive to its original minute evidence.
+		// Keep that quarter's originals rather than merging away the boundary
+		// needed to subtract/replace only the corrected household contribution.
+		protected := ` AND NOT EXISTS (SELECT 1 FROM history_load_estimates r WHERE r.method GLOB 'historical_power_repair_v1:*' AND r.start_ms>=` + table + `.start_ms-(` + table + `.start_ms%900000) AND r.start_ms<` + table + `.start_ms-(` + table + `.start_ms%900000)+900000)`
+		protected += ` AND NOT EXISTS (SELECT 1 FROM energy_ledger_meta a, json_each(CASE WHEN a.key GLOB 'endpoint-repair-v1:*' THEN a.value ELSE '{}' END,'$.plan.minutes') m WHERE a.key GLOB 'endpoint-repair-v1:*' AND json_extract(m.value,'$.start_ms')>=` + table + `.start_ms-(` + table + `.start_ms%900000) AND json_extract(m.value,'$.start_ms')<` + table + `.start_ms-(` + table + `.start_ms%900000)+900000)`
+		if err := s.history.QueryRowContext(ctx, `SELECT MIN(start_ms) FROM `+table+` WHERE resolution_ms=? AND start_ms<?`+protected, ArchiveResolutionMS, cutoff).Scan(&first); err != nil {
 			return err
 		}
 		if !first.Valid {
