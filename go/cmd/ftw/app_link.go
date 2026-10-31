@@ -822,6 +822,7 @@ func startAppLink(
 				Modes:        modes,
 				Plans:        plans,
 				PlannerPrefs: gateway,
+				TimeZones:    gateway,
 				History:      history,
 				Prices:       priceReader,
 				Loadpoints:   loadpoints,
@@ -934,6 +935,16 @@ func (l *lateAPI) Apply(safetyK *float64, export *string) (appproto.PlannerPrefs
 		return appproto.PlannerPrefsSnapshot{}, errors.New("the box is still starting")
 	}
 	return srv.ApplyPlannerPrefs(safetyK, export)
+}
+
+// ProposeTimeZone stores a client's time zone through the API server, once it
+// exists, for the reason Apply waits.
+func (l *lateAPI) ProposeTimeZone(zone string) (appproto.TimeZoneAnswer, error) {
+	srv := l.srv.Load()
+	if srv == nil {
+		return appproto.TimeZoneAnswer{}, errors.New("the box is still starting")
+	}
+	return srv.ProposeTimeZone(zone)
 }
 
 func (l *lateAPI) Route(r *http.Request) apiauth.RouteFacts {

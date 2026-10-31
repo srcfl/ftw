@@ -42,6 +42,9 @@ func defaultOps() map[string]opSpec {
 		// meets the dispatch gate before anything moves, so a sick meter must
 		// not lock the household out of holding more reserve.
 		OpPlannerPrefsSet: {scope: ScopeModeWrite, dispatchWrite: false},
+		// The household clock is setup the box holds, and a goal read on the
+		// wrong clock is wrong whatever the meter says.
+		OpSiteTimeZonePropose: {scope: ScopeSetupWrite, dispatchWrite: false},
 		// The loadpoint pair moves energy — a manual hold commands the
 		// charger and a boost opens the battery-to-EV path — so both sit
 		// behind the dispatch gate. A box with no loadpoint controller

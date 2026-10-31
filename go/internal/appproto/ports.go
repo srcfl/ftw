@@ -257,6 +257,20 @@ type PlannerPrefs interface {
 	Apply(safetyK *float64, export *string) (PlannerPrefsSnapshot, error)
 }
 
+// TimeZoneAnswer is what the box did with a client's time zone.
+type TimeZoneAnswer struct {
+	// Zone is the household zone the site keeps.
+	Zone string
+	// Taken is true when the offer became the site's zone.
+	Taken bool
+}
+
+// TimeZones takes a client's time zone as the household clock while the box
+// keeps none of its own. Nil answers E_UNAVAILABLE.
+type TimeZones interface {
+	ProposeTimeZone(zone string) (TimeZoneAnswer, error)
+}
+
 // PlanReader hands over the planner's current output.
 //
 // Nil means the planner has produced nothing at all, which the wire reports as

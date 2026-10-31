@@ -25,7 +25,8 @@ var watchedPaths = []string{
 	"go/internal/mpc/", "go/internal/optimizercontract/", // plans
 	"go/internal/gridcost/", "go/internal/forecasting/", "go/internal/sunpos/", // plan inputs
 	"go/internal/config/", "go/internal/configreload/", // limits
-	"go/internal/units/", // charge steps
+	"go/internal/units/",     // charge steps
+	"go/internal/localzone/", // household clock: goal deadlines, import hour
 	"go/internal/cars/", "go/internal/sitepower/",
 	"go/internal/events/", "go/internal/state/",
 	"drivers/", "optimizer/native/bundle/", // bundled drivers and solver

@@ -1,8 +1,11 @@
-// Package localzone names the zone the box keeps its clock in.
+// Package localzone keeps the household's clock: the zone every wall-clock
+// rule reads, and its name for clients.
 package localzone
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -22,7 +25,66 @@ import (
 // The name must keep the rules time.Local runs on. Clients read the box's
 // household clock (a car's ready time, a goal's days) in this zone, so a name
 // with other rules moves every goal by the difference.
-func Name() string { return name() }
+//
+// A zone the site stores (Use) wins over the host's.
+func Name() string {
+	if household != "" {
+		return household
+	}
+	return name()
+}
+
+// household is the zone the site stores, set once by Use.
+var household string
+
+// Stored returns the zone the site stores, or "" when the box runs on the
+// host's zone.
+func Stored() string { return household }
+
+// Known reports whether the box has a household clock: a zone the site
+// stores, or a host zone other than UTC. A Docker box has none until a
+// client offers one.
+func Known() bool {
+	return household != "" || !utcNames[strings.TrimPrefix(name(), "Etc/")]
+}
+
+// Use makes the site's stored zone the household clock: time.Local, and the
+// Name clients read. A Docker box runs on UTC whatever house it is in, so a
+// car goal of 17:00 was met at 18:00 in a Stockholm winter until the zone
+// became a fact of the site rather than of the host.
+//
+// Core calls it once at start, before any goroutine reads the clock:
+// assigning time.Local later races every time.Now. A change takes effect
+// when Core next starts. Empty keeps the host's zone and names it again.
+func Use(zone string) error {
+	if zone == "" {
+		household = ""
+		return nil
+	}
+	loc, err := Load(zone)
+	if err != nil {
+		return err
+	}
+	time.Local = loc
+	household = zone
+	// A worker Core starts reads the same clock.
+	return os.Setenv("TZ", zone)
+}
+
+// Load reads an IANA zone a site may store. "Local" and "" name no zone.
+func Load(zone string) (*time.Location, error) {
+	if zone == "" || zone == "Local" {
+		return nil, errors.New("name a time zone such as Europe/Stockholm")
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return nil, fmt.Errorf("%q is not a time zone such as Europe/Stockholm", zone)
+	}
+	return loc, nil
+}
+
+// SameRules reports whether a and b keep the same clock from 1970 to 2038.
+func SameRules(a, b *time.Location) bool { return sameRules(a, b) }
 
 // Read once: time.Local is fixed when the process starts, so a zone changed
 // on the host afterwards must not rename the one the box still runs on.

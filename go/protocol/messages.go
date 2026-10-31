@@ -42,6 +42,11 @@ const (
 	// permission. The box maps that permission onto a planner mode; the
 	// caller does not name the mode.
 	OpPlannerPrefsSet = "planner.prefs.set"
+	// OpSiteTimeZonePropose offers the client's time zone as the household
+	// clock. The box stores it only while it keeps no zone of its own, and
+	// restarts to run on it; a box that keeps one answers E_PRECONDITION
+	// with the zone it keeps in args.tz.
+	OpSiteTimeZonePropose = "site.time_zone.propose"
 	// OpLoadpointHold pins one EV loadpoint to a fixed charging power, or
 	// releases it with `clear`. The same manual hold the HTTP route
 	// installs, reached through this door's gates instead of a verb.
