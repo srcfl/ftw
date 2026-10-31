@@ -261,3 +261,15 @@ describe("setup wizard — the house password on a new box", () => {
     assert.match(JS, /Short passwords are easy to guess/);
   });
 });
+
+describe("setup wizard — household clock", () => {
+  it("stores the browser's zone as site.time_zone", () => {
+    assert.match(JS, /time_zone:\s*browserTimeZone\(\)/,
+      "a Docker box runs on UTC; the home's zone comes from the browser that sets it up");
+    assert.match(JS, /resolvedOptions\(\)\.timeZone/);
+  });
+
+  it("names the clock on the review screen", () => {
+    assert.match(JS, /' · clock ' \+ esc\(clock\)/);
+  });
+});

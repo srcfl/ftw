@@ -181,7 +181,12 @@ charger's phase mode. A change of car or goal rolls the charger's deadline
 before the replan, so that plan has the car's goal in it.
 
 - **One goal per car**, used wherever the car is plugged in. `readyByMin` is
-  in the box's time zone.
+  in the box's time zone: the site's `site.time_zone`, or the host's when the
+  site stores none. A Docker host runs on UTC, so the app, the web client
+  and the on-box setup offer their own zone (`site.time_zone.propose`). The
+  box takes an offer only while it keeps no zone, and restarts to run on it.
+  A recurring goal keeps its clock time in the new zone. A one-off goal that
+  finishes at the car's limit keeps the instant it was saved for.
 - **Surplus-only is the car's choice.** The site's battery rule
   (`surplus_unlock_bat_soc`) is the charger's: it rides
   `PUT /api/loadpoints/{id}/schedule` as before, and no car op carries it.

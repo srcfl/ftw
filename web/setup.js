@@ -889,6 +889,8 @@
         esc(document.getElementById('fuse-voltage').value) + ' V per phase';
     }
     html += ' · ' + esc(zone);
+    var clock = browserTimeZone();
+    if (clock) html += ' · clock ' + esc(clock);
     html += '</div></div>';
 
     // Devices
@@ -1001,12 +1003,25 @@
       });
   };
 
+  // The household clock car goals and daily history read. A Docker box runs
+  // on UTC, so the zone comes from the browser that sets the home up. A
+  // browser on UTC says nothing about the home; the box then keeps its own.
+  function browserTimeZone() {
+    try {
+      var tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+      return /^(Etc\/)?(UTC|UCT|GMT|Universal|Zulu)$/.test(tz) ? '' : tz;
+    } catch (e) {
+      return '';
+    }
+  }
+
   function buildConfig() {
     var zone = document.getElementById('price-zone').value;
 
     var cfg = {
       site: {
         name: document.getElementById('site-name').value.trim() || 'My Home',
+        time_zone: browserTimeZone() || undefined,
         control_interval_s: 5,
         grid_target_w: 0,
         grid_tolerance_w: 42,

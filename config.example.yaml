@@ -5,6 +5,7 @@
 
 site:
   name: "Home"
+  # time_zone: Europe/Stockholm  # the home's clock; empty uses the host's zone (UTC in Docker)
   control_interval_s: 2         # 2 s matches Ferroamp ehub ~1 Hz; drop to 1 for snappier response
   grid_target_w: 0              # 0 = self-consumption
   grid_tolerance_w: 42          # deadband (The Answer)

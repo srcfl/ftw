@@ -142,6 +142,7 @@ const (
 	MsgNow                    = protocol.MsgNow
 	OpSetMode                 = protocol.OpSetMode
 	OpPlannerPrefsSet         = protocol.OpPlannerPrefsSet
+	OpSiteTimeZonePropose     = protocol.OpSiteTimeZonePropose
 	OpLoadpointHold           = protocol.OpLoadpointHold
 	OpLoadpointBoost          = protocol.OpLoadpointBoost
 	OpLoadpointSoCSet         = protocol.OpLoadpointSoCSet
@@ -246,6 +247,7 @@ const (
 	ScopeMembersRead      = protocol.ScopeMembersRead
 	ScopeMembersWrite     = protocol.ScopeMembersWrite
 	ScopeCarsWrite        = protocol.ScopeCarsWrite
+	ScopeSetupWrite       = protocol.ScopeSetupWrite
 	CapDerCar             = protocol.CapDerCar
 	ErrBooting            = protocol.ErrBooting
 	ErrUnknownOp          = protocol.ErrUnknownOp

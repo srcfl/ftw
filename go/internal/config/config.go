@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/localzone"
 	"gopkg.in/yaml.v3"
 )
 
@@ -800,6 +801,11 @@ type Site struct {
 	Gain                 float64 `yaml:"gain" json:"gain"`
 	SlewRateW            float64 `yaml:"slew_rate_w" json:"slew_rate_w"`
 	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
+
+	// TimeZone is the household's IANA zone: the clock car goals, the import
+	// hour, daily history and savings read. Empty keeps the host's zone.
+	// Core reads it once at start (localzone.Use).
+	TimeZone string `yaml:"time_zone,omitempty" json:"time_zone,omitempty"`
 
 	// SlewEnabled gates the external per-cycle ramp limiter. Both
 	// supported inverter families (Ferroamp, Sungrow) have their own
@@ -1976,6 +1982,11 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Price.Validate(); err != nil {
 		return err
+	}
+	if c.Site.TimeZone != "" {
+		if _, err := localzone.Load(c.Site.TimeZone); err != nil {
+			return fmt.Errorf("site.time_zone: %w", err)
+		}
 	}
 
 	// Empty drivers list is a valid shape — e.g. an EV-only site that
