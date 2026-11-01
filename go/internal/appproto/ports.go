@@ -319,6 +319,9 @@ type PriceReader interface {
 	// Currency is the ISO code their minor units are in. Without it the app
 	// would have to guess whether 45 is öre or cents.
 	Currency() string
+	// VATPercent is the VAT rate the box applies to TotalMinor, after any
+	// default. Still a float, as the config keeps it; the wire rounds it once.
+	VATPercent() float64
 	// Slots returns every stored slot overlapping [fromMs, toMs), oldest
 	// first. Overlapping, not contained: the slot in progress at fromMs is
 	// the price right now, and a window starting at "now" that left it out

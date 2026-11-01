@@ -600,6 +600,15 @@ func (s *Service) SetApplier(a Applier) {
 	s.applierMu.Unlock()
 }
 
+// VATPercent is the VAT rate the next fetch applies to the consumer total,
+// after the default. Read under the same lock SetApplier takes, so a reader
+// never sees a rate halfway through a config reload.
+func (s *Service) VATPercent() float64 {
+	s.applierMu.Lock()
+	defer s.applierMu.Unlock()
+	return s.Applier.VATPercent
+}
+
 // FXConverter abstracts currency conversion so the prices package
 // doesn't need to import currency/ directly (and FromConfig callers
 // can pass a test stub). When it is nil, or has no rate for the pair, a
