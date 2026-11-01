@@ -206,3 +206,51 @@ func TestAMountOverTheEtcUTCLinkIsNotUTC(t *testing.T) {
 		t.Fatalf("zone = %q, want Europe/Stockholm", got)
 	}
 }
+
+// keepClock restores the process clock a test moves.
+func keepClock(t *testing.T) {
+	t.Helper()
+	local, stored := time.Local, household
+	t.Setenv("TZ", os.Getenv("TZ"))
+	t.Cleanup(func() { time.Local, household = local, stored })
+}
+
+// A Docker box runs on UTC. Once the site stores its zone, the box's own
+// clock reads the household's hours.
+func TestAStoredZoneIsTheClockOfABoxOnUTC(t *testing.T) {
+	keepClock(t)
+	time.Local = time.UTC
+	if err := Use("Europe/Stockholm"); err != nil {
+		t.Fatal(err)
+	}
+	winter := time.Date(2026, 11, 1, 16, 0, 0, 0, time.UTC)
+	if got := time.UnixMilli(winter.UnixMilli()).Hour(); got != 17 {
+		t.Fatalf("16:00Z reads %d:00 on the box, want 17:00", got)
+	}
+	if Name() != "Europe/Stockholm" || Stored() != "Europe/Stockholm" || os.Getenv("TZ") != "Europe/Stockholm" {
+		t.Fatalf("name %q stored %q TZ %q, want Europe/Stockholm", Name(), Stored(), os.Getenv("TZ"))
+	}
+}
+
+func TestNoStoredZoneKeepsTheHostClock(t *testing.T) {
+	keepClock(t)
+	host := time.Local
+	if err := Use(""); err != nil {
+		t.Fatal(err)
+	}
+	if time.Local != host || Stored() != "" {
+		t.Fatalf("Use(\"\") moved the clock to %v, stored %q", time.Local, Stored())
+	}
+}
+
+func TestAZoneThatDoesNotLoadIsRefused(t *testing.T) {
+	keepClock(t)
+	for _, zone := range []string{"Local", "Mars/Olympus", "../../etc/passwd"} {
+		if err := Use(zone); err == nil {
+			t.Fatalf("Use(%q) took a zone no client can load", zone)
+		}
+	}
+	if Stored() != "" {
+		t.Fatalf("stored %q after refusals", Stored())
+	}
+}

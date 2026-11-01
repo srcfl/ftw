@@ -425,6 +425,9 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("config loaded", "site", cfg.Site.Name, "drivers", len(cfg.Drivers))
+	// The household clock is set before anything else reads it: every
+	// goroutine from here on reads time.Local.
+	useHouseholdClock(cfg.Site.TimeZone)
 	// Repaired-but-wrong config: ERROR so it reaches the log ring and the
 	// support report, without stopping a boot the repair made safe.
 	for _, w := range cfg.LoadWarnings {
@@ -525,6 +528,11 @@ func main() {
 	if err := st.AbsorbColdHistory(context.Background(), coldDir); err != nil {
 		slog.Error("absorb cold history", "err", err)
 		os.Exit(1)
+	}
+	if cleared, err := st.KeepDailyZone(context.Background(), localzone.Name()); err != nil {
+		slog.Warn("could not check the zone of cached daily energy", "err", err)
+	} else if cleared {
+		slog.Info("household zone changed; daily energy is computed again on the new clock", "zone", localzone.Name())
 	}
 	defer func() {
 		if err := st.Close(); err != nil {
@@ -3475,6 +3483,15 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, dataMaint
 
 // seedImportHour gives the import ceiling the clock hour's import that
 // state.db recorded before this start, so a restart keeps it.
+// useHouseholdClock runs Core on the site's stored zone, or the host's when
+// none is stored.
+func useHouseholdClock(stored string) {
+	if err := localzone.Use(stored); err != nil {
+		slog.Error("site.time_zone does not load; the box keeps the host's zone", "err", err)
+	}
+	slog.Info("household clock", "zone", localzone.Name(), "stored", localzone.Stored() != "")
+}
+
 func seedImportHour(st *state.Store, ctrl *control.State, now time.Time) {
 	start := control.ImportHourStart(now)
 	wh, covered, err := st.ImportWhIntervals(context.Background(), [][2]int64{{start.UnixMilli(), now.UnixMilli()}})

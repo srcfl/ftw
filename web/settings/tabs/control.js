@@ -31,6 +31,8 @@
         '</fieldset>' : '';
       return setup + '<fieldset><legend>Site</legend>' +
         field("Name", "site.name", "text", "Home") +
+        field("Time zone", "site.time_zone", "text", "",
+          "The home's clock, such as Europe/Stockholm. Car goals, the import hour and daily history read it. Empty uses the host's zone, which is UTC in Docker. FTW restarts to apply a change.") +
         '<div class="field-row"><div>' +
         field("Grid target (W)", "site.grid_target_w", "number", 0) +
         '</div><div>' +
