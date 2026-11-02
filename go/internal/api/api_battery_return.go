@@ -92,15 +92,7 @@ func (s *Server) batteryReturn(r *http.Request) (batteryreturn.Report, int, erro
 	var site batteryreturn.Site
 	if s.deps.Cfg != nil && s.deps.CfgMu != nil {
 		s.deps.CfgMu.RLock()
-		for _, d := range s.deps.Cfg.Drivers {
-			if d.BatteryCapacityWh > 0 {
-				site.CapacityWh += d.BatteryCapacityWh
-				site.Batteries++
-			}
-		}
-		if w := s.deps.Cfg.Weather; w != nil && placed(w.Latitude, w.Longitude) {
-			site.Lat, site.Lon, site.Placed = w.Latitude, w.Longitude, true
-		}
+		site = batteryreturn.SiteOf(s.deps.Cfg)
 		s.deps.CfgMu.RUnlock()
 	}
 	rep, err := batteryreturn.Build(r.Context(), s.deps.State, year, now, site)
@@ -108,12 +100,4 @@ func (s *Server) batteryReturn(r *http.Request) (batteryreturn.Report, int, erro
 		return batteryreturn.Report{}, http.StatusInternalServerError, err
 	}
 	return rep, http.StatusOK, nil
-}
-
-// placed reports whether the owner set a position in Sweden, where the
-// refund applies. A wrong position could put the sun down while panels
-// still produce: setup's map starts on central Stockholm, so a site left
-// there has none, and swapped coordinates land outside the country.
-func placed(lat, lon float64) bool {
-	return lat >= 55 && lat <= 69.5 && lon >= 10.5 && lon <= 24.5 && !(lat == 59.3293 && lon == 18.0686)
 }

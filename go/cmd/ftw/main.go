@@ -1685,6 +1685,9 @@ func main() {
 			defer ctrlMu.Unlock()
 			return control.PhaseImbalanceW(tel, ctrl, timeout, time.Now())
 		}
+		// The planner counts the energy tax refund on grid energy the
+		// battery stores and sends back, as History counts it.
+		mpcSvc.BatteryReturn = (&batteryReturnPlanning{ledger: st, cfg: cfg, cfgMu: cfgMu, now: time.Now}).state
 		// The planner keeps each clock hour under the owner's import
 		// ceiling, from the budget Core's live limit counts.
 		mpcSvc.ImportCeiling = func() mpc.ImportCeiling {
