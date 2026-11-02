@@ -5,22 +5,24 @@ import "math"
 // A Swedish household gets back the energy tax on grid energy it stored in
 // the battery and later sent back to the grid (11 kap. 13 § lagen
 // (1994:1776) om skatt på energi). Losses are not refunded, nor is the VAT.
-// The plan counts the refund as the History figure does (package
+// The plan counts the refund in the order the History figure does (package
 // batteryreturn), slot by slot rather than hour by hour:
 //
 //   - In each slot the battery took from the grid only what solar could not
 //     have supplied, and gave to the grid only what solar could not have
 //     exported.
-//   - The battery holds a mix of grid and other energy. Each kWh it gives
-//     to the grid carries the grid share it held. Grid energy enters the mix
-//     after the charge loss and leaves it before the discharge loss.
+//   - What the house takes from the battery counts as grid energy first, and
+//     what goes to the grid counts as other energy first.
+//   - Grid energy enters after the round-trip loss, other energy whole. What
+//     does not fit in the battery sheds grid energy first.
 //
-// The Core DP carries the grid share as a second state beside the SoC.
+// Energies are in Wh the battery can give back (AC out). The Core DP
+// carries the grid part of what the battery holds as a share, a second
+// state beside the SoC.
 
-// batteryReturnShareLevels is the Core DP's grid-share grid: 0, ½, 1. A
-// fixed plan's refund is linear in the share, so few levels are enough: on
-// a month of real prices 3, 5 and 21 levels gave the same plans' value to
-// within 0.1 kr.
+// batteryReturnShareLevels is the Core DP's grid-share grid: 0, ½, 1. On a
+// month of real prices with solar, 3, 5, 7 and 11 levels gave the same
+// plans' value to within 0.3 kr.
 const batteryReturnShareLevels = 3
 
 // batteryReturnCredit is the öre per kWh of returned grid energy the plan
@@ -64,21 +66,69 @@ func returnFlowsW(slot Slot, batteryW, gridW float64) (gridToBatteryW, batteryTo
 	return 0, 0
 }
 
+// returnStep is one slot as the refund counts it, in Wh the battery can give
+// back: what the house and the grid take from the battery, the grid and
+// other energy it takes in, and how much it gains; then, for a given start,
+// what it holds before and after. Only the start and the grid share vary,
+// so the Core DP builds the flows once per slot and action.
+type returnStep struct {
+	homeWh, toGridWh    float64
+	gridInWh, otherInWh float64
+	gainWh              float64
+
+	heldWh, afterWh, invAfter float64
+}
+
+// newReturnFlows builds a slot's flows.
+func newReturnFlows(slot Slot, batteryW, gridW, dtH, etaC, etaD float64) returnStep {
+	toBatteryW, toGridW := returnFlowsW(slot, batteryW, gridW)
+	var s returnStep
+	switch {
+	case batteryW < 0:
+		s.toGridWh = toGridW * dtH
+		s.homeWh = -batteryW*dtH - s.toGridWh
+		s.gainWh = batteryW * dtH
+	case batteryW > 0:
+		s.gridInWh = toBatteryW * dtH * etaC * etaD
+		s.otherInWh = (batteryW - toBatteryW) * dtH
+		s.gainWh = batteryW * dtH * etaC * etaD
+	}
+	return s
+}
+
+// from starts the step with storedWh in the cells.
+func (s returnStep) from(storedWh, etaD float64) returnStep {
+	s.heldWh = max(storedWh, 0) * etaD
+	s.afterWh = max(s.heldWh+s.gainWh, 0)
+	s.invAfter = 0
+	if s.afterWh > 0 {
+		s.invAfter = 1 / s.afterWh
+	}
+	return s
+}
+
+// apply moves a grid share across the step. It returns the share after it
+// and the grid energy sent back, in Wh. What stays at home takes grid
+// energy first and what goes to the grid takes other energy first; grid
+// energy enters after the loss, other energy whole; what does not fit sheds
+// grid energy first.
+func (s *returnStep) apply(share float64) (float64, float64) {
+	grid := share * s.heldWh
+	fromGrid := min(grid, s.homeWh)
+	other := max(s.heldWh-grid-s.homeWh+fromGrid, 0)
+	fromOther := min(other, s.toGridWh)
+	returned := min(grid-fromGrid, s.toGridWh-fromOther)
+	grid += s.gridInWh - fromGrid - returned
+	grid -= min(grid, max(grid+other-fromOther+s.otherInWh-s.afterWh, 0))
+	return max(grid*s.invAfter, 0), returned
+}
+
 // returnMixStep moves the grid share across one slot. storedWh is the energy
 // in the cells at the slot's start and share the grid part of it. It returns
 // the share at the slot's end and the grid energy sent back, in AC Wh.
-func returnMixStep(slot Slot, batteryW, gridW, storedWh, share, dtH, etaC float64) (float64, float64) {
-	toBatteryW, toGridW := returnFlowsW(slot, batteryW, gridW)
-	if toGridW > 0 {
-		// A discharge leaves the mix as it was.
-		return share, share * toGridW * dtH
-	}
-	if batteryW > 0 {
-		if after := storedWh + batteryW*dtH*etaC; after > 0 {
-			share = (share*max(storedWh, 0) + toBatteryW*dtH*etaC) / after
-		}
-	}
-	return min(max(share, 0), 1), 0
+func returnMixStep(slot Slot, batteryW, gridW, storedWh, share, dtH, etaC, etaD float64) (float64, float64) {
+	step := newReturnFlows(slot, batteryW, gridW, dtH, etaC, etaD).from(storedWh, etaD)
+	return step.apply(share)
 }
 
 // annotateBatteryReturn sets each action's returned grid energy and the
@@ -90,13 +140,17 @@ func annotateBatteryReturn(plan *Plan, slots []Slot, p Params) {
 	})
 }
 
-// walkBatteryReturn replays the mix over the actions, hands each action's
-// returned grid energy (AC Wh) to each, and returns the refund in öre.
+// walkBatteryReturn replays the account over the actions, hands each
+// action's returned grid energy (AC Wh) to each, and returns the refund in
+// öre.
 func walkBatteryReturn(actions []Action, slots []Slot, p Params, each func(i int, wh float64)) float64 {
 	credit := p.batteryReturnCredit()
-	etaC := p.ChargeEfficiency
+	etaC, etaD := p.ChargeEfficiency, p.DischargeEfficiency
 	if etaC <= 0 {
 		etaC = 0.95
+	}
+	if etaD <= 0 {
+		etaD = 0.95
 	}
 	share, soc := p.initialGridShare(), p.InitialSoC
 	var returnedWh float64
@@ -104,7 +158,7 @@ func walkBatteryReturn(actions []Action, slots []Slot, p Params, each func(i int
 		var wh float64
 		if credit > 0 && i < len(slots) {
 			share, wh = returnMixStep(slots[i], a.BatteryW, a.GridW,
-				soc*p.CapacityWh, share, slots[i].DurationHours(), etaC)
+				soc*p.CapacityWh, share, slots[i].DurationHours(), etaC, etaD)
 			returnedWh += wh
 		}
 		if each != nil {
@@ -116,26 +170,28 @@ func walkBatteryReturn(actions []Action, slots []Slot, p Params, each func(i int
 }
 
 // BatteryReturnState is what Core knows of the refund when it plans: the
-// credit per kWh, the grid share of what the battery held when History last
-// counted it, and the AC Wh the battery took in since. A zero value counts
-// no refund.
+// credit per kWh; the grid and other energy History held after the last
+// hour it counted, in Wh the battery can give back; and what the battery
+// took in and gave out since, in AC Wh. A zero value counts no refund.
 type BatteryReturnState struct {
-	OreKwh         float64
-	GridShare      float64
-	ChargedSinceWh float64
+	OreKwh            float64
+	GridWh, OtherWh   float64
+	ChargedSinceWh    float64
+	DischargedSinceWh float64
 }
 
-// startShare is the grid share of the storedWh the cells hold now. Energy
-// that came in after History's count counts as other energy; a discharge
-// since then took grid energy in proportion.
-func (b BatteryReturnState) startShare(storedWh, etaC float64) float64 {
-	share := min(max(b.GridShare, 0), 1)
-	if !(share > 0) || !(storedWh > 0) {
+// startShare is the grid share of the storedWh the cells hold now. It counts
+// low: what the battery gave out since History's count took grid energy,
+// what it took in counts as other energy, and History's other energy is all
+// still there.
+func (b BatteryReturnState) startShare(storedWh, etaD float64) float64 {
+	if etaD <= 0 {
+		etaD = 0.95
+	}
+	held := storedWh * etaD
+	if !(held > 0) {
 		return 0
 	}
-	if etaC <= 0 {
-		etaC = 0.95
-	}
-	counted := max(storedWh-max(b.ChargedSinceWh, 0)*etaC, 0)
-	return share * counted / storedWh
+	grid := min(b.GridWh-max(b.DischargedSinceWh, 0), held-max(b.OtherWh, 0)-max(b.ChargedSinceWh, 0))
+	return min(max(grid/held, 0), 1)
 }

@@ -36,7 +36,8 @@ func TestBatteryReturnCreditIsSwedishAndInTheTariff(t *testing.T) {
 	}
 }
 
-// chargeLedger reads 600 Wh of battery charge in every request.
+// chargeLedger reads 600 Wh of battery charge and 900 Wh of discharge in
+// every request.
 type chargeLedger struct{ batteryreturn.Ledger }
 
 func (chargeLedger) LoadEnergyHistoryContext(context.Context, state.EnergyHistoryQuery) ([]state.EnergyLedgerPoint, bool, error) {
@@ -73,14 +74,14 @@ func TestBatteryReturnPlanning(t *testing.T) {
 
 	// An empty ledger counts a battery with no grid energy.
 	b.count(batteryreturn.SiteOf(cfg))
-	if got := window(); got.OreKwh < 26.39 || got.GridShare != 0 || b.problem || !b.countedTo.Equal(hour) {
+	if got := window(); got.OreKwh < 26.39 || got.GridWh != 0 || b.problem || !b.countedTo.Equal(hour) {
 		t.Fatalf("after the count: %+v problem %v counted to %v", got, b.problem, b.countedTo)
 	}
 
-	// Energy that came in since the count is not taken for grid energy.
-	b.ledger, b.share = chargeLedger{st}, 0.5
-	if got := window(); got.GridShare != 0.5 || got.ChargedSinceWh != 600 {
-		t.Fatalf("charged since the count: %+v", got)
+	// With grid energy held, the flows since the count go with it.
+	b.ledger, b.grid, b.other = chargeLedger{st}, 4000, 2000
+	if got := window(); got.GridWh != 4000 || got.OtherWh != 2000 || got.ChargedSinceWh != 600 || got.DischargedSinceWh != 900 {
+		t.Fatalf("flows since the count: %+v", got)
 	}
 
 	// A count more than two hours old says nothing of the battery now.

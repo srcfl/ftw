@@ -115,8 +115,11 @@ func TestRefundCountsTheGridShareTheBatteryHolds(t *testing.T) {
 	p.InitialSoC = p.SoCMax
 	p.BatteryReturnGridShare = 0.5
 	plan := Optimize(slots, p)
-	if got, want := returnedWh(plan), 0.5*exportedWh(plan); exportedWh(plan) < 5000 || math.Abs(got-want) > 1 {
-		t.Fatalf("returned %.0f Wh of %.0f Wh exported, want half", got, exportedWh(plan))
+	// Half of what the battery can give back is other energy, and it goes
+	// to the grid first.
+	other := 0.5 * p.SoCMax * p.CapacityWh * p.DischargeEfficiency
+	if got, want := returnedWh(plan), exportedWh(plan)-other; exportedWh(plan) < 5000 || math.Abs(got-want) > 1 {
+		t.Fatalf("returned %.0f Wh of %.0f Wh exported, want %.0f", got, exportedWh(plan), want)
 	}
 }
 
@@ -158,21 +161,6 @@ func TestReturnFlowsCountSolarFirst(t *testing.T) {
 		if in != c.toBattery || out != c.toGridW {
 			t.Errorf("%s: %.0f W in, %.0f W out; want %.0f, %.0f", c.name, in, out, c.toBattery, c.toGridW)
 		}
-	}
-}
-
-func TestReturnMixStepIsProportional(t *testing.T) {
-	// 5 kWh stored, 40 % grid. One hour sending 2 kW beyond the house
-	// returns 40 % of it and keeps the mix.
-	share, ret := returnMixStep(Slot{}, -3000, -2000, 5000, 0.4, 1, 0.95)
-	if share != 0.4 || math.Abs(ret-800) > 1e-9 {
-		t.Fatalf("share %.3f returned %.1f Wh", share, ret)
-	}
-	// Charging 2 kW from the grid with 1 kW of sun: 1 kW of it is grid
-	// energy, which enters after the charge loss.
-	share, ret = returnMixStep(Slot{PVW: -1000}, 2000, 1000, 5000, 0.4, 1, 0.95)
-	if want := (2000 + 950.0) / (5000 + 1900); ret != 0 || math.Abs(share-want) > 1e-12 {
-		t.Fatalf("share %.4f, want %.4f", share, want)
 	}
 }
 
@@ -255,7 +243,7 @@ func TestServiceCountsTheRefundFromItsHook(t *testing.T) {
 		if hook {
 			svc.BatteryReturn = func(from, to time.Time) BatteryReturnState {
 				window = [2]time.Time{from, to}
-				return BatteryReturnState{OreKwh: 26.4, GridShare: 0.8}
+				return BatteryReturnState{OreKwh: 26.4, GridWh: 7000}
 			}
 		}
 		if svc.Replan(context.Background()) == nil {
@@ -271,32 +259,22 @@ func TestServiceCountsTheRefundFromItsHook(t *testing.T) {
 	if !window[0].Equal(start.Add(30*time.Second)) || !window[1].Equal(start.Add(4*time.Hour)) {
 		t.Fatalf("asked for %v..%v", window[0], window[1])
 	}
-	share := 0.8
-	if got, want := returnedWh(plan), share*exportedWh(plan); exportedWh(plan) < 3000 || math.Abs(got-want) > 1 {
-		t.Fatalf("returned %.0f Wh of %.0f Wh exported, want %.0f", got, exportedWh(plan), want)
+	// 9 kWh in the cells give back 8.55 kWh, 7 of it grid energy. Replay
+	// the plan from that share: it must be what the service started from.
+	p := Params{Mode: ModeArbitrage, CapacityWh: 10000, InitialSoC: .9, ChargeEfficiency: .95, DischargeEfficiency: .95,
+		BatteryReturnOreKwh: 26.4, BatteryReturnGridShare: 7000 / 8550.}
+	slots := make([]Slot, len(plan.Actions))
+	for i, a := range plan.Actions {
+		slots[i] = Slot{StartMs: a.SlotStartMs, LenMin: a.SlotLenMin, ExecutionStartMs: a.ExecutionStartMs, PVW: a.PVW, LoadW: a.LoadW}
+	}
+	if exportedWh(plan) < 3000 || returnedWh(plan) <= 0 || returnedWh(plan) > exportedWh(plan) {
+		t.Fatalf("returned %.0f Wh of %.0f Wh exported", returnedWh(plan), exportedWh(plan))
+	}
+	if want := walkBatteryReturn(plan.Actions, slots, p, nil); math.Abs(plan.BatteryReturnOre-want) > 1e-6 {
+		t.Fatalf("refund %.2f öre, replayed from the hook's start %.2f", plan.BatteryReturnOre, want)
 	}
 	if math.Abs(plan.BatteryReturnOre-26.4*returnedWh(plan)/1000) > 1e-6 {
 		t.Fatalf("refund %.2f öre", plan.BatteryReturnOre)
-	}
-}
-
-func TestStartShareTakesNewChargeForOtherEnergy(t *testing.T) {
-	b := BatteryReturnState{OreKwh: 26.4, GridShare: 0.5}
-	if got := b.startShare(8000, 0.95); got != 0.5 {
-		t.Fatalf("nothing charged since the count: share %.3f", got)
-	}
-	// 2 kWh in at 95 % since the count: 1.9 of the 8 kWh are of unknown
-	// origin, so half of the other 6.1 kWh is grid energy.
-	b.ChargedSinceWh = 2000
-	if got, want := b.startShare(8000, 0.95), 0.5*6100/8000; math.Abs(got-want) > 1e-12 {
-		t.Fatalf("share %.4f, want %.4f", got, want)
-	}
-	b.ChargedSinceWh = 20_000
-	if got := b.startShare(8000, 0.95); got != 0 {
-		t.Fatalf("all of it came in since: share %.3f", got)
-	}
-	if got := (BatteryReturnState{GridShare: 3}).startShare(1000, 0.95); got != 1 {
-		t.Fatalf("share held to 1, got %.3f", got)
 	}
 }
 
@@ -314,6 +292,67 @@ func TestAPluggedInCarLeavesTheRefundOutOfTheDP(t *testing.T) {
 	for i := range a.Actions {
 		if a.Actions[i].BatteryW != b.Actions[i].BatteryW || a.Actions[i].LoadpointW != b.Actions[i].LoadpointW {
 			t.Fatalf("slot %d: the refund changed the plan", i)
+		}
+	}
+}
+
+func TestTheHouseUsesGridEnergyFirstAndTheGridGetsOtherFirst(t *testing.T) {
+	step := func(share, storedWh, pvW, battW, gridW float64) (float64, float64) {
+		return returnMixStep(Slot{PVW: pvW}, battW, gridW, storedWh, share, 1, 1, 1)
+	}
+	// 5 kWh, 40 % grid. 3 kW out, 1 kW of it for the house: the house takes
+	// grid energy, the grid other energy, so nothing is returned.
+	if share, ret := step(0.4, 5000, 0, -3000, -2000); math.Abs(share-0.5) > 1e-12 || ret != 0 {
+		t.Fatalf("share %.3f returned %.0f Wh", share, ret)
+	}
+	// 80 % grid: once the 1 kWh of other energy is gone the grid gets grid
+	// energy.
+	if share, ret := step(0.8, 5000, 0, -3000, -2000); math.Abs(share-1) > 1e-12 || math.Abs(ret-1000) > 1e-9 {
+		t.Fatalf("share %.3f returned %.0f Wh", share, ret)
+	}
+	// Charging 2 kW with 1 kW of sun: 1 kW of grid energy enters after the
+	// round-trip loss, the sun's whole, and what does not fit in the battery
+	// sheds grid energy.
+	share, ret := returnMixStep(Slot{PVW: -1000}, 2000, 1000, 5000, 0.4, 1, 0.95, 0.95)
+	held, after := 5000*0.95, 5000*0.95+2000*0.95*0.95
+	grid := 0.4*held + 1000*0.95*0.95
+	other := 0.6*held + 1000
+	if want := (grid - (grid + other - after)) / after; ret != 0 || math.Abs(share-want) > 1e-12 {
+		t.Fatalf("share %.4f, want %.4f", share, want)
+	}
+	// History's case: 5 kWh from the grid at night, 5 kWh to the house in
+	// the morning, 5 kWh of sun at midday, 5 kWh to the grid in the evening
+	// returns nothing.
+	f, stored, total := 0.0, 0.0, 0.0
+	for _, h := range []struct{ pvW, battW, gridW float64 }{
+		{0, 5000, 5000}, {0, -5000, 0}, {-5000, 5000, 0}, {0, -5000, -5000},
+	} {
+		var r float64
+		f, r = step(f, stored, h.pvW, h.battW, h.gridW)
+		stored += h.battW
+		total += r
+	}
+	if total != 0 {
+		t.Fatalf("returned %.0f Wh of grid energy the house had used", total)
+	}
+}
+
+func TestStartShareCountsLow(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		b        BatteryReturnState
+		storedWh float64
+		want     float64
+	}{
+		{"as History counted", BatteryReturnState{GridWh: 4000, OtherWh: 2000}, 8000, 0.5},
+		{"given out since: grid energy first", BatteryReturnState{GridWh: 4000, OtherWh: 2000, DischargedSinceWh: 1000}, 8000, 3000. / 8000},
+		{"taken in since: other energy", BatteryReturnState{GridWh: 4000, OtherWh: 2000, ChargedSinceWh: 3000}, 8000, 3000. / 8000},
+		{"less than History holds: all its other energy is there", BatteryReturnState{GridWh: 4000, OtherWh: 2000}, 5000, 0.6},
+		{"empty", BatteryReturnState{GridWh: 4000}, 0, 0},
+		{"nothing counted", BatteryReturnState{}, 8000, 0},
+	} {
+		if got := c.b.startShare(c.storedWh, 1); math.Abs(got-c.want) > 1e-12 {
+			t.Errorf("%s: share %.4f, want %.4f", c.name, got, c.want)
 		}
 	}
 }

@@ -30,12 +30,10 @@ type batteryReturnPlanning struct {
 	// next hour.
 	tried time.Time
 	// countedTo is the end of the hour the last good count ran to, and
-	// share the grid part of what the battery held then. History's energies
-	// use the least efficiency the year's readings allow, low early in a
-	// year, so only the share carries over.
-	countedTo time.Time
-	problem   bool
-	share     float64
+	// grid and other what the battery held then.
+	countedTo   time.Time
+	problem     bool
+	grid, other float64
 }
 
 // state is the planner's BatteryReturn hook.
@@ -55,21 +53,21 @@ func (b *batteryReturnPlanning) state(from, to time.Time) mpc.BatteryReturnState
 		b.counting, b.tried = true, hour
 		go b.count(site)
 	}
-	countedTo, share, problem := b.countedTo, b.share, b.problem
+	countedTo, grid, other, problem := b.countedTo, b.grid, b.other, b.problem
 	b.mu.Unlock()
 	// No figure for this site, or no count that says what the battery
 	// holds now: nothing to claim.
 	if problem || countedTo.Before(now.Add(-2*time.Hour)) {
 		return mpc.BatteryReturnState{}
 	}
-	refund := mpc.BatteryReturnState{OreKwh: credit, GridShare: share}
-	if share > 0 {
-		charged, err := b.chargedSince(countedTo, now)
+	refund := mpc.BatteryReturnState{OreKwh: credit, GridWh: grid, OtherWh: other}
+	if grid > 0 {
+		charged, discharged, err := b.flowsSince(countedTo, now)
 		if err != nil {
-			slog.Warn("mpc: battery charge since the refund count unknown; planning without stored grid energy", "err", err)
-			refund.GridShare = 0
+			slog.Warn("mpc: battery flows since the refund count unknown; planning without stored grid energy", "err", err)
+			refund.GridWh = 0
 		}
-		refund.ChargedSinceWh = charged
+		refund.ChargedSinceWh, refund.DischargedSinceWh = charged, discharged
 	}
 	return refund
 }
@@ -86,18 +84,15 @@ func (b *batteryReturnPlanning) count(site batteryreturn.Site) {
 		slog.Warn("mpc: battery return count failed; planning without the refund until the next hour", "err", err)
 		return
 	}
-	b.countedTo, b.problem, b.share = at, !ok, 0
-	if ok && grid+other > 0 {
-		b.share = grid / (grid + other)
-	}
+	b.countedTo, b.problem, b.grid, b.other = at, !ok, grid, other
 	slog.Debug("mpc: battery return count", "grid_wh", grid, "other_wh", other, "hour_end", at, "ok", ok)
 }
 
-// chargedSince is the AC energy the battery took in over [from, to), from
-// the ledger's five-minute buckets.
-func (b *batteryReturnPlanning) chargedSince(from, to time.Time) (float64, error) {
+// flowsSince is the AC energy the battery took in and gave out over
+// [from, to), from the ledger's five-minute buckets.
+func (b *batteryReturnPlanning) flowsSince(from, to time.Time) (charged, discharged float64, err error) {
 	if !to.After(from) {
-		return 0, nil
+		return 0, 0, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -105,13 +100,16 @@ func (b *batteryReturnPlanning) chargedSince(from, to time.Time) (float64, error
 		SinceMS: from.UnixMilli(), UntilMS: to.UnixMilli(),
 		BucketMS: max(to.Sub(from).Milliseconds(), state.EnergyLedgerBucketMS), Limit: 2,
 	})
-	var wh float64
 	for _, p := range points {
-		if p.Flow == state.FlowBatteryCharge && p.EnergyWh > 0 {
-			wh += p.EnergyWh
+		switch {
+		case p.EnergyWh <= 0:
+		case p.Flow == state.FlowBatteryCharge:
+			charged += p.EnergyWh
+		case p.Flow == state.FlowBatteryDischarge:
+			discharged += p.EnergyWh
 		}
 	}
-	return wh, err
+	return charged, discharged, err
 }
 
 // batteryReturnCredit is what a kWh of returned grid energy is worth to a

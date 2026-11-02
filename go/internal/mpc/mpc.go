@@ -723,6 +723,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		shareStep = 1 / float64(GL-1)
 	}
 	shareAt := func(g int) float64 { return float64(g) * shareStep }
+	invShareStep := float64(GL - 1)
 
 	// EV dimensions. When no loadpoint is active, EL=EA=1 and the
 	// EV loops degenerate to a single pass that adds zero power /
@@ -799,12 +800,23 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 
 	// Backwards induction.
 	bestV, bestPolicy := make([]float64, GL), make([]int, GL)
+	var returnFlows []returnStep
+	if GL > 1 {
+		returnFlows = make([]returnStep, A)
+	}
 	for t := N - 1; t >= 0; t-- {
 		if err := ctx.Err(); err != nil {
 			return Plan{}, err
 		}
 		slot := slots[t]
 		dtH := slot.DurationHours()
+		// The refund's flows depend on the action only: there is no car
+		// with more than one grid-share level.
+		for ba := range returnFlows {
+			battW := actionAt(ba)
+			returnFlows[ba] = newReturnFlows(slot, battW, loadpoint.GridW(slot.LoadW, slot.PVW, battW, 0),
+				dtH, p.ChargeEfficiency, p.DischargeEfficiency)
+		}
 		for si := 0; si < S; si++ {
 			soc := socAt(si)
 			for ei := 0; ei < EL; ei++ {
@@ -1079,38 +1091,18 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 							continue
 						}
 						// Energy tax refund on stored grid energy sent
-						// back to the grid; the rest of the action does
-						// not depend on the grid share. The charge mix
-						// is share×stored plus the grid's part, over
-						// what the cells hold after the slot
-						// (returnMixStep). See battery_return.go.
-						toBatteryW, toGridW := returnFlowsW(slot, battW, gridW)
-						storedWh := soc * p.CapacityWh
-						gridInWh := toBatteryW * dtH * p.ChargeEfficiency
-						afterWh := storedWh + battW*dtH*p.ChargeEfficiency
+						// back to the grid. Only the grid share varies
+						// across the levels, and with no car eLo is 0.
+						// See battery_return.go.
+						step := returnFlows[ba].from(soc*p.CapacityWh, p.DischargeEfficiency)
 						for gi := range GL {
-							share := shareAt(gi)
-							total := cost
-							var vNext float64
-							if toGridW > 0 || battW <= 0 {
-								// A discharge or idle slot keeps the
-								// mix, so the share stays on its grid
-								// point.
-								total -= credit * share * toGridW * dtH / 1000
-								vNext = (1-frac)*(1-eFrac)*vLo[eLo*GL+gi] +
-									(1-frac)*eFrac*vLo[eHi*GL+gi] +
-									frac*(1-eFrac)*vHi[eLo*GL+gi] +
-									frac*eFrac*vHi[eHi*GL+gi]
-							} else {
-								share2 := min((share*storedWh+gridInWh)/afterWh, 1)
-								gLo := min(int(share2/shareStep), GL-2)
-								gFrac := share2/shareStep - float64(gLo)
-								a, b := eLo*GL+gLo, eHi*GL+gLo
-								vNext = (1-frac)*(1-eFrac)*((1-gFrac)*vLo[a]+gFrac*vLo[a+1]) +
-									(1-frac)*eFrac*((1-gFrac)*vLo[b]+gFrac*vLo[b+1]) +
-									frac*(1-eFrac)*((1-gFrac)*vHi[a]+gFrac*vHi[a+1]) +
-									frac*eFrac*((1-gFrac)*vHi[b]+gFrac*vHi[b+1])
-							}
+							share2, returnedWh := step.apply(shareAt(gi))
+							total := cost - credit*returnedWh/1000
+							g := share2 * invShareStep
+							gLo := min(int(g), GL-2)
+							gFrac := g - float64(gLo)
+							vNext := (1-frac)*((1-gFrac)*vLo[gLo]+gFrac*vLo[gLo+1]) +
+								frac*((1-gFrac)*vHi[gLo]+gFrac*vHi[gLo+1])
 							total += vNext
 							if total < bestV[gi] {
 								bestV[gi] = total
@@ -1232,7 +1224,8 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		}
 		plan.Actions = append(plan.Actions, a)
 		if GL > 1 {
-			share, _ = returnMixStep(slot, actW, gridW, soc*p.CapacityWh, share, dtH, p.ChargeEfficiency)
+			share, _ = returnMixStep(slot, actW, gridW, soc*p.CapacityWh, share, dtH,
+				p.ChargeEfficiency, p.DischargeEfficiency)
 		}
 		soc = soc2
 		si = gridIndex(soc, p.SoCMin, socStep, S)

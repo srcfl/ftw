@@ -1767,7 +1767,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		refund := s.BatteryReturn(time.UnixMilli(slots[0].ExecutionStart()),
 			time.UnixMilli(last.StartMs).Add(time.Duration(last.LenMin)*time.Minute))
 		p.BatteryReturnOreKwh = refund.OreKwh
-		p.BatteryReturnGridShare = refund.startShare(p.InitialSoC*p.CapacityWh, p.ChargeEfficiency)
+		p.BatteryReturnGridShare = refund.startShare(p.InitialSoC*p.CapacityWh, p.DischargeEfficiency)
 	}
 	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
