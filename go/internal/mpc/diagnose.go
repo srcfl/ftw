@@ -95,6 +95,10 @@ type DiagnosticParams struct {
 	PVUncertaintyW           float64 `json:"pv_uncertainty_w,omitempty"`
 	PVRelativeUncertainty    float64 `json:"pv_relative_uncertainty,omitempty"`
 	PVForecastSafetyK        float64 `json:"pv_forecast_safety_k,omitempty"`
+	// The energy tax refund the plan counted on, and the battery's grid
+	// share at its start.
+	BatteryReturnOreKwh    float64 `json:"battery_return_ore_kwh,omitempty"`
+	BatteryReturnGridShare float64 `json:"battery_return_grid_share,omitempty"`
 
 	LoadpointSurplusOnly       bool `json:"loadpoint_surplus_only"`
 	LoadpointNoBatteryToEV     bool `json:"loadpoint_no_battery_to_ev"`
@@ -234,6 +238,8 @@ func buildDiagnostic(plan *Plan, slots []Slot, p Params, zone string,
 			PVUncertaintyW:             p.PVUncertaintyW,
 			PVRelativeUncertainty:      p.PVRelativeUncertainty,
 			PVForecastSafetyK:          p.PVForecastSafetyK,
+			BatteryReturnOreKwh:        p.BatteryReturnOreKwh,
+			BatteryReturnGridShare:     p.BatteryReturnGridShare,
 			LoadpointSurplusOnly:       p.Loadpoint != nil && p.Loadpoint.SurplusOnly,
 			LoadpointNoBatteryToEV:     p.Loadpoint != nil && p.Loadpoint.NoBatteryToEV,
 			LoadpointBlocksBatteryToEV: p.Loadpoint != nil && p.Loadpoint.blocksBatteryToEV(),
@@ -357,6 +363,8 @@ func planFromDiagnostic(d *Diagnostic) (*Plan, []Slot, Params, time.Time, bool) 
 		PVUncertaintyW:           d.Params.PVUncertaintyW,
 		PVRelativeUncertainty:    d.Params.PVRelativeUncertainty,
 		PVForecastSafetyK:        d.Params.PVForecastSafetyK,
+		BatteryReturnOreKwh:      d.Params.BatteryReturnOreKwh,
+		BatteryReturnGridShare:   d.Params.BatteryReturnGridShare,
 	}
 	if params.Mode == "" {
 		params.Mode = ModeSelfConsumption

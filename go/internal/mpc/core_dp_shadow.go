@@ -34,9 +34,10 @@ type coreDPShadowSkip struct {
 
 // coreDPSlotWork counts the choices Core DP weighs in each slot: battery SoC
 // levels times battery power levels, times EV SoC levels and charger steps
-// when a car is plugged in. Solve time grows with it and with the slot count.
+// when a car is plugged in, times the refund's grid-share levels. Solve time
+// grows with it and with the slot count.
 func coreDPSlotWork(p Params) int64 {
-	work := int64(max(p.SoCLevels, 3)) * int64(max(p.ActionLevels, 3))
+	work := int64(max(p.SoCLevels, 3)) * int64(max(p.ActionLevels, 3)) * int64(p.batteryReturnShareLevels())
 	if lp := p.Loadpoint; lp.active() {
 		work *= int64(lp.Levels) * int64(len(lp.normalizedSteps()))
 	}
@@ -120,8 +121,12 @@ func (s *Service) startCoreDPShadow(champion Plan, slots []Slot, p Params, reaso
 			shadowOre := replayedGridCost(slots, p, shadow)
 			block.TotalCostOre = shadowOre
 			block.ActiveMinusShadowOre = activeOre - shadowOre
-			block.ActiveTerminalCorrectedOre = terminalCorrectedOre(activeOre, planEndSoC(&champion), p)
-			block.TerminalCorrectedOre = terminalCorrectedOre(shadowOre, planEndSoC(&shadow), p)
+			// The corrected figures also net out the energy tax refund
+			// each plan counts on.
+			block.ActiveTerminalCorrectedOre = terminalCorrectedOre(activeOre, planEndSoC(&champion), p) -
+				walkBatteryReturn(champion.Actions, slots, p, nil)
+			block.TerminalCorrectedOre = terminalCorrectedOre(shadowOre, planEndSoC(&shadow), p) -
+				walkBatteryReturn(shadow.Actions, slots, p, nil)
 			block.ActiveMinusShadowTerminalCorrectedOre = block.ActiveTerminalCorrectedOre - block.TerminalCorrectedOre
 			if block.FirstAction != nil {
 				block.FirstAction.EMSMode, _, _ = actionToSlot(*block.FirstAction, p.Mode)

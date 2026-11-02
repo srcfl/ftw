@@ -134,6 +134,10 @@ type Service struct {
 	// watts. Nil or 0 plans against the aggregate fuse alone. Called
 	// without s.mu; it may take the control lock.
 	PhaseImbalanceW func() float64
+	// BatteryReturn says what the energy tax refund after battery storage
+	// is worth over [from, to) and what grid energy the battery holds. Nil
+	// counts no refund.
+	BatteryReturn func(from, to time.Time) BatteryReturnState
 	// ImportCeiling returns the owner's hourly import ceiling as Core
 	// enforces it. Nil or zero W plans without it. Called without s.mu; it
 	// may take the control lock.
@@ -1758,6 +1762,13 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	if p.ImportHours != nil {
 		p.ImportMeanW = importCeiling.MeanW
 	}
+	if s.BatteryReturn != nil {
+		last := slots[len(slots)-1]
+		refund := s.BatteryReturn(time.UnixMilli(slots[0].ExecutionStart()),
+			time.UnixMilli(last.StartMs).Add(time.Duration(last.LenMin)*time.Minute))
+		p.BatteryReturnOreKwh = refund.OreKwh
+		p.BatteryReturnGridShare = refund.startShare(p.InitialSoC*p.CapacityWh, p.ChargeEfficiency)
+	}
 	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}
@@ -2181,6 +2192,8 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		plan.Actions[i].ForecastPVW = &pvPoint
 		plan.Actions[i].ForecastLoadW = &loadPoint
 	}
+	// Every engine's plan counts the refund by Core's rule.
+	annotateBatteryReturn(&plan, slots, p)
 
 	// Baselines — counter-factual dispatch costs over the same horizon
 	// so the UI can show savings-vs-X numbers. Skip when already in

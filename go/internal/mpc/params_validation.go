@@ -190,6 +190,12 @@ func validatePlanningParams(p Params) error {
 	if !finite(p.InitialSoC) || p.InitialSoC < 0 || p.InitialSoC > 1 {
 		return fmt.Errorf("initial_soc must be within 0..1, got %.6g", p.InitialSoC)
 	}
+	if err := requireNonNegativePlanningValue("battery_return_ore_kwh", p.BatteryReturnOreKwh); err != nil {
+		return err
+	}
+	if !finite(p.BatteryReturnGridShare) || p.BatteryReturnGridShare < 0 || p.BatteryReturnGridShare > 1 {
+		return fmt.Errorf("battery_return_grid_share must be within 0..1, got %.6g", p.BatteryReturnGridShare)
+	}
 	if err := requireNonNegativePlanningValue("max_charge_w", p.MaxChargeW); err != nil {
 		return err
 	}

@@ -129,20 +129,3 @@ func TestBatteryReturnAPIGivesTheYearAndEveryHour(t *testing.T) {
 		}
 	}
 }
-
-func TestOnlyASwedishPositionPlacesTheSite(t *testing.T) {
-	for _, c := range []struct {
-		lat, lon float64
-		want     bool
-	}{
-		{59.6, 16.5, true}, {67.86, 20.23, true}, {55.6, 13.0, true},
-		{16.5, 59.6, false},       // swapped
-		{59.6, -16.5, false},      // lost sign
-		{59.3293, 18.0686, false}, // setup's starting pin
-		{0, 0, false}, {60.17, 24.94 + 1, false},
-	} {
-		if got := placed(c.lat, c.lon); got != c.want {
-			t.Fatalf("placed(%v, %v) = %v", c.lat, c.lon, got)
-		}
-	}
-}

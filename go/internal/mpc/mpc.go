@@ -256,6 +256,14 @@ type Params struct {
 	// hourly_import_caps gets them on its wire.
 	ImportMeanW float64
 	ImportHours []ImportHour
+
+	// BatteryReturnOreKwh is the energy tax refunded per kWh of grid energy
+	// the battery stores and later sends back to the grid, excluding VAT.
+	// Only active arbitrage sends battery energy to the grid, so other modes
+	// ignore it. BatteryReturnGridShare (0..1) is the grid part of what the
+	// battery holds at plan start. See battery_return.go.
+	BatteryReturnOreKwh    float64
+	BatteryReturnGridShare float64
 }
 
 // StorageAssetSpec is one independently constrained home battery in the
@@ -344,6 +352,11 @@ type Action struct {
 	StoragePowerW   map[string]float64 `json:"storage_power_w,omitempty"`
 	StorageEnergyWh map[string]float64 `json:"storage_energy_wh,omitempty"`
 
+	// BatteryReturnWh is the stored grid energy this slot sends back to the
+	// grid, whose energy tax the owner can reclaim. Core sets it on every
+	// published plan whose params carry a refund.
+	BatteryReturnWh float64 `json:"battery_return_wh,omitempty"`
+
 	// LivePVSurplusSoCCap is a 0–1 SoC fraction that Core sets when it
 	// publishes the plan; solver output leaves it zero. Zero means the
 	// planner gives no permission to move live surplus into the battery in
@@ -405,6 +418,9 @@ type Plan struct {
 	// invalid, or a caution plan could not keep the point plan's limits and
 	// departure goals. The planning warnings say why.
 	CautionOff bool `json:"caution_off,omitempty"`
+	// BatteryReturnOre is the energy tax refund the plan counts on. It is
+	// not part of TotalCostOre, which stays what crosses the meter.
+	BatteryReturnOre float64 `json:"battery_return_ore,omitempty"`
 }
 
 // ShadowPlan is a challenger candidate calculated alongside the active plan.
@@ -657,7 +673,9 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 	if p.Loadpoint.active() {
 		evLevels = max(2, p.Loadpoint.Levels)
 	}
-	workingBytes := (float64(N)+1)*float64(S)*(16*float64(evLevels)+48) + (float64(A)+1)*8
+	// The refund's grid share is a second battery state.
+	GL := p.batteryReturnShareLevels()
+	workingBytes := (float64(N)+1)*float64(S)*(16*float64(evLevels*GL)+48) + (float64(A)+1)*8
 	const maxDPWorkingBytes = 64 * 1024 * 1024
 	if workingBytes > maxDPWorkingBytes {
 		return Plan{}, fmt.Errorf("Core DP exceeds its 64 MiB working memory budget")
@@ -699,6 +717,12 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		}
 	}
 	actionAt := func(j int) float64 { return actionGrid[j] }
+	credit := p.batteryReturnCredit()
+	shareStep := 0.0
+	if GL > 1 {
+		shareStep = 1 / float64(GL-1)
+	}
+	shareAt := func(g int) float64 { return float64(g) * shareStep }
 
 	// EV dimensions. When no loadpoint is active, EL=EA=1 and the
 	// EV loops degenerate to a single pass that adds zero power /
@@ -737,19 +761,20 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		return evSteps[ea]
 	}
 
-	// V[t][s][e] = minimum expected cost from slot t onward, starting
-	// from battery SoC index s and EV SoC index e. Backward-filled.
+	// V[t][s][e*GL+g] = minimum expected cost from slot t onward, starting
+	// from battery SoC index s, EV SoC index e and grid-share index g.
+	// Backward-filled.
 	V := make([][][]float64, N+1)
 	Policy := make([][][]int, N) // encodes (battActionIdx * EA + evActionIdx)
 	for t := 0; t <= N; t++ {
 		V[t] = make([][]float64, S)
 		for si := 0; si < S; si++ {
-			V[t][si] = make([]float64, EL)
+			V[t][si] = make([]float64, EL*GL)
 		}
 		if t < N {
 			Policy[t] = make([][]int, S)
 			for si := 0; si < S; si++ {
-				Policy[t][si] = make([]int, EL)
+				Policy[t][si] = make([]int, EL*GL)
 			}
 		}
 	}
@@ -767,12 +792,13 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 	for si := 0; si < S; si++ {
 		battKwh := p.CapacityWh * socAt(si) / 1000.0
 		battCredit := -p.TerminalSoCPrice * battKwh
-		for ei := 0; ei < EL; ei++ {
-			V[N][si][ei] = battCredit
+		for x := range V[N][si] {
+			V[N][si][x] = battCredit
 		}
 	}
 
 	// Backwards induction.
+	bestV, bestPolicy := make([]float64, GL), make([]int, GL)
 	for t := N - 1; t >= 0; t-- {
 		if err := ctx.Err(); err != nil {
 			return Plan{}, err
@@ -783,8 +809,9 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 			soc := socAt(si)
 			for ei := 0; ei < EL; ei++ {
 				evSoc := evSocAt(ei)
-				bestV := math.Inf(1)
-				bestPolicy := 0
+				for gi := range bestV {
+					bestV[gi], bestPolicy[gi] = math.Inf(1), 0
+				}
 				for ba := 0; ba < A; ba++ {
 					battW := actionAt(ba)
 
@@ -1038,14 +1065,57 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 							}
 							eFrac = f - float64(eLo)
 						}
-						vNext := (1-frac)*(1-eFrac)*V[t+1][lo][eLo] +
-							(1-frac)*eFrac*V[t+1][lo][eHi] +
-							frac*(1-eFrac)*V[t+1][hi][eLo] +
-							frac*eFrac*V[t+1][hi][eHi]
-						total := cost + vNext
-						if total < bestV {
-							bestV = total
-							bestPolicy = ba*EA + ea
+						vLo, vHi := V[t+1][lo], V[t+1][hi]
+						if GL == 1 {
+							vNext := (1-frac)*(1-eFrac)*vLo[eLo] +
+								(1-frac)*eFrac*vLo[eHi] +
+								frac*(1-eFrac)*vHi[eLo] +
+								frac*eFrac*vHi[eHi]
+							total := cost + vNext
+							if total < bestV[0] {
+								bestV[0] = total
+								bestPolicy[0] = ba*EA + ea
+							}
+							continue
+						}
+						// Energy tax refund on stored grid energy sent
+						// back to the grid; the rest of the action does
+						// not depend on the grid share. The charge mix
+						// is share×stored plus the grid's part, over
+						// what the cells hold after the slot
+						// (returnMixStep). See battery_return.go.
+						toBatteryW, toGridW := returnFlowsW(slot, battW, gridW)
+						storedWh := soc * p.CapacityWh
+						gridInWh := toBatteryW * dtH * p.ChargeEfficiency
+						afterWh := storedWh + battW*dtH*p.ChargeEfficiency
+						for gi := range GL {
+							share := shareAt(gi)
+							total := cost
+							var vNext float64
+							if toGridW > 0 || battW <= 0 {
+								// A discharge or idle slot keeps the
+								// mix, so the share stays on its grid
+								// point.
+								total -= credit * share * toGridW * dtH / 1000
+								vNext = (1-frac)*(1-eFrac)*vLo[eLo*GL+gi] +
+									(1-frac)*eFrac*vLo[eHi*GL+gi] +
+									frac*(1-eFrac)*vHi[eLo*GL+gi] +
+									frac*eFrac*vHi[eHi*GL+gi]
+							} else {
+								share2 := min((share*storedWh+gridInWh)/afterWh, 1)
+								gLo := min(int(share2/shareStep), GL-2)
+								gFrac := share2/shareStep - float64(gLo)
+								a, b := eLo*GL+gLo, eHi*GL+gLo
+								vNext = (1-frac)*(1-eFrac)*((1-gFrac)*vLo[a]+gFrac*vLo[a+1]) +
+									(1-frac)*eFrac*((1-gFrac)*vLo[b]+gFrac*vLo[b+1]) +
+									frac*(1-eFrac)*((1-gFrac)*vHi[a]+gFrac*vHi[a+1]) +
+									frac*eFrac*((1-gFrac)*vHi[b]+gFrac*vHi[b+1])
+							}
+							total += vNext
+							if total < bestV[gi] {
+								bestV[gi] = total
+								bestPolicy[gi] = ba*EA + ea
+							}
 						}
 					}
 				}
@@ -1061,11 +1131,13 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 				// EV off. The +Inf V propagates upstream so the
 				// DP avoids routing through this infeasible region
 				// when a legal path exists.
-				if math.IsInf(bestV, 1) {
-					bestPolicy = idleActionIdx * EA
+				for gi := range GL {
+					if math.IsInf(bestV[gi], 1) {
+						bestPolicy[gi] = idleActionIdx * EA
+					}
+					V[t][si][ei*GL+gi] = bestV[gi]
+					Policy[t][si][ei*GL+gi] = bestPolicy[gi]
 				}
-				V[t][si][ei] = bestV
-				Policy[t][si][ei] = bestPolicy
 			}
 		}
 	}
@@ -1090,11 +1162,16 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		evSoc = lp.InitialSoC
 		ei = gridIndex(evSoc, lp.SoCMin, evSocStep, EL)
 	}
+	share := p.initialGridShare()
+	gi := 0
 	var totalCost float64
 	for t := 0; t < N; t++ {
 		slot := slots[t]
 		dtH := slot.DurationHours()
-		pol := Policy[t][si][ei]
+		if GL > 1 {
+			gi = gridIndex(share, 0, shareStep, GL)
+		}
+		pol := Policy[t][si][ei*GL+gi]
 		ba := pol / EA
 		ea := pol % EA
 		actW := clipBatteryPowerToBand(soc, actionAt(ba), dtH, p.CapacityWh,
@@ -1154,6 +1231,9 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 			a.LoadpointSoC = evSoc2
 		}
 		plan.Actions = append(plan.Actions, a)
+		if GL > 1 {
+			share, _ = returnMixStep(slot, actW, gridW, soc*p.CapacityWh, share, dtH, p.ChargeEfficiency)
+		}
 		soc = soc2
 		si = gridIndex(soc, p.SoCMin, socStep, S)
 		if evActive {
@@ -1162,6 +1242,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		}
 	}
 	plan.TotalCostOre = totalCost
+	annotateBatteryReturn(&plan, slots, p)
 	annotateCurtailment(&plan, p)
 	return plan, ctx.Err()
 }
