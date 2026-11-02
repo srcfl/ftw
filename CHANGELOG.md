@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.158.0
+
+### Minor Changes
+
+- 875240e: History shows the figure a Swedish household gives Skatteverket to get back the energy tax on grid electricity it stored in a battery and later sent back to the grid. Pick a calendar year to see the kWh, month by month, and download the hourly basis as CSV to keep with the application. Where the readings cannot tell where energy went, FTW counts low: solar counts first in every hour, what the house takes from the battery counts as grid energy first and what goes to the grid as other energy first, losses count as other energy, and an hour counts only when every meter read all of it. The figure needs one battery with its size set, and it assumes FTW reads every solar inverter, battery and car charger on the site. The same figure is at `GET /api/energy/battery-return?year=` and the hours at `/api/energy/battery-return.csv`.
+- b322f55: Store the home's time zone on the site. Car goals, the import hour, daily history and savings now read the site's `site.time_zone` instead of the host's clock, so a Docker box on UTC meets a 17:00 goal at 17:00 at home. The app, the web client and the on-box setup offer their own zone to a box that keeps none, and the box restarts once to run on it. A box that already keeps a zone, stored or from its host, keeps it; change it under Settings → Site.
+
+### Patch Changes
+
+- 9724190: The figure for Skatteverket's energy tax refund after battery storage now works for sites with more than one battery. Each battery keeps its own account of grid and other energy, with its own size and efficiency, so one battery's exports never carry another's grid energy, and for each battery solar, a car and the other batteries count first in every hour. Each battery takes its size from the driver that reads it, and the hourly CSV has one row per battery and hour.
+- fdc2741: Bundle tesla_wall_connector 0.1.2. An idle Tesla Wall Connector Gen 3 no longer shows charging power. With the contactor open, the unit still reads 0.5–1 A of sensor offset on its legs, and the driver multiplied that by the grid voltage, so an idle charger showed about 180–280 W in the flow and in history. The driver now reports 0 W while the contactor is open, and a leg that reads 0 V carries no power.
+- cd1ce6e: The energy ledger keeps hourly totals for four years instead of two, then daily totals. Skatteverket's refund of energy tax after battery storage is worked out hour by hour for a calendar year and may be claimed until three years after the year ends; with two years of hours, the start of an older year had only daily totals and counted as incomplete.
+- c6f757b: Name the box's time zone by the rules its clock runs on. A Docker box that mounts the host's `/etc/localtime` used to tell the app and web client it was on UTC while it planned on the host's clock, so the car's ready time and the plan's days showed an hour or two off. Core now matches a copied zone file to the zone with the same rules, and says UTC only when the clock is UTC.
+
 ## 0.157.3
 
 ### Patch Changes
