@@ -30,6 +30,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/state"
@@ -232,12 +233,20 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 	if err != nil {
 		return Report{}, err
 	}
+	owed, batteries := spans(assets, from, to)
+	r.Batteries = batteries
 	metered := false
 	unread := make([]bool, n) // a battery's readings are missing
 	for _, a := range assets {
 		role := roleOf(a.Kind)
-		if role == roleNone || a.LastSeenMS < from || a.FirstSeenMS >= to {
+		sp, found := owed[a.AssetID]
+		if role == roleNone || !found {
 			continue
+		}
+		// owes reports whether the asset answers for hour i.
+		owes := func(i int) bool {
+			at := from + int64(i)*hourMS
+			return at < sp.to && at+hourMS > sp.from
 		}
 		// One hour past the end shows whether the last hour's readings ran
 		// to its end.
@@ -300,15 +309,13 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 			ok = func(i int) bool {
 				return dark[i] || (rd.seen[i] && !rd.bad[i] && (!rd.resumed[i] || i > 0 && dark[i-1]))
 			}
-		case roleBattery:
-			r.Batteries++
 		case roleGrid:
 			metered = true
 		}
-		// A meter that reported during the year must read every hour of it.
-		// Silence, before or after, is not a quiet hour.
+		// A meter that reported during the year must read every hour it
+		// answers for. Silence, before or after, is not a quiet hour.
 		for i := range r.Hours {
-			if !ok(i) || !ok(i+1) {
+			if owes(i) && (!ok(i) || owes(i+1) && !ok(i+1)) {
 				r.Hours[i].Complete = false
 				unread[i] = unread[i] || role == roleBattery
 			}
@@ -390,6 +397,76 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 		r.Returned += h.Returned
 	}
 	return r, nil
+}
+
+// span is the time [from, to) an asset answers for, in Unix ms.
+type span struct{ from, to int64 }
+
+// handoverMS allows for the old and new identity reading in the same tick
+// in either order.
+const handoverMS = int64(2 * time.Minute / time.Millisecond)
+
+// spans gives each asset that matters for [from, to) the time it answers
+// for, and counts the batteries.
+//
+// A device whose identity changes, a driver that learns the serial for
+// instance, shows up as a new asset of the same kind once the old one
+// stops. Assets of one kind that never read at the same time form one
+// meter: each answers from its first reading until the next one's first
+// reading, so the hours between them are owed by a meter that did not read
+// them. The first answers from the beginning and the last to the end, so a
+// meter that appears late or falls silent leaves those hours incomplete. A
+// meter whose last reading came before the period is gone; one whose first
+// came after it has not arrived.
+func spans(assets []state.EnergyAsset, from, to int64) (map[string]span, int) {
+	byRole := map[role][]state.EnergyAsset{}
+	for _, a := range assets {
+		if r := roleOf(a.Kind); r != roleNone {
+			byRole[r] = append(byRole[r], a)
+		}
+	}
+	out := map[string]span{}
+	batteries := 0
+	for role, list := range byRole {
+		sort.Slice(list, func(i, j int) bool { return list[i].FirstSeenMS < list[j].FirstSeenMS })
+		var meters [][]state.EnergyAsset
+		for _, a := range list {
+			// Continue the meter that stopped last before this one began.
+			best := -1
+			for m, meter := range meters {
+				last := meter[len(meter)-1].LastSeenMS
+				if last <= a.FirstSeenMS+handoverMS && (best < 0 || last > meters[best][len(meters[best])-1].LastSeenMS) {
+					best = m
+				}
+			}
+			if best < 0 {
+				meters = append(meters, []state.EnergyAsset{a})
+			} else {
+				meters[best] = append(meters[best], a)
+			}
+		}
+		for _, meter := range meters {
+			if meter[len(meter)-1].LastSeenMS < from || meter[0].FirstSeenMS >= to {
+				continue
+			}
+			if role == roleBattery {
+				batteries++
+			}
+			for k, a := range meter {
+				sp := span{math.MinInt64, math.MaxInt64}
+				if k > 0 {
+					sp.from = a.FirstSeenMS
+				}
+				if k+1 < len(meter) {
+					sp.to = meter[k+1].FirstSeenMS
+				}
+				if sp.to > from && sp.from < to+hourMS {
+					out[a.AssetID] = sp
+				}
+			}
+		}
+	}
+	return out, batteries
 }
 
 // clamp keeps v within [0, hi].

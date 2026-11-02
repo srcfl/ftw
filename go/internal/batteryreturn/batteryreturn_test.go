@@ -293,6 +293,71 @@ func TestAMeterThatFellSilentLeavesItsHoursIncomplete(t *testing.T) {
 	}
 }
 
+// renew moves an asset to a new identity: the old one reads until 10
+// minutes into hour from, the new one starts there with the ledger's
+// baseline marker and reads from hour from+1 on. With silent > 0 the old
+// one stops that many hours earlier.
+func (f *fakeLedger) renew(id string, from, silent int) string {
+	next := id + "+serial"
+	handover := yearStart.Add(time.Duration(from)*time.Hour + 10*time.Minute).UnixMilli()
+	for i, a := range f.assets {
+		if a.AssetID != id {
+			continue
+		}
+		f.assets[i].LastSeenMS = handover - int64(silent)*hourMS
+		f.assets = append(f.assets, state.EnergyAsset{AssetID: next, Kind: a.Kind, FirstSeenMS: handover, LastSeenMS: a.LastSeenMS})
+		break
+	}
+	var kept []state.EnergyLedgerPoint
+	for _, p := range f.points[id] {
+		switch i := int((p.BucketStartMS - yearStart.UnixMilli()) / hourMS); {
+		case i > from:
+			p.AssetID = next
+			f.points[next] = append(f.points[next], p)
+		case i <= from-silent:
+			kept = append(kept, p)
+		}
+	}
+	f.points[id] = kept
+	f.add(next, state.FlowGridImport, yearStart.Add(time.Duration(from)*time.Hour), time.Hour, 0, "gap")
+	return next
+}
+
+func TestANewIdentityContinuesTheMeter(t *testing.T) {
+	// The inverter's driver learns its serial at 06:10 on the second day,
+	// and the grid meter, battery and solar get new asset ids.
+	l := site(arbitrage(0, 1))
+	for _, id := range []string{grid, battery, solar} {
+		l.renew(id, 30, 0)
+	}
+	r := build(t, l, oneBattery)
+	if r.Problem != "" || r.Batteries != 1 {
+		t.Fatalf("problem %q, %d batteries", r.Problem, r.Batteries)
+	}
+	// Only the handover hour is incomplete; it resets the mix.
+	if r.CompleteHours() != 47 || r.Hours[30].Complete || !r.Hours[29].Complete || !r.Hours[31].Complete {
+		t.Fatalf("%d complete hours; 29/30/31 %v/%v/%v", r.CompleteHours(), r.Hours[29].Complete, r.Hours[30].Complete, r.Hours[31].Complete)
+	}
+	near(t, "first day", returnedOn(r, 0), 9000*firstShare)
+
+	// A battery that fell silent at 22:10 on the first day and came back
+	// under a new id at 06:10 owes the night it did not read.
+	l = site(arbitrage(0, 1))
+	l.renew(battery, 30, 8)
+	r = build(t, l, oneBattery)
+	if r.Batteries != 1 || r.Problem != "" {
+		t.Fatalf("problem %q, %d batteries", r.Problem, r.Batteries)
+	}
+	for i := 22; i <= 30; i++ {
+		if r.Hours[i].Complete {
+			t.Fatalf("hour %d counted while the battery was silent", i)
+		}
+	}
+	if got := returnedOn(r, 1); got != 0 {
+		t.Fatalf("second day returned %.1f Wh after the silent night", got)
+	}
+}
+
 func TestDailyTotalsCannotBeSplitIntoHours(t *testing.T) {
 	l := site(arbitrage(0, 1))
 	l.drop(battery, 0, 24)
