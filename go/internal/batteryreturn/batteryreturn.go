@@ -12,18 +12,20 @@
 //     discharging car could not have supplied, and gave to the grid only
 //     what they could not have exported. Every source on the site must be
 //     one FTW reads.
-//   - The battery holds a mix. Each kWh it gives back carries the share of
-//     grid energy the battery held at that time. Grid energy enters the mix
-//     after the year's measured round-trip loss, so losses are never
-//     refunded. Within an hour the battery discharges before it charges.
+//   - Nothing says how much the battery holds, so no share of its content
+//     can be known. What the house takes from the battery counts as grid
+//     energy first, and what goes to the grid counts as other energy first.
+//     Grid energy enters after the least round-trip efficiency its run of
+//     readings allows, so losses are never refunded; other energy enters
+//     whole. Within an hour the battery discharges before it charges.
 //   - An hour counts only when every meter that reported during the year
 //     read all of it. An hour that does not count adds nothing, and what the
 //     battery took in it counts as energy from elsewhere. Without the
 //     battery's own readings the battery is taken to be full of energy from
 //     elsewhere after the hour. The year starts the same way, so the
 //     configured battery size is required.
-//   - One battery. With two, one mix would let one battery's exports carry
-//     the other's grid energy.
+//   - One battery. With two, one account would let one battery's exports
+//     carry the other's grid energy.
 package batteryreturn
 
 import (
@@ -58,7 +60,7 @@ type Ledger interface {
 // Site is what the report needs beyond the ledger.
 type Site struct {
 	// CapacityWh is the configured size of the batteries together, and
-	// Batteries how many of them have a size. The mix needs an upper bound
+	// Batteries how many of them have a size. The account needs an upper bound
 	// on what the battery holds.
 	CapacityWh float64
 	Batteries  int
@@ -85,10 +87,13 @@ type Hour struct {
 	// Returned is the part of BatteryToGrid that was grid energy stored
 	// earlier: the refundable energy.
 	Returned float64
-	// GridHeld and OtherHeld are the mix after the hour.
+	// GridHeld and OtherHeld are what the battery holds after the hour.
 	GridHeld  float64
 	OtherHeld float64
-	Complete  bool
+	// Efficiency is the least round-trip efficiency the readings of this
+	// hour's run allow.
+	Efficiency float64
+	Complete   bool
 }
 
 // Month sums the hours of one calendar month.
@@ -115,10 +120,9 @@ type Report struct {
 	Returned float64
 	Hours    []Hour
 	Months   [12]Month
-	// Efficiency is the least round-trip efficiency the battery's readings
-	// allow: discharge less a full battery, over charge.
+	// Efficiency is the hours' efficiencies weighted by charge.
 	Efficiency float64
-	// CapacityWh caps the mix: the configured size, or the most the battery
+	// CapacityWh caps what the battery holds: the configured size, or the most it
 	// gained in a day if that is more.
 	CapacityWh float64
 	// Batteries is how many batteries the ledger read in the year.
@@ -359,12 +363,40 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 			low, high = min(low, held), max(high, held)
 			r.CapacityWh = max(r.CapacityWh, high-low)
 		}
-		// out = efficiency × in − what the battery gained, and it gained at
-		// most a full battery.
-		r.Efficiency = clamp((out-r.CapacityWh)/in, 1)
 	}
 
 	k := r.CapacityWh
+
+	// Each run of hours with the battery read gets the least efficiency its
+	// own readings allow: out = efficiency × in − what the battery gained,
+	// and it gained at most a full battery. A short run allows little, and
+	// a run never borrows readings from across a gap.
+	var used, charged float64
+	for a := 0; a < n; {
+		if unread[a] {
+			a++
+			continue
+		}
+		b, in, out := a, 0.0, 0.0
+		for ; b < n && !unread[b]; b++ {
+			in += r.Hours[b].BatteryCharge
+			out += r.Hours[b].BatteryDischarge
+		}
+		eff := 0.0
+		if in > 0 {
+			eff = clamp((out-k)/in, 1)
+		}
+		for i := a; i < b; i++ {
+			r.Hours[i].Efficiency = eff
+		}
+		used += eff * in
+		charged += in
+		a = b
+	}
+	if charged > 0 {
+		r.Efficiency = used / charged
+	}
+
 	grid, other := 0.0, k // unknown content at the start
 	for i := range r.Hours {
 		h := &r.Hours[i]
@@ -375,22 +407,30 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 			h.GridHeld, h.OtherHeld = grid, other
 			continue
 		}
-		// An incomplete hour has no bounds: the battery's measured energy
-		// moves the mix, and none of it counts as grid energy.
+		// An incomplete hour has no bounds: all its discharge counts as
+		// used at home and all its charge as energy from elsewhere.
 		if h.Complete {
 			m.CompleteHours++
 		}
-		if d, held := h.BatteryDischarge, grid+other; d > 0 && held > 0 {
-			take := min(d, held)
-			share := grid / held
-			h.Returned = share * take * h.BatteryToGrid / d
-			grid -= share * take
-			other -= (1 - share) * take
-		}
-		grid += r.Efficiency * h.GridToBattery
-		other += r.Efficiency * (h.BatteryCharge - h.GridToBattery)
-		if held := grid + other; held > k {
-			grid, other = grid*k/held, other*k/held
+		// Discharge before charge. What stays at home takes grid energy
+		// first; what goes to the grid takes other energy first.
+		home := h.BatteryDischarge - h.BatteryToGrid
+		fromGrid := min(grid, home)
+		grid -= fromGrid
+		other = max(0, other-(home-fromGrid))
+		fromOther := min(other, h.BatteryToGrid)
+		other -= fromOther
+		h.Returned = min(grid, h.BatteryToGrid-fromOther)
+		grid -= h.Returned
+		// Grid energy enters after the least efficiency, other energy
+		// whole. What does not fit a full battery leaves as grid energy
+		// first.
+		grid += h.Efficiency * h.GridToBattery
+		other += h.BatteryCharge - h.GridToBattery
+		if over := grid + other - k; over > 0 {
+			cut := min(grid, over)
+			grid -= cut
+			other -= over - cut
 		}
 		h.GridHeld, h.OtherHeld = grid, other
 		m.Returned += h.Returned

@@ -59,13 +59,12 @@ func (s *Server) handleBatteryReturnCSV(w http.ResponseWriter, r *http.Request) 
 		"returned_wh", "grid_held_wh", "other_held_wh", "complete", "efficiency", "capacity_wh",
 	})
 	wh := func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) }
-	efficiency := strconv.FormatFloat(rep.Efficiency, 'f', 4, 64)
 	for _, h := range rep.Hours {
 		_ = cw.Write([]string{
 			h.Start.Format(time.RFC3339), wh(h.GridImport), wh(h.GridExport), wh(h.BatteryCharge),
 			wh(h.BatteryDischarge), wh(h.Solar), wh(h.VehicleDischarge), wh(h.GridToBattery),
 			wh(h.BatteryToGrid), wh(h.Returned), wh(h.GridHeld), wh(h.OtherHeld), strconv.FormatBool(h.Complete),
-			efficiency, wh(rep.CapacityWh),
+			strconv.FormatFloat(h.Efficiency, 'f', 4, 64), wh(rep.CapacityWh),
 		})
 	}
 	cw.Flush()

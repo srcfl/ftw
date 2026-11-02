@@ -125,11 +125,7 @@ func arbitrage(days ...int) map[int]flows {
 // Two days of arbitrage charge 20 kWh and discharge 18. The least
 // efficiency that allows, with a 10 kWh battery that may have emptied over
 // the two days, is (18 − 10) / 20 = 0.4: each night hour adds 1 kWh of grid
-// energy to the mix.
-//
-// firstShare is the grid share after the first night: four hours, each
-// leaving 10/11 of what the full battery held.
-var firstShare = 1 - math.Pow(10.0/11, 4)
+// energy.
 
 func build(t *testing.T, l Ledger, s Site) Report {
 	t.Helper()
@@ -160,13 +156,13 @@ func TestArbitrageReturnsGridEnergyAfterLoss(t *testing.T) {
 	if math.Abs(r.Efficiency-0.4) > 1e-9 || r.CapacityWh != 10_000 || r.CompleteHours() != 48 || r.Problem != "" || r.Batteries != 1 {
 		t.Fatalf("efficiency %v capacity %v complete %d problem %q", r.Efficiency, r.CapacityWh, r.CompleteHours(), r.Problem)
 	}
-	// The year starts with a battery full of energy from elsewhere. Each
-	// night hour's grid energy pushes the same amount of the mix out, so
-	// the first evening returns 9 kWh at the grid share firstShare.
-	near(t, "first day", returnedOn(r, 0), 9000*firstShare)
-	// The second night adds 4 kWh of grid energy to the 1 kWh left, and the
-	// evening empties what the mix holds.
-	near(t, "second day", returnedOn(r, 1), 1000*(4+firstShare))
+	// The year starts with a battery full of energy from elsewhere, and
+	// what goes to the grid takes that first: the first night's grid energy
+	// does not fit, and the first evening returns nothing.
+	near(t, "first day", returnedOn(r, 0), 0)
+	// The second night adds 4 kWh of grid energy to the 1 kWh left. The
+	// evening sends that 1 kWh first, then the 4 kWh of grid energy.
+	near(t, "second day", returnedOn(r, 1), 4000)
 	near(t, "year", r.Returned, returnedOn(r, 0)+returnedOn(r, 1))
 	near(t, "january", r.Months[0].Returned, r.Returned)
 	if r.Months[0].Hours != 48 || r.Months[1].Hours != 0 {
@@ -179,6 +175,22 @@ func TestArbitrageReturnsGridEnergyAfterLoss(t *testing.T) {
 		t.Fatalf("export hour %+v", h)
 	}
 	near(t, "held after the second night", r.Hours[24+4].GridHeld+r.Hours[24+4].OtherHeld, 5000)
+}
+
+func TestGridEnergyUsedInTheMorningIsGoneByEvening(t *testing.T) {
+	// The second review's case: 5 kWh from the grid at night, 5 kWh to the
+	// house in the morning, 5 kWh from the sun at midday, 5 kWh to the grid
+	// in the evening. The grid energy was used at home.
+	hours := map[int]flows{}
+	for d := range 2 {
+		hours[d*24+2] = flows{imp: 5, chg: 5}
+		hours[d*24+7] = flows{dis: 5}
+		hours[d*24+12] = flows{pv: 5, chg: 5}
+		hours[d*24+19] = flows{dis: 5, exp: 5}
+	}
+	if r := build(t, site(hours), oneBattery); r.Returned != 0 {
+		t.Fatalf("returned %.1f Wh of grid energy used at home", r.Returned)
+	}
 }
 
 func TestStoredSolarSentToTheGridIsNotReturned(t *testing.T) {
@@ -223,8 +235,9 @@ func TestOnlyTheShareThatLeftTheSiteIsReturned(t *testing.T) {
 	if h := r.Hours[24+19]; h.BatteryToGrid != 1000 {
 		t.Fatalf("export hour %+v", h)
 	}
-	// Each hour sends a third of its discharge to the grid.
-	near(t, "second day", returnedOn(r, 1), 1000*(4+firstShare)/3)
+	// What stays at home takes the grid energy first, so the third that
+	// goes out is other energy.
+	near(t, "second day", returnedOn(r, 1), 0)
 }
 
 func TestSolarInTheHourCountsFirst(t *testing.T) {
@@ -248,10 +261,10 @@ func TestAMissingHourForgetsWhatTheBatteryHeld(t *testing.T) {
 	if r.Hours[35].Complete || r.Hours[36].Complete || r.CompleteHours() != 46 {
 		t.Fatalf("hours 35/36 complete %v/%v, %d complete hours", r.Hours[35].Complete, r.Hours[36].Complete, r.CompleteHours())
 	}
+	// Without the gap the second day returns 4 kWh.
 	if got := returnedOn(r, 1); got != 0 {
 		t.Fatalf("second day returned %.1f Wh after the gap", got)
 	}
-	near(t, "first day", returnedOn(r, 0), 9000*firstShare)
 }
 
 func TestOnlyMeasuredReadingsCount(t *testing.T) {
@@ -261,15 +274,15 @@ func TestOnlyMeasuredReadingsCount(t *testing.T) {
 		// Without the grid meter the hour attributes nothing, but the
 		// battery's readings keep the mix.
 		l := site(arbitrage(0, 1))
-		l.mark(grid, 19, quality)
+		l.mark(grid, 44, quality)
 		r := build(t, l, oneBattery)
-		if r.Hours[19].Complete || r.Hours[18].Complete || r.Hours[18].Returned != 0 || r.Hours[19].Returned != 0 || r.Hours[20].Returned <= 0 {
-			t.Fatalf("%s grid reading counted: %+v", quality, r.Hours[18:21])
+		if r.Hours[44].Complete || r.Hours[43].Complete || r.Hours[43].Returned != 0 || r.Hours[44].Returned != 0 || r.Hours[42].Returned != 2000 {
+			t.Fatalf("%s grid reading counted: %+v", quality, r.Hours[42:45])
 		}
-		// Without the battery's, the mix starts over.
+		// Without the battery's, the account starts over.
 		l = site(arbitrage(0, 1))
-		l.mark(battery, 19, quality)
-		if r := build(t, l, oneBattery); r.Hours[19].Complete || returnedOn(r, 0) != 0 {
+		l.mark(battery, 43, quality)
+		if r := build(t, l, oneBattery); r.Hours[43].Complete || returnedOn(r, 1) != 0 {
 			t.Fatalf("%s battery reading counted", quality)
 		}
 	}
@@ -338,7 +351,6 @@ func TestANewIdentityContinuesTheMeter(t *testing.T) {
 	if r.CompleteHours() != 47 || r.Hours[30].Complete || !r.Hours[29].Complete || !r.Hours[31].Complete {
 		t.Fatalf("%d complete hours; 29/30/31 %v/%v/%v", r.CompleteHours(), r.Hours[29].Complete, r.Hours[30].Complete, r.Hours[31].Complete)
 	}
-	near(t, "first day", returnedOn(r, 0), 9000*firstShare)
 
 	// A battery that fell silent at 22:10 on the first day and came back
 	// under a new id at 06:10 owes the night it did not read.
