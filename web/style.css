@@ -267,6 +267,7 @@ header h1 {
 }
 .energy-history-pager button:disabled { opacity: 0.4; cursor: default; }
 .history-disclosure .energy-history-note { margin: 0.75rem 0 0; text-align: center; }
+.history-disclosure .energy-history-note a { color: var(--text); }
 #view-energy > .history-row { margin-top: 0; }
 #view-energy > .history-row > .history-disclosure { width: 100%; }
 .history-numbers-disclosure .history-disclosure-body { padding: 0; }
