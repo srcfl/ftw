@@ -311,12 +311,12 @@ func TestTheHouseUsesGridEnergyFirstAndTheGridGetsOtherFirst(t *testing.T) {
 		t.Fatalf("share %.3f returned %.0f Wh", share, ret)
 	}
 	// Charging 2 kW with 1 kW of sun: 1 kW of grid energy enters after the
-	// round-trip loss, the sun's whole, and what does not fit in the battery
-	// sheds grid energy.
+	// round-trip loss, the loss and the sun's energy whole as other energy,
+	// and what does not fit in the battery sheds grid energy.
 	share, ret := returnMixStep(Slot{PVW: -1000}, 2000, 1000, 5000, 0.4, 1, 0.95, 0.95)
 	held, after := 5000*0.95, 5000*0.95+2000*0.95*0.95
 	grid := 0.4*held + 1000*0.95*0.95
-	other := 0.6*held + 1000
+	other := 0.6*held + 2000 - 1000*0.95*0.95
 	if want := (grid - (grid + other - after)) / after; ret != 0 || math.Abs(share-want) > 1e-12 {
 		t.Fatalf("share %.4f, want %.4f", share, want)
 	}
@@ -354,5 +354,21 @@ func TestStartShareCountsLow(t *testing.T) {
 		if got := c.b.startShare(c.storedWh, 1); math.Abs(got-c.want) > 1e-12 {
 			t.Errorf("%s: share %.4f, want %.4f", c.name, got, c.want)
 		}
+	}
+}
+
+// TestBuyAtNightSellAtPeakReturnsWhatHistoryCounts: from an empty battery,
+// the loss of the night's grid energy stays as other energy and goes to the
+// grid first, so (2η − 1)/η of the export counts, as in History.
+func TestBuyAtNightSellAtPeakReturnsWhatHistoryCounts(t *testing.T) {
+	eta := 0.95 * 0.95
+	share, ret := returnMixStep(Slot{}, 10_000, 10_000, 0, 0, 1, 0.95, 0.95)
+	if ret != 0 {
+		t.Fatalf("charging returned %.0f Wh", ret)
+	}
+	stored := 10_000 * 0.95
+	_, ret = returnMixStep(Slot{}, -10_000*eta, -10_000*eta, stored, share, 1, 0.95, 0.95)
+	if want := 10_000 * eta * (2*eta - 1) / eta; math.Abs(ret-want) > 1e-6 {
+		t.Fatalf("returned %.1f Wh of %.1f Wh, want %.1f", ret, 10_000*eta, want)
 	}
 }

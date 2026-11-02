@@ -11,10 +11,13 @@ import "math"
 //   - In each slot the battery took from the grid only what solar could not
 //     have supplied, and gave to the grid only what solar could not have
 //     exported.
-//   - What the house takes from the battery counts as grid energy first, and
-//     what goes to the grid counts as other energy first.
-//   - Grid energy enters after the round-trip loss, other energy whole. What
-//     does not fit in the battery sheds grid energy first.
+//   - Other energy comes in whole, then the export leaves and takes other
+//     energy first, then grid energy comes in after the round-trip loss,
+//     with the loss kept as other energy, then the house takes its share and
+//     takes grid energy first.
+//   - The account holds what the battery holds: what does not fit sheds grid
+//     energy first. History caps at the battery's size instead, so the plan
+//     sheds grid energy sooner.
 //
 // Energies are in Wh the battery can give back (AC out). The Core DP
 // carries the grid part of what the battery holds as a share, a second
@@ -90,7 +93,8 @@ func newReturnFlows(slot Slot, batteryW, gridW, dtH, etaC, etaD float64) returnS
 		s.gainWh = batteryW * dtH
 	case batteryW > 0:
 		s.gridInWh = toBatteryW * dtH * etaC * etaD
-		s.otherInWh = (batteryW - toBatteryW) * dtH
+		// Other energy and the grid energy's loss, whole.
+		s.otherInWh = batteryW*dtH - s.gridInWh
 		s.gainWh = batteryW * dtH * etaC * etaD
 	}
 	return s
@@ -107,19 +111,20 @@ func (s returnStep) from(storedWh, etaD float64) returnStep {
 	return s
 }
 
-// apply moves a grid share across the step. It returns the share after it
-// and the grid energy sent back, in Wh. What stays at home takes grid
-// energy first and what goes to the grid takes other energy first; grid
-// energy enters after the loss, other energy whole; what does not fit sheds
-// grid energy first.
+// apply moves a grid share across the step in History's order: other
+// energy in, the export out (other energy first), grid energy in, the house
+// (grid energy first), then what does not fit sheds grid energy. It returns
+// the share after the step and the grid energy sent back, in Wh.
 func (s *returnStep) apply(share float64) (float64, float64) {
 	grid := share * s.heldWh
-	fromGrid := min(grid, s.homeWh)
-	other := max(s.heldWh-grid-s.homeWh+fromGrid, 0)
+	other := s.heldWh - grid + s.otherInWh
 	fromOther := min(other, s.toGridWh)
-	returned := min(grid-fromGrid, s.toGridWh-fromOther)
-	grid += s.gridInWh - fromGrid - returned
-	grid -= min(grid, max(grid+other-fromOther+s.otherInWh-s.afterWh, 0))
+	returned := min(grid, s.toGridWh-fromOther)
+	grid += s.gridInWh - returned
+	fromGrid := min(grid, s.homeWh)
+	grid -= fromGrid
+	other = max(other-fromOther-(s.homeWh-fromGrid), 0)
+	grid -= min(grid, max(grid+other-s.afterWh, 0))
 	return max(grid*s.invAfter, 0), returned
 }
 
