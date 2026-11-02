@@ -109,14 +109,14 @@ func TestTeslaWallConnectorInitPollAndReadonlyCommands(t *testing.T) {
 		t.Errorf("session_wh=%v, want 4200", extra["session_wh"])
 	}
 
-	if err := d.Command(context.Background(), []byte(`{"action":"ev_set_current","power_w":11040}`)); err != nil {
-		t.Fatalf("ev_set_current should ack: %v", err)
-	}
-	if err := d.Command(context.Background(), []byte(`{"action":"ev_pause"}`)); err != nil {
-		t.Fatalf("ev_pause should ack: %v", err)
-	}
-	if err := d.Command(context.Background(), []byte(`{"action":"ev_resume"}`)); err != nil {
-		t.Fatalf("ev_resume should ack: %v", err)
+	// The wall connector has no local setpoint; the catalog marks it
+	// read_only, so Core refuses control before it reaches the driver.
+	for _, cmd := range []string{
+		`{"action":"ev_set_current","power_w":11040}`, `{"action":"ev_pause"}`, `{"action":"ev_resume"}`,
+	} {
+		if err := d.Command(context.Background(), []byte(cmd)); err == nil || !strings.Contains(err.Error(), "read_only") {
+			t.Fatalf("%s: err=%v, want the read_only refusal", cmd, err)
+		}
 	}
 	if err := d.DefaultMode(); err != nil {
 		t.Fatalf("default mode: %v", err)
@@ -349,7 +349,24 @@ func TestTeslaWallConnectorVitalsFailureKeepsDriver(t *testing.T) {
 }
 
 func TestTeslaWallConnectorPhaseFallbackToGrid(t *testing.T) {
-	// No usable phase voltages → grid_v × vehicle_current_a.
+	// No leg voltages at all → grid_v × vehicle_current_a.
+	fake := &teslaWCFake{vitalsBody: []byte(`{
+		"contactor_closed": true,
+		"vehicle_connected": true,
+		"grid_v": 230,
+		"vehicle_current_a": 10,
+		"session_energy_wh": 1,
+		"evse_state": 11
+	}`)}
+	reading := teslaWCPoll(t, fake, nil)
+	if reading.RawW < 2290 || reading.RawW > 2310 {
+		t.Errorf("EV W=%v, want 2300 fallback", reading.RawW)
+	}
+}
+
+func TestTeslaWallConnectorLegsAtZeroCarryNoPower(t *testing.T) {
+	// The legs are measured on the car side of the contactor. Legs that
+	// read 0–2 V carry nothing, whatever grid_v says.
 	fake := &teslaWCFake{vitalsBody: []byte(`{
 		"contactor_closed": true,
 		"vehicle_connected": true,
@@ -361,8 +378,27 @@ func TestTeslaWallConnectorPhaseFallbackToGrid(t *testing.T) {
 		"session_energy_wh": 1,
 		"evse_state": 11
 	}`)}
-	reading := teslaWCPoll(t, fake, nil)
-	if reading.RawW < 2290 || reading.RawW > 2310 {
-		t.Errorf("EV W=%v, want 2300 fallback", reading.RawW)
+	if reading := teslaWCPoll(t, fake, nil); reading.RawW != 0 {
+		t.Errorf("EV W=%v, want 0 through legs at 0 V", reading.RawW)
+	}
+}
+
+func TestTeslaWallConnectorOpenContactorIsIdle(t *testing.T) {
+	// An idle unit reads 0.5–1 A of sensor offset on its legs with the
+	// contactor open; that is not load.
+	fake := &teslaWCFake{vitalsBody: []byte(`{
+		"contactor_closed": false,
+		"vehicle_connected": false,
+		"grid_v": 230,
+		"vehicle_current_a": 0.8,
+		"currentA_a": 0.8,
+		"currentB_a": 0.6,
+		"voltageA_v": 0,
+		"voltageB_v": 0,
+		"session_energy_wh": 0,
+		"evse_state": 1
+	}`)}
+	if reading := teslaWCPoll(t, fake, nil); reading.RawW != 0 {
+		t.Errorf("EV W=%v, want 0 with the contactor open", reading.RawW)
 	}
 }
