@@ -32,16 +32,57 @@
     return (Math.max(0, Number(wh) || 0) / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 }) + ' kWh';
   }
 
-  // Why a year has no figure, from the battery's configuration.
+  // "a", "a and b", "a, b and c".
+  function list(names) {
+    return names.length < 2 ? names.join('') : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+  }
+
+  // The drivers that read the batteries that pass the test, once each.
+  function labels(data, test) {
+    var seen = {};
+    return (data.batteries || []).filter(function (battery) {
+      if (!test(battery) || !battery.label || seen[battery.label]) return false;
+      seen[battery.label] = true;
+      return true;
+    }).map(function (battery) { return battery.label; });
+  }
+
+  // 'the driver "a"', 'the drivers "a" and "b"'.
+  function drivers(names) {
+    return (names.length > 1 ? 'the drivers ' : 'the driver ') +
+      list(names.map(function (name) { return '\u201c' + name + '\u201d'; }));
+  }
+
+  function percent(efficiency) {
+    return Math.floor((Number(efficiency) || 0) * 100) + ' %';
+  }
+
+  // Why a year has no figure, from the batteries' configuration.
   var problems = {
-    battery_size: function () {
-      return 'Set the battery\'s size in Settings to get a figure. FTW needs to know how much it can hold.';
+    battery_size: function (data) {
+      var names = labels(data, function (battery) { return !battery.sized; });
+      return (names.length ? 'Set the battery size of ' + drivers(names) : 'Set the battery\'s size') +
+        ' in Settings to get a figure. FTW needs to know how much each battery can hold.';
     },
-    batteries: function (data) {
-      return 'FTW works this figure out for one battery with its size set. In ' + data.year + ' it read ' +
-        data.batteries + ' batteries. A replaced battery counts as a second one.';
+    battery_unread: function (data) {
+      return 'Settings gives ' + drivers(data.unread || []) + ' a battery size, but FTW read no battery through ' +
+        ((data.unread || []).length > 1 ? 'them' : 'it') + ' in ' + data.year + '. FTW could count what an unread battery ' +
+        'sent to the grid for another one, so there is no figure.';
     }
   };
+
+  // How the figure was counted: each battery's size and least efficiency.
+  function counted(batteries) {
+    if (batteries.length === 1) {
+      return ' Counted with a ' + kWhExact(batteries[0].capacity_wh) + ' battery and at least ' +
+        percent(batteries[0].efficiency) + ' of its charge coming back out.';
+    }
+    if (!batteries.length) return '';
+    return ' Counted for each battery on its own: ' + list(batteries.map(function (battery) {
+      return kWh(battery.returned_wh) + ' from ' + battery.label + ' (' + kWhExact(battery.capacity_wh) +
+        ', at least ' + percent(battery.efficiency) + ' of its charge back out)';
+    })) + '.';
+  }
 
   function monthName(month) {
     return new Date(Date.UTC(2000, month - 1, 15)).toLocaleDateString(undefined, { month: 'long', timeZone: 'UTC' });
@@ -72,13 +113,12 @@
       result.appendChild(document.createTextNode(
         ' of grid electricity went back to the grid after battery storage in ' + data.year + '. ' +
         'Readings are complete for ' + complete.toLocaleString() + ' of ' + hours.toLocaleString() + ' hours' +
-        (running ? ' so far; the year is still running.' : '.') +
-        ' Counted with a ' + kWhExact(data.capacity_wh) + ' battery and at least ' +
-        Math.floor((Number(data.efficiency) || 0) * 100) + ' % of its charge coming back out.'
+        (running ? ' so far; the year is still running.' : '.') + counted(data.batteries || [])
       ));
     }
     rows.textContent = '';
-    (data.months || []).forEach(function (month) {
+    // Without a figure the months have none either.
+    (problems[data.problem] ? [] : data.months || []).forEach(function (month) {
       if (!month.hours) return;
       var row = document.createElement('tr');
       cell(row, monthName(month.month));

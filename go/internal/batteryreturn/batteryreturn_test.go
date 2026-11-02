@@ -26,14 +26,28 @@ var (
 )
 
 const (
-	grid    = "meter:1/grid_meter"
-	battery = "inverter:1/battery"
-	solar   = "inverter:1/pv"
-	charger = "charger:1/vehicle_charger"
+	grid     = "meter:1/grid_meter"
+	battery  = "inverter:1/battery"
+	battery2 = "inverter:2/battery"
+	solar    = "inverter:1/pv"
+	charger  = "charger:1/vehicle_charger"
 )
 
+// labels name each asset after the driver that read it.
+var labels = map[string]string{grid: "meter", battery: "battery", battery2: "battery 2", solar: "solar", charger: "charger"}
+
+// sized is a site with batteries of these sizes in Wh, read by "battery"
+// and "battery 2".
+func sized(wh ...float64) Site {
+	var s Site
+	for i, w := range wh {
+		s.Batteries = append(s.Batteries, SizedBattery{Driver: []string{"battery", "battery 2"}[i], CapacityWh: w})
+	}
+	return s
+}
+
 // oneBattery is 10 kWh, configured, at an unplaced site.
-var oneBattery = Site{CapacityWh: 10_000, Batteries: 1}
+var oneBattery = sized(10_000)
 
 // flows is one hour of a site, in kWh.
 type flows struct{ imp, exp, chg, dis, pv float64 }
@@ -64,7 +78,7 @@ func (f *fakeLedger) add(asset string, flow state.EnergyFlow, at time.Time, leng
 }
 
 func (f *fakeLedger) install(id string, kind state.EnergyAssetKind) {
-	f.assets = append(f.assets, state.EnergyAsset{AssetID: id, Kind: kind,
+	f.assets = append(f.assets, state.EnergyAsset{AssetID: id, Kind: kind, Label: labels[id],
 		FirstSeenMS: yearStart.Add(-24 * time.Hour).UnixMilli(), LastSeenMS: reportNow.UnixMilli()})
 }
 
@@ -103,6 +117,18 @@ func site(hours map[int]flows) *fakeLedger {
 		f.add(battery, state.FlowBatteryCharge, at, time.Hour, h.chg*1000, "integrated")
 		f.add(battery, state.FlowBatteryDischarge, at, time.Hour, h.dis*1000, "integrated")
 		f.add(solar, state.FlowPVGeneration, at, time.Hour, h.pv*1000, "integrated")
+	}
+	return f
+}
+
+// another adds a battery with its own driver that charges and discharges as
+// given in kWh. The site's grid and solar stay as they are.
+func (f *fakeLedger) another(id string, hours map[int]flows) *fakeLedger {
+	f.install(id, state.AssetBattery)
+	for i := range 49 {
+		at, h := yearStart.Add(time.Duration(i)*time.Hour), hours[i]
+		f.add(id, state.FlowBatteryCharge, at, time.Hour, h.chg*1000, "integrated")
+		f.add(id, state.FlowBatteryDischarge, at, time.Hour, h.dis*1000, "integrated")
 	}
 	return f
 }
@@ -153,8 +179,8 @@ func returnedOn(r Report, day int) float64 {
 
 func TestArbitrageReturnsGridEnergyAfterLoss(t *testing.T) {
 	r := build(t, site(arbitrage(0, 1)), oneBattery)
-	if math.Abs(r.Efficiency-0.4) > 1e-9 || r.CapacityWh != 10_000 || r.CompleteHours() != 48 || r.Problem != "" || r.Batteries != 1 {
-		t.Fatalf("efficiency %v capacity %v complete %d problem %q", r.Efficiency, r.CapacityWh, r.CompleteHours(), r.Problem)
+	if b := r.Batteries; len(b) != 1 || math.Abs(b[0].Efficiency-0.4) > 1e-9 || b[0].CapacityWh != 10_000 || r.CompleteHours() != 48 || r.Problem != "" {
+		t.Fatalf("batteries %+v complete %d problem %q", b, r.CompleteHours(), r.Problem)
 	}
 	// The year starts with a battery full of energy from elsewhere, and
 	// what goes to the grid takes that first: the first night's grid energy
@@ -381,8 +407,8 @@ func TestANewIdentityContinuesTheMeter(t *testing.T) {
 		l.renew(id, 30, 0)
 	}
 	r := build(t, l, oneBattery)
-	if r.Problem != "" || r.Batteries != 1 {
-		t.Fatalf("problem %q, %d batteries", r.Problem, r.Batteries)
+	if r.Problem != "" || len(r.Batteries) != 1 {
+		t.Fatalf("problem %q, %d batteries", r.Problem, len(r.Batteries))
 	}
 	// Only the handover hour is incomplete; it resets the mix.
 	if r.CompleteHours() != 47 || r.Hours[30].Complete || !r.Hours[29].Complete || !r.Hours[31].Complete {
@@ -394,8 +420,8 @@ func TestANewIdentityContinuesTheMeter(t *testing.T) {
 	l = site(arbitrage(0, 1))
 	l.renew(battery, 30, 8)
 	r = build(t, l, oneBattery)
-	if r.Batteries != 1 || r.Problem != "" {
-		t.Fatalf("problem %q, %d batteries", r.Problem, r.Batteries)
+	if len(r.Batteries) != 1 || r.Problem != "" {
+		t.Fatalf("problem %q, %d batteries", r.Problem, len(r.Batteries))
 	}
 	for i := 22; i <= 30; i++ {
 		if r.Hours[i].Complete {
@@ -430,8 +456,8 @@ func TestANewBatteryStartsItsOwnAccount(t *testing.T) {
 	}
 	l.points[battery] = kept
 	r := build(t, l, oneBattery)
-	if r.Batteries != 1 || r.Problem != "" || r.Hours[30].Complete {
-		t.Fatalf("problem %q, %d batteries, hour 30 complete %v", r.Problem, r.Batteries, r.Hours[30].Complete)
+	if len(r.Batteries) != 1 || r.Problem != "" || r.Hours[30].Complete {
+		t.Fatalf("problem %q, %d batteries, hour 30 complete %v", r.Problem, len(r.Batteries), r.Hours[30].Complete)
 	}
 	if got := returnedOn(r, 1); got != 0 {
 		t.Fatalf("second day returned %.1f Wh across the swap", got)
@@ -456,25 +482,30 @@ func TestNoGridMeterCountsNothing(t *testing.T) {
 	}
 }
 
-func TestOneSizedBatteryOrNoFigure(t *testing.T) {
+func TestEveryBatteryNeedsItsSize(t *testing.T) {
 	if r := build(t, site(arbitrage(0, 1)), Site{}); r.Problem != NoSize || r.Returned != 0 || r.CompleteHours() != 0 {
 		t.Fatalf("no size: problem %q, %.1f Wh", r.Problem, r.Returned)
 	}
-	// A second battery: one mix would let the first battery's exports carry
-	// grid energy the second one holds.
+	// A second battery without a size.
+	if r := build(t, site(arbitrage(0, 1)).another(battery2, arbitrage(0, 1)), oneBattery); r.Problem != NoSize || r.Returned != 0 || len(r.Batteries) != 2 || r.Batteries[1].Sized {
+		t.Fatalf("second battery unsized: problem %q, %.1f Wh, %+v", r.Problem, r.Returned, r.Batteries)
+	}
+	// A size for a battery the ledger never read, or did not read in the
+	// year: what it did could have been counted for the first.
+	r := build(t, site(arbitrage(0, 1)), sized(10_000, 5000))
+	if r.Problem != Unread || r.Returned != 0 || len(r.Unread) != 1 || r.Unread[0] != "battery 2" {
+		t.Fatalf("never read: problem %q, unread %v", r.Problem, r.Unread)
+	}
 	l := site(arbitrage(0, 1))
-	l.install("inverter:2/battery", state.AssetBattery)
-	for i := range 49 {
-		l.add("inverter:2/battery", state.FlowBatteryCharge, yearStart.Add(time.Duration(i)*time.Hour), time.Hour, 0, "integrated")
+	l.install(battery2, state.AssetBattery)
+	l.assets[3].FirstSeenMS, l.assets[3].LastSeenMS = yearStart.AddDate(-1, 0, 0).UnixMilli(), yearStart.Add(-time.Hour).UnixMilli()
+	if r := build(t, l, sized(10_000, 5000)); r.Problem != Unread || len(r.Batteries) != 1 {
+		t.Fatalf("read before the year: problem %q, %+v", r.Problem, r.Batteries)
 	}
-	for _, s := range []Site{oneBattery, {CapacityWh: 20_000, Batteries: 2}} {
-		if r := build(t, l, s); r.Problem != NotOneBattery || r.Returned != 0 || r.Batteries != 2 {
-			t.Fatalf("two batteries, %d sized: problem %q, %.1f Wh", s.Batteries, r.Problem, r.Returned)
-		}
-	}
-	// A size for a battery the ledger never read.
-	if r := build(t, site(arbitrage(0, 1)), Site{CapacityWh: 20_000, Batteries: 2}); r.Problem != NotOneBattery {
-		t.Fatalf("one battery, two sizes: problem %q", r.Problem)
+	// One first read after the year was not there to read.
+	l.assets[3].FirstSeenMS, l.assets[3].LastSeenMS = reportNow.Add(time.Hour).UnixMilli(), reportNow.Add(2*time.Hour).UnixMilli()
+	if r := build(t, l, sized(10_000, 5000)); r.Problem != "" || len(r.Batteries) != 1 || r.Returned != build(t, site(arbitrage(0, 1)), oneBattery).Returned {
+		t.Fatalf("read after the year: problem %q, %.1f Wh", r.Problem, r.Returned)
 	}
 	// No battery at all is no problem, just nothing.
 	l = site(nil)
@@ -484,14 +515,134 @@ func TestOneSizedBatteryOrNoFigure(t *testing.T) {
 	}
 }
 
+// TestOneBatterysExportsDoNotCarryAnothersGridEnergy is the second review's
+// case: battery A charges only from solar and sends 9 kWh to the grid each
+// evening, while battery B charges 10 kWh from the grid each night and
+// never discharges. One mix for both would count A's exports as B's grid
+// energy.
+func TestOneBatterysExportsDoNotCarryAnothersGridEnergy(t *testing.T) {
+	a, b := map[int]flows{}, map[int]flows{}
+	for d := range 2 {
+		for h := 1; h <= 4; h++ {
+			a[d*24+h] = flows{imp: 2.5}
+			b[d*24+h] = flows{chg: 2.5}
+		}
+		for h := 10; h <= 13; h++ {
+			a[d*24+h] = flows{pv: 2.5, chg: 2.5}
+		}
+		for h := 18; h <= 20; h++ {
+			a[d*24+h] = flows{exp: 3, dis: 3}
+		}
+	}
+	r := build(t, site(a).another(battery2, b), sized(10_000, 20_000))
+	if r.Problem != "" || r.CompleteHours() != 48 || r.Returned != 0 {
+		t.Fatalf("problem %q, %d complete hours, returned %.1f Wh", r.Problem, r.CompleteHours(), r.Returned)
+	}
+	// The bounds still give B the grid energy and A the export.
+	if h := r.Hours[2].Batteries; h[0].GridToBattery != 0 || h[1].GridToBattery != 2500 {
+		t.Fatalf("night %+v", h)
+	}
+	if h := r.Hours[19].Batteries; h[0].BatteryToGrid != 3000 || h[1].BatteryToGrid != 0 {
+		t.Fatalf("evening %+v", h)
+	}
+}
+
+// bothFromTheGrid is A doing arbitrage as above with 10 kWh, and B the same
+// at half the power with 5 kWh: each night hour charges A 2.5 kWh and B
+// 1.25, each evening hour sends 3 and 1.5 to the grid. It returns the site
+// with A, and B.
+func bothFromTheGrid() (map[int]flows, map[int]flows) {
+	a, b := arbitrage(0, 1), map[int]flows{}
+	for i, h := range a {
+		b[i] = flows{chg: h.chg / 2, dis: h.dis / 2}
+		a[i] = flows{imp: h.imp * 1.5, exp: h.exp * 1.5, chg: h.chg, dis: h.dis}
+	}
+	return a, b
+}
+
+func TestTwoBatteriesFromTheGridEachReturnTheirOwn(t *testing.T) {
+	a, b := bothFromTheGrid()
+	r := build(t, site(a).another(battery2, b), sized(10_000, 5000))
+	if r.Problem != "" || r.CompleteHours() != 48 || len(r.Batteries) != 2 {
+		t.Fatalf("problem %q, %d complete hours", r.Problem, r.CompleteHours())
+	}
+	// In the evening the export is both batteries' discharge, so each sent
+	// all of its own: 4.5 kWh out less the other's 1.5 or 3.
+	if h := r.Hours[19].Batteries; h[0].BatteryToGrid != 3000 || h[1].BatteryToGrid != 1500 {
+		t.Fatalf("evening %+v", h)
+	}
+	// By hand: A is the one-battery arbitrage, with efficiency (18 − 10) /
+	// 20 = 0.4, and returns 2 kWh. B charges 10 kWh and discharges 9 with
+	// 5 kWh, so (9 − 5) / 10 = 0.4 too. Each night hour brings B 0.5 kWh of
+	// grid energy and 0.75 kWh of loss as other energy. B starts full of
+	// other energy, so the first night's grid energy does not fit, and the
+	// first evening sends 4.5 kWh of other energy. The second night brings
+	// 2 kWh of grid energy and 3 kWh of other energy to the 0.5 kWh left,
+	// and the full battery sheds 0.5 kWh of grid energy. The second evening
+	// sends the 3.5 kWh of other energy first, then 1 kWh of grid energy.
+	if bat := r.Batteries; math.Abs(bat[0].Efficiency-0.4) > 1e-9 || math.Abs(bat[1].Efficiency-0.4) > 1e-9 || bat[1].CapacityWh != 5000 {
+		t.Fatalf("batteries %+v", bat)
+	}
+	near(t, "A", r.Batteries[0].Returned, 2000)
+	near(t, "B", r.Batteries[1].Returned, 1000)
+	near(t, "year", r.Returned, 3000)
+	if h := r.Hours[24+4].Batteries; math.Abs(h[1].GridHeld-1500) > 1 || math.Abs(h[1].OtherHeld-3500) > 1 {
+		t.Fatalf("B after the second night %+v", h[1])
+	}
+}
+
+func TestExportEitherBatteryCouldHaveSentCountsLow(t *testing.T) {
+	// On the second evening the batteries discharge 4.5 kWh an hour but only
+	// 3 go to the grid. B's 1.5 could be part of it, so A sent at least 1.5;
+	// A's 3 could be all of it, so B sent at least nothing.
+	a, b := bothFromTheGrid()
+	for h := 18; h <= 20; h++ {
+		a[24+h] = flows{exp: 3, dis: 3}
+	}
+	r := build(t, site(a).another(battery2, b), sized(10_000, 5000))
+	if h := r.Hours[24+19].Batteries; h[0].BatteryToGrid != 1500 || h[1].BatteryToGrid != 0 {
+		t.Fatalf("evening %+v", h)
+	}
+	// By hand: after the second night A holds 3 kWh of grid energy and 7 of
+	// other. Each hour it sends 1.5 kWh out, which takes other energy, and
+	// keeps 1.5 at home, which takes the grid energy. All of B's discharge
+	// stays at home. Neither returns anything.
+	near(t, "A", r.Batteries[0].Returned, 0)
+	near(t, "B", r.Batteries[1].Returned, 0)
+}
+
+func TestABatterysMissingHourForgetsOnlyItsAccount(t *testing.T) {
+	// B's reading at 10:00 on the first day has a gap. Hours 9 and 10 count
+	// for neither battery, but only B starts over full of other energy.
+	a, b := bothFromTheGrid()
+	l := site(a).another(battery2, b)
+	l.mark(battery2, 10, "gap")
+	r := build(t, l, sized(10_000, 5000))
+	if r.CompleteHours() != 46 || r.Hours[9].Complete || r.Hours[10].Complete {
+		t.Fatalf("%d complete hours", r.CompleteHours())
+	}
+	near(t, "A", r.Batteries[0].Returned, 2000)
+	// By hand: the gap splits B's readings into two runs. The second, from
+	// 11:00 on the first day, charges 5 kWh and discharges 9, so its least
+	// efficiency is (9 − 5) / 5 = 0.8. B starts it full of other energy;
+	// the first evening leaves 0.5 kWh of it. The second night brings
+	// 4 kWh of grid energy and 1 kWh of loss as other energy, and the full
+	// battery sheds 0.5 kWh of grid energy: 3.5 of grid, 1.5 of other. The
+	// second evening sends the 1.5 first, then 3 kWh of grid energy.
+	if h := r.Hours[30].Batteries; h[0].Efficiency != 0.4 || h[1].Efficiency != 0.8 {
+		t.Fatalf("efficiencies %+v", h)
+	}
+	near(t, "B", r.Batteries[1].Returned, 3000)
+}
+
 func TestTheSizeIsAtLeastWhatTheBatteryGainedInADay(t *testing.T) {
 	// Configured as 5 kWh, the battery gains 9 kWh a night after loss.
-	r := build(t, site(arbitrage(0, 1)), Site{CapacityWh: 5000, Batteries: 1})
-	if r.CapacityWh != 9000 {
-		t.Fatalf("capacity %v", r.CapacityWh)
+	r := build(t, site(arbitrage(0, 1)), sized(5000))
+	if r.Batteries[0].CapacityWh != 9000 {
+		t.Fatalf("capacity %v", r.Batteries[0].CapacityWh)
 	}
 	// A larger size only counts lower.
-	small, large := build(t, site(arbitrage(0, 1)), oneBattery), build(t, site(arbitrage(0, 1)), Site{CapacityWh: 15_000, Batteries: 1})
+	small, large := build(t, site(arbitrage(0, 1)), oneBattery), build(t, site(arbitrage(0, 1)), sized(15_000))
 	if large.Returned >= small.Returned {
 		t.Fatalf("15 kWh returned %.1f, 10 kWh %.1f", large.Returned, small.Returned)
 	}
@@ -538,7 +689,7 @@ func TestSolarIsZeroAfterDusk(t *testing.T) {
 		}
 		return l
 	}
-	placed := Site{CapacityWh: 10_000, Batteries: 1, Lat: 59.33, Lon: 18.07, Placed: true}
+	placed := Site{Batteries: oneBattery.Batteries, Lat: 59.33, Lon: 18.07, Placed: true}
 	full := build(t, site(arbitrage(0, 1)), placed)
 	// Waking at 06:00, before dawn, loses nothing.
 	if r := build(t, sleeping(6), placed); r.CompleteHours() != 48 || r.Returned != full.Returned {
@@ -602,8 +753,8 @@ func TestTheStoreHoursAreTheReportHours(t *testing.T) {
 		obs = append(obs,
 			state.EnergyObservation{AssetID: grid, DeviceID: "meter:1", AssetKind: state.AssetGridMeter, Flow: state.FlowGridImport, AtMs: at.UnixMilli(), CounterWh: &imported},
 			state.EnergyObservation{AssetID: grid, DeviceID: "meter:1", AssetKind: state.AssetGridMeter, Flow: state.FlowGridExport, AtMs: at.UnixMilli(), CounterWh: &exported},
-			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Flow: state.FlowBatteryCharge, AtMs: at.UnixMilli(), PowerW: &charging},
-			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Flow: state.FlowBatteryDischarge, AtMs: at.UnixMilli(), PowerW: &discharging},
+			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Label: "battery", Flow: state.FlowBatteryCharge, AtMs: at.UnixMilli(), PowerW: &charging},
+			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Label: "battery", Flow: state.FlowBatteryDischarge, AtMs: at.UnixMilli(), PowerW: &discharging},
 		)
 	}
 	if err := st.RecordTickWithOptionalHistory(nil, nil, obs); err != nil {
@@ -652,8 +803,8 @@ func TestASpreadOutageIsNotAnHour(t *testing.T) {
 		p, c, d := pv, charge, discharge
 		obs = append(obs,
 			state.EnergyObservation{AssetID: solar, DeviceID: "inverter:1", AssetKind: state.AssetPV, Flow: state.FlowPVGeneration, AtMs: at.UnixMilli(), PowerW: &p},
-			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Flow: state.FlowBatteryCharge, AtMs: at.UnixMilli(), PowerW: &c},
-			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Flow: state.FlowBatteryDischarge, AtMs: at.UnixMilli(), PowerW: &d},
+			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Label: "battery", Flow: state.FlowBatteryCharge, AtMs: at.UnixMilli(), PowerW: &c},
+			state.EnergyObservation{AssetID: battery, DeviceID: "inverter:1", AssetKind: state.AssetBattery, Label: "battery", Flow: state.FlowBatteryDischarge, AtMs: at.UnixMilli(), PowerW: &d},
 		)
 		if local := at.In(stockholm); local.Day() == 1 && (local.Hour()*60+local.Minute() >= 9*60+30 && local.Hour()*60+local.Minute() < 22*60+30) {
 			continue // the meter is offline
