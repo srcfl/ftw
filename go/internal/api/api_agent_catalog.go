@@ -110,6 +110,8 @@ var agentAPIQueryHints = map[string]map[string]string{
 	"/api/agents/audit":              {"before": "Audit sequence before which to page", "n": "Maximum audit rows"},
 	"/api/series":                    {"driver": "Configured driver name", "metric": "Metric or comma-separated metrics from /api/series/catalog", "range": "Time back, such as 6h", "since": "Unix milliseconds", "until": "Unix milliseconds", "points": "Maximum points per metric; 0 returns stored rows", "format": "json (default) or csv"},
 	"/api/energy/history.csv":        {"scope": "system or asset", "asset_id": "Asset id from /api/energy/assets", "since": "Unix milliseconds", "until": "Unix milliseconds", "bucket": "Bucket duration, at least 5m", "limit": "Maximum buckets, up to 5000"},
+	"/api/energy/battery-return":     {"year": "Calendar year in Swedish time, 2018 to now; default last year"},
+	"/api/energy/battery-return.csv": {"year": "Calendar year in Swedish time, 2018 to now; default last year"},
 }
 
 // This context is requested for technical debugging, not for routine status,
