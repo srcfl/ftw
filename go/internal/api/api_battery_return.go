@@ -28,22 +28,29 @@ func (s *Server) handleBatteryReturn(w http.ResponseWriter, r *http.Request) {
 			"month": i + 1, "returned_wh": m.Returned, "hours": m.Hours, "complete_hours": m.CompleteHours,
 		}
 	}
+	batteries := make([]map[string]any, len(rep.Batteries))
+	for i, b := range rep.Batteries {
+		batteries[i] = map[string]any{
+			"asset_id": b.AssetID, "label": b.Label, "sized": b.Sized,
+			"returned_wh": b.Returned, "efficiency": b.Efficiency, "capacity_wh": b.CapacityWh,
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"year":           rep.Year,
 		"zone":           batteryreturn.Zone,
 		"returned_wh":    rep.Returned,
 		"hours":          len(rep.Hours),
 		"complete_hours": rep.CompleteHours(),
-		"efficiency":     rep.Efficiency,
-		"capacity_wh":    rep.CapacityWh,
-		"batteries":      rep.Batteries,
+		"batteries":      batteries,
+		"unread":         append([]string{}, rep.Unread...),
 		"problem":        rep.Problem,
 		"months":         months,
 	})
 }
 
 // handleBatteryReturnCSV is every hour behind the figure, for the owner to
-// keep with the application.
+// keep with the application: one row per battery and hour, so each row can
+// be checked on its own and the figure is the sum of returned_wh.
 func (s *Server) handleBatteryReturnCSV(w http.ResponseWriter, r *http.Request) {
 	rep, status, err := s.batteryReturn(r)
 	if err != nil {
@@ -54,18 +61,21 @@ func (s *Server) handleBatteryReturnCSV(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="ftw-battery-return-%d.csv"`, rep.Year))
 	cw := csv.NewWriter(w)
 	_ = cw.Write([]string{
-		"hour_start", "grid_import_wh", "grid_export_wh", "battery_charge_wh", "battery_discharge_wh",
-		"solar_wh", "vehicle_discharge_wh", "grid_to_battery_wh", "battery_to_grid_wh",
+		"hour_start", "battery", "grid_import_wh", "grid_export_wh", "battery_charge_wh", "battery_discharge_wh",
+		"solar_wh", "vehicle_discharge_wh", "other_batteries_discharge_wh", "grid_to_battery_wh", "battery_to_grid_wh",
 		"returned_wh", "grid_held_wh", "other_held_wh", "complete", "efficiency", "capacity_wh",
 	})
 	wh := func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) }
 	for _, h := range rep.Hours {
-		_ = cw.Write([]string{
-			h.Start.Format(time.RFC3339), wh(h.GridImport), wh(h.GridExport), wh(h.BatteryCharge),
-			wh(h.BatteryDischarge), wh(h.Solar), wh(h.VehicleDischarge), wh(h.GridToBattery),
-			wh(h.BatteryToGrid), wh(h.Returned), wh(h.GridHeld), wh(h.OtherHeld), strconv.FormatBool(h.Complete),
-			strconv.FormatFloat(h.Efficiency, 'f', 4, 64), wh(rep.CapacityWh),
-		})
+		for i, b := range h.Batteries {
+			bat := rep.Batteries[i]
+			_ = cw.Write([]string{
+				h.Start.Format(time.RFC3339), bat.AssetID, wh(h.GridImport), wh(h.GridExport), wh(b.Charge),
+				wh(b.Discharge), wh(h.Solar), wh(h.VehicleDischarge), wh(h.BatteryDischarge - b.Discharge),
+				wh(b.GridToBattery), wh(b.BatteryToGrid), wh(b.Returned), wh(b.GridHeld), wh(b.OtherHeld),
+				strconv.FormatBool(h.Complete), strconv.FormatFloat(b.Efficiency, 'f', 4, 64), wh(bat.CapacityWh),
+			})
+		}
 	}
 	cw.Flush()
 }
@@ -92,10 +102,14 @@ func (s *Server) batteryReturn(r *http.Request) (batteryreturn.Report, int, erro
 	var site batteryreturn.Site
 	if s.deps.Cfg != nil && s.deps.CfgMu != nil {
 		s.deps.CfgMu.RLock()
+		// A charger's battery_capacity_wh is a car's, not a home battery's.
+		vehicles := map[string]bool{}
+		for _, lp := range s.deps.Cfg.Loadpoints {
+			vehicles[lp.DriverName] = true
+		}
 		for _, d := range s.deps.Cfg.Drivers {
-			if d.BatteryCapacityWh > 0 {
-				site.CapacityWh += d.BatteryCapacityWh
-				site.Batteries++
+			if d.BatteryCapacityWh > 0 && !vehicles[d.Name] {
+				site.Batteries = append(site.Batteries, batteryreturn.SizedBattery{Driver: d.Name, CapacityWh: d.BatteryCapacityWh})
 			}
 		}
 		if w := s.deps.Cfg.Weather; w != nil && placed(w.Latitude, w.Longitude) {

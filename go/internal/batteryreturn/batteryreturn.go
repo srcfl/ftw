@@ -8,24 +8,24 @@
 // The ledger says how much each meter counted, not where each kWh went. The
 // report therefore counts low wherever it cannot know:
 //
-//   - In each hour the battery took from the grid only what solar and a
-//     discharging car could not have supplied, and gave to the grid only
-//     what they could not have exported. Every source on the site must be
-//     one FTW reads.
-//   - Nothing says how much the battery holds, so no share of its content
-//     can be known. What the house takes from the battery counts as grid
-//     energy first, and what goes to the grid counts as other energy first.
-//     Grid energy counts after the least round-trip efficiency its run of
-//     readings allows, so losses are never refunded; the loss stays in the
-//     account as other energy. Within an hour, the order credits least.
+//   - In each hour a battery took from the grid only what solar, a
+//     discharging car and the other batteries could not have supplied, and
+//     gave to the grid only what they could not have exported. Every source
+//     on the site must be one FTW reads.
+//   - Each battery keeps an account of its own, so one battery's exports
+//     never carry another's grid energy. Nothing says how much a battery
+//     holds, so no share of its content can be known. What the house takes
+//     from a battery counts as grid energy first, and what goes to the grid
+//     counts as other energy first. Grid energy counts after the least
+//     round-trip efficiency its run of readings allows, so losses are never
+//     refunded; the loss stays in the account as other energy. Within an
+//     hour, the order credits least.
 //   - An hour counts only when every meter that reported during the year
-//     read all of it. An hour that does not count adds nothing, and what the
-//     battery took in it counts as energy from elsewhere. Without the
-//     battery's own readings the battery is taken to be full of energy from
-//     elsewhere after the hour. The year starts the same way, so the
-//     configured battery size is required.
-//   - One battery. With two, one account would let one battery's exports
-//     carry the other's grid energy.
+//     read all of it. An hour that does not count adds nothing, and what a
+//     battery took in it counts as energy from elsewhere. Without a
+//     battery's own readings that battery is taken to be full of energy from
+//     elsewhere after the hour. The year starts the same way, so every
+//     battery needs its configured size.
 package batteryreturn
 
 import (
@@ -59,41 +59,63 @@ type Ledger interface {
 
 // Site is what the report needs beyond the ledger.
 type Site struct {
-	// CapacityWh is the configured size of the batteries together, and
-	// Batteries how many of them have a size. The account needs an upper bound
-	// on what the battery holds.
-	CapacityWh float64
-	Batteries  int
+	// Batteries are the drivers with a battery size in Settings. Each
+	// account needs an upper bound on what its battery holds.
+	Batteries []SizedBattery
 	// Lat and Lon place the site when Placed. Then a solar inverter that
 	// sleeps after dusk reads 0 instead of leaving the night incomplete.
 	Lat, Lon float64
 	Placed   bool
 }
 
+// SizedBattery is a driver with a battery size in Settings. The ledger names
+// each asset after the driver that read it last, so the size belongs to the
+// battery meter with an asset of that name.
+type SizedBattery struct {
+	Driver     string
+	CapacityWh float64
+}
+
 // Hour is one clock hour of the basis. Energies are Wh.
 type Hour struct {
-	Start            time.Time
-	GridImport       float64
-	GridExport       float64
+	Start      time.Time
+	GridImport float64
+	GridExport float64
+	// BatteryCharge and BatteryDischarge are the batteries together.
 	BatteryCharge    float64
 	BatteryDischarge float64
 	Solar            float64
 	VehicleDischarge float64
+	// GridToBattery, BatteryToGrid, Returned, GridHeld and OtherHeld are the
+	// sums over Batteries.
+	GridToBattery float64
+	BatteryToGrid float64
+	Returned      float64
+	GridHeld      float64
+	OtherHeld     float64
+	Complete      bool
+	// Batteries is each battery's part, in the order of Report.Batteries.
+	Batteries []BatteryHour
+}
+
+// BatteryHour is one battery's part of an hour. Energies are Wh.
+type BatteryHour struct {
+	Charge    float64
+	Discharge float64
 	// GridToBattery is the least grid energy the battery can have taken.
 	GridToBattery float64
-	// BatteryToGrid is the least battery energy that can have gone out to
+	// BatteryToGrid is the least of its energy that can have gone out to
 	// the grid.
 	BatteryToGrid float64
-	// Returned is the part of BatteryToGrid that was grid energy stored
-	// earlier: the refundable energy.
+	// Returned is the part of BatteryToGrid that was grid energy stored in
+	// this battery earlier: the refundable energy.
 	Returned float64
-	// GridHeld and OtherHeld are what the battery holds after the hour.
+	// GridHeld and OtherHeld are what it holds after the hour.
 	GridHeld  float64
 	OtherHeld float64
 	// Efficiency is the least round-trip efficiency the readings of this
 	// hour's run allow.
 	Efficiency float64
-	Complete   bool
 }
 
 // Month sums the hours of one calendar month.
@@ -107,11 +129,11 @@ type Month struct {
 type Problem string
 
 const (
-	// NoSize: the battery has no configured size.
+	// NoSize: a battery the ledger read in the year has no size in Settings.
 	NoSize Problem = "battery_size"
-	// NotOneBattery: the ledger read more than one battery in the year, or
-	// a different number than have a size.
-	NotOneBattery Problem = "batteries"
+	// Unread: the ledger did not read a battery that has a size in Settings.
+	// What it did could have been counted for the others.
+	Unread Problem = "battery_unread"
 )
 
 // Report is one calendar year, or the part of it that has passed.
@@ -120,16 +142,31 @@ type Report struct {
 	Returned float64
 	Hours    []Hour
 	Months   [12]Month
-	// Efficiency is the hours' efficiencies weighted by charge.
-	Efficiency float64
-	// CapacityWh caps what the battery holds: the configured size, or the most it
-	// gained in a day if that is more.
-	CapacityWh float64
-	// Batteries is how many batteries the ledger read in the year.
-	Batteries int
+	// Batteries are the batteries the ledger read in the year.
+	Batteries []Battery
+	// Unread names the drivers with a battery size that the ledger did not
+	// read in the year.
+	Unread []string
 	// Problem is set when nothing is returned for a reason other than the
 	// readings.
 	Problem Problem
+}
+
+// Battery is one battery meter the ledger read in the year, with its own
+// account.
+type Battery struct {
+	// AssetID is its latest identity, and Label the driver that read it
+	// last.
+	AssetID string
+	Label   string
+	// Sized: Settings holds its size.
+	Sized bool
+	// Efficiency is its hours' efficiencies weighted by charge.
+	Efficiency float64
+	// CapacityWh caps what it holds: the configured size, or the most it
+	// gained in a day if that is more.
+	CapacityWh float64
+	Returned   float64
 }
 
 // CompleteHours counts the hours with complete readings.
@@ -203,13 +240,7 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 	if cut := now.Add(-settle).Truncate(time.Hour); cut.Before(end) {
 		end = cut
 	}
-	r := Report{Year: year, Efficiency: 1, CapacityWh: site.CapacityWh}
-	switch {
-	case site.Batteries == 0:
-		r.Problem = NoSize
-	case site.Batteries > 1:
-		r.Problem = NotOneBattery
-	}
+	r := Report{Year: year}
 	if !end.After(start) {
 		return r, nil
 	}
@@ -237,10 +268,16 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 	if err != nil {
 		return Report{}, err
 	}
-	owed, batteries := spans(assets, from, to)
-	r.Batteries = batteries
+	owed, meters := spans(assets, from, to)
+	r.sizeBatteries(assets, meters, site.Batteries, to)
+	for i := range r.Hours {
+		r.Hours[i].Batteries = make([]BatteryHour, len(r.Batteries))
+	}
 	metered := false
-	unread := make([]bool, n) // a battery's readings are missing
+	unread := make([][]bool, len(r.Batteries)) // a battery's readings are missing
+	for b := range unread {
+		unread[b] = make([]bool, n)
+	}
 	for _, a := range assets {
 		role := roleOf(a.Kind)
 		sp, found := owed[a.AssetID]
@@ -252,6 +289,7 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 			at := from + int64(i)*hourMS
 			return at < sp.to && at+hourMS > sp.from
 		}
+		b := sp.meter // the battery meter, for a battery
 		// One hour past the end shows whether the last hour's readings ran
 		// to its end.
 		rd := readings{make([]bool, n+1), make([]bool, n+1), make([]bool, n+1)}
@@ -290,8 +328,10 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 				h.GridExport += p.EnergyWh
 			case state.FlowBatteryCharge:
 				h.BatteryCharge += p.EnergyWh
+				h.Batteries[b].Charge += p.EnergyWh
 			case state.FlowBatteryDischarge:
 				h.BatteryDischarge += p.EnergyWh
+				h.Batteries[b].Discharge += p.EnergyWh
 			case state.FlowPVGeneration:
 				h.Solar += p.EnergyWh
 			case state.FlowVehicleDischarge:
@@ -320,143 +360,217 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 		// nothing of the old account carries over.
 		if role == roleBattery && sp.from != math.MinInt64 && sp.from >= from && sp.from < to {
 			i := int((sp.from - from) / hourMS)
-			unread[i], r.Hours[i].Complete = true, false
+			unread[b][i], r.Hours[i].Complete = true, false
 		}
 		// A meter that reported during the year must read every hour it
 		// answers for. Silence, before or after, is not a quiet hour.
 		for i := range r.Hours {
 			if owes(i) && (!ok(i) || owes(i+1) && !ok(i+1)) {
 				r.Hours[i].Complete = false
-				unread[i] = unread[i] || role == roleBattery
+				if role == roleBattery {
+					unread[b][i] = true
+				}
 			}
 		}
 	}
-	switch {
-	case r.Batteries == 0:
-		r.Problem = "" // nothing stored, nothing to size
-	case r.Batteries != 1 || site.Batteries > 1:
-		r.Problem = NotOneBattery
-	}
 
-	var in, out float64
+	for b := range r.Batteries {
+		r.Batteries[b].fit(r.Hours, b, unread[b], loc)
+	}
 	for i := range r.Hours {
 		h := &r.Hours[i]
-		if !unread[i] {
-			in += h.BatteryCharge
-			out += h.BatteryDischarge
-		}
 		// Without a grid meter nothing says what crossed the connection.
 		h.Complete = h.Complete && metered
+		m := &r.Months[h.Start.In(loc).Month()-1]
+		m.Hours++
 		if !h.Complete {
 			continue
 		}
-		h.GridToBattery = clamp(h.BatteryCharge-h.Solar-h.VehicleDischarge, h.GridImport)
-		h.BatteryToGrid = clamp(h.GridExport-h.Solar-h.VehicleDischarge, h.BatteryDischarge)
+		if r.Problem == "" {
+			m.CompleteHours++
+		}
+		for b := range h.Batteries {
+			// Solar, a discharging car and the other batteries may each have
+			// supplied this battery's charge or the export.
+			bh := &h.Batteries[b]
+			others := h.BatteryDischarge - bh.Discharge
+			bh.GridToBattery = clamp(bh.Charge-h.Solar-h.VehicleDischarge-others, h.GridImport)
+			bh.BatteryToGrid = clamp(h.GridExport-h.Solar-h.VehicleDischarge-others, bh.Discharge)
+			h.GridToBattery += bh.GridToBattery
+			h.BatteryToGrid += bh.BatteryToGrid
+		}
+	}
+	for b := range r.Batteries {
+		r.account(b, unread[b], loc)
+	}
+	return r, nil
+}
+
+// sizeBatteries lists the year's battery meters with their sizes and sets
+// the problem, if any. A driver's size belongs to the meter with an asset of
+// its name, so a new identity behind the driver keeps it.
+func (r *Report) sizeBatteries(all []state.EnergyAsset, meters [][]state.EnergyAsset, sized []SizedBattery, to int64) {
+	sizes := map[string]float64{}
+	for _, s := range sized {
+		sizes[s.Driver] = s.CapacityWh
+	}
+	read := map[string]bool{} // drivers named by a meter read in the year
+	unsized := false
+	for _, meter := range meters {
+		bat := Battery{AssetID: meter[len(meter)-1].AssetID, Efficiency: 1}
+		for _, a := range meter {
+			if a.Label != "" {
+				bat.Label = a.Label
+			}
+			// A meter named by two drivers takes the larger size, which
+			// counts lower.
+			if wh, ok := sizes[a.Label]; ok {
+				bat.Sized, bat.CapacityWh = true, max(bat.CapacityWh, wh)
+				read[a.Label] = true
+			}
+		}
+		unsized = unsized || !bat.Sized
+		r.Batteries = append(r.Batteries, bat)
+	}
+	for _, s := range sized {
+		// A battery first read after the year was not there to read, like
+		// solar added later.
+		later := false
+		for _, a := range all {
+			later = later || a.Kind == state.AssetBattery && a.Label == s.Driver && a.FirstSeenMS >= to
+		}
+		if !read[s.Driver] && !later {
+			r.Unread = append(r.Unread, s.Driver)
+		}
+	}
+	switch {
+	case unsized:
+		r.Problem = NoSize
+	case len(r.Unread) > 0:
+		r.Problem = Unread
+	}
+}
+
+// fit sets the battery's size from its readings, and then each run of its
+// readings' least efficiency.
+func (bat *Battery) fit(hours []Hour, b int, unread []bool, loc *time.Location) {
+	var in, out float64
+	for i, h := range hours {
+		if !unread[i] {
+			in += h.Batteries[b].Charge
+			out += h.Batteries[b].Discharge
+		}
 	}
 	if in > 0 {
 		// A battery that holds what it gained in a day is at least that
 		// large, whatever the configuration says.
 		eff := min(out/in, 1)
 		var held, low, high float64
-		for i, h := range r.Hours {
-			if unread[i] || i > 0 && h.Start.In(loc).YearDay() != r.Hours[i-1].Start.In(loc).YearDay() {
+		for i, h := range hours {
+			if unread[i] || i > 0 && h.Start.In(loc).YearDay() != hours[i-1].Start.In(loc).YearDay() {
 				held, low, high = 0, 0, 0
 			}
 			if unread[i] {
 				continue
 			}
-			held += eff*h.BatteryCharge - h.BatteryDischarge
+			held += eff*h.Batteries[b].Charge - h.Batteries[b].Discharge
 			low, high = min(low, held), max(high, held)
-			r.CapacityWh = max(r.CapacityWh, high-low)
+			bat.CapacityWh = max(bat.CapacityWh, high-low)
 		}
 	}
-
-	k := r.CapacityWh
 
 	// Each run of hours with the battery read gets the least efficiency its
 	// own readings allow: out = efficiency × in − what the battery gained,
 	// and it gained at most a full battery. A short run allows little, and
 	// a run never borrows readings from across a gap.
+	k := bat.CapacityWh
 	var used, charged float64
-	for a := 0; a < n; {
+	for a := 0; a < len(hours); {
 		if unread[a] {
 			a++
 			continue
 		}
-		b, in, out := a, 0.0, 0.0
-		for ; b < n && !unread[b]; b++ {
-			in += r.Hours[b].BatteryCharge
-			out += r.Hours[b].BatteryDischarge
+		z, in, out := a, 0.0, 0.0
+		for ; z < len(hours) && !unread[z]; z++ {
+			in += hours[z].Batteries[b].Charge
+			out += hours[z].Batteries[b].Discharge
 		}
 		eff := 0.0
 		if in > 0 {
 			eff = clamp((out-k)/in, 1)
 		}
-		for i := a; i < b; i++ {
-			r.Hours[i].Efficiency = eff
+		for i := a; i < z; i++ {
+			hours[i].Batteries[b].Efficiency = eff
 		}
 		used += eff * in
 		charged += in
-		a = b
+		a = z
 	}
 	if charged > 0 {
-		r.Efficiency = used / charged
+		bat.Efficiency = used / charged
 	}
+}
 
+// account follows battery b's grid and other energy through the year.
+func (r *Report) account(b int, unread []bool, loc *time.Location) {
+	bat := &r.Batteries[b]
+	k := bat.CapacityWh
 	grid, other := 0.0, k // unknown content at the start
 	for i := range r.Hours {
 		h := &r.Hours[i]
-		m := &r.Months[h.Start.In(loc).Month()-1]
-		m.Hours++
+		bh := &h.Batteries[b]
 		if unread[i] || r.Problem != "" {
 			grid, other = 0, k
-			h.GridHeld, h.OtherHeld = grid, other
-			continue
+		} else {
+			// An incomplete hour has no bounds: all its discharge counts as
+			// used at home and all its charge as energy from elsewhere.
+			// The hour plays in the order that credits least: other energy
+			// arrives, the export leaves and takes other energy first, grid
+			// energy arrives, the house takes its share and takes grid energy
+			// first. Grid energy counts after the least efficiency; its loss
+			// stays in the battery as other energy, so the account never falls
+			// below what the battery holds.
+			other += bh.Charge - bh.GridToBattery
+			fromOther := min(other, bh.BatteryToGrid)
+			other -= fromOther
+			bh.Returned = min(grid, bh.BatteryToGrid-fromOther)
+			grid -= bh.Returned
+			grid += bh.Efficiency * bh.GridToBattery
+			other += (1 - bh.Efficiency) * bh.GridToBattery
+			home := bh.Discharge - bh.BatteryToGrid
+			fromGrid := min(grid, home)
+			grid -= fromGrid
+			other = max(0, other-(home-fromGrid))
+			// What does not fit a full battery leaves as grid energy first.
+			if over := grid + other - k; over > 0 {
+				cut := min(grid, over)
+				grid -= cut
+				other -= over - cut
+			}
 		}
-		// An incomplete hour has no bounds: all its discharge counts as
-		// used at home and all its charge as energy from elsewhere.
-		if h.Complete {
-			m.CompleteHours++
-		}
-		// The hour plays in the order that credits least: other energy
-		// arrives, the export leaves and takes other energy first, grid
-		// energy arrives, the house takes its share and takes grid energy
-		// first. Grid energy counts after the least efficiency; its loss
-		// stays in the battery as other energy, so the account never falls
-		// below what the battery holds.
-		other += h.BatteryCharge - h.GridToBattery
-		fromOther := min(other, h.BatteryToGrid)
-		other -= fromOther
-		h.Returned = min(grid, h.BatteryToGrid-fromOther)
-		grid -= h.Returned
-		grid += h.Efficiency * h.GridToBattery
-		other += (1 - h.Efficiency) * h.GridToBattery
-		home := h.BatteryDischarge - h.BatteryToGrid
-		fromGrid := min(grid, home)
-		grid -= fromGrid
-		other = max(0, other-(home-fromGrid))
-		// What does not fit a full battery leaves as grid energy first.
-		if over := grid + other - k; over > 0 {
-			cut := min(grid, over)
-			grid -= cut
-			other -= over - cut
-		}
-		h.GridHeld, h.OtherHeld = grid, other
-		m.Returned += h.Returned
-		r.Returned += h.Returned
+		bh.GridHeld, bh.OtherHeld = grid, other
+		h.GridHeld += grid
+		h.OtherHeld += other
+		h.Returned += bh.Returned
+		bat.Returned += bh.Returned
+		r.Months[h.Start.In(loc).Month()-1].Returned += bh.Returned
+		r.Returned += bh.Returned
 	}
-	return r, nil
 }
 
-// span is the time [from, to) an asset answers for, in Unix ms.
-type span struct{ from, to int64 }
+// span is the time [from, to) an asset answers for, in Unix ms. A battery's
+// meter is its index among the batteries.
+type span struct {
+	from, to int64
+	meter    int
+}
 
 // handoverMS allows for the old and new identity reading in the same tick
 // in either order.
 const handoverMS = int64(2 * time.Minute / time.Millisecond)
 
 // spans gives each asset that matters for [from, to) the time it answers
-// for, and counts the batteries.
+// for, and lists the battery meters.
 //
 // A device whose identity changes, a driver that learns the serial for
 // instance, shows up as a new asset of the same kind once the old one
@@ -467,7 +581,7 @@ const handoverMS = int64(2 * time.Minute / time.Millisecond)
 // meter that appears late or falls silent leaves those hours incomplete. A
 // meter whose last reading came before the period is gone; one whose first
 // came after it has not arrived.
-func spans(assets []state.EnergyAsset, from, to int64) (map[string]span, int) {
+func spans(assets []state.EnergyAsset, from, to int64) (map[string]span, [][]state.EnergyAsset) {
 	byRole := map[role][]state.EnergyAsset{}
 	for _, a := range assets {
 		if r := roleOf(a.Kind); r != roleNone {
@@ -475,7 +589,7 @@ func spans(assets []state.EnergyAsset, from, to int64) (map[string]span, int) {
 		}
 	}
 	out := map[string]span{}
-	batteries := 0
+	var batteries [][]state.EnergyAsset
 	for role, list := range byRole {
 		sort.Slice(list, func(i, j int) bool { return list[i].FirstSeenMS < list[j].FirstSeenMS })
 		var meters [][]state.EnergyAsset
@@ -498,11 +612,13 @@ func spans(assets []state.EnergyAsset, from, to int64) (map[string]span, int) {
 			if meter[len(meter)-1].LastSeenMS < from || meter[0].FirstSeenMS >= to {
 				continue
 			}
+			index := -1
 			if role == roleBattery {
-				batteries++
+				index = len(batteries)
+				batteries = append(batteries, meter)
 			}
 			for k, a := range meter {
-				sp := span{math.MinInt64, math.MaxInt64}
+				sp := span{math.MinInt64, math.MaxInt64, index}
 				if k > 0 {
 					sp.from = a.FirstSeenMS
 				}
