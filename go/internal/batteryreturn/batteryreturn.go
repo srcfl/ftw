@@ -15,9 +15,9 @@
 //   - Nothing says how much the battery holds, so no share of its content
 //     can be known. What the house takes from the battery counts as grid
 //     energy first, and what goes to the grid counts as other energy first.
-//     Grid energy enters after the least round-trip efficiency its run of
-//     readings allows, so losses are never refunded; other energy enters
-//     whole. Within an hour the battery discharges before it charges.
+//     Grid energy counts after the least round-trip efficiency its run of
+//     readings allows, so losses are never refunded; the loss stays in the
+//     account as other energy. Within an hour, the order credits least.
 //   - An hour counts only when every meter that reported during the year
 //     read all of it. An hour that does not count adds nothing, and what the
 //     battery took in it counts as energy from elsewhere. Without the
@@ -316,6 +316,12 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 		case roleGrid:
 			metered = true
 		}
+		// A battery that takes over from another asset may be new hardware:
+		// nothing of the old account carries over.
+		if role == roleBattery && sp.from != math.MinInt64 && sp.from >= from && sp.from < to {
+			i := int((sp.from - from) / hourMS)
+			unread[i], r.Hours[i].Complete = true, false
+		}
 		// A meter that reported during the year must read every hour it
 		// answers for. Silence, before or after, is not a quiet hour.
 		for i := range r.Hours {
@@ -412,21 +418,24 @@ func Build(ctx context.Context, l Ledger, year int, now time.Time, site Site) (R
 		if h.Complete {
 			m.CompleteHours++
 		}
-		// Discharge before charge. What stays at home takes grid energy
-		// first; what goes to the grid takes other energy first.
-		home := h.BatteryDischarge - h.BatteryToGrid
-		fromGrid := min(grid, home)
-		grid -= fromGrid
-		other = max(0, other-(home-fromGrid))
+		// The hour plays in the order that credits least: other energy
+		// arrives, the export leaves and takes other energy first, grid
+		// energy arrives, the house takes its share and takes grid energy
+		// first. Grid energy counts after the least efficiency; its loss
+		// stays in the battery as other energy, so the account never falls
+		// below what the battery holds.
+		other += h.BatteryCharge - h.GridToBattery
 		fromOther := min(other, h.BatteryToGrid)
 		other -= fromOther
 		h.Returned = min(grid, h.BatteryToGrid-fromOther)
 		grid -= h.Returned
-		// Grid energy enters after the least efficiency, other energy
-		// whole. What does not fit a full battery leaves as grid energy
-		// first.
 		grid += h.Efficiency * h.GridToBattery
-		other += h.BatteryCharge - h.GridToBattery
+		other += (1 - h.Efficiency) * h.GridToBattery
+		home := h.BatteryDischarge - h.BatteryToGrid
+		fromGrid := min(grid, home)
+		grid -= fromGrid
+		other = max(0, other-(home-fromGrid))
+		// What does not fit a full battery leaves as grid energy first.
 		if over := grid + other - k; over > 0 {
 			cut := min(grid, over)
 			grid -= cut
