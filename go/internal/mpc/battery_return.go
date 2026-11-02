@@ -23,10 +23,11 @@ import "math"
 // carries the grid part of what the battery holds as a share, a second
 // state beside the SoC.
 
-// batteryReturnShareLevels is the Core DP's grid-share grid: 0, ½, 1. On a
-// month of real prices with solar, 3, 5, 7 and 11 levels gave the same
-// plans' value to within 0.3 kr.
-const batteryReturnShareLevels = 3
+// batteryReturnShareLevels is the Core DP's grid-share grid: 0, ¼, ½, ¾, 1.
+// The refund is convex in the share, so interpolating between too few levels
+// overstates it: on October's prices three levels cost a 10 kWh villa 0.3–
+// 0.5 kr a month, five and nine levels nothing.
+const batteryReturnShareLevels = 5
 
 // batteryReturnCredit is the öre per kWh of returned grid energy the plan
 // counts on, or 0. Only active arbitrage sends battery energy to the grid.
