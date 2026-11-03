@@ -181,6 +181,16 @@ func TestJudgeR3(t *testing.T) {
 	if v["the battery order swings at most 100 W over the last 5 min"] {
 		t.Fatal("an order hunting between 0 and -3 kW passes")
 	}
+	// No order at all, as when Core hands the battery back to the inverter,
+	// while it runs on from 12 % to the inverter's 5 %.
+	v = run(func(i int, r *sample) { r.Bat.SoCPct = 12 - 7*float64(min(i, 200))/200 })
+	if !v["no discharge ordered below the planner floor"] || v["the battery stays at or above the planner floor"] {
+		t.Fatalf("a battery left to run to 5 %%: %v", v)
+	}
+	v = run(func(i int, r *sample) { r.Bat.SoCPct = max(10, soc(i)) })
+	if !v["the battery stays at or above the planner floor"] || !v["the battery reached the planner floor"] {
+		t.Fatalf("a battery held at the floor: %v", v)
+	}
 }
 
 func TestJudgeR4SessionEnergy(t *testing.T) {

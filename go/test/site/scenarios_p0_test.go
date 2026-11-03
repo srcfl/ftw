@@ -155,8 +155,9 @@ func r3(c *runCtx, fuse float64) (map[string]any, error) {
 // day's Home use is known, and long enough after it that one restart stays
 // under the 10 % unknown-time rule. The rule counts whole ledger minutes,
 // so a restart whose unknown car reading crosses a minute boundary marks
-// two: 128 s of a 1 054 s day when the hold came 10 min after, which failed
-// 1 run in 5. 25 min leaves room for it. Core holds a battery for at most
+// two. With the 42 s Core was down or starting, that came to 128 s of a
+// 1 054 s day when the hold came 10 min after, and failed 1 run in 5.
+// 25 min leaves room for it. Core holds a battery for at most
 // 1800 s, so the hold starts 300 s before the first kill and outlasts both.
 func r4(c *runCtx, fuse float64) (map[string]any, error) {
 	var serial string

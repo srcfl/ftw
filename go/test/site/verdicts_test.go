@@ -648,7 +648,9 @@ func judgeR2(d *runData) (metrics, []criterion) {
 }
 
 // judgeR3: Core orders no discharge below the planner's floor, its battery
-// order settles, and the car answers when the battery stops.
+// order settles, and the car answers when the battery stops. The measured
+// SoC must hold the floor too: an order of 0 W also reads from a battery
+// handed back to the inverter, which would run on to its own 5 %.
 func judgeR3(d *runData) (metrics, []criterion) {
 	fuse, delay, floor := d.metaF("fuse"), d.metaF("charger_delay_s"), d.metaF("planner_floor_pct")
 	t0, tCN, t1 := d.marks["plug"], d.marks["charge_now"], d.marks["end"]
@@ -681,6 +683,7 @@ func judgeR3(d *runData) (metrics, []criterion) {
 	return m, []criterion{
 		crit("the battery reached the planner floor", len(run) > 0 && minSoC <= floor+0.5), // the setup
 		crit("no discharge ordered below the planner floor", below <= 10),
+		crit("the battery stays at or above the planner floor", len(run) > 0 && minSoC >= floor-0.5),
 		crit("the battery order swings at most 100 W over the last 5 min", len(last) > 0 && swing <= 100),
 		crit("over the fuse no longer than the charger's delay + 7 s", over <= allowed),
 		crit("fuse holds", !anyBlown(run)),
