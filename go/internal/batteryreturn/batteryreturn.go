@@ -6,20 +6,21 @@
 // every hour.
 //
 // The ledger says how much each meter counted, not where each kWh went. The
-// report therefore counts low wherever it cannot know:
+// report counts low where the readings leave room, and shares in proportion
+// where nothing can say:
 //
 //   - In each hour a battery took from the grid only what solar, a
 //     discharging car and the other batteries could not have supplied, and
 //     gave to the grid only what they could not have exported. Every source
 //     on the site must be one FTW reads.
 //   - Each battery keeps an account of its own, so one battery's exports
-//     never carry another's grid energy. Nothing says how much a battery
-//     holds, so no share of its content can be known. What the house takes
-//     from a battery counts as grid energy first, and what goes to the grid
-//     counts as other energy first. Grid energy counts after the least
-//     round-trip efficiency its run of readings allows, so losses are never
-//     refunded; the loss stays in the account as other energy. Within an
-//     hour, the order credits least.
+//     never carry another's grid energy. The account follows what the
+//     battery holds and how much of it came from the grid. Energy enters
+//     after the battery's round-trip efficiency over the year, so losses
+//     are never refunded. Whatever leaves, to the house or the grid, carries
+//     the grid's share of what the battery held. The ledger does not say
+//     what came first within an hour, so the hour's charge mixes in before
+//     its discharge leaves.
 //   - An hour counts only when every meter that reported during the year
 //     read all of it. An hour that does not count adds nothing, and what a
 //     battery took in it counts as energy from elsewhere. Without a
@@ -113,8 +114,7 @@ type BatteryHour struct {
 	// GridHeld and OtherHeld are what it holds after the hour.
 	GridHeld  float64
 	OtherHeld float64
-	// Efficiency is the least round-trip efficiency the readings of this
-	// hour's run allow.
+	// Efficiency is the battery's round-trip efficiency over the year.
 	Efficiency float64
 }
 
@@ -161,7 +161,7 @@ type Battery struct {
 	Label   string
 	// Sized: Settings holds its size.
 	Sized bool
-	// Efficiency is its hours' efficiencies weighted by charge.
+	// Efficiency is what came out over what went in, over its read hours.
 	Efficiency float64
 	// CapacityWh caps what it holds: the configured size, or the most it
 	// gained in a day if that is more.
@@ -451,8 +451,7 @@ func (r *Report) sizeBatteries(all []state.EnergyAsset, meters [][]state.EnergyA
 	}
 }
 
-// fit sets the battery's size from its readings, and then each run of its
-// readings' least efficiency.
+// fit sets the battery's efficiency and size from its readings.
 func (bat *Battery) fit(hours []Hour, b int, unread []bool, loc *time.Location) {
 	var in, out float64
 	for i, h := range hours {
@@ -461,53 +460,26 @@ func (bat *Battery) fit(hours []Hour, b int, unread []bool, loc *time.Location) 
 			out += h.Batteries[b].Discharge
 		}
 	}
+	bat.Efficiency = 0
 	if in > 0 {
-		// A battery that holds what it gained in a day is at least that
-		// large, whatever the configuration says.
-		eff := min(out/in, 1)
-		var held, low, high float64
-		for i, h := range hours {
-			if unread[i] || i > 0 && h.Start.In(loc).YearDay() != hours[i-1].Start.In(loc).YearDay() {
-				held, low, high = 0, 0, 0
-			}
-			if unread[i] {
-				continue
-			}
-			held += eff*h.Batteries[b].Charge - h.Batteries[b].Discharge
-			low, high = min(low, held), max(high, held)
-			bat.CapacityWh = max(bat.CapacityWh, high-low)
-		}
+		bat.Efficiency = min(out/in, 1)
 	}
-
-	// Each run of hours with the battery read gets the least efficiency its
-	// own readings allow: out = efficiency × in − what the battery gained,
-	// and it gained at most a full battery. A short run allows little, and
-	// a run never borrows readings from across a gap.
-	k := bat.CapacityWh
-	var used, charged float64
-	for a := 0; a < len(hours); {
-		if unread[a] {
-			a++
+	for i := range hours {
+		hours[i].Batteries[b].Efficiency = bat.Efficiency
+	}
+	// A battery that holds what it gained in a day is at least that large,
+	// whatever the configuration says.
+	var held, low, high float64
+	for i, h := range hours {
+		if unread[i] || i > 0 && h.Start.In(loc).YearDay() != hours[i-1].Start.In(loc).YearDay() {
+			held, low, high = 0, 0, 0
+		}
+		if unread[i] {
 			continue
 		}
-		z, in, out := a, 0.0, 0.0
-		for ; z < len(hours) && !unread[z]; z++ {
-			in += hours[z].Batteries[b].Charge
-			out += hours[z].Batteries[b].Discharge
-		}
-		eff := 0.0
-		if in > 0 {
-			eff = clamp((out-k)/in, 1)
-		}
-		for i := a; i < z; i++ {
-			hours[i].Batteries[b].Efficiency = eff
-		}
-		used += eff * in
-		charged += in
-		a = z
-	}
-	if charged > 0 {
-		bat.Efficiency = used / charged
+		held += bat.Efficiency*h.Batteries[b].Charge - h.Batteries[b].Discharge
+		low, high = min(low, held), max(high, held)
+		bat.CapacityWh = max(bat.CapacityWh, high-low)
 	}
 }
 
@@ -524,28 +496,22 @@ func (r *Report) account(b int, unread []bool, loc *time.Location) {
 		} else {
 			// An incomplete hour has no bounds: all its discharge counts as
 			// used at home and all its charge as energy from elsewhere.
-			// The hour plays in the order that credits least: other energy
-			// arrives, the export leaves and takes other energy first, grid
-			// energy arrives, the house takes its share and takes grid energy
-			// first. Grid energy counts after the least efficiency; its loss
-			// stays in the battery as other energy, so the account never falls
-			// below what the battery holds.
-			other += bh.Charge - bh.GridToBattery
-			fromOther := min(other, bh.BatteryToGrid)
-			other -= fromOther
-			bh.Returned = min(grid, bh.BatteryToGrid-fromOther)
-			grid -= bh.Returned
 			grid += bh.Efficiency * bh.GridToBattery
-			other += (1 - bh.Efficiency) * bh.GridToBattery
-			home := bh.Discharge - bh.BatteryToGrid
-			fromGrid := min(grid, home)
-			grid -= fromGrid
-			other = max(0, other-(home-fromGrid))
-			// What does not fit a full battery leaves as grid energy first.
-			if over := grid + other - k; over > 0 {
-				cut := min(grid, over)
-				grid -= cut
-				other -= over - cut
+			other += bh.Efficiency * (bh.Charge - bh.GridToBattery)
+			// The account never holds more than a full battery.
+			if held := grid + other; held > k {
+				grid, other = grid*k/held, other*k/held
+			}
+			// What leaves carries the grid's share of what the battery held.
+			// More out than the account holds means the account ran low;
+			// the rest carries nothing from the grid.
+			held := grid + other
+			out := min(bh.Discharge, held)
+			if held > 0 {
+				share := grid / held
+				bh.Returned = min(bh.BatteryToGrid, out) * share
+				grid -= out * share
+				other -= out * (1 - share)
 			}
 		}
 		bh.GridHeld, bh.OtherHeld = grid, other
