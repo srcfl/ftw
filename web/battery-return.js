@@ -71,16 +71,16 @@
     }
   };
 
-  // How the figure was counted: each battery's size and least efficiency.
+  // How the figure was counted: each battery's size and efficiency.
   function counted(batteries) {
     if (batteries.length === 1) {
-      return ' Counted with a ' + kWhExact(batteries[0].capacity_wh) + ' battery and at least ' +
-        percent(batteries[0].efficiency) + ' of its charge coming back out.';
+      return ' Counted with a ' + kWhExact(batteries[0].capacity_wh) + ' battery that gave back ' +
+        percent(batteries[0].efficiency) + ' of its charge.';
     }
     if (!batteries.length) return '';
     return ' Counted for each battery on its own: ' + list(batteries.map(function (battery) {
       return kWh(battery.returned_wh) + ' from ' + battery.label + ' (' + kWhExact(battery.capacity_wh) +
-        ', at least ' + percent(battery.efficiency) + ' of its charge back out)';
+        ', gave back ' + percent(battery.efficiency) + ' of its charge)';
     })) + '.';
   }
 

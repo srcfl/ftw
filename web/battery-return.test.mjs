@@ -78,7 +78,7 @@ test('the figure loads when opened, for last year, rounded down to whole kWh', a
   assert.equal(elements.get('battery-return-csv').href, '/api/energy/battery-return.csv?year=' + (thisYear - 1));
   const result = text(elements.get('battery-return-result'));
   assert.match(result, /^123 kWh of grid electricity went back/);
-  assert.match(result, /8\D?700 of 8\D?760 hours\. Counted with a 10\D2 kWh battery and at least 89 % of its charge coming back out\.$/);
+  assert.match(result, /8\D?700 of 8\D?760 hours\. Counted with a 10\D2 kWh battery that gave back 89 % of its charge\.$/);
   const rows = elements.get('battery-return-rows').children;
   assert.equal(rows.length, 12);
   assert.equal(rows[0].children[1].textContent, '1 kWh');
@@ -102,7 +102,7 @@ test('two batteries are counted each on its own', async () => {
       { label: 'garage', sized: true, returned_wh: 3584.9, capacity_wh: 5000, efficiency: 0.4 },
     ],
   });
-  assert.match(text(elements.get('battery-return-result')), /^10 kWh of grid electricity went back.* Counted for each battery on its own: 7 kWh from battery \(10 kWh, at least 40 % of its charge back out\) and 3 kWh from garage \(5 kWh, at least 40 % of its charge back out\)\.$/);
+  assert.match(text(elements.get('battery-return-result')), /^10 kWh of grid electricity went back.* Counted for each battery on its own: 7 kWh from battery \(10 kWh, gave back 40 % of its charge\) and 3 kWh from garage \(5 kWh, gave back 40 % of its charge\)\.$/);
 });
 
 test('a year without a figure says why instead of showing zero', async () => {
