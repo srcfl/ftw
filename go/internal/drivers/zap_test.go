@@ -422,3 +422,81 @@ func TestZapDoesNotInventZeroForNullPowerOnDataModelV2(t *testing.T) {
 		t.Fatalf("W_ac null must not become a synthetic zero: %+v", got)
 	}
 }
+
+// zapV2InverterStub is what a Zap on firmware 7.0.3 sent for a simulated Solis:
+// solar and battery on the DC side, ratings in /api/devices, an inverter DER.
+func zapV2InverterStub() zapAPIStub {
+	return zapAPIStub{
+		devices: map[string]any{"count": 1, "devices": []any{map[string]any{
+			"type": "modbus_tcp", "device_type": "inverter", "profile": "solis", "sn": "INV-V2",
+			"ders": []any{
+				map[string]any{"type": "solar", "enabled": true, "installed_power_W_dc": 8000},
+				map[string]any{"type": "battery", "enabled": true, "rated_power_W_dc": 5000, "capacity_Wh_dc": 15000},
+				map[string]any{"type": "inverter", "enabled": true, "rated_power_W_ac": 20000},
+			},
+		}}},
+		snapshots: map[string]any{"INV-V2": map[string]any{
+			"solar": map[string]any{
+				"type": "solar", "make": "solis", "W_ac": nil, "W_dc": -3000,
+				"mppt": []any{
+					map[string]any{"V_dc": 300, "A_dc": -5, "W_dc": -1500},
+					map[string]any{"V_dc": 290, "A_dc": -4.8, "W_dc": -1392},
+				},
+				"total_generation_Wh_ac": nil, "total_generation_Wh_dc": 150000,
+			},
+			"battery": map[string]any{
+				"type": "battery", "make": "solis", "W_ac": nil, "W_dc": 5000,
+				"V_ac": nil, "V_dc": 52, "A_ac": nil, "A_dc": 10,
+				"soc_nom_fract": 0.75, "soh_fract": nil, "temperature_C": 24,
+				"total_charge_Wh_ac": nil, "total_charge_Wh_dc": 4200000,
+				"total_discharge_Wh_ac": nil, "total_discharge_Wh_dc": 1800000,
+			},
+			"inverter": map[string]any{
+				"type": "inverter", "make": "solis", "W_ac": -2400, "temperature_C": 45, "rated_power_W_ac": 20000,
+			},
+			"version": "v2",
+			"format":  "json",
+		}},
+	}
+}
+
+func TestZapReadsPVAndBatteryOnDataModelV2(t *testing.T) {
+	tel, _, _ := loadZapForTest(t, zapV2InverterStub(), map[string]any{"read_pv": true, "read_battery": true})
+
+	pv := tel.Get("sourceful-zap", telemetry.DerPV)
+	if pv == nil || pv.RawW != -3000 {
+		t.Fatalf("pv = %+v, want -3000W", pv)
+	}
+	pvData := readingData(t, pv)
+	if pvData["rated_w"] != float64(20000) || pvData["lifetime_wh"] != float64(150000) {
+		t.Fatalf("pv rating and energy = %+v", pvData)
+	}
+
+	bat := tel.Get("sourceful-zap", telemetry.DerBattery)
+	if bat == nil || bat.RawW != 5000 {
+		t.Fatalf("battery = %+v, want +5000W charge", bat)
+	}
+	batData := readingData(t, bat)
+	for key, want := range map[string]float64{
+		"soc": 0.75, "v": 52, "a": 10, "temp_c": 24, "rated_w": 5000,
+		"total_charge_wh": 4200000, "total_discharge_wh": 1800000,
+	} {
+		if batData[key] != want {
+			t.Fatalf("battery %s = %v, want %v (%+v)", key, batData[key], want, batData)
+		}
+	}
+}
+
+func TestZapDoesNotReadPVOrBatteryOnDataModelV2UnlessOptedIn(t *testing.T) {
+	tel, _, _ := loadZapForTest(t, zapV2InverterStub(), nil)
+	if got := tel.Get("sourceful-zap", telemetry.DerPV); got != nil {
+		t.Fatalf("Zap must not ingest PV unless opted in: %+v", got)
+	}
+	if got := tel.Get("sourceful-zap", telemetry.DerBattery); got != nil {
+		t.Fatalf("Zap must not ingest battery unless opted in: %+v", got)
+	}
+	count, _, ok := tel.LatestMetric("sourceful-zap", "other_resources")
+	if !ok || count != 2 {
+		t.Fatalf("other_resources = %v %v, want 2 (PV, battery); the inverter DER is not another", count, ok)
+	}
+}
