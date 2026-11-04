@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.158.1
+
+### Patch Changes
+
+- be11e36: The energy tax refund figure for battery storage now counts in proportion. Whatever leaves a battery, to the house or the grid, carries the grid's share of what the battery held, after the battery's efficiency over the year. The old order counted the house's use as grid energy first and the export as other energy first, so a battery with solar almost never got a figure. The home box's 2026 hours now give 42 kWh instead of 0.
+- 7210076: Bundle zap 3.1.2. A Sourceful Zap works as the site meter again after it updates to firmware 7.x. That firmware renamed the fields in its local API, so the driver found no power reading and FTW lost its site meter and stopped dispatching. The driver now reads both the old and the new names. `read_pv` and `read_battery` on a Zap with firmware 7.x are not covered yet.
+
 ## 0.158.0
 
 ### Minor Changes
