@@ -364,3 +364,61 @@ func TestZapDoesNotUseUnsafeLegacyRESTControl(t *testing.T) {
 		t.Fatalf("read-only Zap driver made %d REST control writes, want 0", got)
 	}
 }
+
+// A Zap on firmware 7.x serves the local API in data model v2. These are the
+// names a Zap-HAN on 7.0.3 sent: W_ac, l1_V_ac, and null for what it did not
+// read. Losing them leaves FTW without a site meter.
+func zapV2MeterStub(meter map[string]any) zapAPIStub {
+	return zapAPIStub{
+		devices: map[string]any{"count": 1, "devices": []any{map[string]any{
+			"type": "p1_uart", "device_type": "energy_meter", "sn": "p1m-v2",
+			"ders": []any{map[string]any{"type": "meter", "enabled": true, "location": "grid"}},
+		}}},
+		snapshots: map[string]any{"p1m-v2": map[string]any{
+			"meter":   meter,
+			"version": "v2",
+			"format":  "p1_uart",
+		}},
+	}
+}
+
+func TestZapReadsMeterOnDataModelV2(t *testing.T) {
+	stub := zapV2MeterStub(map[string]any{
+		"type": "meter", "make": "p1", "timestamp": 1793786219266, "read_time_ms": 2,
+		"W_ac": 2388, "Hz": nil, "apparent_VA_ac": nil, "reactive_var_ac": -114,
+		"total_import_Wh_ac": 8014739, "total_export_Wh_ac": 0,
+		"l1_V_ac": 230.1, "l1_A_ac": 8.1, "l1_W_ac": 1872,
+		"l2_V_ac": 231.8, "l2_A_ac": 1.9, "l2_W_ac": 451,
+		"l3_V_ac": 228.7, "l3_A_ac": 0.2, "l3_W_ac": 64,
+	})
+	tel, _, _ := loadZapForTest(t, stub, nil)
+
+	meter := tel.Get("sourceful-zap", telemetry.DerMeter)
+	if meter == nil || meter.RawW != 2388 {
+		t.Fatalf("meter = %+v, want 2388W import", meter)
+	}
+	data := readingData(t, meter)
+	for key, want := range map[string]float64{
+		"l1_v": 230.1, "l1_a": 8.1, "l1_w": 1872,
+		"l2_v": 231.8, "l2_a": 1.9, "l2_w": 451,
+		"l3_v": 228.7, "l3_a": 0.2, "l3_w": 64,
+		"total_import_wh": 8014739, "import_wh": 8014739,
+		"total_export_wh": 0, "export_wh": 0,
+	} {
+		if data[key] != want {
+			t.Fatalf("meter %s = %v, want %v (%+v)", key, data[key], want, data)
+		}
+	}
+	if _, ok := data["freq_hz"]; ok {
+		t.Fatalf("Hz null must stay unknown, got %+v", data)
+	}
+}
+
+func TestZapDoesNotInventZeroForNullPowerOnDataModelV2(t *testing.T) {
+	tel, _, _ := loadZapForTest(t, zapV2MeterStub(map[string]any{
+		"type": "meter", "W_ac": nil, "l1_W_ac": 100,
+	}), nil)
+	if got := tel.Get("sourceful-zap", telemetry.DerMeter); got != nil {
+		t.Fatalf("W_ac null must not become a synthetic zero: %+v", got)
+	}
+}
