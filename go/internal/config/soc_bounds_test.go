@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func f64(v float64) *float64 { return &v }
 
@@ -122,5 +125,41 @@ func TestDropZeroBatteryCeilings(t *testing.T) {
 	}
 	if out := WithBatterySoCBounds([]Driver{{Name: "blank"}}, c.Batteries); out[0].Config["charge_ceil_soc"] != nil {
 		t.Errorf("a dropped soc_max still reached the driver: %v", out[0].Config)
+	}
+}
+
+// A box's settings live in the config database. A zero an older Core stored
+// there must load as unset, and the copy being validated must not write into
+// the map it shares with the live config.
+func TestStoredZeroSoCMaxLoadsAsUnset(t *testing.T) {
+	path, _, st := importedLiveSettings(t)
+	doc, found, err := st.Configuration()
+	if err != nil || !found {
+		t.Fatalf("stored configuration: found=%v err=%v", found, err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(doc.Document, &stored); err != nil {
+		t.Fatal(err)
+	}
+	stored["config"].(map[string]any)["batteries"] = map[string]any{
+		"pixii": map[string]any{"soc_min": 0, "soc_max": 0, "max_charge_w": 0, "max_discharge_w": 0},
+	}
+	raw, _ := json.Marshal(stored)
+	if _, err := st.SaveConfiguration(raw, doc.Revision, nil); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := got.Batteries["pixii"]; b.SoCMax != nil || b.SoCMin == nil || b.MaxChargeW == nil {
+		t.Fatalf("loaded %+v, want soc_max unset and the other limits kept", b)
+	}
+
+	live := Config{Batteries: map[string]Battery{"pixii": {SoCMax: f64(0)}}}
+	next := live
+	next.dropZeroBatteryCeilings()
+	if live.Batteries["pixii"].SoCMax == nil || next.Batteries["pixii"].SoCMax != nil {
+		t.Fatalf("live %+v, copy %+v: want only the copy changed", live.Batteries, next.Batteries)
 	}
 }
