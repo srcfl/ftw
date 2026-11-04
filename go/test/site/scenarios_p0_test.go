@@ -24,14 +24,9 @@ func init() {
 		scenario{name: "r2-60-25", dir: "r2-battery-offline-slow60-25A", minutes: 10, run: func(c *runCtx) (map[string]any, error) { return r2(c, 25, 60) },
 			judge: judgeR2},
 		scenario{name: "r3-25", dir: "r3-planner-floor-25A", minutes: 13, run: func(c *runCtx) (map[string]any, error) { return r3(c, 25) },
-			judge: judgeR3,
-			known: map[string]string{
-				"no discharge ordered below the planner floor":               "A4: fuse relief discharges to 5 %, below planner.soc_min (dispatch.go:4113-4124, 4495-4499)",
-				"the battery order swings at most 100 W over the last 5 min": "A3, A4: at the inverter's empty 5 % Core keeps ordering 3.9-5 kW of discharge (the slew step reopens it, dispatch.go:2148-2219)",
-			}},
-		scenario{name: "r4-25", dir: "r4-sigkill-25A", minutes: 40, run: func(c *runCtx) (map[string]any, error) { return r4(c, 25) },
-			judge: judgeR4,
-			known: map[string]string{"session energy counts again after each restart": "E1: a 1.6 transaction is not taken up after a restart, so session_wh stays 0 (handlers.go:615-617, #1787)"}},
+			judge: judgeR3},
+		scenario{name: "r4-25", dir: "r4-sigkill-25A", minutes: 41, run: func(c *runCtx) (map[string]any, error) { return r4(c, 25) },
+			judge: judgeR4},
 		scenario{name: "r5a-25", dir: "r5a-start-car-charging-25A", minutes: 5, run: func(c *runCtx) (map[string]any, error) { return r5a(c, 25) },
 			judge: judgeR5a},
 		scenario{name: "r5b-25", dir: "r5b-start-stale-plan-25A", minutes: 27, run: func(c *runCtx) (map[string]any, error) { return r5b(c, 25) },
@@ -158,7 +153,11 @@ func r3(c *runCtx, fuse float64) (map[string]any, error) {
 // 20 s; two minutes later the second lasts 120 s, and the house steps to
 // 16 A per phase while Core is gone. Like s7, the run first waits until the
 // day's Home use is known, and long enough after it that one restart stays
-// under the 10 % unknown-time rule. Core holds a battery for at most
+// under the 10 % unknown-time rule. The rule counts whole ledger minutes,
+// so a restart whose unknown car reading crosses a minute boundary marks
+// two. With the 42 s Core was down or starting, that came to 128 s of a
+// 1 054 s day when the hold came 10 min after, and failed 1 run in 5.
+// 25 min leaves room for it. Core holds a battery for at most
 // 1800 s, so the hold starts 300 s before the first kill and outlasts both.
 func r4(c *runCtx, fuse float64) (map[string]any, error) {
 	var serial string
@@ -177,7 +176,7 @@ func r4(c *runCtx, fuse float64) (map[string]any, error) {
 		}) {
 			st.mark("today_known")
 		}
-		sleepS(600)
+		sleepS(1500)
 		st.mark("battery_hold")
 		if err := st.post("/api/battery/manual_hold", map[string]any{"direction": "discharge", "power_w": 3000, "hold_s": 1800}, nil); err != nil {
 			return err
