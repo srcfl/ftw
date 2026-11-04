@@ -96,3 +96,31 @@ func TestWithBatterySoCBoundsDoesNotMutateInput(t *testing.T) {
 		t.Errorf("merged copy lost existing key foo: got %v", got)
 	}
 }
+
+// Settings saved a blank Max SoC as 0. Only soc_max loses it: a soc_min of 0
+// and the power limits are real choices.
+func TestDropZeroBatteryCeilings(t *testing.T) {
+	c := &Config{Batteries: map[string]Battery{
+		"blank":    {SoCMin: f64(0), SoCMax: f64(0), MaxChargeW: f64(7500)},
+		"negative": {SoCMax: f64(-0.1)},
+		"set":      {SoCMax: f64(0.9)},
+		"unset":    {SoCMin: f64(0.1)},
+	}}
+
+	c.dropZeroBatteryCeilings()
+
+	for name, b := range c.Batteries {
+		if name != "set" && b.SoCMax != nil {
+			t.Errorf("%s: soc_max = %v, want unset", name, *b.SoCMax)
+		}
+	}
+	if b := c.Batteries["set"]; b.SoCMax == nil || *b.SoCMax != 0.9 {
+		t.Errorf("set: soc_max = %v, want 0.9", b.SoCMax)
+	}
+	if b := c.Batteries["blank"]; b.SoCMin == nil || *b.SoCMin != 0 || b.MaxChargeW == nil || *b.MaxChargeW != 7500 {
+		t.Errorf("blank: other limits changed: %+v", b)
+	}
+	if out := WithBatterySoCBounds([]Driver{{Name: "blank"}}, c.Batteries); out[0].Config["charge_ceil_soc"] != nil {
+		t.Errorf("a dropped soc_max still reached the driver: %v", out[0].Config)
+	}
+}

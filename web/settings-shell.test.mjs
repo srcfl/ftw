@@ -361,6 +361,21 @@ describe("unchanged settings fields", () => {
     assert.equal(rig.saved().planner.soc_max, 0.95);
   });
 
+  // A blank Max SoC saved as 0 became a 0 % charge ceiling in Core.
+  it("saves a cleared number as unset, not 0", async () => {
+    const rig = await formShell({ site: { name: "Home" }, batteries: { pixii: { soc_max: 0, max_charge_w: 7.5 } } });
+    const number = (path, value, unitScale) => Object.assign(stubElement(), {
+      dataset: unitScale ? { path, unitScale } : { path }, type: "number", defaultValue: value, value });
+    const max = number("batteries.pixii.soc_max", "0");
+    const charge = number("batteries.pixii.max_charge_w", "7.5", "1000");
+    rig.addField(max);
+    rig.addField(charge);
+    max.value = "";
+    charge.value = "";
+    await rig.context.saveConfig();
+    assert.deepEqual(rig.saved().batteries, { pixii: { soc_max: null, max_charge_w: null } });
+  });
+
   // A select shows the first option when the stored value is none of them,
   // and an unchanged save then never stores what the form showed (#1436).
   it("shows a select's default when the stored value is not an option", async () => {

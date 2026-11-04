@@ -1953,6 +1953,7 @@ func isLegacyDefaultDriverRepository(repo DriverRepositorySource) bool {
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
 	c.NormalizeUnits()
+	c.dropZeroBatteryCeilings()
 	if err := c.validateSetup(); err != nil {
 		return err
 	}

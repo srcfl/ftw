@@ -1,5 +1,7 @@
 package config
 
+import "log/slog"
+
 // WithBatterySoCBounds returns a copy of drivers in which every driver that has
 // a matching batteries[<name>] entry gets charge_ceil_soc / discharge_floor_soc
 // defaulted into its free-form Config from the battery's soc_max / soc_min.
@@ -50,4 +52,20 @@ func WithBatterySoCBounds(drivers []Driver, batteries map[string]Battery) []Driv
 		out[i].Config = merged
 	}
 	return out
+}
+
+// dropZeroBatteryCeilings treats a battery soc_max of 0 or less as unset.
+// Settings saved a blank Max SoC as 0 until September 2026. Since soc_max
+// became the dispatch charge ceiling, that 0 blocked all charging, manual
+// Charge included. A battery that must not charge sets max_charge_w: 0.
+func (c *Config) dropZeroBatteryCeilings() {
+	for name, b := range c.Batteries {
+		if b.SoCMax == nil || *b.SoCMax > 0 {
+			continue
+		}
+		slog.Warn("config: ignoring battery soc_max of 0 or less; the planner's ceiling applies",
+			"battery", name, "soc_max", *b.SoCMax)
+		b.SoCMax = nil
+		c.Batteries[name] = b
+	}
 }
