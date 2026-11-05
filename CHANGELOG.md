@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.158.5
+
+### Patch Changes
+
+- 2e9c780: Bundle growatt 2.1.3. A Growatt inverter with no battery no longer shows a
+  second battery at 0 W and 0 % beside the site's real one: the driver now
+  reports a battery only when its voltage, charge level or power is above 0.
+- 3e0a9cb: The forecast caution plan is no longer lost to a late call. Core fixed each
+  worker call's time limit when planning started, so after a point plan the
+  caution call could ask the worker for more time than the call had left. A
+  worker that used its full time limit then answered after Core had given up,
+  and Core published the point plan instead. Each call's time limit now fits
+  the time left before that call's deadline, and Core skips a call that has too
+  little time left, as it already does near the end of a slot.
+- 7c8430c: Price the clock hour in progress when a plan starts part way through it. With 15-minute prices Core replans at :15, :30 and :45, and the peak-power tariff it sends the planner left out the hour already running, so a car plugged in at 17:20 could set a new monthly peak in that hour. Core now sends that hour with the import it has measured so far (from the site meter's hourly counter, else the history; time neither covers counts at no less than the house's current import), and today's completed peak goes in today's group, so each day is one sample. Only a planner that announces `demand_elapsed_hours` gets this shape; a planner without it, such as the bundled one, gets exactly the request it got before.
+
 ## 0.158.4
 
 ### Patch Changes
