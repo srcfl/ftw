@@ -362,7 +362,13 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 			SurplusOnly: lp.SurplusOnly, NoStorageToLoad: lp.blocksBatteryToEV(),
 		})
 	}
-	for _, charge := range p.DemandCharges {
+	req.DemandCharges = externalDemandCharges(p.DemandCharges)
+	return req
+}
+
+func externalDemandCharges(charges []DemandCharge) []externalDemandCharge {
+	var out []externalDemandCharge
+	for _, charge := range charges {
 		wire := externalDemandCharge{
 			ID: charge.ID, PricePerKW: charge.PricePerKW, TopN: charge.TopN,
 			AlreadyKW: charge.AlreadyKW,
@@ -373,9 +379,9 @@ func (o *ExternalOptimizer) buildRequest(slots []Slot, p Params) externalRequest
 				Weight: hour.Weight, Group: hour.Group,
 			})
 		}
-		req.DemandCharges = append(req.DemandCharges, wire)
+		out = append(out, wire)
 	}
-	return req
+	return out
 }
 
 func (r externalResponse) toPlan(slots []Slot, p Params) Plan {

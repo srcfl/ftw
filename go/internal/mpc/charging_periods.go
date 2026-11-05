@@ -58,6 +58,17 @@ func (o *EnergyplanOptimizer) prepareEnergyplanRequest(ctx context.Context, requ
 			request.Slots[i].Confidence = 0
 		}
 	}
+	// A worker without demand_elapsed_hours gets the demand charges as
+	// before: no hour that began before the first slot, each completed day
+	// in already_kw. Its budget follows the charges it gets, so a charge with
+	// only the hour in progress leaves with its fleet budget.
+	if !optimizerHasFeature(info, "demand_elapsed_hours") && hasElapsedDemand(p.DemandCharges) {
+		p.DemandCharges = legacyDemandCharges(p.DemandCharges)
+		request.DemandCharges = externalDemandCharges(p.DemandCharges)
+		if o.timeBudget != nil {
+			request.Settings.TimeLimitS = math.Min(o.cfg.Timeout.Seconds()*0.8, o.timeBudget(slots, p).Seconds())
+		}
+	}
 	// A worker without the hours plans past them; Core's check rejects
 	// such a plan and uses its own. The worker plans the hours in its fleet
 	// model, with the demand charges' budget.

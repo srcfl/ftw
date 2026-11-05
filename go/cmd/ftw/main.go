@@ -1692,6 +1692,13 @@ func main() {
 			defer ctrlMu.Unlock()
 			return control.PlanningImportCeiling(ctrl)
 		}
+		// The demand charges' hour in progress counts what the site meter
+		// measured, the same counter the import ceiling uses.
+		mpcSvc.HourImport = func() mpc.HourImport {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			return control.MeasuredHourImport(ctrl)
+		}
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
 		// over-export and trip an inverter (the Ferroamp 0x8030 fault).

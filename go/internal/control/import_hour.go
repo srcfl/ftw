@@ -245,6 +245,24 @@ func PlanningImportCeiling(s *State) mpc.ImportCeiling {
 	return mpc.ImportCeiling{W: ceiling, MeanW: max(0, ceiling-step/2), HourStart: start, ElapsedWh: elapsedWh}
 }
 
+// MeasuredHourImport is the clock hour in progress as the site meter
+// measured it, with or without a ceiling: the import counted so far and the
+// time its readings cover (time with no record is left out, not counted at
+// the ceiling). The planner's demand charges price that hour from it. Zero
+// until a reading or the boot seed counts this hour. Callers hold the
+// control lock.
+func MeasuredHourImport(s *State) mpc.HourImport {
+	if s == nil {
+		return mpc.HourImport{}
+	}
+	h := &s.importHour
+	if h.lastAt.IsZero() || !s.importHourStart(s.now()).Equal(h.start) {
+		return mpc.HourImport{}
+	}
+	covered := max(0, h.lastAt.Sub(h.start)-h.unknown)
+	return mpc.HourImport{Start: h.start, ImportedWh: h.importedWh, Covered: covered}
+}
+
 // ImportHourStatus is the clock hour's import budget left, negative once it
 // is overrun, and the import limit in force. ok is false while the ceiling is
 // off. Callers hold the control lock or a copy of State.
