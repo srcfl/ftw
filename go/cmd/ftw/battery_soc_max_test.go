@@ -64,7 +64,32 @@ func TestSoCMaxConfigPrecedenceAndReload(t *testing.T) {
 	zero := 0.0
 	cfg.Batteries = map[string]config.Battery{"battery": {SoCMax: &zero}}
 	ctrl.DriverLimits = driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries, cfg.Planner)
-	check(.5, false) // An explicit zero is not an absent limit.
+	check(.5, false) // Validate drops a configured zero; one that bypasses it still blocks charging.
+}
+
+// Settings saved a blank Max SoC as 0. Loading that config must not leave
+// a 0 % ceiling that blocks every charge order, manual Charge included.
+func TestSavedZeroSoCMaxDoesNotBlockCharge(t *testing.T) {
+	cfg := parseBatteryLimitConfig(t, "", "    soc_min: 0\n    soc_max: 0\n    max_charge_w: 0\n    max_discharge_w: 0\n")
+	if cfg.Batteries["battery"].SoCMax != nil {
+		t.Fatalf("soc_max = %v after load, want unset", *cfg.Batteries["battery"].SoCMax)
+	}
+	cfg.Planner = &config.Planner{Enabled: true, SoCMax: .9}
+	ctrl := newControlStateFromConfig(cfg)
+	ctrl.Mode, ctrl.SlewEnabled = control.ModeCharge, false
+	tel := batteryLimitStore(1000)
+	capacities := map[string]float64{"battery": 10000}
+	for _, tc := range []struct {
+		soc      float64
+		charging bool
+	}{{.58, true}, {.9, false}} {
+		soc := tc.soc
+		tel.Update("battery", telemetry.DerBattery, 0, &soc, nil)
+		got := control.ComputeDispatch(tel, ctrl, capacities, 40000)
+		if len(got) != 1 || (got[0].TargetW > 0) != tc.charging {
+			t.Fatalf("SoC %.2f: got %+v, want charging=%v under the planner's 90%%", soc, got, tc.charging)
+		}
+	}
 }
 
 // Dispatch keeps the higher of the battery's and the running planner's
