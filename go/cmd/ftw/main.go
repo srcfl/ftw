@@ -2722,6 +2722,9 @@ func main() {
 		}
 		return dev.DeviceID, dev.Make, dev.Serial, true
 	})
+	// The control.not_following rule reads the box's own answer to "Are we
+	// in control?", the one GET /api/status serves.
+	notifSvc.SetControlReader(srv.ControlStates)
 	// FuseReader: on each HealthTick the fuse_over_limit rule reads
 	// the site meter's live per-phase currents from telemetry and
 	// compares against cfg.Fuse.MaxAmps. Closes over cfg + cfgMu so
