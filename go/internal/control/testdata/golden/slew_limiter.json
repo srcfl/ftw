@@ -1,7 +1,7 @@
 {
   "family": "slew_limiter",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "a8b696aef4738b9099fefe330f7a0cb61ffe772f",
+  "ftw_commit": "74d77a20d58cb902f5f62325520498143e2a2d19",
   "record_count": 127,
   "records": [
     {
@@ -4432,17 +4432,17 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -778.96,
+          "target_w": -764.5600000000001,
           "clamped": false
         },
         {
           "driver": "pixii",
-          "target_w": -778.96,
+          "target_w": -764.5600000000001,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -389.48,
+          "target_w": -382.28000000000003,
           "clamped": false
         }
       ],
@@ -4465,9 +4465,9 @@
       },
       "site_totals": {
         "battery_current_w": 467,
-        "battery_target_sum_w": -1947.4,
+        "battery_target_sum_w": -1911.4,
         "raw_grid_w": 4024,
-        "projected_grid_w": 1609.6
+        "projected_grid_w": 1645.6
       }
     },
     {
@@ -4645,7 +4645,7 @@
         },
         {
           "driver": "sungrow",
-          "target_w": 936.986301369863,
+          "target_w": 913.3150684931506,
           "clamped": false
         }
       ],
@@ -4670,9 +4670,9 @@
       },
       "site_totals": {
         "battery_current_w": -627,
-        "battery_target_sum_w": 488.986301369863,
+        "battery_target_sum_w": 465.31506849315065,
         "raw_grid_w": -3360,
-        "projected_grid_w": -2244.013698630137
+        "projected_grid_w": -2267.6849315068494
       }
     },
     {
@@ -5999,7 +5999,7 @@
       },
       "site_totals": {
         "battery_current_w": 2929,
-        "battery_target_sum_w": 235.00000000000017,
+        "battery_target_sum_w": 235.0000000000001,
         "raw_grid_w": 13734,
         "projected_grid_w": 11040
       }
@@ -8807,7 +8807,7 @@
         },
         {
           "driver": "pixii",
-          "target_w": 396.1600000000001,
+          "target_w": 410.56000000000006,
           "clamped": false
         },
         {
@@ -8838,9 +8838,9 @@
       },
       "site_totals": {
         "battery_current_w": 3544,
-        "battery_target_sum_w": 2690.16,
+        "battery_target_sum_w": 2704.56,
         "raw_grid_w": 4256,
-        "projected_grid_w": 3402.16
+        "projected_grid_w": 3416.56
       }
     },
     {
@@ -10053,9 +10053,9 @@
       },
       "site_totals": {
         "battery_current_w": 4267,
-        "battery_target_sum_w": 5849.800000000001,
+        "battery_target_sum_w": 5849.8,
         "raw_grid_w": -2638,
-        "projected_grid_w": -1055.199999999999
+        "projected_grid_w": -1055.1999999999998
       }
     },
     {

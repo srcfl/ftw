@@ -1920,12 +1920,15 @@ func ComputeDispatch(
 		// import must never lower this target and cause battery-fed export.
 		activeGridTargetW := state.GridTargetW
 		// A battery that may not export holds the whole dead band at or
-		// above 0 W while it discharges. Aimed at 0 W, each drop in house
-		// load sold battery energy until the next correction, about as
-		// often as the site imported. A little import costs less: that
-		// energy stays in the battery for later. Standby readings and
-		// discharges inside the dead band keep the plain target.
-		if currentTotal < -state.GridToleranceW && state.Mode.batteryMayNotExport() {
+		// above 0 W when the plain target asks it to discharge. Aimed at
+		// 0 W, each drop in house load sold battery energy until the next
+		// correction, about as often as the site imported, and a negative
+		// planned grid had the battery export outright. A little import
+		// costs less: that energy stays in the battery for later. A
+		// discharge inside the dead band, such as a standby reading, keeps
+		// the plain target.
+		if state.Mode.batteryMayNotExport() &&
+			currentTotal-(biasedGridW-activeGridTargetW) < -state.GridToleranceW {
 			activeGridTargetW = math.Max(activeGridTargetW, state.GridToleranceW)
 		}
 

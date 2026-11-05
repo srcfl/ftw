@@ -78,6 +78,34 @@ func TestNoExportDischargeHoldsTheBandAboveZero(t *testing.T) {
 	}
 }
 
+// The legacy plan path can carry a negative grid target, meant for PV
+// export. An idle battery under such a plan must not discharge toward it,
+// not even on the first tick.
+func TestNoExportIgnoresANegativePlannedGridForTheBattery(t *testing.T) {
+	for _, mode := range []Mode{ModePlannerCheap, ModePlannerPassiveArbitrage} {
+		t.Run(string(mode), func(t *testing.T) {
+			store, st := coverLoadSite(mode, 42, 800, 0)
+			st.SlotDirective = nil
+			st.PlanTarget = func(time.Time) (string, float64, string, bool) {
+				return string(ModeSelfConsumption), -1365, "plan", true
+			}
+			load, battery := 800.0, 0.0
+			for i := range 10 {
+				grid, soc := load+battery, 0.6
+				store.Update("ferroamp", telemetry.DerMeter, grid, nil, nil)
+				store.Update("ferroamp", telemetry.DerBattery, battery, &soc, nil)
+				battery = batteryTarget(t, store, st, battery)
+				if grid := load + battery; grid < 0 {
+					t.Fatalf("tick %d: discharging %.0f W exports %.0f W", i, -battery, -grid)
+				}
+			}
+			if battery > -700 {
+				t.Fatalf("settled at %.0f W, want the 800 W load covered", battery)
+			}
+		})
+	}
+}
+
 // Surplus that appears while the battery discharges is charged at once.
 // The bias may not turn that into grid import beyond the dead band.
 func TestNoExportBiasChargesSurplusWithoutImport(t *testing.T) {
