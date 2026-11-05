@@ -195,9 +195,14 @@ objective. Unknown bounds and gaps remain null. When executed pulse cost and
 the optimized cost model differ, report `feasible` and omit the cost bound.
 Core validates physical execution; it does not independently prove optimality.
 
-Current Core allows 500 ms for small plans and 5 s for larger plans, demand
-charges or hourly import caps, with a 7 s transport timeout. It reduces the
-budget near the first slot's end and leaves 50 ms for validation/publication.
+Core makes no worker call when less than 500 ms of the first slot remain. It
+allows 500 ms for small plans, 1.5 s with an active car, and 5 s when
+slots × (3 × batteries + 2 × active cars) is at least 965, or when the request
+carries PV curtailment, demand charges or hourly import caps. The request's
+`time_limit_s` is the smaller of that budget and 5.6 s; Core starts the worker
+with `--time-limit=5s`. The transport timeout is 7 s. Near the first slot's end
+Core keeps 50 ms for validation and publication and a reply margin of
+max(5% of the remaining time after that, 30 ms).
 These are compute and call budgets, not a proven wall-time SLA. Measure
 queueing, startup, decoding, solving, replay, encoding and Core validation
 separately when changing them.
