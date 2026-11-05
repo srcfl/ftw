@@ -64,15 +64,17 @@ func energyplanBudget(slots []Slot, p Params, hours bool) time.Duration {
 	if len(slots)*assets >= 193*5 || p.PVCurtailment.MinW > 0 || len(p.DemandCharges) > 0 || hours {
 		budget = energyplanFleetBudget
 	}
-	remaining := remainingFirstSlot(slots)
-	if remaining < energyplanSmallBudget {
+	return min(budget, energyplanSolveTime(remainingFirstSlot(slots)-energyplanPublishMargin))
+}
+
+// energyplanSolveTime is the longest limit a worker can use and still answer
+// before a call deadline toDeadline away. It is zero below Core's no-call
+// threshold: less than energyplanSmallBudget left in the first slot.
+func energyplanSolveTime(toDeadline time.Duration) time.Duration {
+	if toDeadline < energyplanSmallBudget-energyplanPublishMargin {
 		return 0
 	}
-	deadline := remaining - energyplanPublishMargin
-	if available := deadline - max(deadline/20, energyplanReplyMargin); available < budget {
-		return available
-	}
-	return budget
+	return toDeadline - max(toDeadline/20, energyplanReplyMargin)
 }
 
 // Optimize solves the slots Service selects, including point and caution
