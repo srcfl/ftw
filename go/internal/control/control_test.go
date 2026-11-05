@@ -372,8 +372,10 @@ func TestPlannerSelfIdleGateLeavesExistingDischargeAloneInsideDeadband(t *testin
 		Strategy:        "self_consumption",
 	}
 	// Grid balanced — battery is covering load fine. Deadband → no
-	// dispatch issued, but the running battery state is preserved.
-	store := seedStore(0, []struct {
+	// dispatch issued, but the running battery state is preserved. A
+	// battery that may not export holds the band above 0 W, so the
+	// balanced grid imports a little.
+	store := seedStore(20, []struct {
 		name          string
 		currentW, soc float64
 	}{
