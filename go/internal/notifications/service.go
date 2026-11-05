@@ -107,6 +107,11 @@ func DefaultRules() []config.NotificationRule {
 		// the sentences come from the catalogue, never from templates.
 		{Type: PushDriverOffline, Enabled: false, ThresholdS: DefaultThresholdS, Priority: 4, CooldownS: DefaultCooldownS},
 		{Type: PushFuseOverLimit, Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
+		// A device that does not do what FTW asked, for ten minutes. On by
+		// default (Fredrik, 5 Nov 2026): a battery that charged while FTW
+		// asked it to discharge said so on the box's page alone, and the
+		// owner looking at the phone never heard.
+		{Type: PushControlNotFollowing, Enabled: true, ThresholdS: DefaultThresholdS, Priority: 4, CooldownS: DefaultCooldownS},
 		// FTW Cloud on or off. The only rules on by default: each says the
 		// house has started or stopped sending a readable copy of itself to
 		// a Sourceful service, and every owner should hear that without
@@ -138,7 +143,7 @@ func KnownRuleTypes() []string {
 		EventFuseOverLimit, EventConcurrentDriversOffline,
 		PushChargingConnected, PushChargingSessionComplete, PushChargingInterrupted,
 		PushChargingGoalAtRisk, PushUpdateInstalled, PushDriverOffline, PushFuseOverLimit,
-		PushCloudGranted, PushCloudRevoked, PushAgentAdded, PushAgentRequest,
+		PushControlNotFollowing, PushCloudGranted, PushCloudRevoked, PushAgentAdded, PushAgentRequest,
 		PushAgentExpiring, PushApprovalKeySet, PushOwnerAdded, PushCarWhich,
 	}
 }
@@ -282,9 +287,14 @@ type Service struct {
 	// Used by the fuse_over_limit rule to enforce the threshold_s
 	// sustained-over check, analogous to driver_offline's threshold.
 	fuseFirstOverAt map[string]time.Time
-	sent            uint64
-	failed          uint64
-	now             func() time.Time
+	// controlFirstAt[driver|kind] is when the control rule first saw a
+	// device function not following; controlCheckedAt when it last asked.
+	controlReader    ControlReader
+	controlFirstAt   map[string]time.Time
+	controlCheckedAt time.Time
+	sent             uint64
+	failed           uint64
+	now              func() time.Time
 	// charging answers what the plug-in rule needs to know about a
 	// loadpoint; connectedSettle is how long it waits before asking.
 	charging        func(loadpointID string) (ChargingFacts, bool)
@@ -301,6 +311,7 @@ func New(cfg *config.Notifications, pub Publisher, lookup DeviceLookup) *Service
 		alreadyFired:    map[string]bool{},
 		activeAlert:     map[string]bool{},
 		fuseFirstOverAt: map[string]time.Time{},
+		controlFirstAt:  map[string]time.Time{},
 		now:             time.Now,
 		connectedSettle: ConnectedSettle,
 	}
@@ -398,6 +409,9 @@ func (s *Service) Subscribe(bus *events.Bus) {
 		// Fuse rule runs off the same HealthTick cadence so brief
 		// inrush currents don't fire without the threshold sustaining.
 		go s.evaluateFuse(ev.Now)
+		// The control rule asks the box's own answer to "Are we in
+		// control?" on the same cadence, at most every 30 s.
+		go s.evaluateControl(ev.Now)
 	})
 	bus.Subscribe(events.KindNotificationTest, func(e events.Event) {
 		ev, ok := e.(events.NotificationTest)
