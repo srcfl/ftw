@@ -81,6 +81,14 @@ func (m Mode) IsPlannerMode() bool {
 		m == ModePlannerArbitrage
 }
 
+// batteryMayNotExport reports the planner modes whose battery never sells to
+// the grid. Only planner_arbitrage may.
+func (m Mode) batteryMayNotExport() bool {
+	return m == ModePlannerSelf ||
+		m == ModePlannerCheap ||
+		m == ModePlannerPassiveArbitrage
+}
+
 // PlanTargetFunc returns the current slot as mode, grid target W,
 // decision id, and ok. ok false means the plan is missing. The decision
 // id is report metadata. New callers use SlotDirectiveFunc.
@@ -1911,6 +1919,15 @@ func ComputeDispatch(
 		// import/export energy is observed separately by the API; accumulated
 		// import must never lower this target and cause battery-fed export.
 		activeGridTargetW := state.GridTargetW
+		// A battery that may not export holds the whole dead band at or
+		// above 0 W while it discharges. Aimed at 0 W, each drop in house
+		// load sold battery energy until the next correction, about as
+		// often as the site imported. A little import costs less: that
+		// energy stays in the battery for later. Standby readings and
+		// discharges inside the dead band keep the plain target.
+		if currentTotal < -state.GridToleranceW && state.Mode.batteryMayNotExport() {
+			activeGridTargetW = math.Max(activeGridTargetW, state.GridToleranceW)
+		}
 
 		var errW float64
 		switch effectiveMode {
