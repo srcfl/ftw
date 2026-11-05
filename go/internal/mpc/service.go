@@ -138,6 +138,10 @@ type Service struct {
 	// enforces it. Nil or zero W plans without it. Called without s.mu; it
 	// may take the control lock.
 	ImportCeiling func() ImportCeiling
+	// HourImport returns the clock hour in progress as Core's live import
+	// counter measured it (control.MeasuredHourImport). The demand charges'
+	// hour in progress uses it before the import history. Nil: history only.
+	HourImport func() HourImport
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
 	Load               LoadPredictor // optional — overrides flat BaseLoad
