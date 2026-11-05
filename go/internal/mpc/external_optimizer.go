@@ -229,6 +229,17 @@ func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params
 			return Plan{}, fmt.Errorf("prepare optimizer request: %w", err)
 		}
 	}
+	if deadline, ok := ctx.Deadline(); ok && o.timeBudget != nil {
+		// The budget counts from the frozen execution start. A later call,
+		// such as caution after a point solve, has less time before its own
+		// deadline, and a worker that uses its whole limit must answer by it.
+		left := time.Until(deadline)
+		limit := energyplanSolveTime(left)
+		if limit <= 0 {
+			return Plan{}, fmt.Errorf("remaining call time %s is below the Energyplan budget", left)
+		}
+		request.Settings.TimeLimitS = math.Min(request.Settings.TimeLimitS, limit.Seconds())
+	}
 	payload, err = json.Marshal(request)
 	if err != nil {
 		return Plan{}, fmt.Errorf("encode optimizer request: %w", err)
