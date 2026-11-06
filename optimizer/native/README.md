@@ -8,7 +8,7 @@ The [Energyplan contract](../../docs/energyplan-contract.md) defines the shared
 planning and forecast boundary, result meanings, units and failure rules.
 Core owns it; Energyplan keeps an identical copy.
 
-Energyplan 0.6.0 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
+Energyplan 0.7.0 uses the Home Use Binary License in `bundle/LICENSE.txt`. It
 permits private household use with FTW and free noncommercial redistribution
 for that use. Commercial use, OEM bundles, paid installation and services need
 a separate written license from Sourceful Labs AB. FTW's AGPL code has a
@@ -58,8 +58,10 @@ explicitly, or `core` to select Core DP. Stable and development
 builds keep Core as the unset default; Windows and macOS have no required
 bundled worker.
 
-Energyplan uses the same downside PV forecast as Core. Small requests get a
-500 ms solve budget; larger fleets and PV-control requests get 5 s.
+Energyplan uses the same downside PV forecast as Core. Core's call budgets
+(500 ms, 1.5 s with an active car, 5 s for larger fleets and for PV-control,
+demand-charge and import-cap requests, each fitted to its call's deadline) are
+in the contract.
 Core applies PV uncertainty once when forming the downside horizon. This does
 not add worker scenarios or extend the solve budget by itself.
 The transport timeout is 7 s. After Core validates and publishes a plan, one

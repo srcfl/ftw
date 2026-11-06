@@ -545,7 +545,7 @@ func TestNativeDemandChargesOnWeekdayHour(t *testing.T) {
 
 // A worker that announces demand_elapsed_hours takes the hour in progress
 // that began before slot 0 and today's completed peak in today's group, and
-// Core accepts its plan. The bundled worker skips until its pin takes them.
+// Core accepts its plan. The bundled worker must announce the feature.
 func TestNativeEnergyplanTakesElapsedDemandHours(t *testing.T) {
 	binary := os.Getenv("FTW_NATIVE_SOLVER")
 	if binary == "" {
@@ -563,7 +563,7 @@ func TestNativeEnergyplanTakesElapsedDemandHours(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !optimizerHasFeature(info, "demand_elapsed_hours") {
-		t.Skip("this worker does not take demand_elapsed_hours")
+		t.Fatal("the bundled worker does not announce demand_elapsed_hours")
 	}
 	slots, importWh, now := weekdayEvening(t, true)
 	evening := time.Date(2026, 9, 9, 20, 0, 0, 0, time.UTC)
