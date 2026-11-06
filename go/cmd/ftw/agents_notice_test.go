@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +10,8 @@ import (
 	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/appuplink"
+	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/protocol"
 )
 
@@ -44,6 +47,48 @@ func TestAnAgentAddedAtTheBoxPageNamesItsClient(t *testing.T) {
 	}
 	if len(notices) != 2 || notices[1] != (sent{protocol.PushAgentAdded, "Claude"}) {
 		t.Fatalf("a widened grant: notices %+v", notices)
+	}
+}
+
+// noSubscriptions is web push before a phone has stored a subscription.
+type noSubscriptions struct{}
+
+func (noSubscriptions) Publish(context.Context, notifications.Message) error {
+	return notifications.ErrNothingToSend
+}
+
+// A phone paired as the first owner has no web push subscription yet, so the
+// box's own transports have nobody to tell. FTW Cloud took the owner.added
+// notice for the owners' phones, and the history says sent, not failed
+// (#1785). When FTW Cloud did not take it, nobody was told.
+func TestTheHistoryCountsTheNoticeFTWCloudTook(t *testing.T) {
+	for _, c := range []struct {
+		queued bool
+		want   string
+	}{{true, "sent"}, {false, "failed"}} {
+		svc := notifications.New(nil, nil, nil)
+		svc.AddPublisher(noSubscriptions{})
+		bus := events.NewBus()
+		svc.Subscribe(bus)
+		got := make(chan events.NotificationDispatched, 1)
+		bus.Subscribe(events.KindNotificationDispatched, func(e events.Event) {
+			if ev, ok := e.(events.NotificationDispatched); ok {
+				got <- ev
+			}
+		})
+		notices := &cloudNotices{}
+		notices.svc.Store(svc)
+		p := &agentPorts{notices: notices, notice: func(string, string) bool { return c.queued }}
+
+		p.push(protocol.PushOwnerAdded, "")
+		select {
+		case ev := <-got:
+			if ev.EventType != protocol.PushOwnerAdded || ev.Status != c.want {
+				t.Fatalf("FTW Cloud took it: %v; history %s %q (%s)", c.queued, ev.EventType, ev.Status, ev.Error)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("no history row")
+		}
 	}
 }
 
