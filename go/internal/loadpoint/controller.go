@@ -336,6 +336,7 @@ type EVSample struct {
 	PowerMaxAge          time.Duration
 	EnergyAt             time.Time
 	Connected            bool
+	RequestKnown         bool
 	RequestActive        bool
 	DeviceID             string
 	SessionID            string
