@@ -564,13 +564,14 @@ unknown `t`.
 | `slotMs` | uint | Slot length. Where stored slots differ in length, the box repeats a longer slot's price across `slotMs` slots |
 | `spotMinor` | [int or null] | Market price, minor units per kWh |
 | `totalMinor` | [int or null] | What the household pays, tariff and VAT included |
+| `vatPermille` | int | The VAT rate in `totalMinor`, in permille: 250 is 25 %. 0 means no VAT; an older box leaves it out, and the phone reads that as unknown |
 
 `totalMinor` shows the household's tariff, and the privacy notice says so. The
 phone sees how far the slots reach. The window runs from the start of today to
 the end of tomorrow. Because it starts at midnight and not now, its hash moves
-only when new prices land. The box looks at prices once a minute and sends
-`prices` only when a hash of `t0Ms`, `slotMs`, `spotMinor` and `totalMinor`
-changes. A gap between stored slots is `null`.
+only when new prices land or the VAT rate changes. The box looks at prices once a minute and sends
+`prices` only when a hash of `t0Ms`, `slotMs`, `spotMinor`, `totalMinor` and
+`vatPermille` changes. A gap between stored slots is `null`.
 
 ### `plan`: `ftw.plan.read`
 

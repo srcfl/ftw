@@ -363,6 +363,23 @@ func TestFromConfigDefaultsZoneAndVAT(t *testing.T) {
 	}
 }
 
+// VATPercent is the rate the totals are taxed at: the default when the config
+// sets none, and whatever a reload swaps in after that. The app's price answer
+// and FTW Cloud's tile both send it, so it must never be the config's 0.
+func TestVATPercentIsTheRateTheTotalsAreTaxedAt(t *testing.T) {
+	s := FromConfig(&config.Price{Provider: "sourceful", GridTariffOreKwh: 30}, nil, nil)
+	if got := s.VATPercent(); got != 25 {
+		t.Fatalf("unset VAT reads as %v, want the default 25", got)
+	}
+	if _, total := s.Applier.Apply(1.00); total != (100+30)*(1+s.VATPercent()/100) {
+		t.Fatalf("total %v is not taxed at the rate VATPercent reports", total)
+	}
+	s.SetApplier(Applier{GridTariffOreKwh: 30, VATPercent: 25.5})
+	if got := s.VATPercent(); got != 25.5 {
+		t.Fatalf("after a reload VAT reads as %v, want 25.5", got)
+	}
+}
+
 // A base_url reads that server only: a day it does not have stays empty
 // instead of falling back to live Nord Pool prices.
 func TestFromConfigBaseURLReadsOnlyThatServer(t *testing.T) {

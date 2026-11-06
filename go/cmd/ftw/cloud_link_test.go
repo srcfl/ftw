@@ -27,13 +27,16 @@ import (
 func TestPriceColumnsRepeatLongSlotsAndLeaveGapsNull(t *testing.T) {
 	t0 := int64(1_791_763_200_000)
 	q := int64(15 * 60_000)
-	p := priceColumns("SE3", "SEK", []appproto.PricePoint{
+	p := priceColumns("SE3", "SEK", 25.5, []appproto.PricePoint{
 		{StartMs: t0 + 4*q, LenMin: 60, SpotMinor: 40.4, TotalMinor: 110.6},
 		{StartMs: t0, LenMin: 15, SpotMinor: 41.5, TotalMinor: 112},
 		{StartMs: t0 + q, LenMin: 15, SpotMinor: -2.4, TotalMinor: 60},
 	})
 	if p.T0Ms != t0 || p.SlotMs != q || len(p.SpotMinor) != 8 || len(p.TotalMinor) != 8 {
 		t.Fatalf("columns %+v", p)
+	}
+	if p.VATPermille != 255 {
+		t.Fatalf("VAT 25.5 %% went out as %d permille, want 255", p.VATPermille)
 	}
 	want := []any{int64(42), int64(-2), nil, nil, int64(40), int64(40), int64(40), int64(40)}
 	for i, w := range want {

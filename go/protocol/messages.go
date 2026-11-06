@@ -613,6 +613,14 @@ type Price struct {
 	// afternoon, so a window asked for at breakfast genuinely ends early, and
 	// saying so beats drawing a cliff the market did not have.
 	Stale bool `cbor:"stale"`
+	// VATPermille is the VAT rate the box applies to TotalMinor, in permille:
+	// 250 is 25 %, 255 is 25.5 %. It is the rate after the box's default, so
+	// 0 means no VAT. A box that predates the field leaves it out, and a
+	// client reads absent as unknown. It lets an app show spot with VAT at
+	// the box's own rate instead of a guess. The box applies a rate when it
+	// stores a slot and rewrites today and tomorrow every hour, so after a
+	// change older slots keep the rate they were stored with.
+	VATPermille int64 `cbor:"vatPermille"`
 }
 
 // --------------------------------------------------------------------------

@@ -155,8 +155,9 @@ func vectorBodies(grantKey []byte, boxPK []byte) []struct {
 		{"prices", "box", MsgPrices, Prices{
 			Header: h(6, 64_520), Zone: "SE3", Currency: "SEK",
 			T0Ms: 1_791_820_800_000, SlotMs: 900_000,
-			SpotMinor:  []*int64{i64(42), i64(40), nil, i64(-3)},
-			TotalMinor: []*int64{i64(118), i64(115), nil, i64(71)},
+			SpotMinor:   []*int64{i64(42), i64(40), nil, i64(-3)},
+			TotalMinor:  []*int64{i64(118), i64(115), nil, i64(71)},
+			VATPermille: 250,
 		}},
 		{"hb", "box", MsgHB, HB{
 			Header: h(7, 69_020), Clock: ClockNTP, SrcRev: 1, LiveSeq: 4, LpSeq: 5,
