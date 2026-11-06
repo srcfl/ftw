@@ -120,35 +120,24 @@
   var chartEVs = {};
   var statusDisplayState = {};
 
-  // Resolve a CSS custom property off :root at call time. Lazy on
-  // purpose: a runtime theme toggle rewrites the oklch values, so we
-  // re-read every paint rather than caching at module load.
-  function cssVar(name) {
-    try {
-      var v = getComputedStyle(document.documentElement)
-        .getPropertyValue(name).trim();
-      return v || null;
-    } catch (_) {
-      return null;
-    }
+  // Colour is energy: every battery takes the storing hue and every car the
+  // car's. A site with several draws each one a step fainter, in name order,
+  // so their lines still read apart; the legend names them. Canvas strokes
+  // read the resolved role; legend swatches keep var() so they follow the
+  // theme.
+  var SERIES_STEPS = [1, 0.72, 0.5, 0.34];
+  function seriesStep(group, name) {
+    var i = Object.keys(group).sort().indexOf(name);
+    return SERIES_STEPS[Math.max(0, i) % SERIES_STEPS.length];
   }
-
-  // Deterministic color palette for battery series — each driver gets a
-  // stable color based on name hash so reload is consistent.
-  var BATTERY_PALETTE = [
-    "#f59e0b", "#8b5cf6", "#ec4899", "#06b6d4",
-    "#eab308", "#14b8a6", "#f43f5e", "#a855f7",
-  ];
+  function stepSwatch(role, step) {
+    return "color-mix(in srgb, var(" + role + ") " + Math.round(step * 100) + "%, transparent)";
+  }
   function batteryColor(name) {
-    // Route the "pixii" driver through the theme's --violet token so
-    // it visibly separates from "laddning bil" (which hashes to the
-    // same purple slot in EV_PALETTE). Other names fall through.
-    if (name === "pixii") return cssVar('--violet') || BATTERY_PALETTE[7];
-    var h = 0;
-    for (var i = 0; i < name.length; i++) {
-      h = ((h << 5) - h + name.charCodeAt(i)) | 0;
-    }
-    return BATTERY_PALETTE[Math.abs(h) % BATTERY_PALETTE.length];
+    return hexAlpha(chartColors().stores, seriesStep(chartBatteries, name));
+  }
+  function batterySwatch(name) {
+    return stepSwatch("--cyan", seriesStep(chartBatteries, name));
   }
   // A driver name → presentation label. Capitalize first letter so
   // "pixii" → "Pixii"; everything else passes through as-is.
@@ -171,43 +160,37 @@
 
   // Append a legend item for any newly-discovered battery driver. Uses
   // the same markup as the static legend entries so the click handler
-  // (delegated on #chart-legend) picks them up automatically.
-  function syncBatteryLegend() {
+  // (delegated on #chart-legend) picks them up automatically. A new name
+  // can shift the others' steps, so every swatch is set again.
+  function syncSeriesLegend(group, prefix, swatchFor, labelFor) {
     var host = document.getElementById("chart-legend");
     if (!host) return;
-    Object.keys(chartBatteries).forEach(function (name) {
-      var key = "bat:" + name;
-      if (host.querySelector('[data-toggle="' + cssEscape(key) + '"]')) return;
-      var span = document.createElement("span");
-      span.className = "legend-item";
-      span.dataset.toggle = key;
-      if (legendHidden[key]) span.classList.add("legend-off");
-      var swatch = document.createElement("span");
-      swatch.className = "legend-color";
-      swatch.style.background = batteryColor(name);
-      span.appendChild(swatch);
-      span.appendChild(document.createTextNode(" " + batteryLabel(name)));
-      host.appendChild(span);
+    Object.keys(group).forEach(function (name) {
+      var key = prefix + name;
+      var span = host.querySelector('[data-toggle="' + cssEscape(key) + '"]');
+      if (!span) {
+        span = document.createElement("span");
+        span.className = "legend-item";
+        span.dataset.toggle = key;
+        if (legendHidden[key]) span.classList.add("legend-off");
+        var swatch = document.createElement("span");
+        swatch.className = "legend-color";
+        span.appendChild(swatch);
+        span.appendChild(document.createTextNode(" " + labelFor(name)));
+        host.appendChild(span);
+      }
+      span.querySelector(".legend-color").style.background = swatchFor(name);
     });
   }
+  function syncBatteryLegend() {
+    syncSeriesLegend(chartBatteries, "bat:", batterySwatch, batteryLabel);
+  }
 
-  // EV chargers use a distinct palette (magenta/fuchsia family) so they
-  // can't be confused with batteries (amber/purple) or PV (green) in
-  // the live chart. Deterministic hash → stable color across reloads.
-  var EV_PALETTE = [
-    "#ec4899", "#d946ef", "#f97316", "#0ea5e9",
-    "#84cc16", "#f43f5e", "#a855f7", "#14b8a6",
-  ];
   function evColor(name) {
-    // Route "laddning bil" through the theme's --cyan token so it
-    // doesn't collide with the Pixii battery purple (both hash to
-    // the same purple slot in their respective palettes).
-    if (name === "laddning bil") return cssVar('--cyan') || EV_PALETTE[6];
-    var h = 0;
-    for (var i = 0; i < name.length; i++) {
-      h = ((h << 5) - h + name.charCodeAt(i)) | 0;
-    }
-    return EV_PALETTE[Math.abs(h) % EV_PALETTE.length];
+    return hexAlpha(chartColors().car, seriesStep(chartEVs, name));
+  }
+  function evSwatch(name) {
+    return stepSwatch("--violet", seriesStep(chartEVs, name));
   }
   function evLabel(name) {
     if (!name) return name;
@@ -222,22 +205,7 @@
     return slot;
   }
   function syncEVLegend() {
-    var host = document.getElementById("chart-legend");
-    if (!host) return;
-    Object.keys(chartEVs).forEach(function (name) {
-      var key = "ev:" + name;
-      if (host.querySelector('[data-toggle="' + cssEscape(key) + '"]')) return;
-      var span = document.createElement("span");
-      span.className = "legend-item";
-      span.dataset.toggle = key;
-      if (legendHidden[key]) span.classList.add("legend-off");
-      var swatch = document.createElement("span");
-      swatch.className = "legend-color";
-      swatch.style.background = evColor(name);
-      span.appendChild(swatch);
-      span.appendChild(document.createTextNode(" " + evLabel(name)));
-      host.appendChild(span);
-    });
+    syncSeriesLegend(chartEVs, "ev:", evSwatch, evLabel);
   }
   // Minimal CSS.escape polyfill (legend keys contain ':').
   function cssEscape(s) { return String(s).replace(/[^a-zA-Z0-9_-]/g, function(c) { return "\\" + c; }); }
@@ -1145,11 +1113,12 @@
     if (chartView === "energy") {
       function toKwh(arr) { return arr.map(function(x){ return x == null ? null : x / 1000; }); }
       series = [
-        { data: toKwh(chartHistory.e_import),     color: "#ef4444", width: 2, dash: [], name: "Import",     fill: true },
-        { data: toKwh(chartHistory.e_export),     color: "#22c55e", width: 2, dash: [], name: "Export",     fill: true },
-        { data: toKwh(chartHistory.e_pv),         color: "#10b981", width: 2, dash: [], name: "PV",         fill: true },
-        { data: toKwh(chartHistory.e_charged),    color: "#3b82f6", width: 2, dash: [], name: "Charged",    fill: false },
-        { data: toKwh(chartHistory.e_discharged), color: "#f59e0b", width: 2, dash: [], name: "Discharged", fill: false },
+        { data: toKwh(chartHistory.e_import),     color: C.grid,   width: 2, dash: [], name: "Import",     fill: true },
+        // One pink both ways: export is told apart by its dash, not a hue.
+        { data: toKwh(chartHistory.e_export),     color: C.grid,   width: 2, dash: [6, 4], name: "Export", fill: false },
+        { data: toKwh(chartHistory.e_pv),         color: C.solar,  width: 2, dash: [], name: "PV",         fill: true },
+        { data: toKwh(chartHistory.e_charged),    color: C.stores, width: 2, dash: [], name: "Charged",    fill: false },
+        { data: toKwh(chartHistory.e_discharged), color: C.gives,  width: 2, dash: [], name: "Discharged", fill: false },
         { data: toKwh(chartHistory.e_load),       color: C.load, width: 2, dash: [], name: "Load",       fill: false },
       ];
     } else {
@@ -1157,8 +1126,8 @@
       smoothedPVSeries = smoothSeriesForChart(chartHistory.pv, chartHistory.timestamps, chartSmoothMs);
       smoothedLoadSeries = smoothSeriesForChart(chartHistory.load, chartHistory.timestamps, chartSmoothMs);
       series = [
-        { data: smoothedGridSeries, color: "#ef4444", width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
-        { data: smoothedPVSeries,   color: "#22c55e", width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
+        { data: smoothedGridSeries, color: C.grid,  width: 2,   dash: [], name: "Grid", fill: true,  toggle: "grid" },
+        { data: smoothedPVSeries,   color: C.solar, width: 2,   dash: [], name: "PV",   fill: true,  toggle: "pv" },
         { data: smoothedLoadSeries, color: C.load, width: 1.5, dash: [], name: "Load", fill: false, toggle: "load" },
       ];
       // Append one actual/target pair per discovered battery driver.
@@ -1244,14 +1213,14 @@
     // it's immediately obvious what's measured vs predicted.
     var xNowShade = pad.left + plotW * (now - windowStart) / totalMs;
     if (xNowShade < pad.left + plotW) {
-      ctx.fillStyle = "rgba(251,191,36,0.06)"; // warm amber
+      ctx.fillStyle = hexAlpha(C.text, 0.04); // a trace of ink
       ctx.fillRect(xNowShade, pad.top, pad.left + plotW - xNowShade, plotH);
     }
 
     // Grid lines (drawn inside clip so they only appear in the plot area).
     // Walk yMin..yMax in yStep increments so every line lands on a round
     // number — that's what lets the y-axis labels stay readable.
-    ctx.strokeStyle = C.grid;
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 0.5;
     ctx.font = chartFontAxis;
     var steps = Math.round(yRange / yStep);
@@ -1367,13 +1336,14 @@
         ctx.stroke();
         ctx.setLineDash([]);
       };
-      if (!legendHidden.pv_fc)   drawForecast("pv_w",   "#86efac", lastActualPV);
-      if (!legendHidden.load_fc) drawForecast("load_w", "#fde68a", lastActualLoad);
+      // A forecast is a plan's mark: its hue, weaker than live.
+      if (!legendHidden.pv_fc)   drawForecast("pv_w",   hexAlpha(C.solar, 0.75), lastActualPV);
+      if (!legendHidden.load_fc) drawForecast("load_w", hexAlpha(C.load, 0.75), lastActualLoad);
     }
 
     // ---- Now-line separator (between past actuals and future forecast) ----
     var xNow = tsToX(now);
-    ctx.strokeStyle = "rgba(251,191,36,0.75)";
+    ctx.strokeStyle = hexAlpha(C.text, 0.75);
     ctx.lineWidth = 1.2;
     ctx.setLineDash([4, 4]);
     ctx.beginPath();
@@ -1381,8 +1351,8 @@
     ctx.lineTo(xNow, pad.top + plotH);
     ctx.stroke();
     ctx.setLineDash([]);
-    // No in-canvas "now" / "predicted →" labels — the amber shaded
-    // band + dashed vertical divider already communicate the boundary,
+    // No in-canvas "now" / "predicted →" labels — the shaded band +
+    // dashed vertical divider already communicate the boundary,
     // and the "now" text on the x-axis keeps the anchor obvious.
 
     ctx.restore();
@@ -1436,7 +1406,7 @@
     // where present is. Stroke width bumps on small screens so the
     // marker stays visible alongside the larger axis labels.
     var nowX = pad.left + plotW;
-    ctx.strokeStyle = C.grid;
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = chartNowStrokeW;
     ctx.beginPath();
     ctx.moveTo(nowX, pad.top);
@@ -1469,7 +1439,8 @@
       var fresh = ageMs < 5000;
       // Dot flashes briefly when fresh data lands (discrete, not breathing)
       var dotFlash = sinceFlash < 400 ? (1 - sinceFlash / 400) : 0;
-      ctx.fillStyle = fresh ? "#22c55e" : "#f59e0b";
+      // Live is a state; a reading that has gone quiet falls to ink2.
+      ctx.fillStyle = fresh ? C.live : C.dim;
       ctx.globalAlpha = 0.35 + dotFlash * 0.5;
       ctx.beginPath();
       ctx.arc(w - pad.right - 78, pad.top + 4, 3.5 + dotFlash * 3, 0, Math.PI * 2);
@@ -1479,7 +1450,7 @@
       ctx.arc(w - pad.right - 78, pad.top + 4, 2.5, 0, Math.PI * 2);
       ctx.fill();
       ctx.font = chartFontTooltip;
-      ctx.fillStyle = fresh ? C.dim : "#f59e0b";
+      ctx.fillStyle = C.dim;
       ctx.fillText(ageStr, w - pad.right - 70, pad.top + 8);
     }
 
@@ -1503,8 +1474,10 @@
     }
   }
 
-  // hex like "#ef4444" → "rgba(239,68,68,a)"
+  // "#rrggbb" or a resolved "rgb(r, g, b)" → "rgba(r,g,b,a)"
   function hexAlpha(hex, alpha) {
+    var rgb = /^rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(hex);
+    if (rgb) return "rgba(" + rgb[1] + "," + rgb[2] + "," + rgb[3] + "," + alpha + ")";
     var h = hex.replace("#", "");
     if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
     var r = parseInt(h.substr(0,2), 16);
@@ -1528,24 +1501,28 @@
     _colorProbe.style.color = "var(" + name + ", " + (fallback || "#888") + ")";
     return getComputedStyle(_colorProbe).color || fallback || "#888";
   }
-  // Theme-aware chart chrome colors. Series hues stay fixed (they read on
-  // both themes); only text / gridlines / tooltip surface / the neutral
-  // "load" line flip — those are what go invisible on a light background.
-  // Cached so the animation loop doesn't getComputedStyle every frame —
-  // only recomputed when the active theme actually changes.
+  // Theme-aware chart colours: chrome, and the energy and state roles the
+  // series draw in. Cached so the animation loop doesn't getComputedStyle
+  // every frame — only recomputed when the active theme actually changes.
   var _chartColors = null, _chartColorsTheme = null;
   function chartColors() {
     var theme = document.documentElement.getAttribute("data-theme") || "";
     if (_chartColors && _chartColorsTheme === theme) return _chartColors;
     _chartColorsTheme = theme;
     _chartColors = {
-      text:    cssColor("--fg", "#e6e6e6"),
-      dim:     cssColor("--fg-dim", "#aaaaaa"),
-      muted:   cssColor("--fg-muted", "#888888"),
-      grid:    cssColor("--line", "#2a2a2a"),
-      surface: cssColor("--ink-raised", "#161616"),
-      accent:  cssColor("--accent-e", "#fbbf24"),
-      load:    cssColor("--white-s", "#e8e8e8"),
+      text:    cssColor("--fg", "#eef3ff"),
+      dim:     cssColor("--fg-dim", "#9aa5b8"),
+      muted:   cssColor("--fg-muted", "#727d90"),
+      line:    cssColor("--line", "#1b2433"),
+      surface: cssColor("--ink-raised", "#0b111c"),
+      accent:  cssColor("--accent-e", "#eef3ff"),
+      load:    cssColor("--white-s", "#eef3ff"),
+      solar:   cssColor("--amber", "#ffe14d"),
+      stores:  cssColor("--cyan", "#18d9ff"),
+      gives:   cssColor("--energy-gives", "#ffb000"),
+      grid:    cssColor("--red-e", "#ff5fa8"),
+      car:     cssColor("--violet", "#b69cff"),
+      live:    cssColor("--live", "#83f52c"),
     };
     return _chartColors;
   }
@@ -1584,16 +1561,16 @@
 
     // Tooltip box — labels match current view
     var labels = chartView === "energy" ? [
-      { name: "Import",     data: chartHistory.e_import,     color: "#ef4444" },
-      { name: "Export",     data: chartHistory.e_export,     color: "#22c55e" },
-      { name: "PV",         data: chartHistory.e_pv,         color: "#10b981" },
-      { name: "Charged",    data: chartHistory.e_charged,    color: "#3b82f6" },
-      { name: "Discharged", data: chartHistory.e_discharged, color: "#f59e0b" },
+      { name: "Import",     data: chartHistory.e_import,     color: C.grid },
+      { name: "Export",     data: chartHistory.e_export,     color: C.grid, dash: true },
+      { name: "PV",         data: chartHistory.e_pv,         color: C.solar },
+      { name: "Charged",    data: chartHistory.e_charged,    color: C.stores },
+      { name: "Discharged", data: chartHistory.e_discharged, color: C.gives },
       { name: "Load",       data: chartHistory.e_load,       color: C.load },
     ] : (function () {
       var rows = [
-        { name: "Grid", data: chartHistory.grid, color: "#ef4444" },
-        { name: "PV",   data: chartHistory.pv,   color: "#22c55e" },
+        { name: "Grid", data: chartHistory.grid, color: C.grid },
+        { name: "PV",   data: chartHistory.pv,   color: C.solar },
         { name: "Load", data: chartHistory.load, color: C.load },
       ];
       // Battery rows render their target inline as "actual W (→ target W)"
@@ -1622,7 +1599,7 @@
     var boxY = l.pad.top + 5;
 
     ctx.fillStyle = C.surface;
-    ctx.strokeStyle = C.grid;
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
     ctx.fillRect(boxX, boxY, boxW, boxH);
     ctx.strokeRect(boxX, boxY, boxW, boxH);
@@ -1634,8 +1611,20 @@
     labels.forEach(function (lab, idx) {
       if (i >= lab.data.length) return;
       var y = boxY + (idx + 2) * lineHeight - 4;
-      ctx.fillStyle = lab.color;
-      ctx.fillRect(boxX + 6, y - 8, 8, 8);
+      if (lab.dash) {
+        // A dashed series gets a dashed mark, as in the legend.
+        ctx.strokeStyle = lab.color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([3, 2]);
+        ctx.beginPath();
+        ctx.moveTo(boxX + 6, y - 4);
+        ctx.lineTo(boxX + 14, y - 4);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.fillStyle = lab.color;
+        ctx.fillRect(boxX + 6, y - 8, 8, 8);
+      }
       ctx.fillStyle = lab.dim ? C.muted : C.text;
       ctx.fillText(lab.name, boxX + 18, y);
       ctx.textAlign = "right";
@@ -1670,7 +1659,7 @@
     var x = l.pad.left + l.plotW * (ts - l.windowStart) / l.totalMs;
 
     // Vertical line
-    ctx.strokeStyle = "rgba(251,191,36,0.4)";
+    ctx.strokeStyle = hexAlpha(C.text, 0.4);
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
     ctx.beginPath();
@@ -1681,12 +1670,12 @@
 
     // Tooltip box for forecast values
     var labels = [
-      { name: "PV pred",   val: -a.pv_w,  color: "#86efac" },
-      { name: "Load pred", val: a.load_w, color: "#fde68a" },
-      { name: "Battery",   val: a.battery_w, color: "#f59e0b", showSign: true },
-      { name: "Grid",      val: a.grid_w,    color: "#ef4444", showSign: true },
-      { name: "SoC",       val: a.soc != null ? Math.round(a.soc * 100) + "%" : "—", color: "#60a5fa", literal: true },
-      { name: "Price",     val: fmtPricePerKwh(a.price_ore), color: "#fbbf24", literal: true },
+      { name: "PV pred",   val: -a.pv_w,  color: C.solar },
+      { name: "Load pred", val: a.load_w, color: C.load },
+      { name: "Battery",   val: a.battery_w, color: a.battery_w < 0 ? C.gives : C.stores, showSign: true },
+      { name: "Grid",      val: a.grid_w,    color: C.grid, showSign: true },
+      { name: "SoC",       val: a.soc != null ? Math.round(a.soc * 100) + "%" : "—", color: C.stores, literal: true },
+      { name: "Price",     val: fmtPricePerKwh(a.price_ore), color: hexAlpha(C.text, 0.5), literal: true },
     ];
 
     var lineHeight = 16;
@@ -4911,14 +4900,17 @@
     var legend = document.getElementById("chart-legend");
     if (!legend) return;
     var items = chartView === "energy" ? [
-      ["#ef4444", "Import"], ["#22c55e", "Export"], ["#10b981", "PV"],
-      ["#3b82f6", "Charged"], ["#f59e0b", "Discharged"], ["var(--white-s)", "Load"],
+      ["var(--red-e)", "Import"], ["var(--green-e)", "Export", true], ["var(--amber)", "PV"],
+      ["var(--cyan)", "Charged"], ["var(--energy-gives)", "Discharged"], ["var(--white-s)", "Load"],
     ] : [
-      ["#ef4444", "Grid"], ["#22c55e", "PV"], ["var(--white-s)", "Load"],
-      ["#f59e0b", "Ferroamp"], ["#8b5cf6", "Sungrow"],
+      ["var(--red-e)", "Grid"], ["var(--amber)", "PV"], ["var(--white-s)", "Load"],
+      [stepSwatch("--cyan", 1), "Ferroamp"], [stepSwatch("--cyan", 0.72), "Sungrow"],
     ];
     legend.innerHTML = items.map(function(it) {
-      return '<span class="legend-item"><span class="legend-color" style="background:'+it[0]+'"></span> '+it[1]+'</span>';
+      var swatch = it[2]
+        ? '<span class="legend-color legend-dash" style="border-color:'+it[0]+'"></span>'
+        : '<span class="legend-color" style="background:'+it[0]+'"></span>';
+      return '<span class="legend-item">'+swatch+' '+it[1]+'</span>';
     }).join('');
   }
 
@@ -5159,7 +5151,9 @@
   // compact stacked canvas of (battery action bars, SoC line) over
   // the last 24 h. Mirrors the Plan card's lower charts so the two
   // cards have matching visual weight. Read-only — no interaction.
+  var lastLiveHistoryItems = null;
   function renderLiveHistory(items) {
+    lastLiveHistoryItems = items;
     var canvas = document.getElementById("live-history-chart");
     if (!canvas || !items || !items.length) return;
     // Normalise the /api/history payload: `ts` for the timestamp and
@@ -5216,15 +5210,15 @@
     };
 
     // Zero baseline for battery
-    ctx.strokeStyle = C.grid;
+    ctx.strokeStyle = C.line;
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.left, batMid);
     ctx.lineTo(pad.left + plotW, batMid);
     ctx.stroke();
 
-    // Battery action bars. Charge (positive) above zero in amber-ish
-    // (matches Plan's "charge" colour), discharge in violet-ish.
+    // Battery action bars. Charge (positive) above zero in the storing
+    // hue, discharge below in the giving hue, as on the Plan.
     var barW = Math.max(1, plotW / points.length - 0.5);
     for (var j = 0; j < points.length; j++) {
       var p = points[j];
@@ -5232,7 +5226,7 @@
       if (Math.abs(bw) < 50) continue; // suppress noise
       var x = xOf(p.ts_ms);
       var y = yOfBat(bw);
-      ctx.fillStyle = bw > 0 ? "rgba(251,191,36,0.85)" : "rgba(167,139,250,0.85)";
+      ctx.fillStyle = bw > 0 ? C.stores : C.gives;
       var h = Math.abs(y - batMid);
       var top = bw > 0 ? y : batMid;
       ctx.fillRect(x - barW / 2, top, barW, h);
@@ -5246,7 +5240,7 @@
       var v = Math.max(0, Math.min(100, pct || 0));
       return socTop + socH - (v / 100) * socH;
     };
-    ctx.strokeStyle = "rgba(34,211,238,0.95)";
+    ctx.strokeStyle = C.stores;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     var started = false;
@@ -5334,6 +5328,11 @@
     // fan out into identical /api/history requests — only the data is
     // shared; renderLiveHistory still re-measures the canvas each call.
     fetchLiveHistory();
+  });
+  // The 24h chart draws in theme roles, so it redraws from what it last
+  // showed when the theme flips. The live chart redraws every frame.
+  window.addEventListener("ftw-theme-change", function () {
+    if (lastLiveHistoryItems) renderLiveHistory(lastLiveHistoryItems);
   });
   requestAnimationFrame(animationFrame);
 })();

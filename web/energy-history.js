@@ -19,23 +19,32 @@
     pv_generation: 'Solar', consumer_use: 'Home use',
     vehicle_charge: 'Vehicle charge', vehicle_discharge: 'Vehicle discharge'
   };
+  // Colour is energy: the home is ink and the grid one hue both ways, so
+  // export hangs below the zero line and the side of zero says sold.
   var dailySeries = [
-    { key: 'load_wh', label: 'Home use', color: '#eab308' },
-    { key: 'pv_wh', label: 'Solar', color: '#22c55e' },
-    { key: 'import_wh', label: 'Grid import', color: '#ef4444' },
-    { key: 'export_wh', label: 'Grid export', color: '#f97316' }
+    { key: 'load_wh', label: 'Home use', role: 'text' },
+    { key: 'pv_wh', label: 'Solar', role: 'solar' },
+    { key: 'import_wh', label: 'Grid import', role: 'grid' },
+    { key: 'export_wh', label: 'Grid export, below the line', role: 'grid', below: true }
   ];
 
   function canvasColors() {
     return window.ftwThemeColors
       ? window.ftwThemeColors.palette()
       : {
-          text: '#e8e8e8',
-          dim: '#a0a0a0',
-          muted: '#858585',
-          line: '#2a2a2a',
-          panel: '#161616',
-          accent: '#f5b942'
+          text: '#eef3ff',
+          dim: '#9aa5b8',
+          muted: '#727d90',
+          line: '#1b2433',
+          panel: '#0b111c',
+          accent: '#eef3ff',
+          solar: '#ffe14d',
+          stores: '#18d9ff',
+          gives: '#ffb000',
+          grid: '#ff5fa8',
+          car: '#b69cff',
+          live: '#83f52c',
+          alarm: '#ff453a'
         };
   }
 
@@ -152,7 +161,7 @@
     var legend = document.getElementById('energy-history-legend');
     if (legend) {
       legend.innerHTML = dailySeries.map(function (series) {
-        return '<span><i style="background:' + series.color + '"></i>' + series.label + '</span>';
+        return '<span><i style="background:' + C[series.role] + '"></i>' + series.label + '</span>';
       }).join('') + (days.some(function (day) { return day.history_quality === 'estimated'; }) ? '<span>Home use includes estimates</span>' : '') + (days.some(function (day) { return dailySeries.some(function (series) { return day[series.key] == null; }); }) ? '<span>? Unknown</span>' : '');
     }
     if (!days.length) {
@@ -165,24 +174,46 @@
     var pad = { left: 52, right: 12, top: 14, bottom: 42 };
     var plotW = Math.max(1, width - pad.left - pad.right);
     var plotH = Math.max(1, height - pad.top - pad.bottom);
-    var maxWh = Math.max.apply(null, days.flatMap(function (day) {
-      return dailySeries.map(function (series) { return Math.max(0, Number(day[series.key]) || 0); });
-    }));
-    maxWh = Math.max(1000, maxWh);
+    var upWh = 0;
+    var downWh = 0;
+    days.forEach(function (day) {
+      dailySeries.forEach(function (series) {
+        var value = Math.max(0, Number(day[series.key]) || 0);
+        if (series.below) downWh = Math.max(downWh, value);
+        else upWh = Math.max(upWh, value);
+      });
+    });
+    upWh = Math.max(1000, upWh);
+    // One step for both sides, a quarter of the taller one, and whole steps
+    // each way, so the highest bar and the lowest export bar both reach a
+    // gridline with a label.
+    var stepWh = Math.max(upWh, downWh) / 4;
+    var upSteps = Math.ceil(upWh / stepWh - 1e-9);
+    var downSteps = Math.ceil(downWh / stepWh - 1e-9);
+    var whToPx = plotH / ((upSteps + downSteps) * stepWh);
+    var zeroY = pad.top + upSteps * stepWh * whToPx;
     var textColor = C.dim;
     var borderColor = C.line;
     ctx.font = '11px system-ui, sans-serif';
     ctx.fillStyle = textColor;
     ctx.strokeStyle = borderColor;
     ctx.lineWidth = 1;
-    for (var tick = 0; tick <= 4; tick += 1) {
-      var y = pad.top + plotH * tick / 4;
+    for (var tick = upSteps; tick >= -downSteps; tick -= 1) {
+      var y = zeroY - tick * stepWh * whToPx;
       ctx.beginPath();
       ctx.moveTo(pad.left, y);
       ctx.lineTo(width - pad.right, y);
       ctx.stroke();
       ctx.textAlign = 'right';
-      ctx.fillText((maxWh * (1 - tick / 4) / 1000).toFixed(0) + ' kWh', pad.left - 7, y + 4);
+      ctx.fillText((Math.abs(tick) * stepWh / 1000).toFixed(0) + ' kWh', pad.left - 7, y + 4);
+    }
+    // The labels below zero carry no sign; this word says what they count.
+    if (downSteps > 0) {
+      ctx.fillStyle = C.dim;
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('sold', pad.left + 3, zeroY + 11);
+      ctx.font = '11px system-ui, sans-serif';
     }
 
     var groupW = plotW / days.length;
@@ -194,13 +225,13 @@
       dailySeries.forEach(function (series, seriesIndex) {
         if (day[series.key] == null) {
           ctx.fillStyle = C.muted; ctx.textAlign = 'center';
-          ctx.fillText('?', startX + seriesIndex * (barW + barGap) + barW / 2, pad.top + plotH - 4);
+          ctx.fillText('?', startX + seriesIndex * (barW + barGap) + barW / 2, zeroY - 4);
           return;
         }
         var value = Math.max(0, Number(day[series.key]) || 0);
-        var barH = plotH * value / maxWh;
-        ctx.fillStyle = series.color;
-        ctx.fillRect(startX + seriesIndex * (barW + barGap), pad.top + plotH - barH, barW, barH);
+        var barH = value * whToPx;
+        ctx.fillStyle = C[series.role];
+        ctx.fillRect(startX + seriesIndex * (barW + barGap), series.below ? zeroY : zeroY - barH, barW, barH);
       });
     });
 
