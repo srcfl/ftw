@@ -42,12 +42,21 @@ func openStore(t *testing.T) *state.Store {
 	return st
 }
 
-// record writes the site from `from` to `to`, in time order and in one
-// transaction, leaving out any asset whose id skip returns true for at that
+// record writes the site from `from` to `to`, in time order and in
+// bounded batches, leaving out any asset whose id skip returns true for at that
 // time. A counter keeps counting while it is not read, as a meter's does.
 func record(t *testing.T, st *state.Store, from, to time.Time, skip func(id string, at time.Time) bool) {
 	t.Helper()
 	var obs []state.EnergyObservation
+	flush := func() {
+		if len(obs) == 0 {
+			return
+		}
+		if err := st.RecordTickWithOptionalHistory(nil, nil, obs); err != nil {
+			t.Fatal(err)
+		}
+		obs = nil
+	}
 	for at := from; !at.After(to); at = at.Add(tick) {
 		for id, flows := range site {
 			if skip != nil && skip(id, at) {
@@ -62,10 +71,13 @@ func record(t *testing.T, st *state.Store, from, to time.Time, skip func(id stri
 				obs = append(obs, o)
 			}
 		}
+		// A multi-day fixture must not consume the production transaction timeout
+		// in one call when SQLite is instrumented by the race detector.
+		if len(obs) >= 512 {
+			flush()
+		}
 	}
-	if err := st.RecordTickWithOptionalHistory(nil, nil, obs); err != nil {
-		t.Fatal(err)
-	}
+	flush()
 }
 
 // sharedDay is the whole test day, written once and only read.

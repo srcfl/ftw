@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/nativeupdate"
@@ -13,6 +14,26 @@ import (
 )
 
 const nativeTrialTimeout = 6 * time.Hour
+
+// Build metadata identifies local patches without changing the installed
+// release's SemVer identity. Published trial binaries still require an exact tag.
+func nativeSlotVersion(version string) string {
+	base, metadata, found := strings.Cut(version, "+")
+	if !found || !nativeupdate.ValidTag(base) {
+		return version
+	}
+	for _, id := range strings.Split(metadata, ".") {
+		if id == "" {
+			return version
+		}
+		for _, c := range id {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return version
+			}
+		}
+	}
+	return base
+}
 
 type nativeTrial struct {
 	manager nativeupdate.Manager
@@ -36,7 +57,7 @@ func beginNativeTrial(root, tag, version string) (*nativeTrial, error) {
 		return nil, err
 	}
 	if tag == "" {
-		if state.Current != version {
+		if state.Current != nativeSlotVersion(version) {
 			return nil, fmt.Errorf("native current slot %s does not match binary %s", state.Current, version)
 		}
 		return nil, nil
@@ -101,7 +122,7 @@ func reconcileNativeFallback(root, version string, checker *selfupdate.Checker) 
 		return
 	}
 	state, err := (nativeupdate.Manager{Root: root}).Read()
-	if err != nil || state.Current != version || state.LastFailed == "" || status.Target != state.LastFailed {
+	if err != nil || state.Current != nativeSlotVersion(version) || state.LastFailed == "" || status.Target != state.LastFailed {
 		return
 	}
 	switch status.State {
@@ -128,7 +149,7 @@ func markNativeCleanExit(root string) {
 	if root == "" {
 		return
 	}
-	if err := (nativeupdate.Manager{Root: root}).MarkCleanExit(Version); err != nil {
+	if err := (nativeupdate.Manager{Root: root}).MarkCleanExit(nativeSlotVersion(Version)); err != nil {
 		slog.Warn("native clean-exit mark could not be saved", "err", err)
 	}
 }

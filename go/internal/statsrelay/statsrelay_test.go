@@ -131,3 +131,51 @@ func TestOnlyTheGatewaysSealed204Counts(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The fixture must give the client and gateway the same clock, independent of
+// the machine running the test. The report body is for the previous UTC day.
+func TestRelayFixtureUsesOneClockForEnvelopeAndPayload(t *testing.T) {
+	for _, at := range []time.Time{
+		time.Date(2000, 1, 2, 9, 0, 0, 0, time.UTC),
+		time.Date(2040, 1, 2, 9, 0, 0, 0, time.UTC),
+		time.Date(2040, 1, 1, 23, 30, 0, 0, time.FixedZone("west", -2*60*60)),
+	} {
+		t.Run(at.Format(time.RFC3339), func(t *testing.T) {
+			client, gw, _ := statsrelaytest.New(t, at)
+			date := at.UTC().AddDate(0, 0, -1).Format(time.DateOnly)
+			body, err := json.Marshal(energywire.Report{Schema: energywire.Schema, Date: date, GridImport: 24})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = client.Send(context.Background(), body); err != nil {
+				t.Fatal("shared fixture clock refused", err)
+			}
+			reports := gw.Energy()
+			if len(reports) != 1 || reports[0].Date != date {
+				t.Fatal("wrong report at gateway", reports)
+			}
+		})
+	}
+}
+
+func TestSharedFixtureClockStillRejectsExpiredOrFutureEnvelopes(t *testing.T) {
+	at := time.Date(2040, 1, 3, 9, 0, 0, 0, time.UTC)
+	body, err := json.Marshal(energywire.Report{Schema: energywire.Schema, Date: "2040-01-02", GridImport: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delta := range []time.Duration{0, -24 * time.Hour, -48 * time.Hour, 24 * time.Hour} {
+		t.Run(delta.String(), func(t *testing.T) {
+			_, gw, relay := statsrelaytest.New(t, at)
+			client := statsrelay.New(relay.URL, gw.Key, nil).WithClock(func() time.Time { return at.Add(delta) })
+			err := client.Send(context.Background(), body)
+			accepted := delta == 0 || delta == -24*time.Hour
+			if accepted && err != nil {
+				t.Fatal("fresh envelope refused", err)
+			}
+			if !accepted && (err == nil || len(gw.Energy()) != 0) {
+				t.Fatal("expired or future envelope accepted", err, gw.Energy())
+			}
+		})
+	}
+}
