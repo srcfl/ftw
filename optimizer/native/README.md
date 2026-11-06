@@ -29,9 +29,11 @@ optimizer/native/bundle/ftw-solver-linux-arm64 --time-limit=100ms < requests.jso
 The bundle requires static Linux ARM64 and Linux AMD64 workers. A macOS ARM64
 worker is optional and is not a deployment target. The manifest pins their
 version, private source commit, sizes and SHA-256 checksums. The verifier
-checks every bundled file, the host worker handshake on Linux, and the public
-source boundary. Keep the license and notices with any copied or redistributed
-executable. Run only a verified bundle.
+checks every bundled file, the host worker handshake, and the public source
+boundary. On a host the bundle has no worker for, such as macOS without the
+optional worker, it checks the files and skips execution. Keep the license and
+notices with any copied or redistributed executable. Run only a verified
+bundle.
 
 For a captured single-battery request without scenarios, demand charges,
 thermal loads or PV controls, Core can replay the exact response from another
