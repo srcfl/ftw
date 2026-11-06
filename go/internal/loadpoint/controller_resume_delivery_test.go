@@ -60,3 +60,30 @@ func TestResumeRequiresSustainedMeaningfulDelivery(t *testing.T) {
 		})
 	}
 }
+
+func TestVehicleDeclinesChargeSuppressesResumeUntilRequestReturns(t *testing.T) {
+	now := time.Now()
+	cfg := Config{ID: "car", DriverName: "easee", MinChargeW: 4140}
+	resumes := 0
+	c := &Controller{send: func(context.Context, string, []byte) error { resumes++; return nil }}
+	sample := EVSample{Connected: true, DeviceID: "box", SessionID: "one", RequestKnown: true, RequestActive: false, PowerAt: now}
+	c.recoverOfferedCharge(context.Background(), cfg, sample, 0, now)
+	for seconds := 1; seconds <= 300; seconds += 5 {
+		sample.PowerAt = now.Add(time.Duration(seconds) * time.Second)
+		c.recoverOfferedCharge(context.Background(), cfg, sample, 10350, sample.PowerAt)
+	}
+	if resumes != 0 {
+		t.Fatalf("resumed stopped vehicle %d times", resumes)
+	}
+	if chargerIdleForWake(sample, sample.PowerAt) {
+		t.Fatal("stopped vehicle eligible for wake")
+	}
+	sample.RequestActive = true
+	for seconds := 305; seconds <= 460; seconds += 5 {
+		sample.PowerAt = now.Add(time.Duration(seconds) * time.Second)
+		c.recoverOfferedCharge(context.Background(), cfg, sample, 10350, sample.PowerAt)
+	}
+	if resumes == 0 {
+		t.Fatal("new request did not restore failed-start retries")
+	}
+}
