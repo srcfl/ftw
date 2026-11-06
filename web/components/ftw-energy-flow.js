@@ -653,12 +653,21 @@ class FtwEnergyFlow extends FtwElement {
         !p.aggregated &&
         (layerClass === "ind" || aggregateMemberCount > 1) &&
         Math.max(p._groupSize || 1, aggregateMemberCount || 1) > 1;
+      const grouped = p._groupSize > 1 && !!p.name;
       return renderCircleNode({
         pos: p._pos,
-        value: p.placeholder ? "—" : fmtKw(p.kw),
+        // A planet prints its size; the word under it gives the direction,
+        // because the UI never shows a raw minus. The hub keeps Core's sign
+        // for Home use (#1768).
+        value: p.placeholder ? "—" : fmtKw(Math.abs(p.kw)),
         title: p.title,
-        nameLabel: p._groupSize > 1 && p.name ? p.name.toUpperCase() : null,
-        sub: p.sub,
+        // The title's second line names the device in a group, or says
+        // that FTW only observes it; a phone's larger title font has room
+        // for one word. A grouped device keeps its name there and says
+        // "observe only" under the size instead.
+        nameLabel: grouped ? p.name.toUpperCase()
+          : p.observeOnly ? (this._compact ? "OBSERVED" : "OBSERVE ONLY") : null,
+        sub: grouped && p.observeOnly ? "observe only" : p.sub,
         color: p.color,
         soc: p.placeholder ? null : p.soc,
         chargeLimit: p.placeholder ? null : p.chargeLimit,
@@ -1662,8 +1671,9 @@ function renderDailyParts(parts) {
 }
 
 function fmtKw(kw) {
-  // Input is kilowatts. Sub-kW values render as plain integer watts
-  // (no decimals) so a "30 W" import or "−12 W" battery trickle stays
+  // Input is kilowatts: a size for a planet, Home use as Core signs it
+  // for the hub. Sub-kW values render as plain integer watts (no
+  // decimals) so a "30 W" import or "12 W" battery trickle stays
   // visible as the real number. The visual "idle / balanced"
   // affordances (beam dimming, sub-label text) live on a separate
   // ±FLOW_IDLE_W threshold; this formatter only handles display.
