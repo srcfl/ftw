@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.160.0
+
+### Minor Changes
+
+- fd4426a: The box keeps a control journal. Every few seconds it records the answer to
+  "Are we in control?" for each controlled device, each source, whether the site
+  may dispatch and the operating mode; a change starts a new stretch, with the
+  power Core asked for and the power delivered while it held. Each scored plan
+  slot is kept too, with its planned and delivered energy. Read it over any
+  window with GET /api/control/journal, and as an agent with events.get, so the
+  owner, an assistant or support can learn afterwards why the app warned. A
+  notification the database was too busy to record is now written once it is
+  free.
+
+### Patch Changes
+
+- 1192aef: When an Easee charger's own load balancing holds the car below FTW's order, the EV sheet now says "Easee limits the charger to 12 A (its load balancing). FTW asked for 15 A; the car takes 8.3 kW." instead of "Not following". It needs easee_cloud 1.4.1, which reports the current Easee lets the car take while it is below the order, and names its load balancing when Easee's allocation shows it. Without a named cause the sheet reads "The charger lets the car take 12 A, below the 15 A FTW asked for." A car taking far less or more than the limit allows is still judged as before, and an old charger reason is never shown as the cause.
+- e3e5858: Pairing a phone no longer leaves a failed "A new owner" notification when FTW Cloud took it. FTW Cloud sends that notice to the owners' phones, but the notification history only counted the box's own channels. On a new box those have nobody to send to yet, so the row said "failed: no publisher installed" and the bell showed a red count. The history now shows the notice FTW Cloud holds as "queued", since the box cannot see it leave, and the bell stays clear. With FTW Cloud off, no notice is queued there. When no channel had anyone to send to, the row says "no phone or service to send to" instead of the wrong "no publisher installed".
+- 1192aef: Expose fresh effective EV pilot current separately from the dynamic current setting. A confirmed lower pilot that explains measured delivery is an informational charger limitation even when its internal cause is unknown. Stale or future pilot evidence cannot explain an EV shortfall. A pilot that is only past its 90 s window reads as unknown, and the driver's reported limit, such as Easee's load balancing, still stands.
+- 452ce62: Explain a charger-reported vehicle stop that lasts 90 seconds while FTW offers power, without reporting a no-power fault or assuming full SoC. A brief stop during the session handshake no longer hides a failed start or blocks the resume and wake after FTW's own pause. FTW's own 0 W stop for a car that stopped asking counts as following again.
+
 ## 0.159.1
 
 ### Patch Changes
