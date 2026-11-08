@@ -37,10 +37,12 @@ The handshake identifies the worker, its version, protocol range and features.
 Protocol compatibility and supported features govern use, not matching Core
 and Energyplan release numbers. Current features are `champion`,
 `forecast_reset`, `partial_slots`, `demand_charges`, `ev_duty`,
-`charging_periods`, `published_prices` and `hourly_import_caps`; the worker
-also reports `forecast_protocol_version`.
+`charging_periods`, `published_prices`, `hourly_import_caps` and
+`demand_elapsed_hours`; the worker also reports `forecast_protocol_version`.
 Core negotiates `charging_periods` before sending its optional fields, and
 `hourly_import_caps` before sending `hourly_import_caps`.
+Core negotiates `demand_elapsed_hours` before sending a demand hour that
+starts before the first slot or ended by its execution start.
 
 New optional request fields need capability negotiation or a paired update
 that preserves deployed clients. Unknown optimizer request fields are errors.
@@ -84,9 +86,11 @@ Worker model support does not prove Core can execute every supported case.
 
 Physical capacity, device power, grid limits, allowed EV steps and mode rules
 are hard limits. Measured battery energy outside an operating band may recover
-without worsening the existing violation. After recovery it must stay inside
-the band. Physical zero and capacity remain hard limits throughout. Default
-wear cost is zero; charge/discharge efficiency remains in the physical model.
+without worsening the existing violation, for each battery and for the
+batteries' total, whose band is the sum of their bands (Core applies the same
+SoC limits to every battery). After recovery it must stay inside the band.
+Physical zero and capacity remain hard limits throughout. Default wear cost
+is zero; charge/discharge efficiency remains in the physical model.
 
 Multiple batteries keep their own limits. Current execution requires a common
 charge/discharge direction in each slot. Demand-charge windows use explicit
@@ -117,6 +121,27 @@ The cap wins over EV goals, whose miss shows in
 `flex_shortfall_wh`. The plan reports each hour in
 `plan.hourly_import_caps` as `{start_ms, end_ms, import_wh, max_wh}` on the
 published forecast, `import_wh` including the elapsed part.
+
+`demand_charges` carries peak-power tariffs as
+`{id, price_per_kw, top_n, already_kw, floor_kw, hours}`, each hour
+`{start_ms, end_ms, elapsed_import_kwh, weight, group}` with weight 1 by
+default. An hour's sample is its weight times its mean import in kW: the
+import before the first slot's execution start, `elapsed_import_kwh`, plus the
+plan's import per pulse state from then or `start_ms`, whichever is later, to
+`end_ms`, over the hour's length. A group is one sample, the largest of its
+hours'; an ungrouped hour and each `already_kw` value are one sample each. The
+bill is `price_per_kw * max(floor_kw, mean of the top_n largest samples)`, or
+of all samples if there are fewer. Hours must end inside the horizon, not
+overlap, last 1 minute to 25 hours and number at most 512 per charge. An hour
+that ended by execution start must share its group with an hour that overlaps
+the plan. Core makes each local day a group. With `demand_elapsed_hours` it
+sends the hour in progress from its start, puts the completed peak of each day
+the plan reaches in that day's group and sends each other completed day as one
+`already_kw` value, so each local day is one sample. Without the feature Core
+sends only hours from the first slot on and every completed day in
+`already_kw`. The plan reports `plan.demand_cost` and, per charge in
+`plan.demand_charges`, `billed_kw`, `cost` and each hour's unweighted
+`mean_kw`, in ascending start order.
 
 Thermal, commercial and recourse inputs are unsupported. Protocol v1 has no
 per-phase electrical model, future connection windows or phase-switch schedule.
@@ -193,13 +218,19 @@ For minimization, a reported bound must satisfy
 `lower_bound <= optimum <= candidate objective` for the same feasible set and
 objective. Unknown bounds and gaps remain null. When executed pulse cost and
 the optimized cost model differ, report `feasible` and omit the cost bound.
-Core validates physical execution; it does not independently prove optimality.
+A plan from a search that left out part of the model reports `feasible` with
+a null bound. Core validates physical execution; it does not independently
+prove optimality.
 
 Core makes no worker call when less than 500 ms of the first slot remain. It
 allows 500 ms for small plans, 1.5 s with an active car, and 5 s when
 slots × (3 × batteries + 2 × active cars) is at least 965, or when the request
-carries PV curtailment, demand charges or hourly import caps. The request's
-`time_limit_s` is the smaller of that budget and 5.6 s; Core starts the worker
+carries PV curtailment, demand charges or hourly import caps. Each call's
+`time_limit_s` is the smallest of that budget, 5.6 s and the time left before
+that call's deadline once its request is prepared, less a reply margin of
+max(5% of that time, 30 ms). A later call of the same planning attempt, such as
+the forecast-caution call after the point call, can get less, and Core sends
+no request with less than 450 ms before its deadline. Core starts the worker
 with `--time-limit=5s`. The transport timeout is 7 s. Near the first slot's end
 Core keeps 50 ms for validation and publication and a reply margin of
 max(5% of the remaining time after that, 30 ms).
@@ -215,6 +246,12 @@ over. A candidate must compete with fresh planning on deadline energy, charging
 preferences and cost. `solver.warm_start_valid`, when present, means a cached
 candidate passed this check; it does not mean the final plan used it. Restart
 may discard this optional cache without losing stored user goals.
+
+Replies may carry optional diagnostics. `solver.source`, `solver.fallbacks`,
+`error.fallbacks` and `error.model_variables` are worker-defined, opaque
+numeric codes; each `fallbacks` is an array of them. `solver.model_variables`
+is an integer; Core rejects a reply whose value is not one. Core never
+accepts, rejects or ranks a plan by the values of these diagnostics.
 
 On failure Core may use its validated fallback only where it can represent
 the site. Otherwise an old plan may remain as diagnostic history; retention

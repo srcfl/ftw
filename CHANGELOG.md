@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.159.1
+
+### Patch Changes
+
+- fd3349a: Update the bundled Energyplan planner to 0.7.0. With a peak-power tariff it now plans with the hour already in progress, so each day's peak counts once. A new plan is never worse for the car goals or the bill than the plan the planner already holds, a site whose limits cannot all be met gets a clear reason instead of a failed plan, and the planner needs less memory. The bundle now carries the Linux workers only; a Mac keeps Core's own planner. Core still validates every plan.
+- ec8ce36: `make native-solver-check` no longer fails on a host the Energyplan bundle has
+  no worker for, such as a Mac when the bundle ships only the Linux workers. The
+  verifier still checks every bundled file and skips only the handshake there,
+  as it already did on other unsupported hosts.
+
 ## 0.159.0
 
 ### Minor Changes
