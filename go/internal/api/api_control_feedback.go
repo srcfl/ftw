@@ -21,19 +21,20 @@ import (
 // are null, never invented zeros. Reasons describe only what Core or the
 // device reported, not a guessed physical cause.
 type ControlFeedback struct {
-	Driver           string             `json:"driver"`
-	Kind             string             `json:"kind"`
-	Mode             string             `json:"mode"`
-	Status           string             `json:"status"`
-	Reason           string             `json:"reason"`
-	Severity         string             `json:"severity"`
-	Evidence         string             `json:"evidence"`
-	ReadingsFresh    bool               `json:"readings_fresh"`
-	ConfirmedAtMs    int64              `json:"confirmed_at_ms,omitempty"`
-	SiteConfirmation string             `json:"site_confirmation"`
-	SiteMeter        string             `json:"site_meter,omitempty"`
-	SiteEvidence     *ControlComparison `json:"site_evidence,omitempty"`
-	ToleranceW       *float64           `json:"tolerance_w"`
+	VehicleRequestActive *bool              `json:"vehicle_request_active,omitempty"`
+	Driver               string             `json:"driver"`
+	Kind                 string             `json:"kind"`
+	Mode                 string             `json:"mode"`
+	Status               string             `json:"status"`
+	Reason               string             `json:"reason"`
+	Severity             string             `json:"severity"`
+	Evidence             string             `json:"evidence"`
+	ReadingsFresh        bool               `json:"readings_fresh"`
+	ConfirmedAtMs        int64              `json:"confirmed_at_ms,omitempty"`
+	SiteConfirmation     string             `json:"site_confirmation"`
+	SiteMeter            string             `json:"site_meter,omitempty"`
+	SiteEvidence         *ControlComparison `json:"site_evidence,omitempty"`
+	ToleranceW           *float64           `json:"tolerance_w"`
 	// Internal steps of the verdict; the API exposes their result above.
 	State              string   `json:"-"`
 	VerificationTier   *int     `json:"-"`
@@ -74,9 +75,13 @@ type ControlFeedback struct {
 	SinceMs           int64    `json:"since_ms,omitempty"`
 	CommandAtMs       int64    `json:"command_at_ms,omitempty"`
 	ObservedAtMs      int64    `json:"observed_at_ms,omitempty"`
+	// VehicleDeclined is Core's debounced record that the car refused its
+	// offer. The reason carries the result.
+	VehicleDeclined bool `json:"-"`
 }
 
 type feedbackReading struct {
+	RequestActive      *bool    `json:"request_active"`
 	SetpointW          *float64 `json:"setpoint_w"`
 	MaxA               *float64 `json:"max_a"`
 	PilotA             *float64 `json:"pilot_a"`
@@ -270,6 +275,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					fresh = false
 					f.ActualW = nil
 				}
+				f.VehicleDeclined = lp.VehicleDeclinesOffer(now)
 			}
 			// Evidence describes measured power, not target fulfilment. A device
 			// delivering 4.4 kW against a 5 kW command can still be site-confirmed.
@@ -310,6 +316,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					f.ConfirmedAtMs = comparison.AfterAt.UnixMilli()
 				}
 			}
+			f.VehicleRequestActive = d.RequestActive
 			classifyControlFeedback(&f, cmd, commanded, fresh, coreReason, d.Connected, now)
 			if h := s.deps.Tel.DriverHealth(rd.Driver); h != nil && h.DeviceFault {
 				f.State, f.Reason, f.Severity = "blocked", "device_fault", "warning"
@@ -467,6 +474,7 @@ const (
 func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, commanded, fresh bool, coreReason string, connected *bool, now time.Time) {
 	set := func(state, reason, severity string) { f.State, f.Reason, f.Severity = state, reason, severity }
 	if !fresh {
+		f.VehicleRequestActive = nil
 		f.ActualW, f.ReadbackW, f.OfferedA, f.DeviceLimitA, f.LimitA, f.LimitedBy, f.Make = nil, nil, nil, nil, nil, "", ""
 		f.PilotA, f.DynamicLimitA = nil, nil
 		f.PilotObservedAt, f.PilotConfirmedAtMs = "", 0
@@ -491,6 +499,19 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	}
 	if f.Kind == "ev" && connected != nil && !*connected {
 		set("waiting", "not_connected", "info")
+		return
+	}
+	// The car declined Core's offer: the driver says so now, and Core has seen
+	// it for SessionCompletionTimeout. That explains zero draw, not a full
+	// battery or a met goal; vehicle_not_requesting is Core's own 0 W stop.
+	// Failed commands, stale data and safety pauses keep their own verdicts.
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" && f.VehicleDeclined &&
+		connected != nil && *connected && f.VehicleRequestActive != nil && !*f.VehicleRequestActive &&
+		(f.OfferedA == nil || f.RequestedA == nil || *f.OfferedA+0.5 >= *f.RequestedA) &&
+		coreReason != "site_meter_stale" && coreReason != "site_phase_currents_stale" && coreReason != "fuse_cooldown" &&
+		coreReason != "fuse_limit" && coreReason != "import_limit" &&
+		f.SentW != nil && *f.SentW > 100 && f.ActualW != nil && math.Abs(*f.ActualW) < 100 {
+		set("waiting", "vehicle_declined", "info")
 		return
 	}
 	// A positive clamp explains the lower offer, not prolonged zero delivery.
