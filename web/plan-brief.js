@@ -1,5 +1,6 @@
 import { plannedEVWatts } from "./ev-plan.js";
 import { fillPlanSoC } from "./plan-soc.js";
+import { planNowWords } from "./control-feedback.js";
 
 function formatClock(tsMs) {
   const date = new Date(tsMs);
@@ -366,17 +367,26 @@ export function derivePlanBrief({
   const solverName = [solver.engine, solver.backend].filter(Boolean).join(" / ") ||
     "FTW planner";
 
+  // When the batteries are not doing what this quarter planned, the card
+  // says what they do and why. It must not read "Charging, now" over a
+  // battery that discharges.
+  const offPlan = planNowWords(status.plan_now);
+
   return {
-    state,
-    next: {
-      action: actionLabel(next),
-      time: next
-        ? isNow
-          ? `Now, until ${formatClock(nextEnd)}`
-          : `At ${formatClock(next.slot_start_ms)}`
-        : "No action inside the current horizon",
-    },
-    reason: readableReason(next && next.reason),
+    state: offPlan && state.key === "active"
+      ? { key: "off_plan", label: "Not as planned", tone: "idle" }
+      : state,
+    next: offPlan
+      ? { label: "Now", action: offPlan.now, time: offPlan.plan }
+      : {
+          action: actionLabel(next),
+          time: next
+            ? isNow
+              ? `Now, until ${formatClock(nextEnd)}`
+              : `At ${formatClock(next.slot_start_ms)}`
+            : "No action inside the current horizon",
+        },
+    reason: offPlan ? [offPlan.why, offPlan.then].filter(Boolean).join(" ") : readableReason(next && next.reason),
     constraint,
     warningDetails: cautionWarnings.join('\n\n'),
     forecast,

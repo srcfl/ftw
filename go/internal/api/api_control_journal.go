@@ -13,17 +13,24 @@ import (
 )
 
 // JournalVerdicts is what the control journal samples: each device
-// function's control feedback as GET /api/status serves it, each source's
-// freshness, whether the site may dispatch, and the operating mode.
+// function's control feedback as GET /api/status serves it, whether the
+// batteries follow the plan, each source's freshness, whether the site may
+// dispatch, and the operating mode.
 func (s *Server) JournalVerdicts(now time.Time) []journal.Verdict {
 	var out []journal.Verdict
-	for _, f := range s.controlFeedback(now) {
+	rows := s.controlFeedback(now)
+	plan := s.planNow(now, rows)
+	markOnPlan(rows, plan)
+	for _, f := range rows {
 		detail, _ := json.Marshal(f)
 		out = append(out, journal.Verdict{
 			Subject: f.Kind + ":" + f.Driver, Driver: f.Driver, Kind: f.Kind,
 			Status: f.Status, Reason: f.Reason, Severity: f.Severity, Mode: f.Mode,
 			RequestedW: f.RequestedW, ActualW: f.ActualW, Detail: detail,
 		})
+	}
+	if plan != nil {
+		out = append(out, planNowVerdict(plan))
 	}
 	if s.deps.SiteDispatchBlocked != nil {
 		v := journal.Verdict{Subject: "site:dispatch", Kind: "dispatch", Status: "free", Severity: "info"}

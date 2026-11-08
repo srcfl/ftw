@@ -411,12 +411,16 @@ The registry's `reads` table names each read and the scope it needs.
   device function, a source, the site's dispatch or the mode held one
   verdict, each scored plan slot, and the notifications the box sent, over
   `afterMs`..`beforeMs` (the last 24 hours by default). A span gives `kind`
-  (battery, ev, pv, v2x_charger, device, source, dispatch, mode, slot),
+  (battery, ev, pv, v2x_charger, device, source, dispatch, mode, plan, slot),
   `src` by agent id, Core's `status`, `reason` and `severity` as in
   `control_feedback`, `startMs` and `endMs` (0 while it holds), `samples`,
   `requestedW` and `actualW` as min, max and mean, and `last`: the numbers
   of the latest verdict by field name. Text leaves only as Core's own codes,
-  never names. `minSeverity: "warning"` keeps warnings and alarms; `src`
+  never names. A `plan` span says whether the batteries did what the plan
+  meant (`as_planned` or `off_plan`) and, in `reason`, the measured cause:
+  `less_solar`, `more_solar`, `more_home`, `less_home`, `more_car`,
+  `less_car`, `device`, `manual` or `other`; `last` has the planned and
+  measured watts. `minSeverity: "warning"` keeps warnings and alarms; `src`
   keeps one source. `events` stays empty; it is kept for older readers.
   A source span is the driver's health as Core's watchdog sees it. A slot
   span is the battery fleet's planned and delivered energy over one plan

@@ -72,9 +72,12 @@ type ControlFeedback struct {
 	// under a three-phase order, and ChargingPhaseMaxW the most it takes.
 	ChargingPhase     string   `json:"charging_phase,omitempty"`
 	ChargingPhaseMaxW *float64 `json:"charging_phase_max_w,omitempty"`
-	SinceMs           int64    `json:"since_ms,omitempty"`
-	CommandAtMs       int64    `json:"command_at_ms,omitempty"`
-	ObservedAtMs      int64    `json:"observed_at_ms,omitempty"`
+	// OnPlan says whether a battery does what the plan meant for this quarter
+	// (see PlanNow); absent when no plan steers it.
+	OnPlan       *bool `json:"on_plan,omitempty"`
+	SinceMs      int64 `json:"since_ms,omitempty"`
+	CommandAtMs  int64 `json:"command_at_ms,omitempty"`
+	ObservedAtMs int64 `json:"observed_at_ms,omitempty"`
 	// VehicleDeclined is Core's debounced record that the car refused its
 	// offer. The reason carries the result.
 	VehicleDeclined bool `json:"-"`

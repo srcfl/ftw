@@ -276,6 +276,8 @@ type Server struct {
 	setup                *onboarding.Service
 	setupRestartRevision int64 // Protected by configWriteMu; a lost reply must not queue another restart.
 
+	planNowState planNowTracker
+
 	// dailyCache memoizes per-local-day energy totals keyed by "YYYY-MM-DD".
 	// Past days are immutable once the day ends, so we only ever recompute
 	// today. Lives for process lifetime; /api/energy/daily?days=31 drops from
@@ -1248,6 +1250,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	trust, export, safetyK, mappedMode := s.plannerPrefsSnapshot()
 
+	controlAt := time.Now()
+	controlRows := s.controlFeedback(controlAt)
+	planNow := s.planNow(controlAt, controlRows)
+	markOnPlan(controlRows, planNow)
+
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
@@ -1290,7 +1297,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// diagnostic — incremented when actual fleet delivery diverges
 		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
 		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
-		"control_feedback":    s.controlFeedback(time.Now()),
+		"control_feedback":    controlRows,
+		"plan_now":            planNow,
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
 	}
 	// The ceiling that switching on applies, so a client shows the box's
