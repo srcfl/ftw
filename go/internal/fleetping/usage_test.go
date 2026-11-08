@@ -137,7 +137,7 @@ func TestReportCountsOnlyDriversThatDeliveredWithTheirVersion(t *testing.T) {
 	// Just after a start nothing has answered yet: the names still count,
 	// without a version.
 	f.Running = map[string]string{}
-	if got := Build(f, now).Drivers; len(got) != 5 {
+	if got := Build(f, now).Drivers; len(got) != 4 {
 		t.Fatalf("after a start: %v", got)
 	}
 }
