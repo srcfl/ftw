@@ -84,7 +84,10 @@ func startFleetPing(
 	installedAt := firstSeen(st, time.Now())
 
 	pinger, err := fleetping.New(fleetping.Options{
-		Enabled: fleetReportAllowed(answer, endpoint, provider),
+		// The one answer decides, on every path (Fredrik, 8 November 2026:
+		// every box that shares reports, relay or not). FTW Cloud keeps no
+		// report and no address.
+		Enabled: answer.shares,
 		Facts: func() fleetping.Facts {
 			// Drivers can be installed without restarting FTW. Read the signed
 			// catalogue at the same time as the config so tomorrow's report and
@@ -195,19 +198,6 @@ func (a statsAnswer) saidYes() bool {
 		return a.link.SaidYesToStatistics()
 	}
 	return a.st != nil && cloudlink.SaidYesToStatistics(a.st)
-}
-
-// fleetReportAllowed is the one answer, with one more rule for the direct
-// path (Fredrik, 24 October 2026): a box that shares only by default, never
-// having said yes, posts nothing straight to FTW Cloud, which would see its
-// address; it waits for the relay. Through the relay, or to a collector the
-// household chose, the answer alone decides.
-func fleetReportAllowed(answer statsAnswer, endpoint string, provider fleetping.Provider) func() bool {
-	_, relayed := provider.(*fleetping.RelayProvider)
-	direct := !relayed && strings.TrimSpace(endpoint) == config.DefaultFleetPingEndpoint
-	return func() bool {
-		return answer.shares() && (!direct || answer.saidYes())
-	}
 }
 
 // migrateStatistics turns what an earlier release stored into the one

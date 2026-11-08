@@ -3,7 +3,6 @@ package api
 import (
 	"net/http"
 
-	"github.com/srcfl/ftw/go/internal/cloudlink"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/energyreport"
 )
@@ -24,10 +23,6 @@ type fleetPingView struct {
 	// ThroughRelay is true when the report goes to FTW Cloud through the
 	// Oblivious HTTP relay, so FTW Cloud never sees the box's address.
 	ThroughRelay bool `json:"through_relay"`
-	// WaitsForRelay is a box that shares by default, never having said yes:
-	// its report goes to FTW Cloud only through the relay, and this build
-	// names none, so it waits.
-	WaitsForRelay bool `json:"waits_for_relay"`
 	// Payload is the whole message, exactly as it would be posted.
 	Payload any `json:"payload"`
 	// Energy is the daily energy report under the same answer, built by the
@@ -58,11 +53,6 @@ func (s *Server) handleFleetPing(w http.ResponseWriter, r *http.Request) {
 		ThroughRelay: s.deps.FleetPing.ThroughRelay(),
 		Payload:      s.deps.FleetPing.Payload(),
 	}
-	shares := s.deps.State != nil && cloudlink.SharesStatistics(s.deps.State)
-	if s.deps.Cloud != nil {
-		shares = s.deps.Cloud.Status().Statistics
-	}
-	view.WaitsForRelay = !enabled && !view.ThroughRelay && endpoint == config.DefaultFleetPingEndpoint && shares
 	if s.deps.EnergyReport != nil {
 		p := s.deps.EnergyReport.Preview(r.Context())
 		view.Energy = &p

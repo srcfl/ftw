@@ -83,7 +83,7 @@ func TestFleetPingShowsTheRealPayload(t *testing.T) {
 	if !got.Enabled || got.Endpoint != config.DefaultFleetPingEndpoint || !got.FTWRelay {
 		t.Errorf("enabled=%v endpoint=%q ftw_relay=%v", got.Enabled, got.Endpoint, got.FTWRelay)
 	}
-	if got.Payload["price_zone"] != "SE3" || got.Payload["battery_kwh"] != "5-15" {
+	if got.Payload["price_zone"] != "SE3" || got.Payload["battery_kwh"] != "10" {
 		t.Errorf("payload = %v, want this box's own values", got.Payload)
 	}
 	drivers, ok := got.Payload["drivers"].([]any)

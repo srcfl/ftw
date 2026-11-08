@@ -18,9 +18,9 @@
 //     value, and a salted one still matches itself tomorrow;
 //   - no counter, no sequence number and no "last sent" time, because any of
 //     them would let two pings be ordered into one box's series;
-//   - buckets, not values, but for a driver's version, which is a catalogue
-//     number and is published from one (Fredrik, 8 November 2026). 12.4 kWh of battery and 197 days since install are
-//     close to unique across a fleet this size; "5-15" and "6-12m" are not;
+//   - no raw detail: a driver is its catalogue name and version, a battery
+//     its nearest kWh, and the time since install a range (Fredrik, 8
+//     November 2026: none of this is sensitive, and the counts start at one);
 //   - a send time that moves. A box that pings at 03:17 every night has told
 //     the endpoint its name in a field nobody thought to look at.
 //
@@ -38,10 +38,10 @@
 // and until then one box's arrival times are still loosely related.
 //
 // The residual risk worth naming: the payload is still a quasi-identifier. A
-// beta box in DK2 with 30+ kWh and an unusual driver pair may be the only one
-// like it, and two such pings could be guessed to be the same box. Coarse
-// buckets, a capped driver list and a small field set are what keep that
-// population large; nothing here pretends it is a proof.
+// beta box in DK2 with a 31 kWh battery and an unusual driver pair may be the
+// only one like it, and two such pings could be guessed to be the same box.
+// The service keeps only each day's totals per field, so no report survives
+// to be compared; nothing here pretends it is a proof.
 package fleetping
 
 import (
@@ -53,10 +53,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -182,7 +184,7 @@ func Build(f Facts, now time.Time) Payload {
 		Version:   version,
 		Channel:   channel,
 		Drivers:   driverTypes(f.Drivers, f.Catalogue, f.Running),
-		Battery:   batteryBucket(f.BatteryWh),
+		Battery:   batteryKWh(f.BatteryWh),
 		Zone:      knownZone(f.PriceZone),
 		Age:       ageBucket(f.InstalledAt, now),
 		Solve:     solveBucket(f.Health),
@@ -334,23 +336,14 @@ func driverTypes(configured, catalogue []string, running map[string]string) []st
 // else stays home and the driver counts without one.
 var driverVersion = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
 
-// batteryBucket answers "roughly how much storage", which is what sizing an
-// engineering bet needs. The edges are the ones the residential market lands
-// on: nothing, one module, a normal install, a big one, and everything above.
-func batteryBucket(wh float64) string {
-	kwh := wh / 1000
-	switch {
-	case !(kwh > 0):
+// batteryKWh is the storage to the nearest kWh, and "none" without any
+// (Fredrik, 8 November 2026). A battery under half a kWh still reads as 1, so
+// it is not mistaken for no battery.
+func batteryKWh(wh float64) string {
+	if !(wh > 0) {
 		return "none"
-	case kwh < 5:
-		return "0-5"
-	case kwh < 15:
-		return "5-15"
-	case kwh < 30:
-		return "15-30"
-	default:
-		return "30+"
 	}
+	return strconv.Itoa(max(1, min(9999, int(math.Round(wh/1000)))))
 }
 
 // ageBucket answers "how long has this site been running", coarsely enough

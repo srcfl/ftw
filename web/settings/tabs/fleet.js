@@ -100,9 +100,6 @@
       : body && body.ftw_relay
         ? " FTW Cloud adds the report to that day's totals, then drops it and does not save the source address. These are reports, not unique boxes."
         : " This box uses a custom collector. FTW cannot say what that service stores or whether it counts unique boxes.";
-    if (body && body.waits_for_relay) {
-      return "Not sent yet. This box shares statistics without having said yes, so this report goes to FTW Cloud only through an independent relay, which hides this box's address, and this release names none yet.";
-    }
     if (body && body.enabled) {
       return "Sent " + where +
         ", once a day, at a time that moves from day to day — it takes a few days to work its way round the clock." +

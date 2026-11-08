@@ -118,3 +118,17 @@ func TestADriverLabelCanCarryItsVersion(t *testing.T) {
 	}
 }
 
+func TestBatteryIsTheNearestKilowattHour(t *testing.T) {
+	report := func(label string) string { return strings.Replace(valid, `"5-15"`, `"`+label+`"`, 1) }
+	for _, label := range []string{"none", "1", "12", "9999", "0-5", "30+"} {
+		if _, err := Decode([]byte(report(label))); err != nil {
+			t.Errorf("%s refused: %v", label, err)
+		}
+	}
+	for _, label := range []string{"12.4", "12 kWh", "10000", ""} {
+		if _, err := Decode([]byte(report(label))); err == nil {
+			t.Errorf("%s accepted", label)
+		}
+	}
+}
+

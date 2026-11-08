@@ -57,7 +57,7 @@ func TestPayloadCarriesOnlyTheAgreedFields(t *testing.T) {
 		"schema":         "ftw.fleet/2",
 		"ftw_version":    "v1.4.0-beta.2",
 		"channel":        "beta",
-		"battery_kwh":    "5-15",
+		"battery_kwh":    "12",
 		"price_zone":     "SE3",
 		"install_age":    "6-12m",
 		"plan_solve":     "none",
@@ -147,12 +147,7 @@ func TestDriverListIsSortedDedupedAndCapped(t *testing.T) {
 }
 
 func TestBucketsAreCoarse(t *testing.T) {
-	// Two boxes a kilowatt-hour apart, or a week apart in age, must land in
-	// the same bucket. Fine resolution here is what would make the rest of
-	// the payload a lookup key.
-	if a, b := batteryBucket(12_400), batteryBucket(13_600); a != b {
-		t.Errorf("12.4 kWh -> %q and 13.6 kWh -> %q; buckets are too fine", a, b)
-	}
+	// Boxes a week apart in age must land in the same range.
 	now := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
 	if a, b := ageBucket(now.AddDate(0, 0, -100), now), ageBucket(now.AddDate(0, 0, -107), now); a != b {
 		t.Errorf("100 days -> %q and 107 days -> %q; buckets are too fine", a, b)
@@ -162,11 +157,11 @@ func TestBucketsAreCoarse(t *testing.T) {
 		wh   float64
 		want string
 	}{
-		{0, "none"}, {-1, "none"}, {4_900, "0-5"}, {5_000, "5-15"},
-		{14_999, "5-15"}, {15_000, "15-30"}, {29_999, "15-30"}, {30_000, "30+"},
+		{0, "none"}, {-1, "none"}, {200, "1"}, {4_900, "5"},
+		{12_400, "12"}, {13_600, "14"}, {30_000, "30"}, {50_000_000, "9999"},
 	} {
-		if got := batteryBucket(tc.wh); got != tc.want {
-			t.Errorf("batteryBucket(%v) = %q, want %q", tc.wh, got, tc.want)
+		if got := batteryKWh(tc.wh); got != tc.want {
+			t.Errorf("batteryKWh(%v) = %q, want %q", tc.wh, got, tc.want)
 		}
 	}
 
