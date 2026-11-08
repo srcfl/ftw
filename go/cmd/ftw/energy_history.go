@@ -140,7 +140,7 @@ func buildEnergyObservations(st *state.Store, tel *telemetry.Store, ctrl tickPer
 		}
 		data := energyNumbers(r.Data)
 		appendDirection(id, deviceID, state.AssetVehicleCharger, r.Driver,
-			state.FlowVehicleCharge, r.UpdatedAt.UnixMilli(), math.Max(r.RawW, 0), firstEnergyNumber(data, "session_wh", "total_charge_wh"), false)
+			state.FlowVehicleCharge, r.UpdatedAt.UnixMilli(), math.Max(r.RawW, 0), chargerEnergyCounter(r.Data, data), false)
 	}
 
 	for _, r := range tel.ReadingsByType(telemetry.DerV2X) {
@@ -184,6 +184,19 @@ func energyNumbers(raw json.RawMessage) map[string]float64 {
 		}
 	}
 	return out
+}
+
+// chargerEnergyCounter is the counter to book a charger's energy from. A
+// driver sets session_wh_coarse when its session figure moves in steps too
+// large to say when the energy flowed; the record then integrates power.
+func chargerEnergyCounter(raw json.RawMessage, values map[string]float64) *float64 {
+	var flags struct {
+		Coarse bool `json:"session_wh_coarse"`
+	}
+	if json.Unmarshal(raw, &flags) == nil && flags.Coarse {
+		return firstEnergyNumber(values, "total_charge_wh")
+	}
+	return firstEnergyNumber(values, "session_wh", "total_charge_wh")
 }
 
 func firstEnergyNumber(values map[string]float64, names ...string) *float64 {
