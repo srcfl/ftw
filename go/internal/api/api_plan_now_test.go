@@ -179,6 +179,36 @@ func TestPlanNowExplainsTheGap(t *testing.T) {
 	}
 }
 
+// In planner_self the battery chases zero grid, so a missed forecast still
+// leaves the plan's words wrong, and the owner still gets the reason.
+func TestPlanNowHoldsInEveryPlannerMode(t *testing.T) {
+	srv, ctrl := planNowSite(t, -1231)
+	ctrl.Mode = control.ModePlannerSelf
+	if got := srv.planNow(time.Now(), nil); got == nil || got.Why != "less_solar" {
+		t.Fatalf("plan_now = %+v", got)
+	}
+}
+
+func TestPlanNowLeavesOutABatteryCoreOnlyWatches(t *testing.T) {
+	srv, _ := planNowSite(t, 2500)
+	soc := 0.9
+	srv.deps.Tel.Update("watched", telemetry.DerBattery, -3000, &soc, nil)
+	srv.deps.Tel.RecordDriverSuccess("watched")
+	srv.deps.CfgMu, srv.deps.Cfg = &sync.RWMutex{}, &config.Config{Drivers: []config.Driver{{Name: "watched", ObserveOnly: true}}}
+	got := srv.planNow(time.Now(), nil)
+	if got == nil || got.Status != planNowAsPlanned || got.BatteryW != 2500 {
+		t.Fatalf("plan_now = %+v", got)
+	}
+}
+
+func TestMarkOnPlanSkipsABatteryFTWDoesNotControl(t *testing.T) {
+	rows := []ControlFeedback{{Kind: "battery", Status: "not_controlled"}, {Kind: "battery", Status: "following"}, {Kind: "ev", Status: "following"}}
+	markOnPlan(rows, &PlanNow{Status: planNowAsPlanned})
+	if rows[0].OnPlan != nil || rows[1].OnPlan == nil || !*rows[1].OnPlan || rows[2].OnPlan != nil {
+		t.Fatalf("rows = %+v", rows)
+	}
+}
+
 func TestPlanNowAsPlannedHasNoWhy(t *testing.T) {
 	srv, _ := planNowSite(t, 2500)
 	got := srv.planNow(time.Now(), nil)

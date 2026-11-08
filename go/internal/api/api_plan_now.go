@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/journal"
 	"github.com/srcfl/ftw/go/internal/mpc"
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -220,8 +221,9 @@ func (s *Server) planNow(now time.Time, rows []ControlFeedback) *PlanNow {
 		s.planNowState.reset()
 		return nil
 	}
-	sample := planNowSample{at: now, battery: live.BatteryW, pv: live.PVW, load: live.LoadW, ev: live.EVW}
-	status, since, settles, mean := s.planNowState.observe(sample, planOff(slot.BatteryW, live.BatteryW))
+	battery := live.BatteryW - s.unplannedBatteryW(live)
+	sample := planNowSample{at: now, battery: battery, pv: live.PVW, load: live.LoadW, ev: live.EVW + live.V2XW}
+	status, since, settles, mean := s.planNowState.observe(sample, planOff(slot.BatteryW, battery))
 	out := &PlanNow{
 		Status: status, SinceMs: since.UnixMilli(),
 		SlotStartMs: slot.SlotStartMs, SlotEndMs: slot.SlotStartMs + int64(slot.SlotLenMin)*60_000,
@@ -259,14 +261,37 @@ func (s *Server) planNow(now time.Time, rows []ControlFeedback) *PlanNow {
 	return out
 }
 
-// markOnPlan tells each battery row whether "as planned" is true.
+// unplannedBatteryW is the power of batteries Core only watches. The plan
+// does not steer them, so they are no part of the comparison.
+func (s *Server) unplannedBatteryW(live telemetry.ForecastReading) float64 {
+	if s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return 0
+	}
+	s.deps.CfgMu.RLock()
+	watched := config.ObserveOnlyDriverSet(s.deps.Cfg)
+	for _, d := range s.deps.Cfg.Drivers {
+		if d.BatteryTelemetryOnly {
+			watched[d.Name] = true
+		}
+	}
+	s.deps.CfgMu.RUnlock()
+	total := 0.0
+	for _, src := range live.Sources {
+		if src.Flow.DerType == telemetry.DerBattery && watched[src.Flow.Driver] && src.PowerW != nil {
+			total += *src.PowerW
+		}
+	}
+	return total
+}
+
+// markOnPlan tells each battery FTW controls whether "as planned" is true.
 func markOnPlan(rows []ControlFeedback, plan *PlanNow) {
 	if plan == nil {
 		return
 	}
 	on := plan.Status == planNowAsPlanned
 	for i := range rows {
-		if rows[i].Kind == "battery" {
+		if rows[i].Kind == "battery" && rows[i].Status != "not_controlled" {
 			rows[i].OnPlan = &on
 		}
 	}
