@@ -19,6 +19,7 @@ type evTrace struct {
 	srv       *Server
 	changedAt time.Time
 	drawW     float64
+	extra     string // more reading fields, each with a leading comma
 }
 
 func newEVTrace(drawW float64) *evTrace {
@@ -35,8 +36,8 @@ func (e *evTrace) tick(w float64, reason string) {
 	e.tel.CompleteCommand(c, "accepted")
 	e.mgr.SetCommanded("garage", w, reason)
 	e.tel.Update("easee", telemetry.DerEV, e.drawW, nil, []byte(fmt.Sprintf(
-		`{"connected":true,"control_power_observed_at":%q,"control_power_confirmed":true,"power_max_age_s":180}`,
-		e.changedAt.Format(time.RFC3339Nano))))
+		`{"connected":true,"control_power_observed_at":%q,"control_power_confirmed":true,"power_max_age_s":180%s}`,
+		e.changedAt.Format(time.RFC3339Nano), e.extra)))
 	e.mgr.Observe("garage", true, e.drawW, 0, true)
 	time.Sleep(5 * time.Second)
 }

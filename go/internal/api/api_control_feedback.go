@@ -35,28 +35,38 @@ type ControlFeedback struct {
 	SiteEvidence     *ControlComparison `json:"site_evidence,omitempty"`
 	ToleranceW       *float64           `json:"tolerance_w"`
 	// Internal steps of the verdict; the API exposes their result above.
-	State            string   `json:"-"`
-	VerificationTier *int     `json:"-"`
-	VerificationLost bool     `json:"-"`
-	Escalated        bool     `json:"-"` // not following long enough to be an alarm
-	Response         string   `json:"-"`
-	SiteBeforeW      *float64 `json:"-"`
-	SiteAfterW       *float64 `json:"-"`
-	SiteBeforeAtMs   int64    `json:"-"`
-	SiteAfterAtMs    int64    `json:"-"`
-	SiteDeltaW       *float64 `json:"-"`
-	DeviceDeltaW     *float64 `json:"-"`
-	VerifiedAtMs     int64    `json:"-"`
-	RequestedW       *float64 `json:"requested_w"`
-	SentW            *float64 `json:"sent_w"`
-	ReadbackW        *float64 `json:"readback_w"`
-	ActualW          *float64 `json:"actual_w"`
-	BatterySoC       *float64 `json:"battery_soc,omitempty"`
-	ChargeResumeSoC  *float64 `json:"charge_resume_soc,omitempty"`
-	RequestedA       *float64 `json:"requested_a"`
-	OfferedA         *float64 `json:"offered_a"`
-	DeviceLimitA     *float64 `json:"device_limit_a"`
-	DeviceReason     string   `json:"device_reason,omitempty"`
+	State              string   `json:"-"`
+	VerificationTier   *int     `json:"-"`
+	VerificationLost   bool     `json:"-"`
+	Escalated          bool     `json:"-"` // not following long enough to be an alarm
+	Response           string   `json:"-"`
+	SiteBeforeW        *float64 `json:"-"`
+	SiteAfterW         *float64 `json:"-"`
+	SiteBeforeAtMs     int64    `json:"-"`
+	SiteAfterAtMs      int64    `json:"-"`
+	SiteDeltaW         *float64 `json:"-"`
+	DeviceDeltaW       *float64 `json:"-"`
+	VerifiedAtMs       int64    `json:"-"`
+	RequestedW         *float64 `json:"requested_w"`
+	SentW              *float64 `json:"sent_w"`
+	ReadbackW          *float64 `json:"readback_w"`
+	ActualW            *float64 `json:"actual_w"`
+	BatterySoC         *float64 `json:"battery_soc,omitempty"`
+	ChargeResumeSoC    *float64 `json:"charge_resume_soc,omitempty"`
+	RequestedA         *float64 `json:"requested_a"`
+	OfferedA           *float64 `json:"offered_a"`
+	DeviceLimitA       *float64 `json:"device_limit_a"`
+	PilotA             *float64 `json:"pilot_a"`
+	PilotObservedAt    string   `json:"pilot_observed_at,omitempty"`
+	PilotConfirmedAtMs int64    `json:"pilot_confirmed_at_ms,omitempty"`
+	DynamicLimitA      *float64 `json:"dynamic_limit_a"`
+	// LimitA is the current a charger lets the car take now, when its driver
+	// reports it below the order; LimitedBy names the cause when the driver
+	// shows it, and Make the charger for the sentence.
+	LimitA       *float64 `json:"limit_a,omitempty"`
+	LimitedBy    string   `json:"limited_by,omitempty"`
+	Make         string   `json:"make,omitempty"`
+	DeviceReason string   `json:"device_reason,omitempty"`
 	// ChargingPhase names the one phase (L1-L3) a one-phase car charges on
 	// under a three-phase order, and ChargingPhaseMaxW the most it takes.
 	ChargingPhase     string   `json:"charging_phase,omitempty"`
@@ -67,13 +77,19 @@ type ControlFeedback struct {
 }
 
 type feedbackReading struct {
-	SetpointW       *float64 `json:"setpoint_w"`
-	MaxA            *float64 `json:"max_a"`
-	DeviceLimitA    *float64 `json:"device_limit_a"`
-	DeviceLimitAgeS *float64 `json:"device_limit_age_s"`
-	Reason          string   `json:"reason_no_current_label"`
-	Connected       *bool    `json:"connected"`
-	Online          *bool    `json:"is_online"`
+	SetpointW          *float64 `json:"setpoint_w"`
+	MaxA               *float64 `json:"max_a"`
+	PilotA             *float64 `json:"pilot_a"`
+	PilotObservedAt    string   `json:"pilot_observed_at"`
+	PilotConfirmedAtMs *int64   `json:"pilot_confirmed_at_ms"`
+	DynamicLimitA      *float64 `json:"dynamic_limit_a"`
+	DeviceLimitA       *float64 `json:"device_limit_a"`
+	DeviceLimitAgeS    *float64 `json:"device_limit_age_s"`
+	Reason             string   `json:"reason_no_current_label"`
+	LimitA             *float64 `json:"current_limit_a"`
+	LimitedBy          string   `json:"current_limited_by"`
+	Connected          *bool    `json:"connected"`
+	Online             *bool    `json:"is_online"`
 }
 
 func watts(v float64) *float64 {
@@ -150,6 +166,30 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			var d feedbackReading
 			_ = json.Unmarshal(rd.Data, &d)
 			f.ReadbackW, f.OfferedA, f.DeviceReason = d.SetpointW, d.MaxA, d.Reason
+			f.DynamicLimitA = d.DynamicLimitA
+			pilotAge, pilotValid := pilotReadingAge(d, now)
+			pilotFresh := pilotValid && pilotAge <= pilotFreshFor
+			if pilotFresh {
+				f.PilotA, f.PilotObservedAt, f.PilotConfirmedAtMs = d.PilotA, d.PilotObservedAt, *d.PilotConfirmedAtMs
+			}
+			// New pilot-aware drivers must provide usable evidence. Older
+			// drivers keep their existing normalized-limit contract, and so
+			// does a valid pilot that is only too old: easee_cloud re-reads it
+			// once a minute, a late read can pass 90 s, and Core keeps the
+			// last reading for a minute after the driver stops sending. The
+			// driver checked its limit against the pilot when it was fresh,
+			// so only the pilot becomes unknown.
+			if d.PilotConfirmedAtMs != nil && (!pilotValid || (pilotFresh && *d.PilotA == 0)) {
+				d.LimitA, d.LimitedBy = nil, ""
+			}
+			if d.LimitA != nil {
+				f.LimitA, f.LimitedBy = d.LimitA, d.LimitedBy
+				if s.deps.Registry != nil {
+					if env := s.deps.Registry.Env(rd.Driver); env != nil {
+						f.Make, _ = env.Identity()
+					}
+				}
+			}
 			if d.DeviceLimitAgeS != nil && *d.DeviceLimitAgeS >= 0 && *d.DeviceLimitAgeS <= 120 {
 				f.DeviceLimitA = d.DeviceLimitA
 			}
@@ -359,7 +399,7 @@ func setControlStatus(f *ControlFeedback) {
 		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
 		status = "following"
 	case "battery_full", "battery_nearly_full", "battery_nearly_empty", "core_limit",
-		"fuse_limit", "fuse_cooldown", "charger_limit", "one_phase":
+		"fuse_limit", "fuse_cooldown", "charger_limit", "load_balancer_limit", "charger_pilot_limit", "one_phase":
 		status = "limited"
 	case "import_limit":
 		status = "limited"
@@ -427,7 +467,9 @@ const (
 func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, commanded, fresh bool, coreReason string, connected *bool, now time.Time) {
 	set := func(state, reason, severity string) { f.State, f.Reason, f.Severity = state, reason, severity }
 	if !fresh {
-		f.ActualW, f.ReadbackW, f.OfferedA, f.DeviceLimitA = nil, nil, nil, nil
+		f.ActualW, f.ReadbackW, f.OfferedA, f.DeviceLimitA, f.LimitA, f.LimitedBy, f.Make = nil, nil, nil, nil, nil, "", ""
+		f.PilotA, f.DynamicLimitA = nil, nil
+		f.PilotObservedAt, f.PilotConfirmedAtMs = "", 0
 		set("unknown", "telemetry_stale", "warning")
 		return
 	}
@@ -462,7 +504,10 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("warning", "no_power_response", "warning")
 		return
 	}
-	if f.RequestedA != nil && f.DeviceLimitA != nil && *f.RequestedA > *f.DeviceLimitA+0.5 {
+	// With a fresh pilot and the current the charger lets the car take, the
+	// draw is judged against them below, so the charger's own limit cannot
+	// hide a car taking less.
+	if !(f.PilotA != nil && f.LimitA != nil) && f.RequestedA != nil && f.DeviceLimitA != nil && *f.RequestedA > *f.DeviceLimitA+0.5 {
 		set("limited", "device_limit", "warning")
 		return
 	}
@@ -492,6 +537,34 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	if f.Kind == "ev" && f.SentW != nil && f.RequestedA != nil && f.OfferedA != nil && *f.SentW > 100 && *f.OfferedA+0.5 < *f.RequestedA && settled {
 		set("limited", "offered_current_lower", "warning")
 		return
+	}
+	// The charger holds the order but its driver reports that it lets the car
+	// take less, and names its load balancing when the charger's allocation
+	// shows it (easee_cloud 1.4.1). That explains a car taking about that
+	// much, never more: within 10 %, or as the car follows a step, within
+	// 2 A but at most 15 % of the limit. A car taking far less, nothing, or
+	// more keeps its verdict. A fresh pilot names the charger as the cause
+	// only when it is below the order and is that current. A lower current
+	// whose cause the driver does not show still asks for a look.
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" && f.SentW != nil && f.RequestedW != nil && f.RequestedA != nil && f.LimitA != nil && f.ActualW != nil &&
+		*f.SentW > 100 && *f.RequestedA > 0 && *f.LimitA > 0 && *f.LimitA+0.5 < *f.RequestedA && settled {
+		perA := *f.RequestedW / *f.RequestedA
+		limitW := *f.LimitA * perA
+		tolerance := telemetry.ControlToleranceW(limitW)
+		if *f.ActualW >= limitW-math.Max(tolerance, math.Min(2*perA, 0.15*limitW)) && *f.ActualW <= limitW+tolerance && *f.ActualW < *f.SentW {
+			if f.LimitedBy == "load_balancer" {
+				set("limited", "load_balancer_limit", "info")
+			} else if f.PilotA != nil && *f.PilotA+0.5 < *f.RequestedA && math.Abs(*f.PilotA-*f.LimitA) <= 0.5 {
+				if f.DeviceLimitA != nil && math.Abs(*f.LimitA-*f.DeviceLimitA) <= 0.5 {
+					set("limited", "device_limit", "info")
+				} else {
+					set("limited", "charger_pilot_limit", "info")
+				}
+			} else {
+				set("limited", "offered_current_lower", "warning")
+			}
+			return
+		}
 	}
 	// This is a known Core stop, not a BMS diagnosis or new measurement proof.
 	// Continued power, changed setpoints, stale readings and faults keep their
@@ -625,4 +698,23 @@ func (s *Server) loadpointsWithFeedback(states []loadpoint.State) []loadpointFee
 		out = append(out, view)
 	}
 	return out
+}
+
+// pilotFreshFor is how long a pilot's confirmation can explain a draw; it
+// matches the 90 s for which easee_cloud vouches for a cloud read.
+const pilotFreshFor = 90 * time.Second
+
+// pilotReadingAge is how long ago a pilot-aware driver confirmed its pilot.
+// ok is false when the pilot is not a current, or its confirmation is
+// missing or lies after now, or its source time after the confirmation.
+func pilotReadingAge(d feedbackReading, now time.Time) (age time.Duration, ok bool) {
+	if d.PilotA == nil || d.PilotConfirmedAtMs == nil || *d.PilotConfirmedAtMs <= 0 || math.IsNaN(*d.PilotA) || math.IsInf(*d.PilotA, 0) || *d.PilotA < 0 {
+		return 0, false
+	}
+	confirmed := time.UnixMilli(*d.PilotConfirmedAtMs)
+	source, err := time.Parse(time.RFC3339Nano, d.PilotObservedAt)
+	if err != nil || confirmed.After(now) || source.After(confirmed) {
+		return 0, false
+	}
+	return now.Sub(confirmed), true
 }
