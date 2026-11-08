@@ -278,7 +278,10 @@ coverage before claiming empirical calibration. The
 resulting `champion` can therefore contain Energyplan PV with legacy load, or
 the reverse. Each slot's planning margin comes from the errors its own sources
 made on earlier issues. `legacy_shadow` keeps both legacy signals from the same frozen
-capture for a fair later comparison.
+capture for a fair later comparison. After selection, Core moves near
+quarter-hour slots toward the PV measured in the last five minutes, fading out
+over two hours. The plan uses that value; the scored `champion` keeps the
+selected forecast.
 
 Complete qualified 15-minute observations update the local models outside
 dispatch. SQLite stores the latest Energyplan state under
