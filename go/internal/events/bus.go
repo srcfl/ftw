@@ -118,8 +118,8 @@ type NotificationDispatched struct {
 	Title     string
 	Body      string
 	Priority  int
-	Status    string // "sent" | "failed"
-	Error     string // empty when Status=="sent"
+	Status    string // "sent" | "failed" | "queued" (held by FTW Cloud's uplink)
+	Error     string // empty unless Status=="failed"
 }
 
 func (NotificationDispatched) Kind() string { return KindNotificationDispatched }

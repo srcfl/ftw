@@ -7,8 +7,10 @@ import (
 
 // NotificationEntry is one recorded push-notification attempt.
 //
-// Status is "sent" on success, "failed" on transport or render error.
-// Error holds the backend error text when Status=="failed", empty otherwise.
+// Status is "sent" on success, "failed" on transport or render error, and
+// "queued" when only FTW Cloud's uplink holds it, not yet known to have left
+// the box. Error holds the backend error text when Status=="failed", empty
+// otherwise.
 // The table is populated by a main.go subscriber on
 // events.KindNotificationDispatched so the notifications package never
 // needs to import state.
