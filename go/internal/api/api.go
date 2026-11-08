@@ -506,6 +506,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/notifications/status", Read, s.handleNotificationsStatus)
 	s.handle("GET  /api/notifications/defaults", Read, s.handleNotificationsDefaults)
 	s.handle("GET  /api/notifications/history", Read, s.handleNotificationsHistory)
+	s.handle("GET  /api/control/journal", Read, s.handleControlJournal)
 	s.handle("POST /api/notifications/test", Configure, s.handleNotificationsTest)
 	s.handle("GET  /api/notifications/vapid", Read, s.handleNotificationsVAPID)
 	s.handle("POST   /api/notifications/subscriptions", Configure, s.handlePushSubscribe)

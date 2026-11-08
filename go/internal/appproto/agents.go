@@ -811,8 +811,10 @@ func (h *Handler) onRead(env Envelope) error {
 		return h.onConfigGet(env)
 	case protocol.MsgCarsGet:
 		return h.onCarsGet(env)
+	case protocol.MsgEventsGet:
+		return h.onEventsGet(env)
 	default:
-		// events.get and diag.run are in the contract and not built yet.
+		// diag.run is in the contract and not built yet.
 		return h.refuse(env.ID, ErrUnknownOp, map[string]any{"t": env.T})
 	}
 }

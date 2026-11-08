@@ -529,6 +529,9 @@ type State struct {
 	// the API; mutated only inside ComputeDispatch under the caller's
 	// outer ctrlMu.
 	SlotDeliveryStats SlotDeliveryStats
+	// SlotScored, when set, receives each plan slot Core scored. It runs
+	// under the control lock and must not block.
+	SlotScored func(SlotDelivery)
 
 	// PlanStale tracks whether the last cycle fell back to self_consumption
 	// because the plan was missing. Surfaced via the API for the UI.
@@ -802,6 +805,22 @@ func resetEnergyDispatchBookkeeping(state *State) {
 	state.lastTickTs = time.Time{}
 }
 
+// SlotDelivery is one scored plan slot: the battery energy the plan asked
+// for over the slot, what the fleet delivered, and Core's verdict on it.
+type SlotDelivery struct {
+	SlotStart time.Time
+	SlotEnd   time.Time
+	Mode      Mode
+	PlannedWh float64
+	ActualWh  float64
+	// Ratio is |actual| / |planned|; 0 for a sign mismatch.
+	Ratio   float64
+	Replans uint64
+	// Verdict is on_target, under_delivered, over_delivered or
+	// sign_mismatch.
+	Verdict string
+}
+
 // SlotDeliveryStats tracks observed gaps between the plan's per-slot
 // BatteryEnergyWh and the live fleet's actual delivered Wh. Updated at
 // slot rollover by updateSlotDeliveryMetrics. Pure observability — no
@@ -885,47 +904,60 @@ func updateSlotDeliveryMetrics(state *State, currentTotalW float64, now time.Tim
 
 func scoreSlotDeliveryMetrics(state *State) {
 	plannedWh := state.slotActualPlannedWh
-	if math.Abs(plannedWh) > slotDeliveryIdleWhCutoff {
-		actualWh := state.slotActualWh
-		// Sign mismatch is the categorical failure mode: we moved
-		// energy in the opposite direction from the plan. Caught
-		// before the magnitude-ratio check below, which would
-		// otherwise treat opposite-sign-equal-magnitude (planned
-		// −425, actual +425) as ratio 1.0 = on target.
-		if plannedWh*actualWh < 0 && math.Abs(actualWh) > slotDeliveryIdleWhCutoff {
-			slog.Info("dispatch slot sign mismatch",
+	if math.Abs(plannedWh) <= slotDeliveryIdleWhCutoff {
+		return
+	}
+	actualWh := state.slotActualWh
+	d := SlotDelivery{
+		SlotStart: state.slotActualSlotStart, SlotEnd: state.slotActualDirective.SlotEnd,
+		Mode: state.Mode, PlannedWh: plannedWh, ActualWh: actualWh,
+		Replans: state.slotActualReplans, Verdict: "on_target",
+	}
+	// Sign mismatch is the categorical failure mode: we moved
+	// energy in the opposite direction from the plan. Caught
+	// before the magnitude-ratio check below, which would
+	// otherwise treat opposite-sign-equal-magnitude (planned
+	// −425, actual +425) as ratio 1.0 = on target.
+	if plannedWh*actualWh < 0 && math.Abs(actualWh) > slotDeliveryIdleWhCutoff {
+		slog.Info("dispatch slot sign mismatch",
+			"mode", state.Mode,
+			"replans", state.slotActualReplans,
+			"planned_basis", "accepted_intervals",
+			"planned_wh", plannedWh,
+			"actual_wh", actualWh,
+			"slot_start", state.slotActualSlotStart)
+		state.SlotDeliveryStats.SignMismatchCount++
+		d.Verdict = "sign_mismatch"
+	} else {
+		ratio := math.Abs(actualWh) / math.Max(math.Abs(plannedWh), 1)
+		d.Ratio = ratio
+		switch {
+		case ratio > slotDeliveryOverThreshold:
+			slog.Info("dispatch slot over-delivery",
 				"mode", state.Mode,
 				"replans", state.slotActualReplans,
 				"planned_basis", "accepted_intervals",
 				"planned_wh", plannedWh,
 				"actual_wh", actualWh,
+				"ratio", ratio,
 				"slot_start", state.slotActualSlotStart)
-			state.SlotDeliveryStats.SignMismatchCount++
-		} else {
-			ratio := math.Abs(actualWh) / math.Max(math.Abs(plannedWh), 1)
-			switch {
-			case ratio > slotDeliveryOverThreshold:
-				slog.Info("dispatch slot over-delivery",
-					"mode", state.Mode,
-					"replans", state.slotActualReplans,
-					"planned_basis", "accepted_intervals",
-					"planned_wh", plannedWh,
-					"actual_wh", actualWh,
-					"ratio", ratio,
-					"slot_start", state.slotActualSlotStart)
-				state.SlotDeliveryStats.OverDeliveryCount++
-			case ratio < slotDeliveryUnderThreshold:
-				slog.Info("dispatch slot under-delivery",
-					"mode", state.Mode,
-					"replans", state.slotActualReplans,
-					"planned_basis", "accepted_intervals",
-					"planned_wh", plannedWh,
-					"actual_wh", actualWh,
-					"ratio", ratio,
-					"slot_start", state.slotActualSlotStart)
-				state.SlotDeliveryStats.UnderDeliveryCount++
-			}
+			state.SlotDeliveryStats.OverDeliveryCount++
+			d.Verdict = "over_delivered"
+		case ratio < slotDeliveryUnderThreshold:
+			slog.Info("dispatch slot under-delivery",
+				"mode", state.Mode,
+				"replans", state.slotActualReplans,
+				"planned_basis", "accepted_intervals",
+				"planned_wh", plannedWh,
+				"actual_wh", actualWh,
+				"ratio", ratio,
+				"slot_start", state.slotActualSlotStart)
+			state.SlotDeliveryStats.UnderDeliveryCount++
+			d.Verdict = "under_delivered"
 		}
+	}
+	if state.SlotScored != nil {
+		state.SlotScored(d)
 	}
 }
 
