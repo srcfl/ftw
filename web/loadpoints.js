@@ -43,6 +43,14 @@
     return Math.round(w) + ' W';
   }
 
+  // The plan's battery power as a size and its word ("1.2 kW discharge"),
+  // never a raw minus; signed, as before, only if power-words.js is missing.
+  function batteryW(w) {
+    const words = globalThis.ftwPowerWords;
+    if (w == null || !isFinite(w)) return '—';
+    return words ? words.formatPower(w, 'battery') : fmtW(w);
+  }
+
   function fmtPct(frac) {
     if (frac == null || !isFinite(frac)) return '—';
     return (frac * 100).toFixed(1) + '%';
@@ -215,7 +223,7 @@
         `<td>${fmtPriceOre(a.price_ore)}</td>` +
         `<td>${fmtW(a.loadpoint_w || 0)}</td>` +
         `<td>${fmtPct(a.loadpoint_soc)}</td>` +
-        `<td>${fmtW(a.battery_w)}</td>` +
+        `<td>${batteryW(a.battery_w)}</td>` +
         `<td>${escapeHtml(a.reason || '')}</td>` +
         '</tr>';
     }).join('');
