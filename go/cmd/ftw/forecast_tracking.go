@@ -88,6 +88,9 @@ type forecastTracker struct {
 	observationDrops     uint64
 	observationCheckedMS int64
 	observationPVValid   bool
+	// pvValidSinceMS is when PV last became valid and uncurtailed; 0 while it
+	// is not. Measured PV feeds the plan only once it has held for a full window.
+	pvValidSinceMS       int64
 	observationLoadValid bool
 	issueArchiveError    bool
 	sourceChoice         forecastSourceChoice // guarded by mu
@@ -271,6 +274,7 @@ func (f *forecastTracker) observe(ctx context.Context) {
 	f.mu.Lock()
 	f.observationCheckedMS = now.UnixMilli()
 	f.observationPVValid, f.observationLoadValid = r.PVValid, r.Valid
+	f.notePVValidLocked(r.PVValid, f.observationCheckedMS)
 	f.mu.Unlock()
 	var jobs []forecastObservationJob
 	for _, o := range f.observationIntervals(ctx, r, site, now) {
@@ -287,6 +291,20 @@ func (f *forecastTracker) observe(ctx context.Context) {
 	defer cancel()
 	f.acceptObservations(flushCtx, jobs, f.flushObservations)
 }
+
+// notePVValidLocked tracks how long measured PV has been usable. f.mu is held.
+func (f *forecastTracker) notePVValidLocked(valid bool, nowMS int64) {
+	switch {
+	case !valid:
+		f.pvValidSinceMS = 0
+	case f.pvValidSinceMS == 0:
+		f.pvValidSinceMS = nowMS
+	}
+}
+
+// pvNowcastMaxObservationAge is how old the last validity check may be when a
+// plan uses measured PV. The observer runs every 10 s.
+const pvNowcastMaxObservationAge = 30 * time.Second
 
 // maxHouseholdDecisionWait bounds how long a PV quarter waits for history to
 // close the same quarter. Past it, PV goes alone and that load is given up.
@@ -454,6 +472,7 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 	f.mu.RLock()
 	history := f.errors
 	observations := f.observations
+	pvValidSinceMS, pvCheckedMS := f.pvValidSinceMS, f.observationCheckedMS
 	f.mu.RUnlock()
 	history, observations = learningEvidence(history, observations, site.PVLearningStartedMS, site.LoadLearningStartedMS)
 	candidateState := json.RawMessage(nil)
@@ -513,6 +532,16 @@ func (f *forecastTracker) Snapshot(_ time.Time, weather []state.ForecastPoint) m
 			return 1
 		}
 		return mpc.PlannerRadiationWeight * pv.Model.Trust(t)
+	}
+	// Measured PV anchors the plan only when telemetry has been valid and
+	// uncurtailed for the whole window it averages. Curtailed PV is not what
+	// the panels could have made, and stale PV is not a measurement.
+	if at := origin.UnixMilli(); pvValidSinceMS > 0 && at-pvValidSinceMS >= pvmodel.NowcastWindow.Milliseconds() && at-pvCheckedMS <= pvNowcastMaxObservationAge.Milliseconds() {
+		if measuredW, ok := pv.MeasuredNowW(origin); ok {
+			in.PVNowcast = func(inflightW, forecastW float64, dt time.Duration) float64 {
+				return pvmodel.NowcastW(measuredW, inflightW, forecastW, dt)
+			}
+		}
 	}
 	models := []forecasting.ModelState{}
 	latest := int64(0)

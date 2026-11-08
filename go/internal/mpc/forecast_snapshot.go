@@ -17,6 +17,11 @@ type ForecastInputs struct {
 	PVWeight              func(time.Time) float64
 	PVUncertaintyW        float64
 	PVRelativeUncertainty float64
+	// PVNowcast moves a slot's selected PV forecast toward the generation
+	// measured just before this capture. It takes the in-flight slot's
+	// forecast, the slot's forecast and the time from issue to the slot's
+	// middle, all in generation watts. Nil keeps the forecast as selected.
+	PVNowcast func(inflightW, forecastW float64, dt time.Duration) float64
 	// Resolve selects primary forecasts for the complete price horizon. It runs
 	// once during replanning, outside the service lock, under a bounded context.
 	// Only PVW and LoadW may change; the host retains a frozen legacy shadow.
