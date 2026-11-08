@@ -27,6 +27,28 @@ test('EV costs ignore charging outside the period and days without charging', ()
   assert.equal(calculate([point(1800000, 1500)], [], 1800000, 3600000).incomplete, true);
 });
 
+test('EV cost is partial when a rejected counter reading holds no energy', () => {
+  const calculatorSource = source.slice(source.indexOf('  function calculateEVChargeCost('),
+    source.indexOf('  function renderEVCharging('));
+  const calculate = vm.runInNewContext('(' + calculatorSource.trim() + ')');
+  const start = Date.UTC(2026, 10, 8, 2, 0);
+  const halfHour = 1800000;
+  const point = (offset, wh, quality) => ({
+    flow: 'vehicle_charge', bucket_start_ms: start + offset * halfHour, bucket_len_ms: halfHour, energy_wh: wh, quality,
+  });
+  const price = [{ slot_ts_ms: start, slot_len_min: 120, total_ore_kwh: 200 }];
+  const until = start + 2 * halfHour;
+  // 8 November on a real site: the charger delivered through these buckets
+  // and the ledger rejected the counter jump, so they hold 0 Wh.
+  for (const quality of ['invalid', 'reset']) {
+    const result = calculate([point(0, 1000, 'measured'), point(1, 0, quality)], price, start, until);
+    assert.equal(result.energyWh, 1000);
+    assert.equal(result.incomplete, true, quality);
+  }
+  // A time the charger did not run stays complete.
+  assert.equal(calculate([point(0, 0, 'measured'), point(1, 0, 'gap')], price, start, until).incomplete, false);
+});
+
 test('EV charging cost does not double count overlapping price slots', () => {
   const calculatorSource = source.slice(source.indexOf('  function calculateEVChargeCost('),
     source.indexOf('  function renderEVCharging('));
