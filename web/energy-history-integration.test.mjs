@@ -40,12 +40,13 @@ test('EV cost is partial when a rejected counter reading holds no energy', () =>
   const until = start + 2 * halfHour;
   // 8 November on a real site: the charger delivered through these buckets
   // and the ledger rejected the counter jump, so they hold 0 Wh.
-  for (const quality of ['invalid', 'reset']) {
-    const result = calculate([point(0, 1000, 'measured'), point(1, 0, quality)], price, start, until);
-    assert.equal(result.energyWh, 1000);
-    assert.equal(result.incomplete, true, quality);
-  }
-  // A time the charger did not run stays complete.
+  const result = calculate([point(0, 1000, 'measured'), point(1, 0, 'invalid')], price, start, until);
+  assert.equal(result.energyWh, 1000);
+  assert.equal(result.incomplete, true);
+  // A rejected reading outside the period says nothing about it.
+  assert.equal(calculate([point(0, 1000, 'measured'), point(2, 0, 'invalid')], price, start, until).incomplete, false);
+  // A counter that restarted, with its energy back as an integrated row.
+  assert.equal(calculate([point(0, 0, 'reset'), point(0, 1000, 'integrated')], price, start, until).incomplete, false);
   assert.equal(calculate([point(0, 0, 'measured'), point(1, 0, 'gap')], price, start, until).incomplete, false);
 });
 

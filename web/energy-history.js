@@ -142,10 +142,11 @@
       }
       var energyWh = bucketEnergyWh * (end - start) / (bucketEnd - bucketStart);
       result.energyWh += energyWh;
-      // A rejected or reset counter reading holds 0 Wh whatever the charger
-      // did, so that zero is missing energy. A plain gap with no energy is a
-      // time the charger did not run.
-      if (point.quality === 'invalid' || point.quality === 'reset') result.incomplete = true;
+      // A rejected counter reading holds 0 Wh whatever the charger did, so
+      // that zero is missing energy. A reset's energy comes back as its own
+      // integrated row. A gap at 0 Wh stays complete: mostly the charger did
+      // not run, and this cannot tell the rest apart.
+      if (point.quality === 'invalid') result.incomplete = true;
       if (energyWh <= 0) return;
       if (['measured', 'integrated'].indexOf(point.quality) < 0) result.incomplete = true;
 
