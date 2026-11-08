@@ -159,6 +159,7 @@ func TestGoalReserveHoldsToThePlansLimits(t *testing.T) {
 	} {
 		st := deadlineGoalState(now, "a")
 		st.MinChargeW, st.MaxChargeW, st.AllowedStepsW, st.CarMaxW, st.CarPhases, st.CurrentSoC = 1380, 11040, steps, 3680, c.carPhases, c.soc
+		st.TargetTime = now.Add(30 * time.Minute) // Within the latest start, even near the goal.
 		svc := &Service{
 			LoadpointStates: func() []loadpoint.State { return []loadpoint.State{st} },
 			PlanningLimits: func(st loadpoint.State) (float64, float64, []float64) {

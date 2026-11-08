@@ -47,13 +47,15 @@ func (c *Controller) freezeFuseBudget(now time.Time, samples map[string]EVSample
 		st, _ := c.manager.State(cfg.ID)
 		request := fuseRequest{cfg: c.fuseConfig(cfg, c.tickChoices[cfg.ID].phaseMode), deadline: st.TargetTime}
 		if sample.Connected && !sample.ConnectionUnknown && c.driverCanDispatch(cfg.DriverName) {
-			if hold, held := c.GetManualHold(cfg.ID, now); held {
+			hold, held := c.GetManualHold(cfg.ID, now)
+			if held {
 				request.wantW = clampManualPower(cfg, hold, c.siteFuse())
 			} else {
 				request.wantW, _, _ = c.computeCommandForBudget(now, request.cfg, sample.PowerW, false)
 			}
-			request.goal = request.wantW > 0 && !cfg.SurplusOnly
-			if _, held := c.GetManualHold(cfg.ID, now); !held {
+			// Charge now is a goal even on a solar-only charger.
+			request.goal = request.wantW > 0 && (held || !cfg.SurplusOnly)
+			if !held {
 				c.batSoCArmedMu.Lock()
 				armed := c.batSoCArmed[cfg.ID]
 				c.batSoCArmedMu.Unlock()
@@ -219,13 +221,16 @@ func (c *Controller) phaseRoomCapW(id, mode string, wantW, split, roomA float64)
 }
 
 // FuseConfigs returns the loadpoints with the phase mode each command names
-// this tick. control.EVFuseBudget measures room on those phases, so an auto
-// or 1p offer never gets three phases of room. Outside a tick, and for a
-// loadpoint that gets no command, the configured mode stands.
+// this tick, and the least each can order on those phases.
+// control.EVFuseBudget measures room on those phases, so an auto or 1p offer
+// never gets three phases of room, and an idle pool waits for room for that
+// least order, not the configured three-phase minimum. Outside a tick, and
+// for a loadpoint that gets no command, the configured mode stands.
 func (c *Controller) FuseConfigs() []Config {
 	configs := c.manager.Configs()
 	for i := range configs {
 		if mode := c.tickChoices[configs[i].ID].phaseMode; mode != "" {
+			configs[i] = c.fuseConfig(configs[i], mode)
 			configs[i].PhaseMode = mode
 		}
 	}

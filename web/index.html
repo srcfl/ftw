@@ -778,6 +778,32 @@
       </div>
     </details>
 
+    <details id="battery-return-details" class="history-disclosure">
+      <summary>
+        <span>
+          <strong>Energy tax refund for battery storage</strong>
+          <small>Sweden: the figure to give Skatteverket for one calendar year</small>
+        </span>
+        <span id="battery-return-meta" class="history-disclosure-meta">Open</span>
+      </summary>
+      <div class="history-disclosure-body">
+        <div class="energy-history-controls">
+          <label>Year
+            <select id="battery-return-year"></select>
+          </label>
+          <a id="battery-return-csv" class="btn-send" href="/api/energy/battery-return.csv">Download hourly basis (CSV)</a>
+        </div>
+        <p id="battery-return-result" class="energy-history-quality-note" aria-live="polite">Open this section to work out the year.</p>
+        <section class="energy-history-table-wrap">
+          <table class="energy-history-table">
+            <thead><tr><th>Month</th><th>Returned</th><th>Complete hours</th></tr></thead>
+            <tbody id="battery-return-rows"></tbody>
+          </table>
+        </section>
+        <p class="energy-history-note">The figure is grid electricity that a battery stored and later sent back to the grid. Where the readings cannot tell where energy went, FTW counts low: solar, a car and the other batteries count first in every hour, each battery keeps its own account, what the house takes from a battery counts as grid energy first and what goes to the grid as other energy first, losses count as other energy, and an hour counts only when every meter read all of it. The figure assumes FTW reads every solar inverter, battery and car charger on the site, and it uses the battery sizes set today. You can apply within three years after the year ends, and FTW keeps the hourly readings that long. Keep the CSV, one row per battery and hour, with your application. <a href="https://www.skatteverket.se/privat/skatter/skattpabransleochel/aterbetalningavskattpaelefterbatterilagring.4.5fb2fa71a0b0adb74a23d8.html" target="_blank" rel="noopener">Skatteverket's rules</a></p>
+      </div>
+    </details>
+
     <details id="plan-history-details" class="history-disclosure history-plan-disclosure">
       <summary>
         <span>
@@ -1021,6 +1047,7 @@
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=zones2"></script>
   <script src="/energy-history.js?v=story1"></script>
+  <script src="/battery-return.js?v=3"></script>
   <script src="/diagnose.js?v=zones1"></script>
   <script type="module" src="/mobile-navigation.js?v=scroll1"></script>
   <script src="/update-badge.js?v=native1" defer></script>

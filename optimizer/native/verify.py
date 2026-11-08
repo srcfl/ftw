@@ -101,7 +101,7 @@ def main():
     root = HERE / "bundle"
     manifest = verify_bundle(root)
     host = host_key()
-    if host is None:
+    if host not in manifest["artifacts"]:
         if not args.host_binary:
             print(f"Verified Energyplan {manifest['version']}: bundle integrity passed; no worker for this host, execution skipped")
         return

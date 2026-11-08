@@ -1,7 +1,7 @@
 {
   "family": "seeded_planner",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "15f9edc3b973d7b9151e88d63575a9b7d615a0b3",
+  "ftw_commit": "74d77a20d58cb902f5f62325520498143e2a2d19",
   "record_count": 100,
   "records": [
     {
@@ -452,7 +452,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": -2028,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.93,
+          "live_pv_surplus_soc_cap": 0.9346559122157528,
           "elapsed_s": 357,
           "remaining_s": 689
         }
@@ -460,7 +460,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4189,
+          "target_w": -4153,
           "clamped": false
         }
       ],
@@ -483,9 +483,9 @@
       },
       "site_totals": {
         "battery_current_w": -1651,
-        "battery_target_sum_w": -4189,
+        "battery_target_sum_w": -4153,
         "raw_grid_w": 4230,
-        "projected_grid_w": 1692
+        "projected_grid_w": 1728
       }
     },
     {
@@ -835,7 +835,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 2456,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.86,
+          "live_pv_surplus_soc_cap": 0.8587472677682063,
           "elapsed_s": 110,
           "remaining_s": 220
         }
@@ -1438,7 +1438,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3376.7441889520824,
+          "target_w": -3376.7441860465115,
           "clamped": false
         }
       ],
@@ -1461,9 +1461,9 @@
       },
       "site_totals": {
         "battery_current_w": -465,
-        "battery_target_sum_w": -3376.7441889520824,
+        "battery_target_sum_w": -3376.7441860465115,
         "raw_grid_w": 1767,
-        "projected_grid_w": -1144.7441889520824
+        "projected_grid_w": -1144.7441860465115
       }
     },
     {
@@ -1536,12 +1536,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4275.610107612486,
+          "target_w": -4275.610104181533,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -4453.760528763006,
+          "target_w": -4453.760525189096,
           "clamped": false
         }
       ],
@@ -1564,9 +1564,9 @@
       },
       "site_totals": {
         "battery_current_w": 460,
-        "battery_target_sum_w": -8729.370636375492,
+        "battery_target_sum_w": -8729.37062937063,
         "raw_grid_w": 3414,
-        "projected_grid_w": -5775.370636375492
+        "projected_grid_w": -5775.370629370629
       }
     },
     {
@@ -1825,7 +1825,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.84,
+          "pv_surplus_absorb_soc_cap": 0.8417180764157632,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -1842,12 +1842,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -462.4999999999991,
+          "target_w": -462.5,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -462.4999999999991,
+          "target_w": -462.5,
           "clamped": true
         }
       ],
@@ -1864,7 +1864,7 @@
         "fuse_ev_max_w": 0,
         "fuse_hold_latched": true,
         "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 924.9999999999982,
+        "fuse_hold_max_discharge_w": 925,
         "per_phase_overage_w": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
@@ -1873,9 +1873,9 @@
       },
       "site_totals": {
         "battery_current_w": 6081,
-        "battery_target_sum_w": -924.9999999999982,
+        "battery_target_sum_w": -925,
         "raw_grid_w": -4034,
-        "projected_grid_w": -11039.999999999998
+        "projected_grid_w": -11040
       }
     },
     {
@@ -2628,7 +2628,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.92,
+          "live_pv_surplus_soc_cap": 0.9169474781726529,
           "elapsed_s": 392,
           "remaining_s": 582
         }
@@ -3222,12 +3222,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2222.0129032258064,
+          "target_w": -2208.0774193548386,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -3518.1870967741934,
+          "target_w": -3496.122580645161,
           "clamped": false
         }
       ],
@@ -3250,9 +3250,9 @@
       },
       "site_totals": {
         "battery_current_w": -3768,
-        "battery_target_sum_w": -5740.2,
+        "battery_target_sum_w": -5704.2,
         "raw_grid_w": 3287,
-        "projected_grid_w": 1314.8000000000002
+        "projected_grid_w": 1350.8000000000002
       }
     },
     {
@@ -3319,7 +3319,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 3855.6213055737335,
+          "target_w": 3855.621301775148,
           "clamped": false
         }
       ],
@@ -3342,9 +3342,9 @@
       },
       "site_totals": {
         "battery_current_w": -1381,
-        "battery_target_sum_w": 3855.6213055737335,
+        "battery_target_sum_w": 3855.621301775148,
         "raw_grid_w": -1360,
-        "projected_grid_w": 3876.6213055737335
+        "projected_grid_w": 3876.621301775148
       }
     },
     {
@@ -3403,7 +3403,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -600,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.77,
+          "live_pv_surplus_soc_cap": 0.7709719503840469,
           "elapsed_s": 225,
           "remaining_s": 623
         }
@@ -3691,7 +3691,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.73,
+          "pv_surplus_absorb_soc_cap": 0.7315028887007622,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -3798,7 +3798,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": -23,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.91,
+          "live_pv_surplus_soc_cap": 0.9066230931563072,
           "elapsed_s": 184,
           "remaining_s": 309
         }
@@ -3806,12 +3806,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1306.9935483870968,
+          "target_w": -1293.058064516129,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -2069.4064516129033,
+          "target_w": -2047.341935483871,
           "clamped": false
         }
       ],
@@ -3834,9 +3834,9 @@
       },
       "site_totals": {
         "battery_current_w": -1868,
-        "battery_target_sum_w": -3376.4,
+        "battery_target_sum_w": -3340.4,
         "raw_grid_w": 2514,
-        "projected_grid_w": 1005.5999999999999
+        "projected_grid_w": 1041.6
       }
     },
     {
@@ -4000,7 +4000,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4334.4,
+          "target_w": -4298.4,
           "clamped": false
         }
       ],
@@ -4023,9 +4023,9 @@
       },
       "site_totals": {
         "battery_current_w": -1776,
-        "battery_target_sum_w": -4334.4,
+        "battery_target_sum_w": -4298.4,
         "raw_grid_w": 4264,
-        "projected_grid_w": 1705.6000000000004
+        "projected_grid_w": 1741.6000000000004
       }
     },
     {
@@ -4396,7 +4396,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1459.6000000000004,
+          "target_w": -1423.6000000000004,
           "clamped": false
         }
       ],
@@ -4419,9 +4419,9 @@
       },
       "site_totals": {
         "battery_current_w": 2822,
-        "battery_target_sum_w": -1459.6000000000004,
+        "battery_target_sum_w": -1423.6000000000004,
         "raw_grid_w": 7136,
-        "projected_grid_w": 2854.3999999999996
+        "projected_grid_w": 2890.3999999999996
       }
     },
     {
@@ -4482,7 +4482,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4655.2,
+          "target_w": -3800.2,
           "clamped": false
         }
       ],
@@ -4505,9 +4505,9 @@
       },
       "site_totals": {
         "battery_current_w": -97,
-        "battery_target_sum_w": -4655.2,
+        "battery_target_sum_w": -3800.2,
         "raw_grid_w": 6232,
-        "projected_grid_w": 1673.8000000000002
+        "projected_grid_w": 2528.8
       }
     },
     {
@@ -4964,7 +4964,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.6,
+          "live_pv_surplus_soc_cap": 0.600069383012964,
           "elapsed_s": 82,
           "remaining_s": 541
         }
@@ -5147,7 +5147,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.82,
+          "pv_surplus_absorb_soc_cap": 0.8170109976831964,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -5465,7 +5465,7 @@
           "strategy": "arbitrage",
           "planned_grid_w": 58,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.69,
+          "live_pv_surplus_soc_cap": 0.6876649891490324,
           "elapsed_s": 85,
           "remaining_s": 572
         }
@@ -5551,7 +5551,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.84,
+          "live_pv_surplus_soc_cap": 0.8360543416220111,
           "elapsed_s": 582,
           "remaining_s": 307
         }
@@ -5559,7 +5559,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2367.4,
+          "target_w": -2331.4,
           "clamped": false
         }
       ],
@@ -5582,9 +5582,9 @@
       },
       "site_totals": {
         "battery_current_w": -1912,
-        "battery_target_sum_w": -2367.4,
+        "battery_target_sum_w": -2331.4,
         "raw_grid_w": 759,
-        "projected_grid_w": 303.5999999999999
+        "projected_grid_w": 339.5999999999999
       }
     },
     {
@@ -5645,7 +5645,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 46,
+          "target_w": 82,
           "clamped": false
         }
       ],
@@ -5668,9 +5668,9 @@
       },
       "site_totals": {
         "battery_current_w": 3184,
-        "battery_target_sum_w": 46,
+        "battery_target_sum_w": 82,
         "raw_grid_w": 5230,
-        "projected_grid_w": 2092
+        "projected_grid_w": 2128
       }
     },
     {
@@ -6196,7 +6196,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.72,
+          "pv_surplus_absorb_soc_cap": 0.720847646748382,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -6213,12 +6213,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 977.8064516129032,
+          "target_w": 977.8064516129025,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 1548.1935483870968,
+          "target_w": 1548.1935483870957,
           "clamped": false
         }
       ],
@@ -6241,9 +6241,9 @@
       },
       "site_totals": {
         "battery_current_w": -2798,
-        "battery_target_sum_w": 2526,
+        "battery_target_sum_w": 2525.999999999998,
         "raw_grid_w": -3154,
-        "projected_grid_w": 2170
+        "projected_grid_w": 2169.999999999998
       }
     },
     {
@@ -6302,7 +6302,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 2519,
           "has_planned_grid_w": true,
-          "live_pv_surplus_soc_cap": 0.63,
+          "live_pv_surplus_soc_cap": 0.626232970478788,
           "elapsed_s": 270,
           "remaining_s": 706
         }
@@ -6310,7 +6310,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4185.6,
+          "target_w": -4149.6,
           "clamped": false
         }
       ],
@@ -6333,9 +6333,9 @@
       },
       "site_totals": {
         "battery_current_w": -2544,
-        "battery_target_sum_w": -4185.6,
+        "battery_target_sum_w": -4149.6,
         "raw_grid_w": 2736,
-        "projected_grid_w": 1094.3999999999996
+        "projected_grid_w": 1130.3999999999996
       }
     },
     {
@@ -7070,7 +7070,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.86,
+          "pv_surplus_absorb_soc_cap": 0.8640085831651351,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7079,7 +7079,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.92,
+          "live_pv_surplus_soc_cap": 0.9237344109254809,
           "elapsed_s": 253,
           "remaining_s": 707
         }
@@ -7087,12 +7087,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4500.558904109589,
+          "target_w": -4476.8876712328765,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -2344.041095890411,
+          "target_w": -2331.7123287671234,
           "clamped": false
         }
       ],
@@ -7115,9 +7115,9 @@
       },
       "site_totals": {
         "battery_current_w": -3460,
-        "battery_target_sum_w": -6844.6,
+        "battery_target_sum_w": -6808.6,
         "raw_grid_w": 5641,
-        "projected_grid_w": 2256.3999999999996
+        "projected_grid_w": 2292.3999999999996
       }
     },
     {
@@ -7196,12 +7196,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -2370.9296403164058,
+          "target_w": -2370.9296384238523,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -2469.71837532959,
+          "target_w": -2469.7183733581796,
           "clamped": false
         }
       ],
@@ -7224,9 +7224,9 @@
       },
       "site_totals": {
         "battery_current_w": 1577,
-        "battery_target_sum_w": -4840.648015645996,
+        "battery_target_sum_w": -4840.648011782032,
         "raw_grid_w": 6446,
-        "projected_grid_w": 28.351984354004344
+        "projected_grid_w": 28.351988217968028
       }
     },
     {
@@ -7279,7 +7279,7 @@
           "strategy": "passive_arbitrage",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.82,
+          "live_pv_surplus_soc_cap": 0.8242908060209763,
           "elapsed_s": 190,
           "remaining_s": 608
         }
@@ -7364,7 +7364,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.79,
+          "pv_surplus_absorb_soc_cap": 0.7862699024545199,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7465,7 +7465,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.91,
+          "live_pv_surplus_soc_cap": 0.906954730436936,
           "elapsed_s": 479,
           "remaining_s": 733
         }
@@ -7554,7 +7554,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.78,
+          "pv_surplus_absorb_soc_cap": 0.779134585689955,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -7571,12 +7571,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -3743.903874385292,
+          "target_w": -3743.9038763163794,
           "clamped": true
         },
         {
           "driver": "sungrow",
-          "target_w": -2125.0961256147093,
+          "target_w": -2125.0961236836206,
           "clamped": true
         }
       ],
@@ -7593,7 +7593,7 @@
         "fuse_ev_max_w": 0,
         "fuse_hold_latched": true,
         "fuse_hold_max_charge_w": 0,
-        "fuse_hold_max_discharge_w": 5869.000000000001,
+        "fuse_hold_max_discharge_w": 5869,
         "per_phase_overage_w": 0,
         "effective_import_ceiling_w": 11040,
         "effective_export_ceiling_w": 11040,
@@ -7602,9 +7602,9 @@
       },
       "site_totals": {
         "battery_current_w": 4842,
-        "battery_target_sum_w": -5869.000000000002,
+        "battery_target_sum_w": -5869,
         "raw_grid_w": -329,
-        "projected_grid_w": -11040.000000000002
+        "projected_grid_w": -11040
       }
     },
     {
@@ -7884,7 +7884,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.67,
+          "live_pv_surplus_soc_cap": 0.6692593883812832,
           "elapsed_s": 90,
           "remaining_s": 718
         }
@@ -8304,12 +8304,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4290.6138613861385,
+          "target_w": -4263.524752475248,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -1411.3861386138615,
+          "target_w": -1402.4752475247524,
           "clamped": false
         }
       ],
@@ -8332,9 +8332,9 @@
       },
       "site_totals": {
         "battery_current_w": -1370,
-        "battery_target_sum_w": -5702,
+        "battery_target_sum_w": -5666,
         "raw_grid_w": 7220,
-        "projected_grid_w": 2888
+        "projected_grid_w": 2924
       }
     },
     {
@@ -8680,7 +8680,7 @@
           "strategy": "self_consumption",
           "planned_grid_w": 0,
           "has_planned_grid_w": false,
-          "live_pv_surplus_soc_cap": 0.79,
+          "live_pv_surplus_soc_cap": 0.7909721045648893,
           "elapsed_s": 138,
           "remaining_s": 562
         }
@@ -8688,12 +8688,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -175.64081632653063,
+          "target_w": -158.00816326530614,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -182.9591836734694,
+          "target_w": -164.59183673469389,
           "clamped": false
         }
       ],
@@ -8716,9 +8716,9 @@
       },
       "site_totals": {
         "battery_current_w": -19,
-        "battery_target_sum_w": -358.6,
+        "battery_target_sum_w": -322.6,
         "raw_grid_w": 566,
-        "projected_grid_w": 226.39999999999998
+        "projected_grid_w": 262.4
       }
     },
     {
@@ -8903,12 +8903,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1721.7999999999997,
+          "target_w": -1709.7999999999997,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": -3443.5999999999995,
+          "target_w": -3419.5999999999995,
           "clamped": false
         }
       ],
@@ -8931,9 +8931,9 @@
       },
       "site_totals": {
         "battery_current_w": -1449,
-        "battery_target_sum_w": -5165.4,
+        "battery_target_sum_w": -5129.4,
         "raw_grid_w": 6194,
-        "projected_grid_w": 2477.6000000000004
+        "projected_grid_w": 2513.6000000000004
       }
     },
     {
@@ -9075,7 +9075,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.77,
+          "pv_surplus_absorb_soc_cap": 0.7655297392494168,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9092,7 +9092,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -1876.2,
+          "target_w": -1840.2,
           "clamped": false
         }
       ],
@@ -9115,9 +9115,9 @@
       },
       "site_totals": {
         "battery_current_w": -1491,
-        "battery_target_sum_w": -1876.2,
+        "battery_target_sum_w": -1840.2,
         "raw_grid_w": 642,
-        "projected_grid_w": 256.79999999999995
+        "projected_grid_w": 292.79999999999995
       }
     },
     {
@@ -9378,7 +9378,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -4768.48030502767,
+          "target_w": -4768.480300187617,
           "clamped": false
         }
       ],
@@ -9401,9 +9401,9 @@
       },
       "site_totals": {
         "battery_current_w": 3711,
-        "battery_target_sum_w": -4768.48030502767,
+        "battery_target_sum_w": -4768.480300187617,
         "raw_grid_w": 7142,
-        "projected_grid_w": -1337.4803050276696
+        "projected_grid_w": -1337.480300187617
       }
     },
     {
@@ -9545,7 +9545,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.81,
+          "pv_surplus_absorb_soc_cap": 0.8143981399846733,
           "pv_surplus_absorb_threshold_w": 0
         },
         "legacy_plan": {
@@ -9643,7 +9643,7 @@
           "site_fuse_voltage": 0,
           "site_fuse_phases": 0,
           "site_fuse_safety_a": 0,
-          "pv_surplus_absorb_soc_cap": 0.73,
+          "pv_surplus_absorb_soc_cap": 0.7275713488711221,
           "pv_surplus_absorb_threshold_w": 0
         },
         "slot": {
@@ -9660,12 +9660,12 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 2361.854606161241,
+          "target_w": 2232.923446889023,
           "clamped": false
         },
         {
           "driver": "sungrow",
-          "target_w": 2460.265214751293,
+          "target_w": 2325.9619238427326,
           "clamped": false
         }
       ],
@@ -9688,9 +9688,9 @@
       },
       "site_totals": {
         "battery_current_w": 4391,
-        "battery_target_sum_w": 4822.119820912534,
+        "battery_target_sum_w": 4558.885370731756,
         "raw_grid_w": -835,
-        "projected_grid_w": -403.8801790874659
+        "projected_grid_w": -667.1146292682442
       }
     },
     {

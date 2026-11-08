@@ -92,7 +92,7 @@ func (f *forecastCurtailment) SetReleaseEvidence(evidence func(string) bool) {
 }
 
 // PendingDrivers maps pending hardware identities to current runtime names.
-// Call outside control locks: identity lookup may read SQLite. The caller may
+// Identity lookup reads the store's in-memory device cache. The caller may
 // restore these names into Core's normal curtailment state, which still decides
 // whether fresh telemetry and current intent permit release. Unknown identities
 // remain censored and never map to an arbitrary driver.
@@ -101,15 +101,20 @@ func (f *forecastCurtailment) PendingDrivers(currentNames []string) []string {
 		return nil
 	}
 	identities := make(map[string]string, len(currentNames))
-	for _, name := range currentNames {
-		if f.store != nil {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// With no persisted identity there is nothing to map, so keep f.mu held:
+	// dropping it would let persist move an active entry into f.ids after
+	// the lookups were skipped, and that driver would go missing.
+	if len(f.ids) > 0 && f.store != nil {
+		f.mu.Unlock()
+		for _, name := range currentNames {
 			if device := f.store.LookupDeviceByDriverName(name); device != nil {
 				identities[name] = device.DeviceID
 			}
 		}
+		f.mu.Lock()
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	seen := make(map[string]bool, len(currentNames))
 	var pending []string
 	for _, name := range currentNames {

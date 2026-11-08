@@ -363,6 +363,37 @@ func TestFromConfigDefaultsZoneAndVAT(t *testing.T) {
 	}
 }
 
+// A base_url reads that server only: a day it does not have stays empty
+// instead of falling back to live Nord Pool prices.
+func TestFromConfigBaseURLReadsOnlyThatServer(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if !strings.HasSuffix(r.URL.Path, "/2026/10-27_SE3.json") {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `[{"SEK_per_kWh":1.25,"time_start":"2026-10-27T18:00:00+01:00","time_end":"2026-10-27T18:15:00+01:00"}]`)
+	}))
+	defer srv.Close()
+	s := FromConfig(&config.Price{Provider: "elprisetjustnu", BaseURL: srv.URL + "/"}, nil, nil)
+	if _, ok := s.Provider.(*ElpriserProvider); !ok {
+		t.Fatalf("provider = %T, want the elprisetjustnu provider alone", s.Provider)
+	}
+	loc := time.FixedZone("CET", 3600)
+	rows, err := s.Provider.Fetch(context.Background(), "SE3", time.Date(2026, 10, 27, 12, 0, 0, 0, loc))
+	if err != nil || len(rows) != 1 || rows[0].SEKPerKWh != 1.25 || rows[0].SlotLenMin != 15 {
+		t.Fatalf("today: rows %+v err %v", rows, err)
+	}
+	rows, err = s.Provider.Fetch(context.Background(), "SE3", time.Date(2026, 10, 28, 12, 0, 0, 0, loc))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("a day the server lacks: rows %+v err %v, want none", rows, err)
+	}
+	if paths[0] != "/2026/10-27_SE3.json" {
+		t.Errorf("path %q: the trailing slash doubled", paths[0])
+	}
+}
+
 // ---- ENTSOE minimal checks ----
 
 func TestENTSOERequiresAPIKey(t *testing.T) {

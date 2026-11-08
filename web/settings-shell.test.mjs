@@ -361,6 +361,21 @@ describe("unchanged settings fields", () => {
     assert.equal(rig.saved().planner.soc_max, 0.95);
   });
 
+  // A blank Max SoC saved as 0 became a 0 % charge ceiling in Core.
+  it("saves a cleared number as unset, not 0", async () => {
+    const rig = await formShell({ site: { name: "Home" }, batteries: { pixii: { soc_max: 0, max_charge_w: 7.5 } } });
+    const number = (path, value, unitScale) => Object.assign(stubElement(), {
+      dataset: unitScale ? { path, unitScale } : { path }, type: "number", defaultValue: value, value });
+    const max = number("batteries.pixii.soc_max", "0");
+    const charge = number("batteries.pixii.max_charge_w", "7.5", "1000");
+    rig.addField(max);
+    rig.addField(charge);
+    max.value = "";
+    charge.value = "";
+    await rig.context.saveConfig();
+    assert.deepEqual(rig.saved().batteries, { pixii: { soc_max: null, max_charge_w: null } });
+  });
+
   // A select shows the first option when the stored value is none of them,
   // and an unchanged save then never stores what the form showed (#1436).
   it("shows a select's default when the stored value is not an option", async () => {
@@ -522,7 +537,7 @@ async function electricalShell(fuse) {
   const rig = loadShell(structuredClone(original));
   rig.loadTab('./settings/tabs/control.js');
   const fields = {};
-  for (const [key, fallback] of Object.entries({ phases: 3, voltage: 230, max_amps: 16, safety_margin_a: 0.5 })) {
+  for (const [key, fallback] of Object.entries({ phases: 3, voltage: 230, max_amps: 16, safety_margin_a: 0 })) {
     fields[key] = Object.assign(stubElement(), {
       dataset: { path: 'fuse.' + key }, type: 'number', value: String(fuse[key] ?? fallback),
     });
@@ -562,6 +577,21 @@ describe('electricity connection settings', () => {
       assert.deepEqual(await rig.save(), rig.original);
     });
   }
+
+  it('shows an unset safety margin as 0 and offers a margin as opt-in', () => {
+    const rig = loadShell({});
+    rig.loadTab('./settings/tabs/control.js');
+    const config = { site: {}, fuse: { max_amps: 16 } };
+    const getByPath = (obj, path, dflt) => path.split('.').reduce((node, key) => node?.[key], obj) ?? dflt;
+    const html = rig.tabs.control.render({
+      config, getByPath, escHtml: s => String(s ?? ''),
+      help: text => '<span data-help="' + text + '">?</span>',
+      field: (label, path, type, dflt) => '<input data-path="' + path + '" value="' + getByPath(config, path, dflt) + '">',
+    });
+    assert.match(html, /data-path="fuse\.safety_margin_a" value="0"/);
+    assert.match(html, /Optional\. Amps to keep below the fuse rating[^"]*0 works to the rating\./);
+    assert.doesNotMatch(html, /Defaults to 0\.5 A/);
+  });
 
   it('only replaces custom voltage when the user picks a standard connection', async () => {
     const rig = await electricalShell({ phases: 2, voltage: 240, max_amps: 20, safety_margin_a: 0 });

@@ -3,6 +3,8 @@ package drivers
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -353,5 +355,94 @@ func TestSungrowProbesTheHybridBlockWhenTheDeviceTypeNeverAnswers(t *testing.T) 
 	if !faulted {
 		t.Fatalf("a hybrid with an unreadable device type never reached its " +
 			"running state; the probing fallback is not working")
+	}
+}
+
+// offlineModbus fails every read and write the way FTW's Modbus client does
+// while the inverter is unreachable: the dial error the site rig logged for
+// reads, and the reconnect backoff for writes.
+type offlineModbus struct {
+	*recordingModbus
+	offline bool
+}
+
+func (m *offlineModbus) Read(addr uint16, count uint16, kind int32) ([]uint16, error) {
+	if m.offline {
+		return nil, errors.New("dial tcp 127.0.0.1:502: connect: connection refused")
+	}
+	return m.recordingModbus.Read(addr, count, kind)
+}
+
+func (m *offlineModbus) WriteSingle(addr uint16, value uint16) error {
+	if m.offline {
+		return fmt.Errorf("%w for 1.243s", ErrModbusBackoff)
+	}
+	return m.recordingModbus.WriteSingle(addr, value)
+}
+
+func (m *offlineModbus) WriteMulti(addr uint16, values []uint16) error {
+	if m.offline {
+		return fmt.Errorf("%w for 1.243s", ErrModbusBackoff)
+	}
+	return m.recordingModbus.WriteMulti(addr, values)
+}
+
+// An inverter that drops off the network for a while is not an inverter
+// without registers. The random site rig (27 October 2026) took the Sungrow
+// offline while it held a forced discharge. sungrow 1.6.0 counted the failed
+// writes as the device refusing the EMS block, then reported the release as
+// held without writing it, so the inverter kept discharging for up to five
+// minutes after it came back. It also counted the failed reads as missing
+// registers and dropped 13000, which signs the battery.
+func TestSungrowOutageKeepsTheReleaseAndTheBatterySign(t *testing.T) {
+	tel := telemetry.NewStore()
+	modbus := &offlineModbus{recordingModbus: newRecordingModbus()}
+	modbus.regs[4999] = 0x0E0E // SH10RT
+	modbus.regs[13000] = 0x0004
+	modbus.regs[13021] = 900 // battery power, unsigned; 13000 says discharging
+	modbus.regs[13022] = 550
+	env := NewHostEnv("sungrow", tel).WithModbus(modbus)
+	env.BatteryCapacityWh = 9600
+	d, err := NewLuaDriver("../../../drivers/sungrow.lua", env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+	ctx := context.Background()
+
+	if _, err := d.Poll(ctx); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	cmd, _ := json.Marshal(map[string]any{"action": "battery", "power_w": -3000})
+	if err := d.Command(ctx, cmd); err != nil {
+		t.Fatalf("forced discharge: %v", err)
+	}
+
+	modbus.offline = true
+	for i := 0; i < 6; i++ {
+		untilNextFullRead(env)
+		_, _ = d.Poll(ctx)
+		if err := d.DefaultMode(); err == nil {
+			t.Fatalf("default mode %d reported success while nothing reached the device", i)
+		}
+	}
+	modbus.offline = false
+
+	if err := d.DefaultMode(); err != nil {
+		t.Fatalf("default mode after the device returned: %v", err)
+	}
+	if got := modbus.regs[13049]; got != 0 {
+		t.Fatalf("EMS mode = %d after the device returned, want 0: the "+
+			"release was skipped and the forced discharge kept running", got)
+	}
+
+	untilNextFullRead(env)
+	if _, err := d.Poll(ctx); err != nil {
+		t.Fatalf("poll after the device returned: %v", err)
+	}
+	reading := tel.Get("sungrow", telemetry.DerBattery)
+	if reading == nil || reading.RawW != -900 {
+		t.Fatalf("battery reading = %+v, want -900 W: 13000, which signs it, "+
+			"was dropped during the outage", reading)
 	}
 }

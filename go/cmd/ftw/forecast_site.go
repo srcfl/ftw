@@ -34,6 +34,7 @@ type forecastSiteConfig struct {
 	required              map[string]bool // value identifies PV sources
 	accepted              forecastIdentityReceipt
 	bindingDirty          bool
+	bindingRetryAt        time.Time // a failed binding save waits until then
 	configuredAt          time.Time
 	heatingPrior, ratedPV float64
 	annualBase            float64
@@ -48,6 +49,10 @@ type forecastIdentityReceipt struct {
 }
 
 const forecastIdentityReceiptKey = "forecast/live_identity_v1"
+
+// forecastBindingRetry spaces out binding saves after a failure. Each attempt
+// can wait seconds on SQLite, and the identity poll runs every second.
+const forecastBindingRetry = 30 * time.Second
 
 // forecastPipelinePolicy names how Core composes the forecast it plans with.
 // The evaluation cohort keys on it rather than on the Core version, so error
@@ -137,6 +142,7 @@ func (s *forecastSiteConfig) Configure(cfg *config.Config, catalog []drivers.Cat
 	}
 	weatherData, _ := json.Marshal(weather)
 	weatherRevision := fmt.Sprintf("%x", sha256.Sum256(weatherData))
+	var weatherReceipt []byte
 	s.mu.Lock()
 	for _, old := range earlier {
 		if err != nil || old == baseRevision || s.accepted.BaseRevision != old {
@@ -152,13 +158,10 @@ func (s *forecastSiteConfig) Configure(cfg *config.Config, catalog []drivers.Cat
 	if s.weatherRevision != weatherRevision || s.weatherSinceMS <= 0 {
 		s.weatherRevision = weatherRevision
 		s.weatherSinceMS = time.Now().UnixMilli()
-		receipt, _ := json.Marshal(struct {
+		weatherReceipt, _ = json.Marshal(struct {
 			Revision string
 			SinceMS  int64
 		}{weatherRevision, s.weatherSinceMS})
-		if err := s.store.SaveConfig("forecast/weather_generation", string(receipt)); err != nil {
-			slog.Warn("forecast weather generation not saved", "err", err)
-		}
 	}
 	v.WeatherSinceMS = s.weatherSinceMS
 	v.SiteID = s.value.SiteID
@@ -190,6 +193,12 @@ func (s *forecastSiteConfig) Configure(cfg *config.Config, catalog []drivers.Cat
 	}{weather, s.annualBase, s.annualIncludesHeating})
 	s.priorRevision = fmt.Sprintf("%x", sha256.Sum256(priorData))
 	s.mu.Unlock()
+	// Save outside s.mu: the control tick reads Snapshot and must not wait on SQLite.
+	if weatherReceipt != nil {
+		if err := s.store.SaveConfig("forecast/weather_generation", string(weatherReceipt)); err != nil {
+			slog.Warn("forecast weather generation not saved", "err", err)
+		}
+	}
 	s.RefreshIdentity(time.Now())
 	return previous != s.Snapshot().Revision
 }
@@ -198,10 +207,10 @@ func (s *forecastSiteConfig) Configure(cfg *config.Config, catalog []drivers.Cat
 // Serial/MAC identities are usable immediately. Endpoint fallback retains the
 // existing device contract after a short init grace. A previously stronger
 // identity must return before it can qualify again after restart.
-// Caller serializes this with model rebinding under forecastConfigMu.
+// Caller serializes this with model rebinding under forecastConfigMu, so the
+// saves below, made outside s.mu, keep their order.
 func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	ids := make(map[string]string, len(s.required))
 	pending, pvPending := false, false
 	for name, isPV := range s.required {
@@ -250,12 +259,25 @@ func (s *forecastSiteConfig) RefreshIdentity(now time.Time) bool {
 			s.accepted.LearningBaseRevision = learningBase
 		}
 		s.bindingDirty = true
-		if encoded, err := json.Marshal(s.accepted); err == nil {
-			if err = s.store.SaveConfig(forecastIdentityReceiptKey, string(encoded)); err != nil {
-				slog.Warn("forecast identity binding not saved", "err", err)
-			} else {
-				s.bindingDirty = false
-			}
+	}
+	var binding []byte
+	if !pending && s.bindingDirty && !now.Before(s.bindingRetryAt) {
+		binding, _ = json.Marshal(s.accepted)
+	}
+	s.mu.Unlock()
+
+	// Save outside s.mu: the control tick reads Snapshot and must not wait on SQLite.
+	if binding != nil {
+		err := s.store.SaveConfig(forecastIdentityReceiptKey, string(binding))
+		s.mu.Lock()
+		if err != nil {
+			s.bindingRetryAt = now.Add(forecastBindingRetry)
+		} else {
+			s.bindingDirty = false
+		}
+		s.mu.Unlock()
+		if err != nil {
+			slog.Warn("forecast identity binding not saved", "err", err, "retry_in", forecastBindingRetry)
 		}
 	}
 	if changed {

@@ -67,6 +67,9 @@ func schemaFor(t reflect.Type) map[string]any {
 }
 
 func setupFieldDescription(t reflect.Type, name string) string {
+	if t == reflect.TypeFor[config.Site]() && name == "time_zone" {
+		return "The household's IANA time zone, such as Europe/Stockholm. Car goals, the import hour, daily history and savings read this clock. Empty keeps the host's zone, which is UTC in Docker. Core applies a change when it restarts."
+	}
 	if t == reflect.TypeFor[config.Setup]() {
 		return map[string]string{
 			"goals_reviewed":       "The owner reviewed operating mode, battery reserve/export, planning style and any car/loadpoint goals. Unknown optional goals can wait.",

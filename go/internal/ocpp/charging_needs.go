@@ -148,7 +148,7 @@ func (h *Handler) noteChargingNeeds(id string, n ChargingNeeds) {
 	approved := h.approved[id]
 	h.mu.Unlock()
 	if approved && fn != nil {
-		fn(id, n)
+		h.callback(id, func() { fn(id, n) })
 	}
 }
 

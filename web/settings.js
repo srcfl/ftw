@@ -362,8 +362,10 @@
       if (fieldValue(input, input.defaultValue) === input.value) return;
       var path = input.dataset.path;
       var val = input.type === "number" ? parseFloat(input.value) : input.value;
-      if (input.type === "number" && isNaN(val)) val = 0;
-      if (input.type === "number" && input.dataset.unitScale) {
+      // A blank number is unset, so Core uses its default. Saving 0 instead
+      // gave a battery a 0 % charge ceiling.
+      if (input.type === "number" && isNaN(val)) val = null;
+      else if (input.type === "number" && input.dataset.unitScale) {
         val = val * parseFloat(input.dataset.unitScale);
       }
       // Preserve a stored password when the user hasn't typed over it.

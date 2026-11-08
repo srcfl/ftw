@@ -522,6 +522,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/energy/assets", Read, s.handleEnergyAssets)
 	s.handle("GET  /api/energy/history", Read, s.handleEnergyHistory)
 	s.handle("GET  /api/energy/history.csv", Read, s.handleEnergyHistoryCSV)
+	s.handle("GET  /api/energy/battery-return", Read, s.handleBatteryReturn)
+	s.handle("GET  /api/energy/battery-return.csv", Read, s.handleBatteryReturnCSV)
 	s.handle("GET  /api/savings/daily", Read, s.handleSavingsDaily)
 	s.handle("GET  /api/prices", Read, s.handlePrices)
 	s.handle("GET  /api/prices/zones", Read, s.handlePriceZones)
@@ -784,7 +786,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// storage: surface DB corruption-recovery events from this boot so a
 	// corrupt database is never a silent, blank-dashboard failure again.
 	if s.deps.State != nil {
-		storage := map[string]any{"state": "ok", "cache": "ok"}
+		storage := map[string]any{"state": "ok", "cache": "ok", "history": "ok"}
 		for _, ev := range s.deps.State.HealEvents() {
 			storage[ev.Tier] = ev.Action // "rebuilt" | "restored"
 			storage["last_event_ms"] = ev.AtMs
@@ -1714,6 +1716,9 @@ func (s *Server) handlePostConfigWith(w http.ResponseWriter, r *http.Request, re
 		// declared via DRIVER.config_secrets — keeps config-package
 		// catalog-agnostic.
 		restoreDriverConfigSecrets(&newCfg, s.deps.Cfg, s.driverSecretKeys())
+		// A reviewed draft must save exactly as reviewed; the next load
+		// fills its unset timings instead.
+		newCfg.Site.FillUnsetTimings()
 	}
 	s.deps.CfgMu.RUnlock()
 

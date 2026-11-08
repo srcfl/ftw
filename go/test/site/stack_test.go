@@ -208,6 +208,7 @@ type houseDevice struct {
 	CarMaxA          float64           `json:"car_max_a,omitempty"`
 	CarPhases        int               `json:"car_phases,omitempty"`
 	WiredPhases      int               `json:"wired_phases,omitempty"`
+	Plugged          bool              `json:"plugged,omitempty"`
 }
 
 // houseEvent is one change to the house (device-simulator's runEvent).
@@ -247,6 +248,7 @@ type charger struct {
 	carPhases   int     // 0: as many as offered
 	wiredPhases int     // 1: wired on L1 only, kw its rating there
 	carMaxA     float64
+	plugged     bool // a car on it when the house starts, charging on its own
 }
 
 type stackSpec struct {
@@ -269,10 +271,18 @@ type stackSpec struct {
 	// charge; 0 leaves one.
 	soc2Pct float64
 	// engine is the planner's: core or energyplan. Empty takes
-	// FTW_SITE_ENGINE, else core.
+	// FTW_SITE_ENGINE, else energyplan, as a beta or stable box runs.
 	engine string
+	// mode is the control mode the run selects: planner_self or empty for
+	// planner_passive_arbitrage, as the web app chooses.
+	mode string
 	// horizonH is the planner's horizon_hours; 0 leaves Core's 48 h.
 	horizonH int
+	// plannerSoCMin is the planner's soc_min (a fraction); 0 leaves Core's.
+	plannerSoCMin float64
+	// startAfterS runs the house this long before FTW starts, as a site
+	// runs before Core boots; FTW's start is marked ftw_start.
+	startAfterS float64
 }
 
 type stack struct {
@@ -286,6 +296,7 @@ type stack struct {
 	sim    string // the house's API base URL
 	rec    *recorder
 	cfg    string
+	prices *priceServer
 	// markErr is the first mark the house did not take; the run cannot be
 	// judged without it.
 	markErr error
@@ -340,7 +351,7 @@ func (st *stack) houseSpec() houseSpec {
 		h.Devices = append(h.Devices, houseDevice{ID: lpIDs[i], Driver: "ocpp",
 			OCPPURL: fmt.Sprintf("ws://ftw:%s@127.0.0.1:%d/", ocppPass, st.lane.ftwOCPP()),
 			MaxKW:   kw, Vendor: "RigCo", Model: fmt.Sprintf("Rig%.0f", kw), PhaseSwitch: c.phaseSwitch, CommandResponseS: delay,
-			CarPhases: c.carPhases, CarMaxA: c.carMaxA, WiredPhases: c.wiredPhases,
+			CarPhases: c.carPhases, CarMaxA: c.carMaxA, WiredPhases: c.wiredPhases, Plugged: c.plugged,
 			OCPPConfig: map[string]string{"HeartbeatInterval": "60", "MeterValueSampleInterval": "10"}})
 	}
 	return h
@@ -353,6 +364,7 @@ func (st *stack) up() error {
 	if err := os.MkdirAll(st.rundir, 0o755); err != nil {
 		return err
 	}
+	st.prices = newPriceServer(time.Now())
 	spec, _ := json.MarshalIndent(st.houseSpec(), "", "  ")
 	specPath := filepath.Join(st.rundir, "house.json")
 	if err := os.WriteFile(specPath, spec, 0o644); err != nil {
@@ -388,10 +400,14 @@ func (st *stack) up() error {
 			return err
 		}
 	}
+	if st.spec.startAfterS > 0 {
+		sleepS(st.spec.startAfterS)
+		st.mark("ftw_start")
+	}
 	if err := st.startFTW(); err != nil {
 		return err
 	}
-	if _, err := call("POST", st.ftw+"/api/mode", map[string]any{"mode": "planner_self"}, nil); err != nil {
+	if _, err := call("POST", st.ftw+"/api/mode", map[string]any{"mode": st.mode()}, nil); err != nil {
 		return err
 	}
 	st.rec = &recorder{ftw: st.ftw, path: filepath.Join(st.rundir, "ftw.jsonl")}
@@ -408,7 +424,9 @@ func (st *stack) startFTW() error {
 	return waitHTTP(st.ftw+"/api/status", 90*time.Second)
 }
 
-func (st *stack) stopFTW() { st.ps.stop("ftw", syscall.SIGTERM, 30*time.Second) }
+// stopFTW stops FTW with sig: SIGTERM lets it clean up, SIGKILL is a power
+// cut.
+func (st *stack) stopFTW(sig syscall.Signal) { st.ps.stop("ftw", sig, 30*time.Second) }
 
 func (st *stack) down() {
 	if st.rec != nil {
@@ -417,6 +435,9 @@ func (st *stack) down() {
 	st.ps.stop("ftw", syscall.SIGTERM, 30*time.Second)
 	st.ps.stop("house", syscall.SIGTERM, 15*time.Second)
 	st.ps.stopAll()
+	if st.prices != nil {
+		st.prices.close()
+	}
 }
 
 // event changes the house now.
@@ -516,7 +537,23 @@ func (st *stack) engine() string {
 	if e := os.Getenv("FTW_SITE_ENGINE"); e != "" {
 		return e
 	}
-	return "core"
+	return "energyplan"
+}
+
+// mode is the control mode this run selects, and plannerMode the planner
+// mode in its config that matches it.
+func (st *stack) mode() string {
+	if st.spec.mode != "" {
+		return st.spec.mode
+	}
+	return "planner_passive_arbitrage"
+}
+
+func (st *stack) plannerMode() string {
+	if st.mode() == "planner_self" {
+		return "self_consumption"
+	}
+	return "passive_arbitrage"
 }
 
 func (st *stack) ftwConfig() (string, error) {
@@ -545,7 +582,9 @@ func (st *stack) ftwConfig() (string, error) {
 	cfg := map[string]any{
 		"site": map[string]any{"name": "rig", "control_interval_s": 2, "grid_target_w": 0,
 			"grid_tolerance_w": 42, "watchdog_timeout_s": 60},
-		"fuse": map[string]any{"max_amps": st.spec.fuseA, "phases": 3, "voltage": 230},
+		// safety_margin_a pinned at 0 so the rig judges Core at the rating
+		// whatever the default.
+		"fuse": map[string]any{"max_amps": st.spec.fuseA, "phases": 3, "voltage": 230, "safety_margin_a": 0},
 		"drivers": []map[string]any{
 			{"name": "meter", "lua": "drivers/sdm630.lua", "is_site_meter": true, "capabilities": modbus("meter")},
 			{"name": "sungrow", "lua": "drivers/sungrow.lua", "battery_capacity_wh": 10000, "capabilities": modbus("inverter")},
@@ -559,12 +598,16 @@ func (st *stack) ftwConfig() (string, error) {
 		"device_repository": map[string]any{"enabled": false},
 		// A real box plans. A box without a planner runs Self, where the
 		// battery chases the raw meter and covers the car (dispatch.go),
-		// which hides the stress on the fuse.
-		"planner": map[string]any{"enabled": true, "engine": st.engine(), "mode": "self_consumption"},
-		"price":   map[string]any{"provider": "elprisetjustnu", "zone": "SE3"},
+		// which hides the stress on the fuse. Passive arbitrage is the
+		// mode the web app and a Charge restart return to.
+		"planner": map[string]any{"enabled": true, "engine": st.engine(), "mode": st.plannerMode()},
+		"price":   map[string]any{"provider": "elprisetjustnu", "zone": "SE3", "base_url": st.prices.url()},
 	}
 	if st.spec.horizonH > 0 {
 		cfg["planner"].(map[string]any)["horizon_hours"] = st.spec.horizonH
+	}
+	if st.spec.plannerSoCMin > 0 {
+		cfg["planner"].(map[string]any)["soc_min"] = st.spec.plannerSoCMin
 	}
 	if st.spec.soc2Pct > 0 {
 		cfg["drivers"] = append(cfg["drivers"].([]map[string]any),

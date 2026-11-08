@@ -223,6 +223,7 @@ cloud_purposes: [serve, stats]
 ops:
   - { name: site.mode.set, scope: ftw.mode.write, agent: ftw.goals.request, desc: Change the site operating mode }
   - { name: planner.prefs.set, scope: ftw.mode.write, agent: ftw.goals.request, desc: Set household planner preferences }
+  - { name: site.time_zone.propose, scope: ftw.setup.write, desc: Offer the phone's time zone to a box that keeps none }
   - { name: battery.hold, scope: ftw.dispatch.write, desc: Hold the battery at a fixed setpoint }
   - { name: loadpoint.hold, scope: ftw.dispatch.write, agent: ftw.dispatch.hold, desc: Charge the car now at a fixed current }
   - { name: loadpoint.boost, scope: ftw.dispatch.write, desc: Boost the car from the house battery }

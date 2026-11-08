@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,9 +28,14 @@ type scenario struct {
 	// tolerate names criteria that may fail for a known finding but need
 	// not: random cases, where a seed may or may not reach it.
 	tolerate map[string]string
+	// skip, when set, says what the pinned device-simulator lacks for this
+	// scenario: TestSite reports it skipped instead of running it.
+	skip string
 }
 
 var scenarios = []scenario{
+	{name: "s18-16", dir: "s18-car-first-battery-charge-16A", minutes: 8, short: true,
+		run: s18, judge: judgeS18},
 	{name: "s0-25", dir: "s0-idle-charger-25A", minutes: 5.1, short: true,
 		run: func(c *runCtx) (map[string]any, error) { return s0(c, 25, 60) }, judge: judgeS0},
 	{name: "s0b-25", dir: "s0b-idle-charger-default-hb-25A", minutes: 5.1,
@@ -94,8 +100,7 @@ var scenarios = []scenario{
 	{name: "s16-25", dir: "s16-import-ceiling-idle-start-25A", minutes: 68,
 		run: func(c *runCtx) (map[string]any, error) { return s16(c, 25) }, judge: judgeS16},
 	{name: "s17-25", dir: "s17-two-equal-batteries-25A", minutes: 30,
-		run: func(c *runCtx) (map[string]any, error) { return s17(c, 25) }, judge: judgeS17,
-		tolerate: map[string]string{"Energyplan's plan moves the batteries half the time": "the day's prices: within the hour's wait the plan may keep both batteries idle for later, dearer hours"}},
+		run: func(c *runCtx) (map[string]any, error) { return s17(c, 25) }, judge: judgeS17},
 }
 
 // runCtx is where one scenario runs.
@@ -410,7 +415,7 @@ func s7(c *runCtx, fuse float64, short bool) (map[string]any, error) {
 			sleepS(900)
 		}
 		st.mark("ftw_stop")
-		st.stopFTW()
+		st.stopFTW(syscall.SIGTERM)
 		sleepS(20)
 		st.mark("ftw_start")
 		if err := st.startFTW(); err != nil {
@@ -706,10 +711,10 @@ func judgeS12(d *runData) (metrics, []criterion) {
 		if p.Limit > 0 && p.phasesOr3() == 1 {
 			ones++
 		}
-		// A lower order while every phase has room is a cut on room alone,
-		// unless the plan itself asked for less (a pause between slots).
+		// A lower order while every phase is under the fuse is a cut on room
+		// alone, unless the plan itself asked for less (a pause between slots).
 		if i > 0 && p.offerW() < prs[i-1].offerW()-1 {
-			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-1-0.5 {
+			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-0.1 {
 				if after := d.at(t0 + p.T + 2); after == nil || firstLP(after).CommandedReason != "plan" {
 					cuts++
 				}
@@ -720,7 +725,7 @@ func judgeS12(d *runData) (metrics, []criterion) {
 	// recorded, not judged, since a slow charger's pending order may hold it.
 	limited := 0
 	for _, r := range w {
-		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-1-6 {
+		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-6 {
 			limited++
 		}
 	}
@@ -959,9 +964,11 @@ func judgeS15p(d *runData) (metrics, []criterion) {
 // (15 - 3) x 230 - (1 380 + 230) = 1 150 W on its way once kept the car from
 // starting at all (#1805). With the battery's 2 s the car started 25 s late
 // when Charge now caught a raise in flight, and at once when it did not.
+// The run plans in Self: in passive arbitrage the plan may keep the battery
+// idle and export the PV, and then no raise is on its way (#1875).
 func s15bat(c *runCtx, fuse float64) (map[string]any, error) {
 	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(3), socPct: 50, chargers: []charger{onePhaseCharger},
-		lpExtra: onePhaseExtra, batteryDelayS: 8}, func(st *stack) error {
+		lpExtra: onePhaseExtra, batteryDelayS: 8, mode: "planner_self"}, func(st *stack) error {
 		if err := st.plug(0); err != nil {
 			return err
 		}
@@ -1009,7 +1016,7 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 	start := d.firstT(t0, func(r *sample) bool { return carW(r, 0) >= 0.95*1380 })
 	over, longest := 0.0, 0.0
 	for _, r := range d.window(t0, t1) {
-		if maxAbsI(r) > fuse-1 {
+		if maxAbsI(r) > fuse {
 			over++
 			longest = math.Max(longest, over)
 		} else {
@@ -1017,13 +1024,13 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 		}
 	}
 	m := metrics{"battery_rise_w_20s_before": math.Round(rise), "car_start_s": roundp(start, 1),
-		"car_w_last60":               math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
-		"over_fuse_minus1_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
+		"car_w_last60":        math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
+		"over_fuse_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
 	return m, []criterion{
 		crit("the battery order rose over 1 150 W in the 20 s before Charge now", rise > 1150), // the setup
 		crit("car charging within 10 s of Charge now", le(start, 10)),
 		crit("fuse holds", !anyBlown(d.window(t0, t1))),
-		crit("over fuse - 1 A at most 3 s", longest <= 3),
+		crit("over the fuse at most 3 s", longest <= 3),
 	}
 }
 
@@ -1145,11 +1152,11 @@ func judgeS16(d *runData) (metrics, []criterion) {
 // turns under the plan, one discharging while the other stood at 0 W.
 // Energyplan's plan puts each quarter's discharge on one battery; Core must
 // share it. Core DP plans one battery only, so this runs Energyplan, as a
-// beta box does. A 3 kW house with no PV. Over 48 h the plan keeps the
-// batteries for the dearest hours, often tomorrow's; over 6 h they hold
-// more than the house needs, so it discharges now. The run still waits up
-// to an hour for a quarter the plan discharges, then runs 15 min. It keeps
-// the plan's order for each battery every 30 s in plan.jsonl.
+// beta box does. A 3 kW house with no PV. The pinned prices open with a
+// 4 h evening peak, and over a 6 h horizon the batteries hold less than
+// the house needs in it, so the plan discharges now. The run still waits
+// up to an hour for a quarter the plan discharges, then runs 15 min. It
+// keeps the plan's order for each battery every 30 s in plan.jsonl.
 func s17(c *runCtx, fuse float64) (map[string]any, error) {
 	err := with(c, stackSpec{fuseA: fuse, loadsW: [3]float64{1000, 1000, 1000}, socPct: 74, soc2Pct: 60,
 		engine: "energyplan", horizonH: 6}, func(st *stack) error {

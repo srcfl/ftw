@@ -21,7 +21,10 @@ import (
 
 const (
 	reconnectBackoffBase = 2 * time.Second
-	reconnectBackoffMax  = 60 * time.Second
+	// A device that comes back must be reached within 10 s: until then it
+	// may hold the last forced battery mode. A dead endpoint costs one
+	// connect attempt per 10 s, well under the eviction threshold below.
+	reconnectBackoffMax = 10 * time.Second
 
 	// Many inverters accept exactly one Modbus TCP session and evict the
 	// previous one on every new connect. Redials above this rate almost

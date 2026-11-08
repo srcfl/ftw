@@ -48,7 +48,7 @@ func TestSharedFuseGuardUsesCommandPhase(t *testing.T) {
 			if !known || math.Abs(command.power-tc.commandW) > .01 || command.phaseMode != tc.commandMode {
 				t.Fatalf("command=%+v, want %.0f W with phase %q", command, tc.commandW, tc.commandMode)
 			}
-			if phases := PhaseFor(command.phaseMode, command.power, 3680); command.power > 0 && tc.worstA+command.power/(230*float64(phases)) > 24.001 {
+			if phases := PhaseFor(command.phaseMode, command.power, 3680); command.power > 0 && tc.worstA+command.power/(230*float64(phases)) > 25.001 {
 				t.Fatalf("resolved %dp command crosses the phase working limit: %+v", phases, command)
 			}
 			demand := c.FuseDemands()

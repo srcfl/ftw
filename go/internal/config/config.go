@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/localzone"
 	"gopkg.in/yaml.v3"
 )
 
@@ -54,8 +55,9 @@ type Config struct {
 	LoadWarnings      []string `yaml:"-" json:"-"`
 	LoadpointWarnings []string `yaml:"-" json:"-"`
 	// Retired names settings of removed features that loading dropped so
-	// they cannot steer the site. Startup warns once for each;
-	// DropRetiredSettings deletes them from stored settings.
+	// they cannot steer the site, and stored values that match an old
+	// default. Startup warns once for each; DropRetiredSettings deletes the
+	// removed settings from stored settings and leaves the values alone.
 	Retired []string `yaml:"-" json:"-"`
 	// Used once at startup to end an old calendar's persisted away selection.
 	RetiredCalendarEnabled bool   `yaml:"-" json:"-"`
@@ -800,6 +802,11 @@ type Site struct {
 	SlewRateW            float64 `yaml:"slew_rate_w" json:"slew_rate_w"`
 	MinDispatchIntervalS int     `yaml:"min_dispatch_interval_s" json:"min_dispatch_interval_s"`
 
+	// TimeZone is the household's IANA zone: the clock car goals, the import
+	// hour, daily history and savings read. Empty keeps the host's zone.
+	// Core reads it once at start (localzone.Use).
+	TimeZone string `yaml:"time_zone,omitempty" json:"time_zone,omitempty"`
+
 	// SlewEnabled gates the external per-cycle ramp limiter. Both
 	// supported inverter families (Ferroamp, Sungrow) have their own
 	// internal power-ramp control loops; the external slew was
@@ -868,11 +875,16 @@ type Site struct {
 	MaxExportW float64 `yaml:"max_export_w,omitempty" json:"max_export_w,omitempty"`
 }
 
-// DefaultFuseSafetyMarginA is the fall-back per-phase amp headroom
-// applied when fuse.safety_margin_a is unset (nil) in the YAML.
-// Single source of truth — main.go routes through Fuse.Effective-
-// SafetyMarginA() rather than re-declaring it.
-const DefaultFuseSafetyMarginA = 0.5
+// DefaultFuseSafetyMarginA is the per-phase margin applied when
+// fuse.safety_margin_a is unset (nil). Core works to the fuse rating by
+// default; a margin is opt-in. Single source of truth: main.go routes
+// through Fuse.EffectiveSafetyMarginA() rather than re-declaring it.
+const DefaultFuseSafetyMarginA = 0.0
+
+// oldDefaultFuseSafetyMarginA was the default until FTW worked to the fuse
+// rating. A stored value equal to it may be the settings form's old prefill
+// rather than a choice, so loading names it once and keeps it.
+const oldDefaultFuseSafetyMarginA = 0.5
 
 // Fuse describes the shared breaker limit used by the fuse guard.
 type Fuse struct {
@@ -880,15 +892,11 @@ type Fuse struct {
 	Phases  int     `yaml:"phases" json:"phases"`
 	Voltage float64 `yaml:"voltage" json:"voltage"`
 
-	// SafetyMarginA reserves headroom (per-phase amps) below MaxAmps
-	// inside the dispatch fuse guard. Pointer so we can distinguish
-	// "unset" (nil → DefaultFuseSafetyMarginA) from "explicitly
-	// disabled" (non-nil 0.0). Inverters often have their own per-
-	// phase current protection that trips before the breaker; without
-	// a margin the dispatch can ride right up to MaxAmps and the
-	// inverter cuts to 0 W in one tick, then dispatch ramps back up —
-	// visible as a flap. 0.5 A × 230 V × 3 phases ≈ 345 W of aggregate
-	// headroom.
+	// SafetyMarginA is an opt-in per-phase margin below MaxAmps: each
+	// phase's working limit is MaxAmps − SafetyMarginA. Pointer so an
+	// explicit value, 0 included, always wins over the default (nil →
+	// DefaultFuseSafetyMarginA, which is 0). Set it for an inverter whose
+	// own per-phase limiter trips at the rating and cuts to 0 W.
 	SafetyMarginA *float64 `yaml:"safety_margin_a,omitempty" json:"safety_margin_a,omitempty"`
 }
 
@@ -897,15 +905,25 @@ func (f Fuse) MaxPowerW() float64 {
 	return f.MaxAmps * f.Voltage * float64(f.Phases)
 }
 
-// EffectiveSafetyMarginA returns the per-phase amp headroom to apply,
-// resolving nil ("unset → use default") vs an explicit value (including
-// 0.0 to disable the margin entirely). Single read site so the default
-// can never drift across consumers.
+// EffectiveSafetyMarginA returns the per-phase margin to apply: the
+// explicit value when set, otherwise DefaultFuseSafetyMarginA. Single read
+// site so the default can never drift across consumers.
 func (f Fuse) EffectiveSafetyMarginA() float64 {
 	if f.SafetyMarginA == nil {
 		return DefaultFuseSafetyMarginA
 	}
 	return *f.SafetyMarginA
+}
+
+// noteOldFuseMargin adds one notice when fuse.safety_margin_a holds FTW's
+// old default. The value stays: from April to September 2026 the settings
+// form saved its 0.5 A prefill on any save, but a value saved later is the
+// user's choice, and the stored document cannot tell the two apart.
+func (c *Config) noteOldFuseMargin() {
+	if m := c.Fuse.SafetyMarginA; m != nil && *m == oldDefaultFuseSafetyMarginA {
+		c.Retired = append(c.Retired,
+			"fuse.safety_margin_a is 0.5 A, FTW's old default. FTW now works to the fuse rating. Set 0 to use it.")
+	}
 }
 
 // Driver is one driver entry. Each driver is a Lua script loaded by
@@ -1132,6 +1150,11 @@ type Price struct {
 	GridTariffOreKwh float64 `yaml:"grid_tariff_ore_kwh,omitempty" json:"grid_tariff_ore_kwh,omitempty"`
 	VATPercent       float64 `yaml:"vat_percent,omitempty" json:"vat_percent,omitempty"`
 	APIKey           string  `yaml:"api_key,omitempty" json:"api_key,omitempty"`
+	// BaseURL is for tests and development only. It points the
+	// elprisetjustnu provider at another server with the same API and
+	// turns off the Nord Pool fallback, so the site rig can pin prices.
+	// Only the elprisetjustnu provider reads it; other providers ignore it.
+	BaseURL string `yaml:"base_url,omitempty" json:"base_url,omitempty"`
 
 	// Currency is the ISO code for pricing (default "SEK"). ENTSOE
 	// returns EUR/MWh; we convert using ECB daily FX rates.
@@ -1491,6 +1514,7 @@ func Parse(data []byte, baseDir string) (*Config, error) {
 	var retiredControl retiredControlSettings
 	_ = doc.Decode(&retiredControl)
 	c.applyRetiredControl(retiredControl)
+	c.noteOldFuseMargin()
 	// An omitted app_link section follows the new default. An explicit YAML
 	// null was a valid opt-out before that default changed, so retain it as an
 	// explicit disabled section instead of letting applyDefaults turn it on.
@@ -1683,6 +1707,23 @@ func relToBaseDir(baseDir, p string) string {
 	return rel
 }
 
+// FillUnsetTimings treats a zero control interval or watchdog timeout as
+// unset. Neither has a meaning at zero: a 0 s interval panics the boot ticker
+// and a 0 s watchdog marks every driver stale. Every decoded settings
+// document runs this, not only YAML, so a partial save cannot store a zero
+// that the next boot cannot start from.
+func (s *Site) FillUnsetTimings() {
+	if s.ControlIntervalS == 0 {
+		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
+		// dispatching twice on the same telemetry sample, and halves
+		// the perceived response lag operators saw at the original 5 s.
+		s.ControlIntervalS = 2
+	}
+	if s.WatchdogTimeoutS == 0 {
+		s.WatchdogTimeoutS = 60
+	}
+}
+
 // applyDefaults fills in sensible zero-value defaults.
 func applyDefaults(c *Config) {
 	if c.DeviceRepository == nil {
@@ -1723,17 +1764,9 @@ func applyDefaults(c *Config) {
 	}
 	// Endpoint is deliberately left blank: Resolved() supplies the default at
 	// use, so the collector's address is never written into a household's YAML.
-	if c.Site.ControlIntervalS == 0 {
-		// 2 s matches Ferroamp's ehub MQTT cadence (~1 Hz) without
-		// dispatching twice on the same telemetry sample, and halves
-		// the perceived response lag operators saw at the original 5 s.
-		c.Site.ControlIntervalS = 2
-	}
+	c.Site.FillUnsetTimings()
 	if c.Site.GridToleranceW == 0 {
 		c.Site.GridToleranceW = 42 // The Answer
-	}
-	if c.Site.WatchdogTimeoutS == 0 {
-		c.Site.WatchdogTimeoutS = 60
 	}
 	if c.Site.SmoothingAlpha == 0 {
 		c.Site.SmoothingAlpha = 0.3
@@ -1920,6 +1953,7 @@ func isLegacyDefaultDriverRepository(repo DriverRepositorySource) bool {
 // Validate ensures the config is internally consistent and safe to run with.
 func (c *Config) Validate() error {
 	c.NormalizeUnits()
+	c.dropZeroBatteryCeilings()
 	if err := c.validateSetup(); err != nil {
 		return err
 	}
@@ -1949,6 +1983,11 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Price.Validate(); err != nil {
 		return err
+	}
+	if c.Site.TimeZone != "" {
+		if _, err := localzone.Load(c.Site.TimeZone); err != nil {
+			return fmt.Errorf("site.time_zone: %w", err)
+		}
 	}
 
 	// Empty drivers list is a valid shape — e.g. an EV-only site that
@@ -2060,7 +2099,7 @@ func (c *Config) Validate() error {
 	}
 	// safety_margin_a must be in [0, max_amps) when explicitly set.
 	// Negative would *raise* the per-phase threshold above the breaker
-	// rating (defeating the guard); >= max_amps zeroes the headroom
+	// rating (defeating the guard); >= max_amps leaves no working limit
 	// and silently disables the per-phase clamp — both are real safety
 	// holes if reached through a typo'd config. nil (unset) is OK and
 	// resolves to DefaultFuseSafetyMarginA at the consumer.

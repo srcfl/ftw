@@ -460,7 +460,7 @@ func (s *simSite) coreEvery() time.Duration {
 
 func (s *simSite) declaredMaxAge() time.Duration {
 	if s.field == nil {
-		return 0
+		return s.evMaxAge
 	}
 	return s.field.c.timing.declared
 }
@@ -468,6 +468,9 @@ func (s *simSite) declaredMaxAge() time.Duration {
 // evData is what a charger driver adds to its reading.
 func (s *simSite) evData() map[string]any {
 	if s.field == nil {
+		if s.evMaxAge > 0 {
+			return map[string]any{"power_max_age_s": s.evMaxAge.Seconds()}
+		}
 		return nil
 	}
 	d := map[string]any{"connected": s.ev.Plugged, "control_power_confirmed": true}
@@ -499,7 +502,7 @@ func (f *fieldRun) harvest(s *simSite, kind string) {
 	}
 }
 
-func (f *fieldRun) limitA(s *simSite) float64 { return s.p.Fuse.RatingA - evPhaseMarginA }
+func (f *fieldRun) limitA(s *simSite) float64 { return s.state.fuseLineA() }
 
 // send records the command as the driver registry does and checks a cut.
 func (f *fieldRun) send(ctx context.Context, s *simSite, driver string, payload []byte) error {
@@ -552,12 +555,17 @@ func (f *fieldRun) checkCut(s *simSite, w float64) {
 		over = over || math.Abs(a) >= limit || s.heat[i] >= limit*limit
 	}
 	if !over {
-		f.fail(s, failCut, "cut the car %.0f -> %.0f W for the fuse with every phase under %.0f A (meter %.1f A)",
+		f.fail(s, failCut, "cut the car %.0f -> %.0f W for the fuse with every phase under %.1f A (meter %.1f A)",
 			s.offerW, w, limit, s.meter.PhaseA)
 		return
 	}
 	queuedA, queuedPhases, queued := e.Queued()
 	if !queued || e.DrawW <= 0 {
+		return
+	}
+	// Past the current a gG fuse carries for an hour, no cut on its way
+	// holds back the next one (fuseHourFactor).
+	if hourA := fuseHourFactor * s.p.Fuse.RatingA; max(s.heat[0], s.heat[1], s.heat[2]) > hourA*hourA {
 		return
 	}
 	drawA := e.DrawW / s.p.Voltage / float64(e.DrawPhases)
@@ -577,7 +585,7 @@ func (f *fieldRun) checkCut(s *simSite, w float64) {
 		}
 	}
 	if covered {
-		f.fail(s, failOverCut, "cut the car %.0f -> %.0f W while a cut to %.0f A it has not applied covers the overage (meter %.1f A, limit %.0f A)",
+		f.fail(s, failOverCut, "cut the car %.0f -> %.0f W while a cut to %.0f A it has not applied covers the overage (meter %.1f A, limit %.1f A)",
 			s.offerW, w, queuedA, s.meter.PhaseA, limit)
 	}
 }
@@ -595,7 +603,7 @@ func (f *fieldRun) wantsCharge(s *simSite, baseW float64) bool {
 		if level > 0 {
 			level = math.Max(level, math.Sqrt(s.heat[i]))
 		}
-		room = room && level+p.EVSE.MinA+evPhaseMarginA <= limit
+		room = room && level+p.EVSE.MinA <= limit+1e-9
 	}
 	switch {
 	case !room:
@@ -692,7 +700,7 @@ func fieldRoomW(c fieldCase, e *sitesim.EVSE, car *sitesim.Car) float64 {
 	for i := range phases {
 		worst = math.Max(worst, c.house[i])
 	}
-	roomA := math.Min(c.fuseA-evPhaseMarginA-worst, e.MaxA)
+	roomA := math.Min(c.fuseA-simFuseSafetyA-worst, e.MaxA)
 	if roomA < e.MinA {
 		return 0
 	}
@@ -797,7 +805,7 @@ func runFieldCase(c fieldCase, trace func(string, ...any)) (*simSite, *fieldRun)
 		// Export steps up and down, never past the fuse with the car off.
 		houseW, maxPVW := p.HouseW[0]+p.HouseW[1]+p.HouseW[2], math.Inf(1)
 		for _, a := range c.house {
-			maxPVW = math.Min(maxPVW, 3*230*(c.fuseA-2*evPhaseMarginA+a))
+			maxPVW = math.Min(maxPVW, 3*230*(c.fuseA-simFuseSafetyA+a))
 		}
 		exports := []float64{2500, 6000, 9000, 3000}
 		if len(c.exportW) > 0 {

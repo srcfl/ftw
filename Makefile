@@ -37,6 +37,7 @@ help:
 	@echo "  sim-ocpp             dial Evify OCPP chargers at a running FTW"
 	@echo "  dev                  start sims + main app against config.local.yaml"
 	@echo "  e2e                  run the full-stack e2e test"
+	@echo "  update-chain         install, update, crash and roll back real builds"
 	@echo "  verify               fast pre-commit: test + compose + vet + build"
 	@echo "  verify-all           pre-push: verify + Linux builds"
 	@echo "  install-hooks        install git pre-commit + pre-push hooks (opt-in)"
@@ -120,6 +121,18 @@ release-workflow-test:
 
 e2e: drivers-present
 	cd go && FTW_E2E=1 go test ./test/e2e -v -timeout 180s
+
+# The native update chain with real builds: install, update through a release
+# mirror, three kills in probation, then a binary rollback. Run it before
+# every stable. UPDATE_CHAIN_FROM (or FTW_UPDATE_CHAIN_FROM) lists the
+# releases to update from; by default the last three betas before HEAD. With
+# no beta tags the test fails; UPDATE_CHAIN_FROM=tree builds the previous
+# release from this tree instead.
+UPDATE_CHAIN_FROM ?= $(or $(FTW_UPDATE_CHAIN_FROM),$(shell git tag --list 'v0.*-beta.*' --merged HEAD --no-contains HEAD --sort=-v:refname 2>/dev/null | head -3))
+.PHONY: update-chain
+update-chain:
+	cd go && FTW_UPDATE_CHAIN=1 FTW_UPDATE_CHAIN_FROM="$(UPDATE_CHAIN_FROM)" \
+		go test -count=1 -timeout 60m -run 'TestUpdateChain$$' -v ./cmd/ftw-launcher/
 
 # FTW against device-simulator's house with a real fuse
 # (go/test/site/README.md). SITERIG_SET is short, full or scenario names;

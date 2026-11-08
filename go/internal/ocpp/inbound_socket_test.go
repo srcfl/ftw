@@ -156,7 +156,10 @@ func TestOldSocketStatusCannotClearPauseAfterReconnect(t *testing.T) {
 			if err := status(false); err != nil {
 				t.Fatal(err)
 			}
-			ctrl.Tick(context.Background(), time.Now())
+			unplugged := time.Now()
+			ctrl.Tick(context.Background(), unplugged)
+			// The cable stays out for UnplugGrace.
+			ctrl.Tick(context.Background(), unplugged.Add(loadpoint.UnplugGrace))
 			if _, ok := ctrl.GetManualHold("garage", time.Now()); ok {
 				t.Fatal("fresh physical unplug did not clear Pause")
 			}

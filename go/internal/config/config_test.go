@@ -1260,12 +1260,43 @@ func TestNotificationsMaskSecrets(t *testing.T) {
 	}
 }
 
+// An unset margin works to the fuse rating: the default is 0 and a margin
+// is opt-in (owner rule, 27 Oct 2026).
 func TestFuseSafetyMarginNilUsesDefault(t *testing.T) {
-	// Field omitted in YAML → nil pointer → default 0.5 A.
 	f := Fuse{MaxAmps: 16, Voltage: 230, Phases: 3}
-	if got := f.EffectiveSafetyMarginA(); got != DefaultFuseSafetyMarginA {
-		t.Errorf("nil margin: got %v, want %v (DefaultFuseSafetyMarginA)",
-			got, DefaultFuseSafetyMarginA)
+	if got := f.EffectiveSafetyMarginA(); got != 0 || DefaultFuseSafetyMarginA != 0 {
+		t.Errorf("nil margin: got %v (default %v), want 0", got, DefaultFuseSafetyMarginA)
+	}
+}
+
+// Every explicit margin is kept. Exactly 0.5 A was the old default, which
+// the settings form once saved on any save, so loading adds one notice for
+// it and changes nothing.
+func TestFuseSafetyMarginLoadKeepsExplicitValues(t *testing.T) {
+	for _, tc := range []struct {
+		line       string
+		want       float64
+		wantNotice bool
+	}{
+		{"", 0, false},
+		{"  safety_margin_a: 0\n", 0, false},
+		{"  safety_margin_a: 0.5\n", 0.5, true},
+		{"  safety_margin_a: 0.4\n", 0.4, false},
+		{"  safety_margin_a: 1.2\n", 1.2, false},
+	} {
+		yaml := strings.Replace(minimalYAML, "  max_amps: 16\n", "  max_amps: 16\n"+tc.line, 1)
+		c, err := Parse([]byte(yaml), "/tmp")
+		if err != nil {
+			t.Fatalf("%q: %v", tc.line, err)
+		}
+		if got := c.Fuse.EffectiveSafetyMarginA(); got != tc.want {
+			t.Errorf("%q: margin %v, want %v", tc.line, got, tc.want)
+		}
+		notice := len(c.Retired) == 1 && strings.Contains(c.Retired[0], "old default") &&
+			strings.Contains(c.Retired[0], "Set 0")
+		if notice != tc.wantNotice || (!tc.wantNotice && len(c.Retired) != 0) {
+			t.Errorf("%q: notices %q, want the old-default notice: %v", tc.line, c.Retired, tc.wantNotice)
+		}
 	}
 }
 

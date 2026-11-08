@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Refuse a native release older than a published native candidate."""
+"""Refuse a native release older than a published native candidate.
+
+A stable promotes a beta that has been tested for days, so newer betas may
+exist by then. A stable is refused only when a newer stable exists.
+"""
 
 import json
 from pathlib import Path
@@ -32,7 +36,7 @@ def check(tag, pages):
                 continue
             other_tag = release["tag_name"]
             other = rank(other_tag)
-            if other is not None and other > target:
+            if other is not None and other > target and (other[2] or not target[2]):
                 raise ValueError(f"{tag} is older than published {other_tag}")
 
 

@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -13,94 +14,98 @@ import (
 )
 
 func TestJoinedEVWaitsForMeasuredBatteryBackoffThenResumes(t *testing.T) {
-	now := time.Now().Truncate(time.Second)
-	const houseW, desiredEVW = 5000.0, 10350.0
-	actualBattery, actualEV := 8000.0, 0.0
-	config := loadpoint.Config{ID: "garage", DriverName: "charger", MinChargeW: 4140, MaxChargeW: desiredEVW,
-		PhaseMode: "3p", AllowedStepsW: []float64{0, 4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350}}
-	mgr := loadpoint.NewManager()
-	mgr.Load([]loadpoint.Config{config})
-	store := telemetry.NewStore()
-	dir := SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: 2500, Strategy: "arbitrage"}
-	st := newStateWithEnergyDispatch(dir, "meter")
-	st.clock = func() time.Time { return now }
-	st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases, st.SiteFuseSafetyA = 25, 230, 3, 1
-	st.SlewEnabled = false
-	st.DriverLimits = map[string]PowerLimits{"pixii": {MaxChargeW: 10000, MaxDischargeW: 10000}}
-	var sampledPhaseA float64
-	controller := loadpoint.NewController(mgr,
-		func(time.Time) (loadpoint.Directive, bool) { return loadpoint.Directive{}, false },
-		func(string) (loadpoint.EVSample, bool) {
-			return loadpoint.EVSample{Connected: true, RequestActive: true, PowerW: actualEV, PowerAt: now, SessionWhUnavailable: true}, true
-		},
-		func(_ context.Context, _ string, payload []byte) error {
-			var cmd struct {
-				Action string  `json:"action"`
-				PowerW float64 `json:"power_w"`
+	for _, desiredEVW := range []float64{4140, 10350} {
+		t.Run(fmt.Sprintf("%.0fW", desiredEVW), func(t *testing.T) {
+			now := time.Now().Truncate(time.Second)
+			const houseW = 5000.0
+			actualBattery, actualEV := 8000.0, 0.0
+			config := loadpoint.Config{ID: "garage", DriverName: "charger", MinChargeW: 4140, MaxChargeW: desiredEVW,
+				PhaseMode: "3p", AllowedStepsW: []float64{0, 4140, 4830, 5520, 6210, 6900, 7590, 8280, 8970, 9660, 10350}}
+			mgr := loadpoint.NewManager()
+			mgr.Load([]loadpoint.Config{config})
+			store := telemetry.NewStore()
+			dir := SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: 2500, Strategy: "arbitrage"}
+			st := newStateWithEnergyDispatch(dir, "meter")
+			st.clock = func() time.Time { return now }
+			st.SiteFuseAmps, st.SiteFuseVoltage, st.SiteFusePhases, st.SiteFuseSafetyA = 25, 230, 3, 1
+			st.SlewEnabled = false
+			st.DriverLimits = map[string]PowerLimits{"pixii": {MaxChargeW: 10000, MaxDischargeW: 10000}}
+			var sampledPhaseA float64
+			controller := loadpoint.NewController(mgr,
+				func(time.Time) (loadpoint.Directive, bool) { return loadpoint.Directive{}, false },
+				func(string) (loadpoint.EVSample, bool) {
+					return loadpoint.EVSample{Connected: true, RequestActive: true, PowerW: actualEV, PowerAt: now, SessionWhUnavailable: true}, true
+				},
+				func(_ context.Context, _ string, payload []byte) error {
+					var cmd struct {
+						Action string  `json:"action"`
+						PowerW float64 `json:"power_w"`
+					}
+					if err := json.Unmarshal(payload, &cmd); err != nil {
+						return err
+					}
+					if cmd.Action == "ev_set_current" {
+						actualEV = cmd.PowerW
+						// The physical battery may ignore a reduction. Check this at
+						// the EV send, before a later battery command can conceal it.
+						if phase := (houseW + actualBattery + actualEV) / 690; phase > 24.001 {
+							t.Fatalf("EV spent unmeasured battery relief: %.1f A", phase)
+						}
+					}
+					return nil
+				})
+			controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
+			controller.SetManualHold(config.ID, loadpoint.ManualHold{PowerW: desiredEVW, PhaseMode: "3p", Persistent: true})
+			controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(store, st, mgr.States(), controller.FuseConfigs(), 17250) })
+			controller.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(st) })
+			emit := func(driver string, kind telemetry.DerType, watts float64) {
+				d := map[string]any{"control_power_available": true, "control_power_observed_at": now.Format(time.RFC3339Nano)}
+				if kind == telemetry.DerMeter {
+					d["l1_a"], d["l2_a"], d["l3_a"] = sampledPhaseA, sampledPhaseA, sampledPhaseA
+				}
+				if kind == telemetry.DerEV {
+					d["power_max_age_s"] = 5 // A local charger that answers within seconds.
+				}
+				data, _ := json.Marshal(d)
+				soc := .5
+				store.Update(driver, kind, watts, &soc, data)
+				store.Get(driver, kind).UpdatedAt = now
+				store.RecordDriverSuccess(driver)
 			}
-			if err := json.Unmarshal(payload, &cmd); err != nil {
-				return err
-			}
-			if cmd.Action == "ev_set_current" {
-				actualEV = cmd.PowerW
-				// The physical battery may ignore a reduction. Check this at
-				// the EV send, before a later battery command can conceal it.
-				if phase := (houseW + actualBattery + actualEV) / 690; phase > 24.001 {
-					t.Fatalf("EV spent unmeasured battery relief: %.1f A", phase)
+			var obeyedAt, resumedAt time.Time
+			for tick := 0; tick < 30; tick++ {
+				now = now.Add(5 * time.Second)
+				if tick == 3 {
+					actualBattery, obeyedAt = 0, now // Only now does the battery obey.
+				}
+				sampledPhaseA = (houseW + actualBattery + actualEV) / 690
+				emit("pixii", telemetry.DerBattery, actualBattery)
+				emit(config.DriverName, telemetry.DerEV, actualEV)
+				emit("meter", telemetry.DerMeter, houseW+actualBattery+actualEV)
+				controller.TickWithDispatch(context.Background(), now, true)
+				st.SetEVCommanded(mgr.States())
+				st.SetEVFuseDemands(controller.FuseDemands())
+				targets := ComputeDispatch(store, st, caps(map[string]float64{"pixii": 15000}), 17250)
+				if len(targets) != 1 || targets[0].TargetW > 16560-houseW-desiredEVW+.001 {
+					t.Fatalf("tick %d: battery did not yield to the EV: %+v", tick, targets)
+				}
+				if actualEV > 0 && resumedAt.IsZero() {
+					resumedAt = now
+				}
+				if !obeyedAt.IsZero() {
+					actualBattery = math.Max(0, targets[0].TargetW)
+				}
+				if (houseW+actualBattery+actualEV)/690 > 24.001 {
+					t.Fatalf("tick %d: battery took the EV's headroom: EV %.0f battery %.0f W", tick, actualEV, actualBattery)
 				}
 			}
-			return nil
+			if resumedAt.IsZero() || resumedAt.Sub(obeyedAt) < evRestartDwell {
+				t.Fatalf("EV resumed at %v, battery obeyed at %v: want a %v dwell on measured room", resumedAt, obeyedAt, evRestartDwell)
+			}
+			if actualEV < desiredEVW {
+				t.Fatalf("EV stuck at %.0f W after recovery", actualEV)
+			}
 		})
-	controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
-	controller.SetManualHold(config.ID, loadpoint.ManualHold{PowerW: desiredEVW, PhaseMode: "3p", Persistent: true})
-	controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(store, st, mgr.States(), controller.FuseConfigs(), 17250) })
-	controller.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(st) })
-	emit := func(driver string, kind telemetry.DerType, watts float64) {
-		d := map[string]any{"control_power_available": true, "control_power_observed_at": now.Format(time.RFC3339Nano)}
-		if kind == telemetry.DerMeter {
-			d["l1_a"], d["l2_a"], d["l3_a"] = sampledPhaseA, sampledPhaseA, sampledPhaseA
-		}
-		if kind == telemetry.DerEV {
-			d["power_max_age_s"] = 5 // A local charger that answers within seconds.
-		}
-		data, _ := json.Marshal(d)
-		soc := .5
-		store.Update(driver, kind, watts, &soc, data)
-		store.Get(driver, kind).UpdatedAt = now
-		store.RecordDriverSuccess(driver)
-	}
-	var obeyedAt, resumedAt time.Time
-	for tick := 0; tick < 30; tick++ {
-		now = now.Add(5 * time.Second)
-		if tick == 3 {
-			actualBattery, obeyedAt = 0, now // Only now does the battery obey.
-		}
-		sampledPhaseA = (houseW + actualBattery + actualEV) / 690
-		emit("pixii", telemetry.DerBattery, actualBattery)
-		emit(config.DriverName, telemetry.DerEV, actualEV)
-		emit("meter", telemetry.DerMeter, houseW+actualBattery+actualEV)
-		controller.TickWithDispatch(context.Background(), now, true)
-		st.SetEVCommanded(mgr.States())
-		st.SetEVFuseDemands(controller.FuseDemands())
-		targets := ComputeDispatch(store, st, caps(map[string]float64{"pixii": 15000}), 17250)
-		if len(targets) != 1 || targets[0].TargetW > 1210.001 {
-			t.Fatalf("tick %d: battery did not yield to the EV: %+v", tick, targets)
-		}
-		if actualEV > 0 && resumedAt.IsZero() {
-			resumedAt = now
-		}
-		if !obeyedAt.IsZero() {
-			actualBattery = math.Max(0, targets[0].TargetW)
-		}
-		if (houseW+actualBattery+actualEV)/690 > 24.001 {
-			t.Fatalf("tick %d: battery took the EV's headroom: EV %.0f battery %.0f W", tick, actualEV, actualBattery)
-		}
-	}
-	if resumedAt.IsZero() || resumedAt.Sub(obeyedAt) < evRestartDwell {
-		t.Fatalf("EV resumed at %v, battery obeyed at %v: want a %v dwell on measured room", resumedAt, obeyedAt, evRestartDwell)
-	}
-	if actualEV < 9660 {
-		t.Fatalf("EV stuck at %.0f W after recovery", actualEV)
 	}
 }
 
@@ -178,6 +183,7 @@ type evBatterySite struct {
 	batteryDelay     time.Duration // 0: the battery follows within a tick
 	batteryCommands  []evTimed
 	meterW, targetW  []evTimed // every site reading and battery target
+	batteryOffline   bool      // the battery reports nothing and gets no target
 }
 
 func newEVBatterySite(t *testing.T, houseW float64) *evBatterySite {
@@ -254,7 +260,9 @@ func (s *evBatterySite) step() {
 	}
 	s.maxGridW = math.Max(s.maxGridW, s.gridW())
 	s.meterW = append(s.meterW, evTimed{s.now, s.gridW()})
-	s.emit("pixii", telemetry.DerBattery, s.batteryW)
+	if !s.batteryOffline {
+		s.emit("pixii", telemetry.DerBattery, s.batteryW)
+	}
 	s.emit("charger", telemetry.DerEV, s.evW)
 	s.emit("meter", telemetry.DerMeter, s.gridW())
 	s.state.ObserveSiteImport(s.store)
@@ -262,6 +270,12 @@ func (s *evBatterySite) step() {
 	s.state.SetEVCommanded(s.mgr.States())
 	s.state.SetEVFuseDemands(s.ctrl.FuseDemands())
 	targets := ComputeDispatch(s.store, s.state, caps(map[string]float64{"pixii": 15000}), 17250)
+	if s.batteryOffline {
+		if len(targets) != 0 {
+			s.t.Fatalf("offline battery got targets %+v", targets)
+		}
+		return
+	}
 	if len(targets) != 1 {
 		s.t.Fatalf("targets %+v", targets)
 	}
@@ -516,6 +530,180 @@ func TestFuseOverageGetsBatteryReliefUntilEVCutShows(t *testing.T) {
 	if s.offer() >= 10350 || s.batteryW != 0 {
 		t.Fatalf("after the cut: offer %.0f W battery %.0f W, want a cut car and an idle battery", s.offer(), s.batteryW)
 	}
+	// The car's rise never counts the battery's relief as room. A car that
+	// rose into it kept the battery feeding it 650 W at the 24 A line for
+	// as long as the house load stayed.
+	for range 10 {
+		s.run(time.Minute)
+		if s.batteryW != 0 || s.gridW()/690 > 24+1e-6 {
+			t.Fatalf("%v: offer %.0f W battery %.0f W, %.2f A on each phase; want an idle battery under the 24 A line",
+				s.now.Sub(stepAt), s.offer(), s.batteryW, s.gridW()/690)
+		}
+	}
+	if s.offer() != 5520 {
+		t.Fatalf("offer %.0f W, want 5,520 W: 8 A beside 16 A of house under the 24 A line", s.offer())
+	}
+}
+
+// The only battery goes offline in the middle of fuse relief and drops to
+// 0 W; then the house load falls. Its relief counts whole until the default
+// mode Core sent it can have reached the meter, and then it ends: the car
+// gets back up to the 24 A line instead of being held below it for as long
+// as the battery stays offline.
+func TestOfflineBatteryReliefEndsAfterSettle(t *testing.T) {
+	s := newIdleBatteryEVSite(t, 3000, 0)
+	s.run(5 * time.Minute)
+	stepAt := s.now
+	s.houseW += 8000
+	s.run(3 * time.Second)
+	reliefW := -s.batteryW
+	if reliefW <= 0 || s.state.batteryFuseRelief["pixii"] <= 0 {
+		t.Fatalf("setup: battery %.0f W relief %v", s.batteryW, s.state.batteryFuseRelief)
+	}
+	s.store.DriverHealthMut("pixii").SetOffline()
+	s.batteryOffline, s.batteryW = true, 0
+	offlineAt := s.now
+	for s.now.Sub(offlineAt) < evSettle-time.Second {
+		s.step()
+		if got := s.state.evFuseReliefW(s.store); math.Abs(got-reliefW) > 1e-6 {
+			t.Fatalf("%v after offline: relief %.0f W, want the whole %.0f W", s.now.Sub(offlineAt), got, reliefW)
+		}
+	}
+	s.run(time.Minute - s.now.Sub(stepAt))
+	s.houseW -= 4000 // 7,000 W of house.
+	s.run(9 * time.Minute)
+	t.Logf("offer %.0f W, %.2f A on each phase, relief %v", s.offer(), s.gridW()/690, s.state.batteryFuseRelief)
+	if got := s.state.evFuseReliefW(s.store); got != 0 {
+		t.Fatalf("relief %.0f W still counted %v after offline", got, s.now.Sub(offlineAt))
+	}
+	if s.offer() != 8970 || s.gridW()/690 > 24+1e-6 {
+		t.Fatalf("offer %.0f W at %.2f A, want 8,970 W: 13 A beside 10.1 A of house under the 24 A line", s.offer(), s.gridW()/690)
+	}
+}
+
+// Two batteries: "b2" goes offline holding 1500 W of fuse relief while
+// "bat" stays online. Its relief counts whole for evSettle and then ends,
+// whether dispatch sits in the deadband and sends nothing or sends "bat" a
+// command every tick. Before, a quiet dispatch kept it for as long as the site
+// stayed quiet, and a command dropped it on the first tick.
+func TestOfflineBatteryReliefEndsBesideAnOnlineBattery(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		gridW float64
+	}{
+		{"deadband", 0},
+		{"commanded", 3000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, state, caps := setupPerPhase(tc.gridW, 6, 6, 6, 0.6, 10000)
+			soc := 0.6
+			store.Update("b2", telemetry.DerBattery, -1500, &soc, nil)
+			caps["b2"] = 15200
+			state.DriverLimits["b2"] = PowerLimits{MaxChargeW: 10000, MaxDischargeW: 10000}
+			state.Mode = ModeSelfConsumption
+			now := time.Now()
+			state.clock = func() time.Time { return now }
+			state.batteryFuseRelief = map[string]float64{"b2": 1500}
+			store.DriverHealthMut("b2").SetOffline()
+			commands := 0
+			for start := now; now.Sub(start) < 2*time.Minute; {
+				now = now.Add(time.Second)
+				store.Update("meter", telemetry.DerMeter, tc.gridW, nil, []byte(`{"l1_a":6,"l2_a":6,"l3_a":6}`))
+				store.Get("meter", telemetry.DerMeter).UpdatedAt = now
+				store.DriverHealthMut("meter").RecordSuccess()
+				store.Update("bat", telemetry.DerBattery, 0, &soc, nil)
+				store.Get("bat", telemetry.DerBattery).UpdatedAt = now
+				store.DriverHealthMut("bat").RecordSuccess()
+				if len(ComputeDispatch(store, state, caps, 11040)) > 0 {
+					commands++
+				}
+				// The first dispatch, a second in, finds b2 offline.
+				want := 0.0
+				if now.Sub(start) <= evSettle {
+					want = 1500
+				}
+				if got := state.evFuseReliefW(store); got != want {
+					t.Fatalf("%v offline, %d commands: relief %.0f W, want %.0f W (%v)", now.Sub(start), commands, got, want, state.batteryFuseRelief)
+				}
+			}
+			if (commands > 0) != (tc.gridW != 0) {
+				t.Fatalf("setup: %d dispatches with a command", commands)
+			}
+		})
+	}
+}
+
+// The battery goes offline in relief, its relief ends, it comes back and
+// takes new relief, and it goes offline again. The second offline period
+// counts the new relief whole for evSettle: Core ordered that discharge a
+// second ago, and the old offline clock must not end it at once.
+func TestReturningBatteryReliefCountsWholeAgain(t *testing.T) {
+	s := newIdleBatteryEVSite(t, 3000, 0)
+	s.run(5 * time.Minute)
+	s.houseW += 8000
+	s.run(3 * time.Second)
+	if s.state.batteryFuseRelief["pixii"] <= 0 {
+		t.Fatalf("setup: no relief %v", s.state.batteryFuseRelief)
+	}
+	s.store.DriverHealthMut("pixii").SetOffline()
+	s.batteryOffline, s.batteryW = true, 0
+	s.run(2 * time.Minute)
+	if got := s.state.evFuseReliefW(s.store); got != 0 {
+		t.Fatalf("first offline period: relief %.0f W still counted", got)
+	}
+	s.batteryOffline = false
+	s.run(2 * time.Minute)
+	s.houseW += 2000
+	s.run(3 * time.Second)
+	reliefW := s.state.batteryFuseRelief["pixii"]
+	if reliefW <= 0 {
+		t.Fatalf("setup: no new relief, battery %.0f W relief %v", s.batteryW, s.state.batteryFuseRelief)
+	}
+	s.store.DriverHealthMut("pixii").SetOffline()
+	s.batteryOffline = true
+	offlineAt := s.now
+	for s.now.Sub(offlineAt) < evSettle-time.Second {
+		s.step()
+		if got := s.state.evFuseReliefW(s.store); math.Abs(got-reliefW) > 1e-6 {
+			t.Fatalf("%v into the second offline period: relief %.0f W, want the whole %.0f W", s.now.Sub(offlineAt), got, reliefW)
+		}
+	}
+}
+
+// Relief is only the discharge the fuse guard added: a cancelled charge or
+// the planner's own discharge stays room for the car.
+func TestFuseReliefIsOnlyAddedDischarge(t *testing.T) {
+	s := &State{}
+	s.recordFuseRelief(
+		[]DispatchTarget{{Driver: "idle", TargetW: 0}, {Driver: "planned", TargetW: -1000}, {Driver: "charge", TargetW: 2000}, {Driver: "flip", TargetW: 300}},
+		[]DispatchTarget{{Driver: "idle", TargetW: -650}, {Driver: "planned", TargetW: -1650}, {Driver: "charge", TargetW: 500}, {Driver: "flip", TargetW: -200}},
+	)
+	want := map[string]float64{"idle": 650, "planned": 650, "flip": 200}
+	if len(s.batteryFuseRelief) != len(want) {
+		t.Fatalf("relief %v, want %v", s.batteryFuseRelief, want)
+	}
+	for d, w := range want {
+		if got := s.batteryFuseRelief[d]; math.Abs(got-w) > 1e-9 {
+			t.Fatalf("relief %v, want %v", s.batteryFuseRelief, want)
+		}
+	}
+}
+
+// The car's room counts a battery's relief only as far as a live reading
+// shows it. An offline battery's cached discharge is no reading: its whole
+// relief counts, since Core can no longer hold that discharge.
+func TestEVFuseReliefReadsOnlyLiveBatteries(t *testing.T) {
+	store := telemetry.NewStore()
+	store.Update("live", telemetry.DerBattery, -500, nil, nil)
+	store.DriverHealthMut("live").RecordSuccess()
+	store.Update("offline", telemetry.DerBattery, -500, nil, nil)
+	store.DriverHealthMut("offline").RecordSuccess()
+	store.DriverHealthMut("offline").SetOffline()
+	s := &State{batteryFuseRelief: map[string]float64{"live": 2000, "offline": 2000, "unread": 300}}
+	// live: min(2000, 500); offline and unread: the whole relief.
+	if got := s.evFuseReliefW(store); math.Abs(got-(500+2000+300)) > 1e-9 {
+		t.Fatalf("relief %.0f W, want 2,800 W", got)
+	}
 }
 
 // Only the hour's import limit leaves watts to an EV cut, only those the cut
@@ -549,9 +737,13 @@ func TestFuseReliefLeavesOnlyCeilingWattsToCommandedEVCut(t *testing.T) {
 		}
 		st.SetEVCommanded([]loadpoint.State{{ID: "car", DriverName: "easee", PluggedIn: true, CommandedKnown: true, CommandedW: tc.commandedW}})
 		targets := []DispatchTarget{{Driver: "pixii"}}
-		batteries := map[string]*telemetry.DerReading{"pixii": {}}
+		store := telemetry.NewStore()
+		soc := 0.5
+		store.Update("pixii", telemetry.DerBattery, 0, &soc, nil)
+		store.DriverHealthMut("pixii").RecordSuccess()
+		batteries := map[string]*telemetry.DerReading{"pixii": store.Get("pixii", telemetry.DerBattery)}
 		meter := &telemetry.DerReading{SmoothedW: tc.gridW, Data: tc.data}
-		got := fuseReliefFromSnapshot(targets, batteries, meter, st, 17250, false)
+		got := fuseReliefFromSnapshot(targets, batteries, meter, phaseSample{meter: meter, totalW: meter.RawW, store: store}, st, 17250)
 		if math.Abs(math.Max(0, got)-tc.wantW) > 1e-6 {
 			t.Errorf("%s: relief %.0f W, want %.0f W", tc.name, got, tc.wantW)
 		}
@@ -592,7 +784,7 @@ func TestUnpluggedCarIsNoCutTheBatteryWaitsFor(t *testing.T) {
 		st.SetEVCommanded(points)
 		targets := []DispatchTarget{{Driver: "pixii"}}
 		batteries := map[string]*telemetry.DerReading{"pixii": {}}
-		return math.Max(0, fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, st, 17250, false))
+		return math.Max(0, fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, phaseSample{}, st, 17250))
 	}
 	// 400 W over the ceiling, less than a step: the guard waits.
 	if got := tick(7900, true, 5520); math.Abs(got-400) > 1e-6 {
@@ -656,7 +848,7 @@ func TestCutOnStayingCarStillWaitsWhenAnotherLeaves(t *testing.T) {
 		st.SetEVCommanded(points)
 		targets := []DispatchTarget{{Driver: "pixii"}}
 		batteries := map[string]*telemetry.DerReading{"pixii": {SmoothedW: batteryW}}
-		relief := fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, st, 17250, false)
+		relief := fuseReliefFromSnapshot(targets, batteries, &telemetry.DerReading{SmoothedW: gridW}, phaseSample{}, st, 17250)
 		batteryW = -math.Max(0, relief) // The battery follows within a tick.
 		if batteryW < 0 && tick < 10 {
 			t.Fatalf("%ds: battery %.0f W for watts a's stop removes; pending cut %.0f W", tick, batteryW, st.pendingEVCutW())

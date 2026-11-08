@@ -61,6 +61,10 @@ type Config struct {
 	// window.
 	PlannerPrefs PlannerPrefs
 
+	// TimeZones stores a client's time zone on a box that keeps none, or nil
+	// before the API server is bound.
+	TimeZones TimeZones
+
 	// PlanChargers puts each charger's share on the plan, or nil on a box with
 	// no chargers. PlanFeed pushes the plan when the box replans, or nil for
 	// a box that pushes it only after a command.
@@ -1145,6 +1149,8 @@ func (h *Handler) runCmd(ctx context.Context, cmd Cmd, by string) error {
 		return h.setMode(ctx, cmd, uptimeMs)
 	case OpPlannerPrefsSet:
 		return h.setPlannerPrefs(cmd, uptimeMs)
+	case OpSiteTimeZonePropose:
+		return h.proposeTimeZone(cmd, uptimeMs)
 	case OpLoadpointHold:
 		return h.loadpointHold(cmd, uptimeMs)
 	case OpLoadpointBoost:

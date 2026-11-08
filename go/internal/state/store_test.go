@@ -715,9 +715,15 @@ func TestSnapshotToSkipsTimeSeriesTables(t *testing.T) {
 	if err := snap.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name IN ('history_hot','history_warm','history_cold','ts_samples')`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("compact snapshot retained history tables: %d %v", count, err)
 	}
-	if partial, err := Open(dst); err == nil {
-		partial.Close()
-		t.Fatal("compact snapshot offered empty history as a full restore")
+	// Opened alone it starts an empty history and says so.
+	partial, err := Open(dst)
+	if err != nil {
+		t.Fatalf("open compact snapshot alone: %v", err)
+	}
+	events := partial.HealEvents()
+	partial.Close()
+	if len(events) != 1 || events[0].Tier != tierHistory {
+		t.Fatalf("compact snapshot offered empty history as a full restore: events=%+v", events)
 	}
 
 }

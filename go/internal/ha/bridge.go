@@ -816,6 +816,12 @@ func metricUnitAndClass(name, explicitUnit string) (unit, devClass string) {
 func (b *Bridge) subscribeCommands() {
 	b.client.Subscribe(b.cmdTopic("mode"), 0, func(_ paho.Client, m paho.Message) {
 		mode := string(m.Payload())
+		// A stored broker command is replayed on every reconnect. It
+		// must not undo the boot rule that ends manual Charge.
+		if mode == string(control.ModeCharge) && m.Retained() {
+			slog.Warn("HA: ignored a retained Charge command; send a new command to charge")
+			return
+		}
 		if b.cb.SetMode != nil {
 			if err := b.cb.SetMode(mode); err != nil {
 				slog.Warn("HA set mode failed", "err", err)
