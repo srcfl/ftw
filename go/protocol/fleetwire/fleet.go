@@ -48,7 +48,10 @@ var (
 )
 
 var release = regexp.MustCompile(`^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(-beta\.[0-9]{1,4})?$`)
-var driver = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
+// A driver label is a catalogue name, with the version the box runs when the
+// sender knows it: "pixii" or "pixii@2.1.9".
+var driver = regexp.MustCompile(`^[a-z0-9_-]{1,64}(@[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})?$`)
 var zone = regexp.MustCompile(`^[A-Z0-9-]{2,16}$`)
 
 // Decode refuses extra fields, so a sender cannot add a household record.

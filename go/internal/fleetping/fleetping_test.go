@@ -108,6 +108,7 @@ func TestUnknownDriverNamesCollapseToOther(t *testing.T) {
 	got := driverTypes(
 		[]string{"sungrow", "fredriks_hus", "grannens_pump"},
 		[]string{"sungrow", "easee_cloud"},
+		nil,
 	)
 	want := []string{"other", "sungrow"}
 	if len(got) != len(want) {
@@ -125,7 +126,7 @@ func TestDriverListIsSortedDedupedAndCapped(t *testing.T) {
 	// and an unusually long list is a signature. None of the three is an
 	// answer to "which driver types are in use".
 	catalogue := []string{"sungrow", "easee_cloud", "ferroamp"}
-	got := driverTypes([]string{"sungrow", "ferroamp", "sungrow", "easee_cloud"}, catalogue)
+	got := driverTypes([]string{"sungrow", "ferroamp", "sungrow", "easee_cloud"}, catalogue, nil)
 	want := []string{"easee_cloud", "ferroamp", "sungrow"}
 	for i := range want {
 		if got[i] != want[i] {
@@ -140,7 +141,7 @@ func TestDriverListIsSortedDedupedAndCapped(t *testing.T) {
 		many = append(many, name)
 		big = append(big, name)
 	}
-	if n := len(driverTypes(many, big)); n != maxDrivers {
+	if n := len(driverTypes(many, big, nil)); n != maxDrivers {
 		t.Fatalf("driver list capped at %d, want %d", n, maxDrivers)
 	}
 }

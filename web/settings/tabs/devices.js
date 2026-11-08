@@ -140,14 +140,19 @@
     return true;
   }
 
-  // DRIVER.verification_status, in the same words the setup wizard uses. A
-  // driver must not describe its own testing differently depending on which
-  // screen you meet it on.
-  function verificationLabel(status) {
-    if (status === "production") return "verified on hardware";
-    if (status === "beta") return "in testing";
-    if (status === "experimental") return "untested";
-    return "";
+  // How many boxes ran exactly this version the last closed day, in the same
+  // words the setup wizard uses. Nothing when the counts are not known.
+  function usageLabel(count) {
+    if (typeof count !== "number") return "";
+    return count === 1 ? "1 home runs this version" : count + " homes run this version";
+  }
+
+  // The fleet's counts per "driver@version", from the catalog reply.
+  var knownRunBy = null;
+  function rememberRunBy(data) { if (data && data.run_by) knownRunBy = data.run_by; }
+  function runByVersion(driverID, version) {
+    if (!knownRunBy) return undefined;
+    return knownRunBy[driverID + "@" + version] || 0;
   }
 
   // Every driver runs locally; they are just fetched from different places.
@@ -177,7 +182,7 @@
     // file instead, which is what they would edit or delete.
     var local = source === "local";
     var detail = [local ? entry.path || "" : originLabel(entry),
-                  verificationLabel(entry.verification_status)].filter(Boolean);
+                  usageLabel(entry.run_by)].filter(Boolean);
     return {
       source: source,
       headline: local ? "your own file" : "v" + (entry.installed_version || entry.version || "unknown"),
@@ -250,7 +255,7 @@
         downloaded: !!onDisk,
         active: selected(onDisk, driver.version),
         chosen: !!(selected(onDisk, driver.version) && chosen && driver.version === chosen),
-        verification: verificationLabel((driver.metadata || {}).verification_status)
+        verification: usageLabel(runByVersion(body.driver_id, driver.version))
       });
     });
 
@@ -294,13 +299,9 @@
       .join(" ").toLowerCase();
   }
 
-  // Proven first. Four of thirty-seven have run on customer hardware and the
-  // rest have not; alphabetical order buries that.
-  var VERIFICATION_RANK = {production: 0, beta: 1, experimental: 2};
-
+  // The ones most homes run first: that is what a count is for.
   function catalogRank(e) {
-    var rank = VERIFICATION_RANK[e.verification_status];
-    return rank === undefined ? 3 : rank;
+    return typeof e.run_by === "number" ? -e.run_by : 1;
   }
 
   // Every term has to match somewhere, so "sungrow hybrid" narrows rather
@@ -331,7 +332,8 @@
   S.driverVersions = {
     runtimeVerified: runtimeVerified,
     runningSummary: runningSummary,
-    verificationLabel: verificationLabel,
+    usageLabel: usageLabel,
+    rememberRunBy: rememberRunBy,
     versionRows: versionRows,
     render: function (panel, driverID, body, opts) {
       return renderVersionPicker(panel, driverID, body, opts);
@@ -642,6 +644,7 @@
     return apiFetch("/api/drivers/catalog")
       .then(function (r) { return r.json(); })
       .then(function (data) {
+        rememberRunBy(data);
         var entries = (data && data.entries) || [];
         var entry = null;
         entries.forEach(function (e) { if (e && e.path === opts.logicalPath) entry = e; });
@@ -1617,12 +1620,11 @@
           origin.textContent = e.channel === "beta" ? "beta" : "from the driver channel";
           tags.appendChild(origin);
         }
-        var verdict = verificationLabel(e.verification_status);
-        if (verdict) {
+        var usage = usageLabel(e.run_by);
+        if (usage) {
           var badge = document.createElement("span");
-          badge.className = "drv-catalog-tag drv-catalog-" +
-            (e.verification_status === "production" ? "proven" : "unproven");
-          badge.textContent = verdict;
+          badge.className = "drv-catalog-tag";
+          badge.textContent = usage;
           tags.appendChild(badge);
         }
         card.appendChild(tags);
@@ -1647,6 +1649,7 @@
       }
 
       apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
+        rememberRunBy(data);
         var entries = (data && data.entries) || [];
         // Capability-driven reveal: show the Disable-PV checkbox only
         // on drivers whose catalog entry advertises BOTH meter and pv.

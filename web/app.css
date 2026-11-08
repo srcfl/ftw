@@ -2338,12 +2338,6 @@ body.ftw-app .drv-catalog-tag {
   padding: 1px 7px;
   text-transform: uppercase;
 }
-/* Four of thirty-seven have run on customer hardware. That is the difference
-   worth showing, so it is the only tag that carries colour. */
-body.ftw-app .drv-catalog-proven {
-  border-color: color-mix(in srgb, var(--live) 40%, transparent);
-  color: var(--live);
-}
 body.ftw-app .drv-catalog-unproven {
   border-color: color-mix(in srgb, var(--accent-e) 30%, transparent);
   color: var(--accent-e);

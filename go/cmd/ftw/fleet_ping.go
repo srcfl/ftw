@@ -95,6 +95,22 @@ func startFleetPing(
 			defer cfgMu.RUnlock()
 			f := fleetping.FactsFromConfig(cfg, version, catalogue, installedAt)
 			f.Health = health
+			if tel == nil {
+				return f
+			}
+			f.Running = fleetping.RunningDrivers(cfg, time.Now(), func(name string) (time.Time, bool) {
+				h := tel.DriverHealth(name)
+				if h == nil || h.LastSuccess == nil {
+					return time.Time{}, false
+				}
+				return *h.LastSuccess, true
+			}, func(lua string) string {
+				entry, err := drivers.ParseCatalogFile(lua)
+				if err != nil {
+					return ""
+				}
+				return entry.Version
+			})
 			return f
 		},
 		Provider: provider,

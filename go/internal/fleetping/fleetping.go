@@ -124,6 +124,12 @@ type Facts struct {
 	// what belongs in this list lives.
 	Catalogue []string
 
+	// Running is the drivers that delivered a reading in the last day, by
+	// type, with the version each runs. A driver counts only if it did: a
+	// configured one that never answers says nothing about the driver. Nil
+	// counts every configured driver, without a version.
+	Running map[string]string
+
 	// BatteryWh is the installed battery capacity across the site.
 	BatteryWh float64
 
@@ -174,7 +180,7 @@ func Build(f Facts, now time.Time) Payload {
 		Schema:    Schema,
 		Version:   version,
 		Channel:   channel,
-		Drivers:   driverTypes(f.Drivers, f.Catalogue),
+		Drivers:   driverTypes(f.Drivers, f.Catalogue, f.Running),
 		Battery:   batteryBucket(f.BatteryWh),
 		Zone:      knownZone(f.PriceZone),
 		Age:       ageBucket(f.InstalledAt, now),
@@ -280,12 +286,14 @@ func releaseVersion(v string) (version, channel string) {
 }
 
 // driverTypes returns the sorted, deduplicated set of driver types, with
-// anything the catalogue does not name collapsed into one "other".
+// anything the catalogue does not name collapsed into one "other". A type the
+// catalogue names carries its version, as "pixii@2.1.9", so the fleet can say
+// how many run exactly that version.
 //
 // Sorted because the order drivers appear in a config is itself a detail of
 // that config; deduplicated because two Sungrow inverters are one answer to
 // "which drivers are in use" and the count would narrow the household.
-func driverTypes(configured, catalogue []string) []string {
+func driverTypes(configured, catalogue []string, running map[string]string) []string {
 	known := make(map[string]bool, len(catalogue))
 	for _, name := range catalogue {
 		known[name] = true
@@ -298,14 +306,21 @@ func driverTypes(configured, catalogue []string) []string {
 		if name == "" {
 			continue
 		}
-		if !known[name] {
-			name = "other"
-		}
-		if seen[name] {
+		version, ran := running[name]
+		if running != nil && !ran {
 			continue
 		}
-		seen[name] = true
-		out = append(out, name)
+		label := name
+		if !known[name] {
+			label = "other"
+		} else if driverVersion.MatchString(version) {
+			label = name + "@" + version
+		}
+		if seen[label] {
+			continue
+		}
+		seen[label] = true
+		out = append(out, label)
 	}
 	sort.Strings(out)
 	if len(out) > maxDrivers {
@@ -313,6 +328,10 @@ func driverTypes(configured, catalogue []string) []string {
 	}
 	return out
 }
+
+// driverVersion is the only shape of version a report may carry. Anything
+// else stays home and the driver counts without one.
+var driverVersion = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
 
 // batteryBucket answers "roughly how much storage", which is what sizing an
 // engineering bet needs. The edges are the ones the residential market lands
