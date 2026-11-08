@@ -281,6 +281,7 @@ import {
       planning: state.planMeta || {},
     });
     applyStateBadge('plan-state-badge', brief.state);
+    setText('plan-next-label', brief.next.label || 'Next');
     setText('plan-next-action', brief.next.action);
     setText('plan-next-time', brief.next.time);
     setText('plan-main-reason', brief.reason);

@@ -48,6 +48,8 @@ function target(row) {
 function source(row) {
   if (row.mode === 'manual') return 'as you asked';
   if (row.mode === 'solar') return 'from spare solar';
+  // A battery's row says "as planned" only when Core says it is.
+  if (row.kind === 'battery') return row.on_plan === true ? 'as planned' : 'as FTW asked';
   if (row.mode === 'plan' || String(row.mode || '').startsWith('planner')) return 'as planned';
   return 'as FTW asked';
 }
@@ -161,6 +163,43 @@ function proofLine(row) {
 
 // One answer per device function: a title, one sentence and, when the owner
 // can act, the next step. Tone follows Core's severity and status.
+function planBattery(watts, charge, discharge, rest) {
+  if (Math.abs(watts) < 100) return rest;
+  return `${watts > 0 ? charge : discharge} ${controlPower(watts)}`;
+}
+
+function planNowWhy(p) {
+  const pair = (subject, actual, planned, source) => num(actual) && num(planned) ? `${subject} ${controlPower(actual)}; ${source} said ${controlPower(planned)}.` : '';
+  switch (p.why) {
+    case 'less_solar': case 'more_solar': return pair('The sun gives', p.pv_w, p.planned_pv_w, 'the forecast');
+    case 'more_home': case 'less_home': return pair('The home uses', p.load_w, p.planned_load_w, 'the forecast');
+    case 'more_car': case 'less_car': return pair('The car takes', p.ev_w, p.planned_ev_w, 'the plan');
+    case 'manual': return 'You are holding the battery by hand.';
+    case 'device': return REASON_TITLES[p.device_reason] ? `${REASON_TITLES[p.device_reason]}.` : 'The battery cannot follow the plan right now.';
+    default: return 'FTW follows what the home and the sun do now, not the forecast.';
+  }
+}
+
+function planNowThen(p) {
+  if (!/^(less|more)_(solar|home|car)$/.test(p.why || '')) return '';
+  const now = p.battery_w, planned = p.planned_battery_w;
+  if (now <= -100) return planned > -100 || Math.abs(now) > Math.abs(planned) ? 'The battery covers the home, so you buy less.' : 'The battery gives only what the home needs.';
+  if (now >= 100) return 'The battery charges with what is left over.';
+  return planned > 0 ? 'Nothing is left over to charge with.' : 'The battery rests.';
+}
+
+// What the batteries do now beside what the plan meant, and why, when Core
+// says they differ. Null when they do not. Core decides; this only words it.
+export function planNowWords(value) {
+  if (!value || value.status !== 'off_plan' || !num(value.battery_w) || !num(value.planned_battery_w)) return null;
+  return {
+    now: capital(planBattery(value.battery_w, 'charging', 'discharging', 'idle')),
+    plan: `The plan said: ${planBattery(value.planned_battery_w, 'charge', 'discharge', 'rest')}`,
+    why: planNowWhy(value),
+    then: planNowThen(value),
+  };
+}
+
 export function controlStatus(row, live = true) {
   if (!live) return {title: 'Status not current', text: 'FTW has not reported for a while.', proof: '', next: 'Waiting for a fresh report.', tone: 'stale'};
   const title = REASON_TITLES[row.reason] || STATUS_TITLES[row.status] || 'Checking';

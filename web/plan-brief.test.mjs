@@ -452,3 +452,28 @@ describe("plan brief normalization", () => {
     assert.equal(brief.next.action, "Manual control is active");
   });
 });
+
+describe("plan brief beside what happens now", () => {
+  const plan = { actions: [slot(-5, { battery_w: 2595, reason: "absorb PV surplus" })], solver: {} };
+  const offPlan = { status: "off_plan", why: "less_solar", battery_w: -1231, planned_battery_w: 2595, pv_w: -1392, planned_pv_w: -3814 };
+
+  it("says what the battery does and why when it is not the plan", () => {
+    const brief = derivePlanBrief({ enabled: true, plan, now, status: { mode: "planner_arbitrage", plan_now: offPlan } });
+    assert.equal(brief.state.label, "Not as planned");
+    assert.equal(brief.next.label, "Now");
+    assert.equal(brief.next.action, "Discharging 1.2 kW");
+    assert.equal(brief.next.time, "The plan said: charge 2.6 kW");
+    assert.equal(brief.reason, "The sun gives 1.4 kW; the forecast said 3.8 kW. The battery covers the home, so you buy less.");
+  });
+
+  it("keeps the plan's own words while it holds", () => {
+    const brief = derivePlanBrief({ enabled: true, plan, now, status: { mode: "planner_arbitrage", plan_now: { ...offPlan, status: "as_planned", why: "" } } });
+    assert.equal(brief.state.label, "Plan active");
+    assert.match(brief.next.time, /^Now, until /);
+  });
+
+  it("does not hide a stale plan behind the comparison", () => {
+    const brief = derivePlanBrief({ enabled: true, plan, now, status: { mode: "planner_arbitrage", plan_stale: true, plan_now: offPlan } });
+    assert.equal(brief.state.label, "Fallback active");
+  });
+});

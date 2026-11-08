@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {controlRows, controlStatus, controlReceipt, controlNumbers, controlCurve, controlForPlanet,
-  controlSummary, withControlMarks} from './control-feedback.js';
+  controlSummary, withControlMarks, planNowWords} from './control-feedback.js';
 
 const row = extra => ({driver: 'bat', kind: 'battery', mode: 'planner_arbitrage', status: 'following', reason: 'power_observed',
   severity: 'info', evidence: 'measured', readings_fresh: true, sent_w: -2250, requested_w: -2250, actual_w: -2249,
@@ -33,9 +33,11 @@ test('the default view never shows tier numbers or internal codes', () => {
 });
 
 test('the answer follows Core: following, not following and lost control', () => {
-  const following = controlStatus(row());
+  const following = controlStatus(row({on_plan: true}));
   assert.equal(following.title, 'Following FTW');
   assert.equal(following.text, 'Discharging 2.2 kW as planned.');
+  assert.equal(controlStatus(row({on_plan: false})).text, 'Discharging 2.2 kW as FTW asked.');
+  assert.equal(controlStatus(row()).text, 'Discharging 2.2 kW as FTW asked.');
   assert.equal(following.tone, 'ok');
   const ignored = controlStatus(row({status: 'not_following', reason: 'no_power_response', severity: 'warning', sent_w: 3000, actual_w: 0}));
   assert.equal(ignored.title, 'Not following');
@@ -210,4 +212,27 @@ test('a confirmed lower pilot is an explained restriction with separate current 
   assert.ok(numbers.some(([label,value])=>label==='Actual pilot current'&&value==='13 A'));
   assert.ok(numbers.some(([label,value])=>label==='Dynamic current setting'&&value==='15 A'));
   assert.ok(!numbers.some(([label])=>label==='Charger offer'));
+});
+
+test('the plan and what happens now, in words', () => {
+  const morning = {status: 'off_plan', why: 'less_solar', battery_w: -1231, planned_battery_w: 2595, pv_w: -1392, planned_pv_w: -3814, load_w: 1230, planned_load_w: 1219, ev_w: 0, planned_ev_w: 0};
+  assert.deepEqual(planNowWords(morning), {
+    now: 'Discharging 1.2 kW',
+    plan: 'The plan said: charge 2.6 kW',
+    why: 'The sun gives 1.4 kW; the forecast said 3.8 kW.',
+    then: 'The battery covers the home, so you buy less.',
+  });
+  assert.equal(planNowWords({...morning, status: 'as_planned'}), null);
+  assert.equal(planNowWords(null), null);
+  assert.equal(planNowWords({...morning, battery_w: 800}).then, 'The battery charges with what is left over.');
+  assert.equal(planNowWords({...morning, battery_w: 20}).now, 'Idle');
+  assert.equal(planNowWords({...morning, battery_w: 20}).then, 'Nothing is left over to charge with.');
+  assert.equal(planNowWords({...morning, planned_battery_w: 0}).plan, 'The plan said: rest');
+  assert.equal(planNowWords({...morning, why: 'more_home', load_w: 2500, planned_load_w: 1000}).why, 'The home uses 2.5 kW; the forecast said 1.0 kW.');
+  assert.equal(planNowWords({...morning, why: 'more_car', ev_w: 3000}).why, 'The car takes 3.0 kW; the plan said 0 W.');
+  assert.equal(planNowWords({...morning, why: 'manual'}).why, 'You are holding the battery by hand.');
+  assert.equal(planNowWords({...morning, why: 'manual'}).then, '');
+  assert.equal(planNowWords({...morning, why: 'device', device_reason: 'fuse_limit'}).why, 'Limited by the main fuse.');
+  assert.equal(planNowWords({...morning, why: 'other'}).why, 'FTW follows what the home and the sun do now, not the forecast.');
+  assert.equal(planNowWords({...morning, planned_battery_w: -3000, battery_w: -1000, why: 'less_home'}).then, 'The battery gives only what the home needs.');
 });
