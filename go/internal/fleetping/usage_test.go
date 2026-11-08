@@ -21,7 +21,7 @@ func TestUsageReadsTheNewestDayAndKeepsIt(t *testing.T) {
 		_, _ = w.Write([]byte(`{"days":[{"date":"2026-11-06","drivers":{"pixii@2.1.9":3}},{"date":"2026-11-07","drivers":{"pixii@2.1.9":14,"sma_pv@1.1.1":1}}]}`))
 	}))
 	defer srv.Close()
-	u := NewUsage(srv.URL + "/v1/fleet")
+	u := NewUsage(srv.URL+"/v1/fleet", nil)
 	at := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	u.now = func() time.Time { return at }
 	got := u.Counts(context.Background())
@@ -46,7 +46,7 @@ func TestUsageWithNoAnswerShowsNothingAndWaits(t *testing.T) {
 		w.WriteHeader(http.StatusBadGateway)
 	}))
 	defer srv.Close()
-	u := NewUsage(srv.URL)
+	u := NewUsage(srv.URL, nil)
 	if got := u.Counts(context.Background()); got != nil {
 		t.Fatalf("counts = %v", got)
 	}
@@ -62,12 +62,48 @@ func TestUsageWithNoAnswerShowsNothingAndWaits(t *testing.T) {
 
 // The feed from before boxes reported versions must not read as nobody
 // running anything.
+func TestABoxThatDeclinedNeverAsks(t *testing.T) {
+	var asked atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { asked.Add(1) }))
+	defer srv.Close()
+	if got := NewUsage(srv.URL, func() bool { return false }).Counts(context.Background()); got != nil || asked.Load() != 0 {
+		t.Fatalf("counts = %v, asked %d times", got, asked.Load())
+	}
+}
+
+// A slow answer holds up only the one who asked: everyone else gets what is
+// known, at once.
+func TestASlowAnswerBlocksNobodyElse(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		_, _ = w.Write([]byte(`{"days":[{"date":"2026-11-07","drivers":{"pixii@2.1.9":1}}]}`))
+	}))
+	defer srv.Close()
+	defer close(release)
+	u := NewUsage(srv.URL, nil)
+	go u.Counts(context.Background())
+	<-entered
+	done := make(chan map[string]int, 1)
+	go func() { done <- u.Counts(context.Background()) }()
+	select {
+	case got := <-done:
+		if got != nil {
+			t.Fatalf("counts = %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a second caller waited for the first one's answer")
+	}
+}
+
 func TestUsageWithoutVersionsShowsNothing(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"days":[{"date":"2026-11-07","drivers":{"pixii":13,"easee_cloud":8}}]}`))
 	}))
 	defer srv.Close()
-	if got := NewUsage(srv.URL).Counts(context.Background()); got != nil {
+	if got := NewUsage(srv.URL, nil).Counts(context.Background()); got != nil {
 		t.Fatalf("counts = %v", got)
 	}
 }
@@ -97,5 +133,11 @@ func TestReportCountsOnlyDriversThatDeliveredWithTheirVersion(t *testing.T) {
 	want := []string{"other", "pixii@2.1.9"}
 	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("drivers = %v, want %v", got, want)
+	}
+	// Just after a start nothing has answered yet: the names still count,
+	// without a version.
+	f.Running = map[string]string{}
+	if got := Build(f, now).Drivers; len(got) != 5 {
+		t.Fatalf("after a start: %v", got)
 	}
 }

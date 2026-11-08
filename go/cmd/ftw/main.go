@@ -2573,7 +2573,7 @@ func main() {
 		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, st, appLinkEnabled, agents),
 		Agents:          agentsForAPI(agents),
 		FleetPing:       fleetPinger,
-		DriverUsage:     fleetping.NewUsage(cfg.FleetPing.Resolved()),
+		DriverUsage:     fleetping.NewUsage(cfg.FleetPing.Resolved(), answer.shares),
 		EnergyReport:    energyReport,
 		Cloud:           cloudForAPI(cloudLink),
 		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,

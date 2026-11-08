@@ -18,7 +18,8 @@
 //     value, and a salted one still matches itself tomorrow;
 //   - no counter, no sequence number and no "last sent" time, because any of
 //     them would let two pings be ordered into one box's series;
-//   - buckets, not values. 12.4 kWh of battery and 197 days since install are
+//   - buckets, not values, but for a driver's version, which is a catalogue
+//     number and is published from one (Fredrik, 8 November 2026). 12.4 kWh of battery and 197 days since install are
 //     close to unique across a fleet this size; "5-15" and "6-12m" are not;
 //   - a send time that moves. A box that pings at 03:17 every night has told
 //     the endpoint its name in a field nobody thought to look at.
@@ -126,8 +127,8 @@ type Facts struct {
 
 	// Running is the drivers that delivered a reading in the last day, by
 	// type, with the version each runs. A driver counts only if it did: a
-	// configured one that never answers says nothing about the driver. Nil
-	// counts every configured driver, without a version.
+	// configured one that never answers says nothing about the driver. Empty,
+	// as just after a start, counts every configured driver without a version.
 	Running map[string]string
 
 	// BatteryWh is the installed battery capacity across the site.
@@ -307,7 +308,7 @@ func driverTypes(configured, catalogue []string, running map[string]string) []st
 			continue
 		}
 		version, ran := running[name]
-		if running != nil && !ran {
+		if len(running) > 0 && !ran {
 			continue
 		}
 		label := name

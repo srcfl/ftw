@@ -44,7 +44,7 @@ func TestDriverCatalogSaysHowManyRunThatVersion(t *testing.T) {
 	feed := `{"days":[{"date":"2026-11-07","drivers":{"pixii@2.1.9":1,"pixii@2.1.8":14}}]}`
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(feed)) }))
 	defer cloud.Close()
-	run, entries := readDriverCatalog(t, driverUsageServer(t, fleetping.NewUsage(cloud.URL)))
+	run, entries := readDriverCatalog(t, driverUsageServer(t, fleetping.NewUsage(cloud.URL, nil)))
 	if run["pixii@2.1.8"] != 14 || len(entries) != 1 || entries[0]["run_by"] != float64(1) {
 		t.Fatalf("run_by = %v, entries = %v", run, entries)
 	}
@@ -53,7 +53,7 @@ func TestDriverCatalogSaysHowManyRunThatVersion(t *testing.T) {
 func TestDriverCatalogHasNoCountWithoutTheFeed(t *testing.T) {
 	cloud := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadGateway) }))
 	defer cloud.Close()
-	run, entries := readDriverCatalog(t, driverUsageServer(t, fleetping.NewUsage(cloud.URL)))
+	run, entries := readDriverCatalog(t, driverUsageServer(t, fleetping.NewUsage(cloud.URL, nil)))
 	if run != nil || len(entries) != 1 {
 		t.Fatalf("run_by = %v, entries = %v", run, entries)
 	}
