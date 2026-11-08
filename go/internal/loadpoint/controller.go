@@ -1749,7 +1749,7 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg 
 	sample, now, live = c.currentChargeSample(now, lpCfg, sample)
 	// Vehicle APIs can lag the charger by minutes. Do not interrupt measured
 	// delivery, or turn missing charger power into evidence of a sleeping car.
-	if !live || !chargerIdleForWake(sample, now) {
+	if !live || !chargerIdleForWake(sample, now) || c.vehicleDeclinesOffer(lpID, sample, now) {
 		return
 	}
 	pw, _ := cmd["power_w"].(float64)
@@ -1861,7 +1861,7 @@ func (c *Controller) maybeWakeVehicle(ctx context.Context, now time.Time, lpCfg 
 	// gets this for free.
 	//
 	latest, checkedAt, live := c.currentChargeSample(now, lpCfg, sample)
-	if !live || !chargerIdleForWake(latest, checkedAt) {
+	if !live || !chargerIdleForWake(latest, checkedAt) || c.vehicleDeclinesOffer(lpID, latest, checkedAt) {
 		return
 	}
 	c.cycleWallbox(lpID, lpCfg.DriverName)

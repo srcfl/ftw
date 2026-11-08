@@ -43,8 +43,22 @@ func (c *Controller) currentChargeSample(now time.Time, cfg Config, previous EVS
 }
 
 func chargerIdleForWake(sample EVSample, now time.Time) bool {
-	return !(sample.RequestKnown && !sample.RequestActive) && !sample.PowerUnavailable && finite(sample.PowerW) && sample.PowerW < DeliveringW &&
+	return !sample.PowerUnavailable && finite(sample.PowerW) && sample.PowerW < DeliveringW &&
 		!sample.PowerAt.After(now) && (sample.PowerAt.IsZero() || now.Sub(sample.PowerAt) <= sample.PowerWindow())
+}
+
+// vehicleDeclinesOffer needs fresh charger data that says the car stopped
+// asking, and a stop that has lasted SessionCompletionTimeout while Core
+// offered current. A handshake blip, Core's own pause, or stale or unknown
+// evidence is not enough. It says nothing about the battery level.
+func (c *Controller) vehicleDeclinesOffer(id string, sample EVSample, now time.Time) bool {
+	if c == nil || c.manager == nil || !sample.RequestKnown || sample.RequestActive || !sample.Connected || sample.ConnectionUnknown ||
+		sample.PowerUnavailable || !finite(sample.PowerW) || sample.PowerW < 0 || sample.PowerW >= DeliveringW ||
+		sample.PowerAt.IsZero() || sample.PowerAt.After(now) || now.Sub(sample.PowerAt) > min(sample.PowerWindow(), resumeObservationGap) {
+		return false
+	}
+	st, ok := c.manager.State(id)
+	return ok && st.VehicleDeclinesOffer(now)
 }
 
 // recoverOfferedCharge resumes our zero offer, or a known plug session that
@@ -66,12 +80,10 @@ func (c *Controller) recoverOfferedCharge(ctx context.Context, cfg Config, sampl
 		c.resumeOffers[cfg.ID] = &proof
 		return
 	}
-	// A current, explicit vehicle-side stop is not a failed start. Do not
-	// infer a full battery or mark its goal complete; a later active request
-	// naturally re-enables recovery. Unknown/stale evidence cannot suppress it.
-	if sample.RequestKnown && !sample.RequestActive && sample.Connected && !sample.ConnectionUnknown &&
-		!sample.PowerUnavailable && finite(sample.PowerW) && sample.PowerW >= 0 && sample.PowerW < 100 &&
-		!sample.PowerAt.IsZero() && !sample.PowerAt.After(now) && now.Sub(sample.PowerAt) <= min(sample.PowerWindow(), resumeObservationGap) {
+	// A lasting vehicle-side stop is not a failed start. Do not infer a full
+	// battery or mark its goal complete; a later active request re-enables
+	// recovery. A brief stop still gets the resume after Core's own pause.
+	if c.vehicleDeclinesOffer(cfg.ID, sample, now) {
 		delete(c.resumeOffers, cfg.ID)
 		return
 	}

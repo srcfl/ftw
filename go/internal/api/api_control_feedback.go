@@ -65,6 +65,9 @@ type ControlFeedback struct {
 	SinceMs           int64    `json:"since_ms,omitempty"`
 	CommandAtMs       int64    `json:"command_at_ms,omitempty"`
 	ObservedAtMs      int64    `json:"observed_at_ms,omitempty"`
+	// VehicleDeclined is Core's debounced record that the car refused its
+	// offer. The reason carries the result.
+	VehicleDeclined bool `json:"-"`
 }
 
 type feedbackReading struct {
@@ -232,6 +235,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 					fresh = false
 					f.ActualW = nil
 				}
+				f.VehicleDeclined = lp.VehicleDeclinesOffer(now)
 			}
 			// Evidence describes measured power, not target fulfilment. A device
 			// delivering 4.4 kW against a 5 kW command can still be site-confirmed.
@@ -359,7 +363,7 @@ func setControlStatus(f *ControlFeedback) {
 	status, severity := "waiting", "info"
 	switch f.Reason {
 	case "power_observed", "solar_below_ceiling", "idle", "plan", "manual_hold", "pv_surplus",
-		"vehicle_complete", "vehicle_limit_completion":
+		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
 		status = "following"
 	case "battery_full", "battery_nearly_full", "battery_nearly_empty", "core_limit",
 		"fuse_limit", "fuse_cooldown", "charger_limit", "one_phase":
@@ -455,16 +459,17 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("waiting", "not_connected", "info")
 		return
 	}
-	// A fresh driver-confirmed vehicle stop explains zero draw, not a full
-	// battery or a completed goal. Failed commands, stale data and safety
-	// pauses retain their own verdicts. Missing request evidence changes nothing.
-	if f.Kind == "ev" && commanded && cmd.Result == "accepted" &&
+	// The car declined Core's offer: the driver says so now, and Core has seen
+	// it for SessionCompletionTimeout. That explains zero draw, not a full
+	// battery or a met goal; vehicle_not_requesting is Core's own 0 W stop.
+	// Failed commands, stale data and safety pauses keep their own verdicts.
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" && f.VehicleDeclined &&
 		connected != nil && *connected && f.VehicleRequestActive != nil && !*f.VehicleRequestActive &&
 		(f.OfferedA == nil || f.RequestedA == nil || *f.OfferedA+0.5 >= *f.RequestedA) &&
 		coreReason != "site_meter_stale" && coreReason != "site_phase_currents_stale" && coreReason != "fuse_cooldown" &&
 		coreReason != "fuse_limit" && coreReason != "import_limit" &&
 		f.SentW != nil && *f.SentW > 100 && f.ActualW != nil && math.Abs(*f.ActualW) < 100 {
-		set("waiting", "vehicle_not_requesting", "info")
+		set("waiting", "vehicle_declined", "info")
 		return
 	}
 	// A positive clamp explains the lower offer, not prolonged zero delivery.

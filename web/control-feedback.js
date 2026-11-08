@@ -62,6 +62,7 @@ const REASON_TITLES = {
   waiting_response: 'Adjusting', no_command: 'No command yet', not_connected: 'No car connected',
   no_plan_budget: 'Waiting for the plan', pv_surplus_pause: 'Waiting for spare solar', wake_kick: 'Starting the charger',
   vehicle_complete: 'Car is full', vehicle_limit_completion: 'Car reached its limit', vehicle_not_requesting: 'Car not taking power',
+  vehicle_declined: 'Car stopped charging',
   battery_full: 'Battery full', battery_nearly_full: 'Battery nearly full', battery_nearly_empty: 'Battery nearly empty',
   core_limit: 'Limited by FTW', fuse_limit: 'Limited by the main fuse', fuse_cooldown: 'Waiting after a site power limit',
   import_limit: 'Limited by the hourly import limit',
@@ -83,7 +84,8 @@ function sentence(row) {
     case 'solar_below_ceiling': return `Producing ${controlPower(actual)}, below ${target(row)}.`;
     case 'vehicle_complete': return 'Not charging: the car reports that it is full.';
     case 'vehicle_limit_completion': return 'Not charging: the car reached its own charge limit.';
-    case 'vehicle_not_requesting': return 'The charger reports that the car has finished or paused charging. Its battery level and charge limit are not confirmed by this status.';
+    case 'vehicle_not_requesting': return 'The car is not asking for power right now.';
+    case 'vehicle_declined': return 'The charger reports that the car has finished or paused charging. This does not confirm its battery level or charge limit.';
     case 'waiting_response': return `Moving to ${target(row)}. The ${name} usually responds within ${row.kind === 'ev' ? 'two minutes' : '15 seconds'}.`;
     case 'no_command': return 'FTW has not sent a command since it started.';
     case 'not_connected': return 'Plug in a car to charge.';
@@ -130,7 +132,7 @@ function nextStep(row) {
     case 'power_below_target': case 'power_above_target': case 'power_wrong_direction':
     case 'no_power_response': case 'power_while_idle':
       return `The ${name} has not said why. Check its app or display.`;
-    case 'vehicle_not_requesting': return 'Check the car’s charge limit and schedule.';
+    case 'vehicle_declined': return 'Check the car’s charge limit and schedule.';
     case 'setpoint_changed': return 'Another app or controller may be changing it.';
     case 'device_fault': return `Check the ${name}.`;
     case 'telemetry_stale': case 'readings_lost': case 'command_failed': case 'default_failed':
