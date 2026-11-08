@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,34 +140,38 @@ func TestRecorderKeepsSpansThroughFailedWrites(t *testing.T) {
 	}
 }
 
-// A span that holds writes its running numbers once a minute, so a crash
-// loses at most a minute of them.
-func TestRecorderWritesHoldingSpansOnceAMinute(t *testing.T) {
+// A span that holds writes its running numbers once a StatsEvery, so a
+// crash loses at most that much of them.
+func TestRecorderWritesHoldingSpansOnceAStatsEvery(t *testing.T) {
 	st := &fakeStore{}
 	r := New(st)
 	t0 := time.Unix(20_000, 0)
 	r.Observe(t0, []Verdict{battery("following", "plan", "info", 500, 500)})
 	r.Flush(context.Background(), t0)
-	for s := 5; s <= 55; s += 5 {
-		r.Observe(t0.Add(time.Duration(s)*time.Second), []Verdict{battery("following", "plan", "info", 500, 500)})
-		r.Flush(context.Background(), t0.Add(time.Duration(s)*time.Second))
+	step := 5 * time.Second
+	n := int(StatsEvery / step)
+	for i := 1; i < n; i++ {
+		at := t0.Add(time.Duration(i) * step)
+		r.Observe(at, []Verdict{battery("following", "plan", "info", 500, 500)})
+		r.Flush(context.Background(), at)
 	}
 	if got := st.bySubject("battery:sungrow")[0].Samples; got != 1 {
-		t.Fatalf("samples written before a minute: %d", got)
+		t.Fatalf("samples written before StatsEvery: %d", got)
 	}
-	r.Observe(t0.Add(65*time.Second), []Verdict{battery("following", "plan", "info", 500, 500)})
-	r.Flush(context.Background(), t0.Add(65*time.Second))
-	if got := st.bySubject("battery:sungrow")[0]; got.Samples != 13 || got.UpdatedMs != t0.Add(65*time.Second).UnixMilli() {
-		t.Fatalf("after a minute: %+v", got)
+	at := t0.Add(StatsEvery)
+	r.Observe(at, []Verdict{battery("following", "plan", "info", 500, 500)})
+	r.Flush(context.Background(), at)
+	if got := st.bySubject("battery:sungrow")[0]; got.Samples != int64(n+1) || got.UpdatedMs != at.UnixMilli() {
+		t.Fatalf("after StatsEvery: %+v", got)
 	}
 }
 
 func TestRecorderRecordsAFinishedSpan(t *testing.T) {
 	st := &fakeStore{}
 	r := New(st)
-	r.Record(state.ControlSpan{Subject: "slot:battery", Kind: "slot", Status: "under_delivered", Severity: "warning", StartMs: 1, EndMs: 900_001, UpdatedMs: 900_001})
+	r.Record(state.ControlSpan{Subject: "slot:batteries", Kind: "slot", Status: "under_delivered", Severity: "warning", StartMs: 1, EndMs: 900_001, UpdatedMs: 900_001})
 	r.Flush(context.Background(), time.Unix(1_000, 0))
-	if got := st.bySubject("slot:battery"); len(got) != 1 || got[0].Status != "under_delivered" {
+	if got := st.bySubject("slot:batteries"); len(got) != 1 || got[0].Status != "under_delivered" {
 		t.Fatalf("slot span: %+v", got)
 	}
 }
@@ -195,5 +200,107 @@ func TestRecorderSettlesInfoChangesButNotWarnings(t *testing.T) {
 	if len(got) != 3 || got[1].Status != "not_following" ||
 		got[1].StartMs != t0.Add(15*time.Second).UnixMilli() || got[1].EndMs != t0.Add(18*time.Second).UnixMilli() {
 		t.Fatalf("a 3 s warning must be its own span, ended when the recovery was first seen: %+v", got)
+	}
+}
+
+// blockingStore holds each write until released, and fails spans whose
+// subject it refuses.
+type blockingStore struct {
+	mu      sync.Mutex
+	inserts map[string]int
+	nextID  int64
+	gate    chan struct{}
+	refuse  string
+}
+
+func (b *blockingStore) SaveControlSpans(_ context.Context, spans []*state.ControlSpan) error {
+	if b.gate != nil {
+		<-b.gate
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, sp := range spans {
+		if sp.Subject == b.refuse {
+			return errors.New("NOT NULL constraint failed")
+		}
+	}
+	for _, sp := range spans {
+		if sp.ID == 0 {
+			b.nextID++
+			sp.ID = b.nextID
+			b.inserts[sp.Subject]++
+		}
+	}
+	return nil
+}
+
+// A stop flushes from another goroutine while the journal's own flush may
+// be writing. A new span is inserted once, and samples after the stop
+// start nothing.
+func TestRecorderFlushesTakeTurns(t *testing.T) {
+	st := &blockingStore{inserts: map[string]int{}, gate: make(chan struct{})}
+	r := New(st)
+	t0 := time.Unix(40_000, 0)
+	r.Observe(t0, []Verdict{battery("following", "plan", "info", 500, 500)})
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() { defer wg.Done(); r.Flush(context.Background(), t0) }()
+	}
+	time.Sleep(20 * time.Millisecond)
+	close(st.gate)
+	wg.Wait()
+	if n := st.inserts["battery:sungrow"]; n != 1 {
+		t.Fatalf("span inserted %d times", n)
+	}
+	r.CloseAll(t0.Add(time.Second))
+	r.Observe(t0.Add(2*time.Second), []Verdict{battery("following", "plan", "info", 500, 500)})
+	if open := r.Open(); len(open) != 0 {
+		t.Fatalf("a sample after the stop opened %+v", open)
+	}
+}
+
+// One span no write will take does not hold back the others, and is
+// dropped once it has failed long enough.
+func TestRecorderIsolatesASpanNoWriteTakes(t *testing.T) {
+	st := &blockingStore{inserts: map[string]int{}, refuse: "source:bad"}
+	r := New(st)
+	t0 := time.Unix(50_000, 0)
+	r.Observe(t0, []Verdict{
+		{Subject: "source:bad", Kind: "source", Status: "live", Severity: "info"},
+		battery("following", "plan", "info", 500, 500),
+	})
+	r.Observe(t0.Add(5*time.Second), []Verdict{battery("following", "plan", "info", 500, 500)})
+	for i := range giveUpAfter + 1 {
+		r.Flush(context.Background(), t0.Add(time.Duration(10+i)*time.Second))
+	}
+	if st.inserts["battery:sungrow"] != 1 {
+		t.Fatalf("the good span was held back: %+v", st.inserts)
+	}
+	r.mu.Lock()
+	left := len(r.pending)
+	r.mu.Unlock()
+	if left != 0 {
+		t.Fatalf("%d spans still pending after giving up", left)
+	}
+}
+
+// A warning that arrives while an info change waits starts its span at
+// once, and the change that never settled leaves no trace.
+func TestRecorderWarningDuringACandidate(t *testing.T) {
+	st := &fakeStore{}
+	r := New(st)
+	t0 := time.Unix(60_000, 0)
+	tick := func(s int, v Verdict) {
+		at := t0.Add(time.Duration(s) * time.Second)
+		r.Observe(at, []Verdict{v})
+		r.Flush(context.Background(), at)
+	}
+	tick(0, battery("following", "plan", "info", 1000, 1000))
+	tick(5, battery("waiting", "waiting_response", "info", 1000, 0))
+	tick(10, battery("not_following", "no_power_response", "warning", 1000, 0))
+	got := st.bySubject("battery:sungrow")
+	if len(got) != 2 || got[0].Status != "following" || got[0].EndMs != t0.Add(10*time.Second).UnixMilli() || got[1].Status != "not_following" {
+		t.Fatalf("spans %+v", got)
 	}
 }

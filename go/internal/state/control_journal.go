@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -15,7 +16,7 @@ import (
 type ControlSpan struct {
 	ID int64 `json:"id"`
 	// Subject names what held the verdict, e.g. "battery:sungrow",
-	// "source:easee", "site:dispatch", "site:mode" or "slot:battery".
+	// "source:easee", "site:dispatch", "site:mode" or "slot:batteries".
 	Subject  string `json:"subject"`
 	Driver   string `json:"driver,omitempty"`
 	Kind     string `json:"kind"`
@@ -47,9 +48,10 @@ type PowerStats struct {
 	Sum float64 `json:"sum"`
 }
 
-// Add takes one reading; nil adds nothing.
+// Add takes one reading; nil or a value that is not a finite number adds
+// nothing.
 func (p *PowerStats) Add(w *float64) {
-	if w == nil {
+	if w == nil || math.IsNaN(*w) || math.IsInf(*w, 0) {
 		return
 	}
 	if p.N == 0 || *w < p.Min {
@@ -126,13 +128,15 @@ func (s *Store) SaveControlSpans(ctx context.Context, spans []*ControlSpan) erro
 			}
 			continue
 		}
+		// first_json never changes after the insert, so an update leaves it.
+		update := append(append([]any{}, args[:len(args)-2]...), args[len(args)-1], sp.ID)
 		if _, err := tx.ExecContext(ctx, `UPDATE control_journal SET
 				subject = ?, driver = ?, kind = ?, status = ?, reason = ?, severity = ?, mode = ?,
 				start_ms = ?, end_ms = ?, updated_ms = ?, samples = ?,
 				requested_n = ?, requested_min = ?, requested_max = ?, requested_sum = ?,
 				actual_n = ?, actual_min = ?, actual_max = ?, actual_sum = ?,
-				first_json = ?, last_json = ?
-				WHERE id = ?`, append(args, sp.ID)...); err != nil {
+				last_json = ?
+				WHERE id = ?`, update...); err != nil {
 			return fmt.Errorf("control journal: update %d: %w", sp.ID, err)
 		}
 		ids[i] = sp.ID
@@ -221,17 +225,18 @@ func (s *Store) PruneControlSpans(ctx context.Context, beforeMs int64) (int64, e
 }
 
 // NotificationsBetween returns notification attempts in [sinceMs, untilMs],
-// newest first, and whether more matched than the limit allowed.
-func (s *Store) NotificationsBetween(ctx context.Context, sinceMs, untilMs int64, limit int) ([]NotificationEntry, bool, error) {
+// newest first, for one driver when driver is set, and whether more matched
+// than the limit allowed.
+func (s *Store) NotificationsBetween(ctx context.Context, sinceMs, untilMs int64, driver string, limit int) ([]NotificationEntry, bool, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, ts_ms, event_type, driver, title, body, priority, status, error
 			FROM notification_log
-			WHERE ts_ms >= ? AND ts_ms <= ?
+			WHERE ts_ms >= ? AND ts_ms <= ? AND (? = '' OR driver = ?)
 			ORDER BY ts_ms DESC, id DESC
-			LIMIT ?`, sinceMs, untilMs, limit+1)
+			LIMIT ?`, sinceMs, untilMs, driver, driver, limit+1)
 	if err != nil {
 		return nil, false, err
 	}

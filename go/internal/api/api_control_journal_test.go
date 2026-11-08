@@ -118,8 +118,15 @@ func TestControlJournalAnswersAWindow(t *testing.T) {
 	if len(spans) != 1 || spans[0].Status != "following" || spans[0].EndMs != nil {
 		t.Fatalf("open span: %s", out["spans"])
 	}
-	if _, code := get("since=10&until=5"); code != http.StatusBadRequest {
-		t.Fatalf("reversed window: status %d", code)
+	for _, bad := range []string{"since=10&until=5", "severity=loud", "severity=warning,lod", "limit=-1", "limit=many"} {
+		if _, code := get(bad); code != http.StatusBadRequest {
+			t.Fatalf("%s: status %d", bad, code)
+		}
+	}
+	out, _ = get("since=" + msText(t0) + "&until=" + msText(t0+60*minute) + "&severity=" + "info,%20warning")
+	_ = json.Unmarshal(out["spans"], &spans)
+	if len(spans) != 2 {
+		t.Fatalf("a spaced comma list: %s", out["spans"])
 	}
 }
 

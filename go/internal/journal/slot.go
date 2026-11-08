@@ -7,16 +7,17 @@ import (
 	"github.com/srcfl/ftw/go/internal/state"
 )
 
-// SlotSpan is a scored plan slot as the journal keeps it: the plan's
-// average battery power over the slot as asked for, the delivered average
-// as actual, and the energy behind both.
+// SlotSpan is a scored plan slot as the journal keeps it, for the battery
+// fleet as a whole: the plan's energy over the slot as an average power
+// asked for, the fleet's delivered energy as an average actual, and the
+// energy behind both. The mode is the one in force when the slot ended.
 func SlotSpan(d control.SlotDelivery) state.ControlSpan {
 	severity := "info"
 	if d.Verdict == "under_delivered" || d.Verdict == "sign_mismatch" {
 		severity = "warning"
 	}
 	sp := state.ControlSpan{
-		Subject: "slot:battery", Kind: "slot", Status: d.Verdict, Severity: severity, Mode: string(d.Mode),
+		Subject: "slot:batteries", Kind: "slot", Status: d.Verdict, Severity: severity, Mode: string(d.Mode),
 		StartMs: d.SlotStart.UnixMilli(), EndMs: d.SlotEnd.UnixMilli(), UpdatedMs: d.SlotEnd.UnixMilli(), Samples: 1,
 	}
 	if hours := d.SlotEnd.Sub(d.SlotStart).Hours(); hours > 0 {

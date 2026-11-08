@@ -57,8 +57,11 @@ func (s *Server) JournalVerdicts(now time.Time) []journal.Verdict {
 	return out
 }
 
-// sourceVerdict is a driver's freshness as the journal keeps it. The error
-// text changes from poll to poll, so it is detail, not the reason.
+// sourceVerdict is a driver's health as Core's watchdog sees it: live,
+// lagging after a failed read, offline once the watchdog gave up, or fault.
+// It is the driver's state, not a reading's age, which control feedback
+// judges per device. The error text changes from poll to poll, so it is
+// detail, not the reason.
 func sourceVerdict(name string, h telemetry.DriverHealth) journal.Verdict {
 	v := journal.Verdict{Subject: "source:" + name, Driver: name, Kind: "source", Status: "live", Severity: "info"}
 	switch {
@@ -136,22 +139,32 @@ func toJournalSpan(sp state.ControlSpan, nowMs int64) journalSpan {
 }
 
 // journalSeverities turns ?severity= into the severities to keep: a single
-// level keeps it and those above it; a comma list keeps exactly those.
-func journalSeverities(q string) []string {
+// level keeps it and those above it; a comma list keeps exactly those. ok is
+// false for a word that is not a severity.
+func journalSeverities(q string) (keep []string, ok bool) {
+	known := map[string]bool{"info": true, "warning": true, "alarm": true}
 	if q == "" {
-		return nil
+		return nil, true
 	}
 	if strings.Contains(q, ",") {
-		return strings.Split(q, ",")
+		for _, sev := range strings.Split(q, ",") {
+			sev = strings.TrimSpace(sev)
+			if !known[sev] {
+				return nil, false
+			}
+			keep = append(keep, sev)
+		}
+		return keep, true
 	}
 	switch q {
 	case "info":
-		return nil
+		return nil, true
 	case "warning":
-		return []string{"warning", "alarm"}
-	default:
-		return []string{q}
+		return []string{"warning", "alarm"}, true
+	case "alarm":
+		return []string{"alarm"}, true
 	}
+	return nil, false
 }
 
 // GET /api/control/journal answers "what happened" over a window: each
@@ -159,7 +172,9 @@ func journalSeverities(q string) []string {
 // one verdict, with the power asked for and delivered, each scored plan
 // slot, and the notifications the box sent. since and until are Unix ms
 // (the last 24 hours by default); subject keeps subjects with that prefix,
-// e.g. battery: or source:easee; severity=warning keeps warnings and alarms.
+// e.g. battery: or source:easee; driver keeps one driver's spans and
+// notifications; severity=warning keeps warning and alarm spans. Notices are
+// what the owner was told and are not filtered by severity.
 func (s *Server) handleControlJournal(w http.ResponseWriter, r *http.Request) {
 	if s.deps.State == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "the control journal needs the state store"})
@@ -184,19 +199,27 @@ func (s *Server) handleControlJournal(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := 200
 	if v := q.Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			limit = min(n, 1000)
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "limit must be a positive number"})
+			return
 		}
+		limit = min(n, 1000)
+	}
+	severities, ok := journalSeverities(q.Get("severity"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "severity must be info, warning or alarm, or a comma list of them"})
+		return
 	}
 	spans, more, err := s.deps.State.ControlSpans(r.Context(), state.ControlSpanQuery{
 		SinceMs: sinceMs, UntilMs: untilMs, SubjectPrefix: q.Get("subject"), Driver: q.Get("driver"),
-		Severities: journalSeverities(q.Get("severity")), Limit: limit,
+		Severities: severities, Limit: limit,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	notices, noticesMore, err := s.deps.State.NotificationsBetween(r.Context(), sinceMs, untilMs, limit)
+	notices, noticesMore, err := s.deps.State.NotificationsBetween(r.Context(), sinceMs, untilMs, q.Get("driver"), limit)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

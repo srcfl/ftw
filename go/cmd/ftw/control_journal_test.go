@@ -27,10 +27,14 @@ func openJournalStore(t *testing.T) *state.Store {
 // left open.
 func TestStopControlJournalClosesAndWrites(t *testing.T) {
 	st := openJournalStore(t)
-	rec := newControlJournal(st)
+	j := newControlJournal(st)
 	now := time.Now()
-	rec.Observe(now, []journal.Verdict{{Subject: "site:dispatch", Kind: "dispatch", Status: "free", Severity: "info"}})
-	stopControlJournal(rec)
+	sample := func(time.Time) []journal.Verdict {
+		return []journal.Verdict{{Subject: "site:dispatch", Kind: "dispatch", Status: "free", Severity: "info"}}
+	}
+	j.rec.Observe(now, sample(now))
+	j.start(context.Background(), sample, st)
+	j.shutdown()
 	spans, _, err := st.ControlSpans(context.Background(), state.ControlSpanQuery{SinceMs: 0, UntilMs: now.Add(time.Minute).UnixMilli()})
 	if err != nil || len(spans) != 1 || spans[0].EndMs == 0 {
 		t.Fatalf("spans %+v err %v", spans, err)

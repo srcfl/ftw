@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"testing"
 )
 
@@ -108,8 +109,57 @@ func TestNotificationsBetween(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, more, err := st.NotificationsBetween(context.Background(), 2_000, 9_000, 1)
+	got, more, err := st.NotificationsBetween(context.Background(), 2_000, 9_000, "", 1)
 	if err != nil || !more || len(got) != 1 || got[0].TsMs != 9_000 {
 		t.Fatalf("got %+v more=%v err=%v", got, more, err)
+	}
+}
+
+// A reading that is not a number must not reach the table: one NaN sum
+// failed the NOT NULL check and held back every later write.
+func TestPowerStatsIgnoresNonFiniteReadings(t *testing.T) {
+	st := openTestStore(t)
+	sp := &ControlSpan{Subject: "battery:sungrow", Status: "following", StartMs: 1, UpdatedMs: 1}
+	nan, inf := math.NaN(), math.Inf(1)
+	sp.Requested.Add(&nan)
+	sp.Requested.Add(&inf)
+	sp.Requested.Add(jw(500))
+	if err := st.SaveControlSpans(context.Background(), []*ControlSpan{sp}); err != nil {
+		t.Fatal(err)
+	}
+	if sp.Requested.N != 1 || sp.Requested.Sum != 500 {
+		t.Fatalf("stats %+v", sp.Requested)
+	}
+}
+
+// An update keeps the verdict the span opened with.
+func TestSaveControlSpansKeepsFirstOnUpdate(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	sp := &ControlSpan{Subject: "battery:sungrow", Status: "limited", StartMs: 1, UpdatedMs: 1,
+		First: json.RawMessage(`{"requested_w":4298}`), Last: json.RawMessage(`{"requested_w":4298}`)}
+	if err := st.SaveControlSpans(ctx, []*ControlSpan{sp}); err != nil {
+		t.Fatal(err)
+	}
+	sp.First, sp.Last = nil, json.RawMessage(`{"requested_w":4162}`)
+	if err := st.SaveControlSpans(ctx, []*ControlSpan{sp}); err != nil {
+		t.Fatal(err)
+	}
+	got, _, _ := st.ControlSpans(ctx, ControlSpanQuery{SinceMs: 0, UntilMs: 10})
+	if string(got[0].First) != `{"requested_w":4298}` || string(got[0].Last) != `{"requested_w":4162}` {
+		t.Fatalf("first %s last %s", got[0].First, got[0].Last)
+	}
+}
+
+func TestNotificationsBetweenForOneDriver(t *testing.T) {
+	st := openTestStore(t)
+	for _, d := range []string{"sungrow", "easee", "sungrow"} {
+		if err := st.RecordNotification(NotificationEntry{TsMs: 100, EventType: "control.not_following", Driver: d, Status: "sent"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, more, err := st.NotificationsBetween(context.Background(), 0, 1_000, "sungrow", 1)
+	if err != nil || len(got) != 1 || !more || got[0].Driver != "sungrow" {
+		t.Fatalf("got %+v more %v err %v", got, more, err)
 	}
 }

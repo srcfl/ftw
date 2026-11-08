@@ -623,7 +623,7 @@ func main() {
 	// in control?", and each scored plan slot, so a warning can be explained
 	// after it has passed (GET /api/control/journal, events.get).
 	ctrlJournal := newControlJournal(st)
-	ctrl.SlotScored = func(d control.SlotDelivery) { ctrlJournal.Record(journal.SlotSpan(d)) }
+	ctrl.SlotScored = func(d control.SlotDelivery) { ctrlJournal.rec.Record(journal.SlotSpan(d)) }
 	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
 	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
 	storedSafetyK, _ := st.LoadConfig(config.StateKeySafetyK)
@@ -2731,7 +2731,7 @@ func main() {
 	// The control.not_following rule reads the box's own answer to "Are we
 	// in control?", the one GET /api/status serves.
 	notifSvc.SetControlReader(srv.ControlStates)
-	go runControlJournal(ctx, ctrlJournal, srv.JournalVerdicts, st)
+	ctrlJournal.start(ctx, srv.JournalVerdicts, st)
 	// FuseReader: on each HealthTick the fuse_over_limit rule reads
 	// the site meter's live per-phase currents from telemetry and
 	// compares against cfg.Fuse.MaxAmps. Closes over cfg + cfgMu so
@@ -2939,7 +2939,7 @@ func main() {
 			slog.Info("shutting down")
 			cloudLink.Bye(cloudwire.ByeShutdown, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
-			stopControlJournal(ctrlJournal)
+			ctrlJournal.shutdown()
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
@@ -2955,7 +2955,7 @@ func main() {
 			// back "box out of reach" until the box is back.
 			cloudLink.Bye(cloudwire.ByeUpdate, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
-			stopControlJournal(ctrlJournal)
+			ctrlJournal.shutdown()
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)

@@ -42,8 +42,12 @@ type Store interface {
 
 const (
 	// StatsEvery is how often a span that still holds writes its running
-	// numbers. A changed verdict is written at the next flush.
-	StatsEvery = time.Minute
+	// numbers; a crash loses at most this much of them. A changed verdict is
+	// written at the next flush.
+	StatsEvery = 5 * time.Minute
+	// giveUpAfter is how many flushes in a row may fail to write one span
+	// alone before it is dropped, so one bad row cannot hold back the rest.
+	giveUpAfter = 20
 	// maxPending bounds what a failing database leaves in memory.
 	maxPending = 5000
 	// failLogEvery spaces the warnings while writes keep failing.
@@ -52,16 +56,23 @@ const (
 	// starts a span. Each new order makes a device "waiting" for a second
 	// or two; that is not a change worth a span. A warning or an alarm
 	// starts one at once, however short, and a settled change is dated
-	// from when it was first seen.
+	// from when it was first seen. The cost: info verdicts that keep
+	// changing faster than Settle never settle, and the span they would
+	// have replaced runs on.
 	Settle = 15 * time.Second
 )
 
-// Recorder turns samples into spans and writes them. Observe and Flush run
-// on one goroutine; Record may be called from any.
+// Recorder turns samples into spans and writes them. Any goroutine may call
+// it; flushes take turns, so two never write the same new span twice.
 type Recorder struct {
-	mu    sync.Mutex
-	store Store
-	open  map[string]*state.ControlSpan
+	mu      sync.Mutex
+	flushMu sync.Mutex
+	store   Store
+	// stopped is set by CloseAll: later samples start nothing.
+	stopped bool
+	// failures counts flushes in a row that could not write a span alone.
+	failures map[*state.ControlSpan]int
+	open     map[string]*state.ControlSpan
 	// candidate holds a change to an info verdict until it settles.
 	candidate map[string]*state.ControlSpan
 	// pending holds spans with changes not yet written, each with the
@@ -79,7 +90,7 @@ type Recorder struct {
 // New returns a recorder that writes to store.
 func New(store Store) *Recorder {
 	return &Recorder{store: store, open: map[string]*state.ControlSpan{}, candidate: map[string]*state.ControlSpan{},
-		pending: map[*state.ControlSpan]uint64{}}
+		pending: map[*state.ControlSpan]uint64{}, failures: map[*state.ControlSpan]int{}}
 }
 
 // Observe takes one sample of every subject. A subject missing from the
@@ -91,6 +102,9 @@ func (r *Recorder) Observe(now time.Time, verdicts []Verdict) {
 	nowMs := now.UnixMilli()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stopped {
+		return
+	}
 	seen := map[string]bool{}
 	for _, v := range verdicts {
 		if v.Subject == "" || seen[v.Subject] {
@@ -172,13 +186,15 @@ func (r *Recorder) Record(sp state.ControlSpan) {
 	r.markLocked(&sp)
 }
 
-// CloseAll ends every open span now, for a clean shutdown.
+// CloseAll ends every open span now, for a clean shutdown. Samples after it
+// start nothing.
 func (r *Recorder) CloseAll(now time.Time) {
 	if r == nil {
 		return
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.stopped = true
 	for subject, sp := range r.open {
 		r.closeLocked(sp, now.UnixMilli())
 		delete(r.open, subject)
@@ -187,11 +203,15 @@ func (r *Recorder) CloseAll(now time.Time) {
 }
 
 // Flush writes changed spans, and once a StatsEvery the running numbers of
-// spans that still hold. A failed write keeps everything for the next one.
+// spans that still hold. A failed write keeps everything for the next one;
+// when the whole batch fails, each span is tried alone so one bad row
+// cannot hold back the rest.
 func (r *Recorder) Flush(ctx context.Context, now time.Time) {
 	if r == nil || r.store == nil {
 		return
 	}
+	r.flushMu.Lock()
+	defer r.flushMu.Unlock()
 	type entry struct {
 		orig    *state.ControlSpan
 		version uint64
@@ -224,32 +244,54 @@ func (r *Recorder) Flush(ctx context.Context, now time.Time) {
 		return
 	}
 
+	saved := make([]bool, len(copies))
 	err := r.store.SaveControlSpans(ctx, copies)
+	if err == nil {
+		for i := range saved {
+			saved[i] = true
+		}
+	} else {
+		for i, c := range copies {
+			saved[i] = r.store.SaveControlSpans(ctx, []*state.ControlSpan{c}) == nil
+		}
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if err != nil {
-		if r.failingAt.IsZero() {
-			r.failingAt = now
-		}
-		if now.Sub(r.loggedAt) >= failLogEvery {
-			r.loggedAt = now
-			slog.Warn("control journal: write failed; keeping spans for the next try",
-				"pending", len(r.pending), "since", r.failingAt, "err", err)
-		}
-		return
-	}
-	if !r.failingAt.IsZero() {
-		slog.Info("control journal: writes recovered", "failing_since", r.failingAt, "dropped", r.dropped)
-		r.failingAt, r.loggedAt, r.dropped = time.Time{}, time.Time{}, 0
-	}
+	failed := 0
 	for i, e := range batch {
+		if !saved[i] {
+			failed++
+			r.failures[e.orig]++
+			if r.failures[e.orig] >= giveUpAfter && e.orig.EndMs != 0 {
+				slog.Error("control journal: dropping a span no write would take",
+					"subject", e.orig.Subject, "start_ms", e.orig.StartMs, "tries", r.failures[e.orig], "err", err)
+				delete(r.pending, e.orig)
+				delete(r.failures, e.orig)
+				r.dropped++
+			}
+			continue
+		}
+		delete(r.failures, e.orig)
 		if e.orig.ID == 0 {
 			e.orig.ID = copies[i].ID
 		}
 		if v, ok := r.pending[e.orig]; ok && v == e.version {
 			delete(r.pending, e.orig)
 		}
+	}
+	if failed > 0 {
+		if r.failingAt.IsZero() {
+			r.failingAt = now
+		}
+		if now.Sub(r.loggedAt) >= failLogEvery {
+			r.loggedAt = now
+			slog.Warn("control journal: write failed; keeping spans for the next try",
+				"failed", failed, "pending", len(r.pending), "since", r.failingAt, "err", err)
+		}
+	} else if !r.failingAt.IsZero() {
+		slog.Info("control journal: writes recovered", "failing_since", r.failingAt, "dropped", r.dropped)
+		r.failingAt, r.loggedAt, r.dropped = time.Time{}, time.Time{}, 0
 	}
 	r.compactLocked()
 }

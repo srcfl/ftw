@@ -418,6 +418,10 @@ The registry's `reads` table names each read and the scope it needs.
   of the latest verdict by field name. Text leaves only as Core's own codes,
   never names. `minSeverity: "warning"` keeps warnings and alarms; `src`
   keeps one source. `events` stays empty; it is kept for older readers.
+  A source span is the driver's health as Core's watchdog sees it. A slot
+  span is the battery fleet's planned and delivered energy over one plan
+  slot, as average watts. A warning starts a span at once; a change to an
+  info verdict counts once it has held 15 s, from when it was first seen.
 - The box answers `diag.run` with `E_UNKNOWN_OP` until it builds it. `cars.get` carries no name, maker, VIN, identifier or source,
   and the redactor takes those out of `logs.get` and `config.get`; a box
   without the car store answers it `E_UNAVAILABLE`. `plan.get` names each
