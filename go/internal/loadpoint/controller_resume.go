@@ -47,6 +47,20 @@ func chargerIdleForWake(sample EVSample, now time.Time) bool {
 		!sample.PowerAt.After(now) && (sample.PowerAt.IsZero() || now.Sub(sample.PowerAt) <= sample.PowerWindow())
 }
 
+// vehicleDeclinesOffer needs fresh charger data that says the car stopped
+// asking, and a stop that has lasted SessionCompletionTimeout while Core
+// offered current. A handshake blip, Core's own pause, or stale or unknown
+// evidence is not enough. It says nothing about the battery level.
+func (c *Controller) vehicleDeclinesOffer(id string, sample EVSample, now time.Time) bool {
+	if c == nil || c.manager == nil || !sample.RequestKnown || sample.RequestActive || !sample.Connected || sample.ConnectionUnknown ||
+		sample.PowerUnavailable || !finite(sample.PowerW) || sample.PowerW < 0 || sample.PowerW >= DeliveringW ||
+		sample.PowerAt.IsZero() || sample.PowerAt.After(now) || now.Sub(sample.PowerAt) > min(sample.PowerWindow(), resumeObservationGap) {
+		return false
+	}
+	st, ok := c.manager.State(id)
+	return ok && st.VehicleDeclinesOffer(now)
+}
+
 // recoverOfferedCharge resumes our zero offer, or a known plug session that
 // still asks for charge after two minutes of accepted positive offers without
 // delivery. The current limit must succeed before this optional resume. Only
@@ -64,6 +78,13 @@ func (c *Controller) recoverOfferedCharge(ctx context.Context, cfg Config, sampl
 	if offerW <= 0 {
 		proof.zeroOffer = true
 		c.resumeOffers[cfg.ID] = &proof
+		return
+	}
+	// A lasting vehicle-side stop is not a failed start. Do not infer a full
+	// battery or mark its goal complete; a later active request re-enables
+	// recovery. A brief stop still gets the resume after Core's own pause.
+	if c.vehicleDeclinesOffer(cfg.ID, sample, now) {
+		delete(c.resumeOffers, cfg.ID)
 		return
 	}
 	// Ten seconds near the supported minimum prove recovery. A normal

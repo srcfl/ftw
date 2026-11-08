@@ -182,6 +182,23 @@ test('limited positive EV offer does not explain prolonged zero delivery', () =>
  assert.doesNotMatch(hour.text,/fuse/);
 });
 
+test('vehicle-side stop is explained without asserting full SoC or a met goal', () => {
+ const s=controlStatus(row({kind:'ev',status:'waiting',reason:'vehicle_declined',severity:'info',actual_w:0,requested_w:10350}));
+ assert.match(s.title,/Car stopped charging/);
+ assert.match(s.text,/finished or paused/);
+ assert.match(s.text,/does not confirm/);
+ assert.match(s.next,/charge limit and schedule/);
+ assert.equal(s.tone,'neutral');
+ assert.doesNotMatch(s.text,/car is full|reached its own charge limit/);
+});
+
+test('Core’s own stop for a car that stopped asking keeps its own words', () => {
+ const s=controlStatus(row({kind:'ev',status:'following',reason:'vehicle_not_requesting',severity:'info',actual_w:0,sent_w:0}));
+ assert.equal(s.title,'Car not taking power');
+ assert.match(s.text,/not asking for power/);
+ assert.equal(s.next,'');
+});
+
 test('a confirmed lower pilot is an explained restriction with separate current values', () => {
   const r = row({kind:'ev',status:'limited',reason:'charger_pilot_limit',severity:'info',
     requested_a:15,offered_a:15,dynamic_limit_a:15,pilot_a:13,actual_w:8850,sent_w:10350});

@@ -130,6 +130,9 @@ type State struct {
 	CapacitySource           string  `json:"capacity_source"`
 	// ChargingDeclined is a sustained vehicle-side refusal, not a battery level.
 	ChargingDeclined bool `json:"charging_declined"`
+	// NotRequestingSince is when the car stopped asking for the current Core
+	// offers. Zero while it asks, while Core offers none or power is unknown.
+	NotRequestingSince time.Time `json:"-"`
 	// SoCRetention reports whether the confirmed estimate can survive restart.
 	EnergySource         string    `json:"energy_source,omitempty"`
 	EnergyUpdatedAtMs    int64     `json:"energy_updated_at_ms,omitempty"`
@@ -365,6 +368,14 @@ type Manager struct {
 // SessionCompletionTimeout debounces a sustained vehicle-side refusal.
 // A refusal is not evidence that the battery reached its target.
 const SessionCompletionTimeout = 90 * time.Second
+
+// VehicleDeclinesOffer reports a car that has refused Core's offered current
+// for SessionCompletionTimeout. A brief stop during the session handshake is
+// not enough. It says nothing about the battery level or a met goal.
+func (st State) VehicleDeclinesOffer(now time.Time) bool {
+	return st.PluggedIn && !st.NotRequestingSince.IsZero() && !st.NotRequestingSince.After(now) &&
+		now.Sub(st.NotRequestingSince) >= SessionCompletionTimeout
+}
 
 // The interruption hysteresis. A charge that had run steadily for at least
 // InterruptSteadyRun and then stops below steadyChargeFloorW for
@@ -1374,6 +1385,7 @@ func (lp *loadpointRuntime) snapshot() State {
 		SurplusOnly:              lp.Config.SurplusOnly,
 		Schedule:                 lp.schedule,
 		ChargingDeclined:         lp.chargingDeclined,
+		NotRequestingSince:       lp.notRequestingSince,
 		SoCRetention:             lp.socRetention,
 		CarMaxW:                  lp.car.MaxW,
 		CarChargeLimit:           lp.car.ChargeLimit,
