@@ -220,8 +220,8 @@ func TestNothingToSendIsNotAFailure(t *testing.T) {
 		t.Fatalf("sent=%d failed=%d, want 1/0", st.Sent, st.Failed)
 	}
 
-	// Alone, an empty transport means nobody was told — and that is the
-	// truthful "no publisher" failure, not a quiet success.
+	// Alone, an empty transport means nobody was told — and that is a
+	// truthful "nobody to send to" failure, not a quiet success.
 	svc2, _ := newSvc(pushCfg(config.NotificationRule{
 		Type: PushChargingSessionComplete, Enabled: true,
 	}), nil)

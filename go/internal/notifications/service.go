@@ -1087,15 +1087,24 @@ func (s *Service) dispatch(cfg *config.Notifications, rule config.NotificationRu
 
 // deliver fans one rendered message out to every installed transport and
 // settles the counters and the history trail once for the lot.
+func (s *Service) deliver(eventType, device string, msg Message) {
+	s.deliverTo(eventType, device, msg, false)
+}
+
+// deliverTo is deliver for a message FTW Cloud may also hold: queued says
+// its uplink waits to send it.
 //
 // One delivery anywhere counts as sent — the operator was told. A transport
 // answering ErrNothingToSend was absent, not failing: web push with no
-// stored subscription has not had a push fail. No transport at all is the
-// old nil-publisher case — cold-start / reload can leave notifications
-// enabled with no provider installed — and stays a truthful failure in the
+// stored subscription has not had a push fail. A message only FTW Cloud
+// holds is queued, neither sent nor failed: the uplink sends it when it
+// can, and may drop it. When every transport was absent, or none is
+// installed — cold-start / reload can leave notifications enabled with no
+// provider — nobody was told, and that stays a truthful failure in the
 // history rather than a panic or a silence.
-func (s *Service) deliver(eventType, device string, msg Message) {
-	sent, errs := publishAll(s.publishers(), msg)
+func (s *Service) deliverTo(eventType, device string, msg Message, queued bool) {
+	pubs := s.publishers()
+	sent, errs := publishAll(pubs, msg)
 	switch {
 	case sent > 0:
 		if len(errs) > 0 {
@@ -1104,11 +1113,21 @@ func (s *Service) deliver(eventType, device string, msg Message) {
 		slog.Info("notifications: sent", "event", eventType, "driver", device)
 		s.bumpSent()
 		s.emitDispatched(eventType, device, msg, "sent", "")
+	case queued:
+		if len(errs) > 0 {
+			slog.Warn("notifications: some transports failed", "event", eventType, "err", errors.Join(errs...))
+		}
+		slog.Info("notifications: queued for FTW Cloud", "event", eventType, "driver", device)
+		s.emitDispatched(eventType, device, msg, "queued", "")
 	case len(errs) > 0:
 		err := errors.Join(errs...)
 		slog.Warn("notifications: publish failed", "event", eventType, "driver", device, "err", err)
 		s.bumpFailed()
 		s.emitDispatched(eventType, device, msg, "failed", err.Error())
+	case len(pubs) > 0:
+		slog.Warn("notifications: no phone or service to send to", "event", eventType, "driver", device)
+		s.bumpFailed()
+		s.emitDispatched(eventType, device, msg, "failed", "no phone or service to send to")
 	default:
 		slog.Warn("notifications: no publisher installed — skipping", "event", eventType, "driver", device)
 		s.bumpFailed()

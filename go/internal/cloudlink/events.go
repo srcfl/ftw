@@ -222,13 +222,15 @@ type notice struct{ kind, client string }
 // to the box changed, and goes whenever the box is linked. client is the
 // name of the client given access, on agent.added; it leaves the box only
 // while the readable copy is on and carries events. False means the box is
-// not linked or the kind is not a notice.
+// not linked, its owner turned FTW Cloud off, its grant is for statistics
+// only, which carries no notice, or the kind is not a notice. True means
+// queued, not sent: the uplink sends it when it can, and may drop it.
 func (l *Link) Notice(kind, client string) bool {
 	if !slices.Contains(cloudwire.NoticeKinds, kind) {
 		return false
 	}
 	l.mu.Lock()
-	if l.link == nil || l.link.Ending || l.closing {
+	if l.link == nil || l.link.Ending || l.closing || l.disabled || l.grant.statisticsOnly() {
 		l.mu.Unlock()
 		return false
 	}

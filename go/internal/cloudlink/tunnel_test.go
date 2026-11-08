@@ -628,6 +628,30 @@ func TestANoticeGoesPastTheBudget(t *testing.T) {
 	svc.waitFor(cloudwire.MsgNotice, 3*time.Second)
 }
 
+// A statistics-only grant carries no notice: sendNotices sends none under it.
+// Notice says so rather than queue one that would wait unsent, because the
+// box's notification history reads the answer as delivered (#1785).
+func TestNoNoticeIsTakenUnderAStatisticsOnlyGrant(t *testing.T) {
+	svc := newFakeService(t)
+	h := newHarness(t, svc)
+	h.grant(t)
+	svc.waitFor(cloudwire.MsgRoster, 5*time.Second)
+	if !h.link.Notice(protocol.PushOwnerAdded, "") {
+		t.Fatal("the readable copy refused a notice")
+	}
+	g := h.record(t)
+	g.Policy, g.Scopes, g.Purposes = cloudwire.StatsPolicy, []string{}, []string{protocol.CloudPurposeStats}
+	h.link.mu.Lock()
+	err := h.link.storeLocked(g, "test")
+	h.link.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.link.Notice(protocol.PushOwnerAdded, "") {
+		t.Fatal("a statistics-only grant took a notice it never sends")
+	}
+}
+
 // fakeExchange is the box's exchange, as the link sees it.
 type fakeExchange struct{ ch chan cloudwire.X }
 
