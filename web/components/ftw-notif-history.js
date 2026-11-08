@@ -91,6 +91,8 @@ export class FtwNotifHistory extends FtwElement {
     }
     ftw-modal tr.sent    td .status-cell { color: var(--live, #7dd17d); }
     ftw-modal tr.failed  td .status-cell { color: var(--alarm, #e57373); }
+    ftw-modal tr.queued  td .status-cell { color: var(--fg-dim, #a0a0a0); }
+    ftw-modal .status-note { color: var(--fg-dim, #a0a0a0); }
     ftw-modal td.body    { color: var(--fg-dim, #a0a0a0); }
     ftw-modal .empty { padding: 24px; text-align: center; color: var(--fg-muted, #858585); }
     ftw-modal .scroll { max-height: 60vh; overflow: auto; }
@@ -197,9 +199,13 @@ export class FtwNotifHistory extends FtwElement {
     var tsText = isNaN(ts.getTime()) ? "?" : ts.toLocaleString();
     var esc = s => (s == null ? "" : String(s)).replace(/[&<>]/g, c =>
       c === "&" ? "&amp;" : c === "<" ? "&lt;" : "&gt;");
+    // queued: FTW Cloud holds it for the owners' phones, and the box cannot
+    // see it leave. Not sent, and not a failure for the bell.
     var statusCell = r.status === "failed"
       ? '<span class="status-cell">✗ failed</span><div class="error-text">' + esc(r.error) + '</div>'
-      : '<span class="status-cell">✓ sent</span>';
+      : r.status === "queued"
+        ? '<span class="status-cell">… queued</span><div class="status-note">waiting to go through FTW Cloud</div>'
+        : '<span class="status-cell">✓ sent</span>';
     return '<tr class="' + esc(r.status || "") + '">' +
       '<td>' + esc(tsText) + '</td>' +
       '<td>' + esc(r.event_type) + (r.driver ? ' · ' + esc(r.driver) : '') + '</td>' +

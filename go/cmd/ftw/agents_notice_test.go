@@ -58,14 +58,15 @@ func (noSubscriptions) Publish(context.Context, notifications.Message) error {
 }
 
 // A phone paired as the first owner has no web push subscription yet, so the
-// box's own transports have nobody to tell. FTW Cloud took the owner.added
-// notice for the owners' phones, and the history says sent, not failed
-// (#1785). When FTW Cloud did not take it, nobody was told.
+// box's own transports have nobody to tell. FTW Cloud queued the owner.added
+// notice for the owners' phones, and the history says queued: not failed
+// (#1785), and not sent, since the box cannot see it leave. When FTW Cloud
+// did not take it, nobody was told.
 func TestTheHistoryCountsTheNoticeFTWCloudTook(t *testing.T) {
 	for _, c := range []struct {
 		queued bool
 		want   string
-	}{{true, "sent"}, {false, "failed"}} {
+	}{{true, "queued"}, {false, "failed"}} {
 		svc := notifications.New(nil, nil, nil)
 		svc.AddPublisher(noSubscriptions{})
 		bus := events.NewBus()

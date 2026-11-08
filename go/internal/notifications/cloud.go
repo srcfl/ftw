@@ -25,8 +25,10 @@ func (s *Service) NotifyCloudGrant(kind string) {
 // says, to every transport the box has.
 //
 // FTW Cloud carries them on a path of its own, queued before this is called.
-// viaCloud says it took this one, which counts as a delivery: a phone paired
-// as the first owner finds no other transport with anyone to tell (#1785).
+// viaCloud says its uplink holds this one for the owners' phones. The box
+// cannot see it leave, so when no transport of the box's own sent it, the
+// history says queued: a phone paired as the first owner finds no other
+// transport with anyone to tell (#1785).
 func (s *Service) NotifyAgents(kind string, viaCloud bool) {
 	switch kind {
 	case PushAgentAdded, PushAgentRequest, PushAgentExpiring, PushApprovalKeySet, PushOwnerAdded:
@@ -76,18 +78,8 @@ func (s *Service) notify(kind string, security, viaCloud bool) {
 		s.emitDispatched(kind, "", Message{Priority: prio}, "failed", err.Error())
 		return
 	}
-	pubs := s.publishers()
-	if viaCloud {
-		pubs = append(pubs, cloudNotice{})
-	}
-	s.deliverTo(pubs, kind, "", Message{Kind: kind, Title: title, Body: body, Priority: prio, Tags: splitTags(rule.Tags)})
+	s.deliverTo(kind, "", Message{Kind: kind, Title: title, Body: body, Priority: prio, Tags: splitTags(rule.Tags)}, viaCloud)
 }
-
-// cloudNotice is FTW Cloud's security notice, already queued for the owners'
-// phones when the box's own transports hear of it.
-type cloudNotice struct{}
-
-func (cloudNotice) Publish(context.Context, Message) error { return nil }
 
 // CloudPublisher hands each catalogue-worded message to FTW Cloud's uplink,
 // which signs it and sends it as an event for the owners' phones. It only

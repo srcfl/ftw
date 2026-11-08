@@ -148,7 +148,7 @@ type agentPorts struct {
 
 // push tells every owner about a change to who may reach the box: as a
 // notice through FTW Cloud, and through the box's own transports, whose
-// history also counts the notice FTW Cloud took. client names the client
+// history also records the notice FTW Cloud queued. client names the client
 // given access, on agent.added.
 func (p *agentPorts) push(kind, client string) {
 	viaCloud := p.notice != nil && p.notice(kind, client)
