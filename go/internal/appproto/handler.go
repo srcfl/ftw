@@ -107,7 +107,9 @@ type Config struct {
 	// Logs and Redactor serve logs.get, ConfigDoc and Redactor config.get,
 	// Views live.get and loadpoints.get. Each read answers E_UNAVAILABLE
 	// without its ports.
-	Logs      LogSource
+	Logs LogSource
+	// Journal serves events.get: the control journal and notifications.
+	Journal   JournalSource
 	Redactor  func() *redact.Redactor
 	ConfigDoc func() (any, error)
 	Views     AgentViews

@@ -57,6 +57,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/ftwcli"
 	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/ha"
+	"github.com/srcfl/ftw/go/internal/journal"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/localzone"
@@ -618,6 +619,11 @@ func main() {
 	// Restore durable modes and targets. Forced Charge ends at restart;
 	// the planner makes a fresh plan instead of resuming that override.
 	restoreStoredMode(ctrl, st, cfg)
+	// The control journal keeps each change in the box's answer to "Are we
+	// in control?", and each scored plan slot, so a warning can be explained
+	// after it has passed (GET /api/control/journal, events.get).
+	ctrlJournal := newControlJournal(st)
+	ctrl.SlotScored = func(d control.SlotDelivery) { ctrlJournal.Record(journal.SlotSpan(d)) }
 	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
 	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
 	storedSafetyK, _ := st.LoadConfig(config.StateKeySafetyK)
@@ -2725,6 +2731,7 @@ func main() {
 	// The control.not_following rule reads the box's own answer to "Are we
 	// in control?", the one GET /api/status serves.
 	notifSvc.SetControlReader(srv.ControlStates)
+	go runControlJournal(ctx, ctrlJournal, srv.JournalVerdicts, st)
 	// FuseReader: on each HealthTick the fuse_over_limit rule reads
 	// the site meter's live per-phase currents from telemetry and
 	// compares against cfg.Fuse.MaxAmps. Closes over cfg + cfgMu so
@@ -2759,7 +2766,7 @@ func main() {
 		if !ok {
 			return
 		}
-		if err := st.RecordNotification(state.NotificationEntry{
+		entry := state.NotificationEntry{
 			TsMs:      ev.Time.UnixMilli(),
 			EventType: ev.EventType,
 			Driver:    ev.Driver,
@@ -2768,9 +2775,8 @@ func main() {
 			Priority:  ev.Priority,
 			Status:    ev.Status,
 			Error:     ev.Error,
-		}); err != nil {
-			slog.Warn("notification_log: record failed", "err", err)
 		}
+		recordWithRetry("notification_log", func() error { return st.RecordNotification(entry) })
 	})
 	// Web push runs beside whatever provider the config names. The provider
 	// itself was built before the uplink (the dead man's rows carry its
@@ -2933,6 +2939,7 @@ func main() {
 			slog.Info("shutting down")
 			cloudLink.Bye(cloudwire.ByeShutdown, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
+			stopControlJournal(ctrlJournal)
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
@@ -2948,6 +2955,7 @@ func main() {
 			// back "box out of reach" until the box is back.
 			cloudLink.Bye(cloudwire.ByeUpdate, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
+			stopControlJournal(ctrlJournal)
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)

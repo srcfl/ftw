@@ -419,18 +419,69 @@ type LogsGet struct {
 	AfterMs  int64  `cbor:"afterMs,omitempty"`
 }
 
-// EventsGet asks for recent events, with the same cursors as LogsGet.
+// EventsGet asks what the box recorded about control between AfterMs and
+// BeforeMs, the last 24 hours when both are 0: each stretch in which a
+// device function, a source, the site's dispatch or the mode held one
+// verdict, each scored plan slot, and the notifications the box sent. Src
+// keeps one source by its agent id; MinSeverity "warning" keeps warnings and
+// alarms, "alarm" alarms only. N bounds the spans, newest first.
 type EventsGet struct {
-	N        uint64 `cbor:"n,omitempty"`
-	BeforeMs int64  `cbor:"beforeMs,omitempty"`
-	AfterMs  int64  `cbor:"afterMs,omitempty"`
+	N           uint64 `cbor:"n,omitempty"`
+	BeforeMs    int64  `cbor:"beforeMs,omitempty"`
+	AfterMs     int64  `cbor:"afterMs,omitempty"`
+	Src         string `cbor:"src,omitempty"`
+	MinSeverity string `cbor:"minSeverity,omitempty"`
 }
 
-// Events is the answer to events.get: FTW Cloud's event bodies, oldest
-// first. More says older events remain.
+// EventSpan is one stretch in which a subject held one control verdict.
+// Kind is battery, ev, pv, v2x_charger or device for a controlled function,
+// source for a driver's freshness, dispatch for whether the site may act,
+// mode for the operating mode, or slot for a scored plan slot. Status,
+// reason and severity are Core's own words, as in control_feedback.
+type EventSpan struct {
+	Kind     string `cbor:"kind"`
+	Src      string `cbor:"src,omitempty"`
+	Status   string `cbor:"status"`
+	Reason   string `cbor:"reason,omitempty"`
+	Severity string `cbor:"severity,omitempty"`
+	Mode     string `cbor:"mode,omitempty"`
+	StartMs  int64  `cbor:"startMs"`
+	// EndMs is 0 while the verdict still holds.
+	EndMs   int64 `cbor:"endMs"`
+	Samples int64 `cbor:"samples"`
+	// RequestedW and ActualW summarise the power Core asked for and the
+	// power measured over the span; absent when never known.
+	RequestedW *PowerRange `cbor:"requestedW,omitempty"`
+	ActualW    *PowerRange `cbor:"actualW,omitempty"`
+	// Last holds the numbers of the latest sample by field name, such as
+	// sent_w, readback_w, offered_a, battery_soc or planned_wh.
+	Last map[string]float64 `cbor:"last,omitempty"`
+}
+
+// PowerRange is the least, most and mean watts over a span.
+type PowerRange struct {
+	Min  float64 `cbor:"min"`
+	Max  float64 `cbor:"max"`
+	Mean float64 `cbor:"mean"`
+}
+
+// EventNotice is one notification the box sent or tried to send.
+type EventNotice struct {
+	Ts       int64  `cbor:"ts"`
+	Type     string `cbor:"type"`
+	Src      string `cbor:"src,omitempty"`
+	Status   string `cbor:"status"`
+	Priority int    `cbor:"priority,omitempty"`
+}
+
+// Events is the answer to events.get: spans newest first, the notices in
+// the same window, and More when either was cut. Events is kept for
+// readers built before spans; the box leaves it empty.
 type Events struct {
-	Events []cbor.RawMessage `cbor:"events"`
-	More   bool              `cbor:"more"`
+	Events  []cbor.RawMessage `cbor:"events"`
+	Spans   []EventSpan       `cbor:"spans,omitempty"`
+	Notices []EventNotice     `cbor:"notices,omitempty"`
+	More    bool              `cbor:"more"`
 }
 
 // DriverState is one driver in drivers.get, by its opaque source id.

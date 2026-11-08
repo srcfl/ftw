@@ -797,8 +797,10 @@ func startAppLink(
 	agents.access = &appuplink.AgentAccess{Enroll: enroll, Clock: agentClock, Push: agents.push,
 		Holds: endAgentHolds(loadpoints)}
 	agents.state = appproto.NewAgentState()
+	var journalSrc appproto.JournalSource
 	if st != nil {
 		agents.audit = newStateAudit(ctx, st)
+		journalSrc = stateJournal{st: st}
 	}
 	caps = append(caps, appproto.CapAccessAgents, appproto.CapAccessInvites)
 	// One view for every agent session, so a charger's plug-in count is
@@ -838,6 +840,7 @@ func startAppLink(
 				Agents:       agents.state,
 				Audit:        agents.audit,
 				Logs:         ringLogs{ring: agents.logs},
+				Journal:      journalSrc,
 				Redactor:     agents.redactor,
 				Views:        views,
 				AgentKey:     agents.key,
