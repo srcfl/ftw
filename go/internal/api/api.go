@@ -116,6 +116,10 @@ type Deps struct {
 	// embeddings; GET /api/fleet-ping then says so.
 	FleetPing *fleetping.Pinger
 
+	// DriverUsage says how many boxes run each driver version, for the lists
+	// of drivers. Nil leaves the numbers off.
+	DriverUsage *fleetping.Usage
+
 	// EnergyReport is the anonymous daily energy report, held for the same
 	// reason: Settings shows the report it would send. Nil leaves it out.
 	EnergyReport *energyreport.Sender
@@ -2093,7 +2097,19 @@ func (s *Server) driverCatalogReply() map[string]any {
 			entries[i].Chosen = s.deps.DriverRepository.Chosen(entries[i].Path, entries[i].Version)
 		}
 	}
-	return map[string]any{"path": dir, "entries": entries}
+	// How many run each version, from one and up. A driver is a driver: the
+	// count is all this says about it. An operator's own file is not in it.
+	counts := s.deps.DriverUsage.Counts(context.Background())
+	if counts != nil {
+		for i := range entries {
+			if entries[i].Source == "local" {
+				continue
+			}
+			n := counts[strings.TrimSuffix(entries[i].Filename, ".lua")+"@"+entries[i].Version]
+			entries[i].RunBy = &n
+		}
+	}
+	return map[string]any{"path": dir, "entries": entries, "run_by": counts}
 }
 
 // POST /api/drivers/{name}/restart — stop + re-add the driver so it

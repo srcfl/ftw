@@ -70,6 +70,10 @@ type CatalogEntry struct {
 	VerificationNotes  string   `json:"verification_notes,omitempty"`
 	TestedModels       []string `json:"tested_models,omitempty"` // e.g. ["Home", "Charge"]
 
+	// RunBy is how many boxes ran exactly this driver and version on the
+	// last closed day. Absent when the fleet's counts are not known.
+	RunBy *int `json:"run_by,omitempty"`
+
 	// Controls are the operator-facing commands the driver declares. Empty
 	// for every driver that only reports. See catalog_controls.go.
 	Controls []CatalogControl `json:"controls,omitempty"`

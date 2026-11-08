@@ -619,8 +619,11 @@ The honest limits, which belong here rather than in a comment nobody reads:
 ## Fleet ping
 
 The box's anonymous daily report is separate from the Cloud readable-copy
-grant. Once a day it posts its FTW version and channel, the driver types in use, a
-battery-capacity bucket, its price zone and an install-age bucket. It answers
+grant. Once a day it posts its FTW version and channel, each driver that delivered
+readings with its version (`pixii@2.1.9`), its battery to the nearest kWh, its price
+zone and an install-age range. The driver lists show how many boxes ran exactly that
+version the last closed day, from one and up. That count is all FTW says about a
+driver; there is no separate verification status. It answers
 how many reports arrive and what they describe, which helps size engineering
 bets. It is one of two anonymous daily reports under one statistics answer, with
 the energy report beside it (ADR 0008).

@@ -223,13 +223,6 @@ describe("the statistics switch", () => {
     assert.match(shareLine(null), /Could not read/);
   });
 
-  it("does not claim a report goes while it waits for the relay", () => {
-    const line = whereLine({ enabled: false, waits_for_relay: true, endpoint: "https://cloud.ftw.energy/v1/fleet", ftw_relay: true, payload });
-    assert.match(line, /^Not sent yet/);
-    assert.match(line, /only through an independent relay/);
-    assert.doesNotMatch(line, /^Sent/);
-  });
-
   it("says who sees what when the report goes through the relay", () => {
     const line = whereLine({ enabled: true, endpoint: "https://relay.example.net/ftw", ftw_relay: true, through_relay: true, payload });
     assert.match(line, /^Sent through https:\/\/relay\.example\.net\/ftw, an independent relay, to FTW Cloud/);

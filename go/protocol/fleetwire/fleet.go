@@ -48,7 +48,12 @@ var (
 )
 
 var release = regexp.MustCompile(`^v[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}(-beta\.[0-9]{1,4})?$`)
-var driver = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
+// A driver label is a catalogue name, with the version the box runs when the
+// sender knows it: "pixii" or "pixii@2.1.9".
+var driver = regexp.MustCompile(`^[a-z0-9_-]{1,64}(@[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4})?$`)
+// Battery size: none, the nearest kWh, or the ranges older boxes send.
+var battery = regexp.MustCompile(`^(none|[0-9]{1,4}|0-5|5-15|15-30|30\+)$`)
 var zone = regexp.MustCompile(`^[A-Z0-9-]{2,16}$`)
 
 // Decode refuses extra fields, so a sender cannot add a household record.
@@ -82,7 +87,7 @@ func Decode(data []byte) (Report, error) {
 	} else if strings.Contains(r.Version, "-beta.") {
 		channel = "beta"
 	}
-	if r.Channel != channel || len(r.Drivers) > 16 || !slices.Contains([]string{"none", "0-5", "5-15", "15-30", "30+"}, r.Battery) ||
+	if r.Channel != channel || len(r.Drivers) > 16 || !battery.MatchString(r.Battery) ||
 		(r.Zone != "unknown" && !zone.MatchString(r.Zone)) || !slices.Contains([]string{"unknown", "0-1m", "1-6m", "6-12m", "1y+"}, r.Age) {
 		return r, bad
 	}

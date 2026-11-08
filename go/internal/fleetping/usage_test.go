@@ -1,0 +1,143 @@
+package fleetping
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/srcfl/ftw/go/internal/config"
+)
+
+func TestUsageReadsTheNewestDayAndKeepsIt(t *testing.T) {
+	var asked atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		if r.URL.Path != "/v1/fleet/public" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"days":[{"date":"2026-11-06","drivers":{"pixii@2.1.9":3}},{"date":"2026-11-07","drivers":{"pixii@2.1.9":14,"sma_pv@1.1.1":1}}]}`))
+	}))
+	defer srv.Close()
+	u := NewUsage(srv.URL+"/v1/fleet", nil)
+	at := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	u.now = func() time.Time { return at }
+	got := u.Counts(context.Background())
+	if got["pixii@2.1.9"] != 14 || got["sma_pv@1.1.1"] != 1 {
+		t.Fatalf("counts = %v", got)
+	}
+	u.Counts(context.Background())
+	if asked.Load() != 1 {
+		t.Fatalf("asked %d times, want a kept answer", asked.Load())
+	}
+	at = at.Add(7 * time.Hour)
+	u.Counts(context.Background())
+	if asked.Load() != 2 {
+		t.Fatalf("asked %d times after it went old", asked.Load())
+	}
+}
+
+func TestUsageWithNoAnswerShowsNothingAndWaits(t *testing.T) {
+	var asked atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		asked.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+	u := NewUsage(srv.URL, nil)
+	if got := u.Counts(context.Background()); got != nil {
+		t.Fatalf("counts = %v", got)
+	}
+	u.Counts(context.Background())
+	if asked.Load() != 1 {
+		t.Fatalf("asked %d times, want a wait after a failure", asked.Load())
+	}
+	var none *Usage
+	if none.Counts(context.Background()) != nil {
+		t.Fatal("a nil Usage should know nothing")
+	}
+}
+
+// The feed from before boxes reported versions must not read as nobody
+// running anything.
+func TestABoxThatDeclinedNeverAsks(t *testing.T) {
+	var asked atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { asked.Add(1) }))
+	defer srv.Close()
+	if got := NewUsage(srv.URL, func() bool { return false }).Counts(context.Background()); got != nil || asked.Load() != 0 {
+		t.Fatalf("counts = %v, asked %d times", got, asked.Load())
+	}
+}
+
+// A slow answer holds up only the one who asked: everyone else gets what is
+// known, at once.
+func TestASlowAnswerBlocksNobodyElse(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		_, _ = w.Write([]byte(`{"days":[{"date":"2026-11-07","drivers":{"pixii@2.1.9":1}}]}`))
+	}))
+	defer srv.Close()
+	defer close(release)
+	u := NewUsage(srv.URL, nil)
+	go u.Counts(context.Background())
+	<-entered
+	done := make(chan map[string]int, 1)
+	go func() { done <- u.Counts(context.Background()) }()
+	select {
+	case got := <-done:
+		if got != nil {
+			t.Fatalf("counts = %v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a second caller waited for the first one's answer")
+	}
+}
+
+func TestUsageWithoutVersionsShowsNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"days":[{"date":"2026-11-07","drivers":{"pixii":13,"easee_cloud":8}}]}`))
+	}))
+	defer srv.Close()
+	if got := NewUsage(srv.URL, nil).Counts(context.Background()); got != nil {
+		t.Fatalf("counts = %v", got)
+	}
+}
+
+func TestReportCountsOnlyDriversThatDeliveredWithTheirVersion(t *testing.T) {
+	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	cfg := &config.Config{Drivers: []config.Driver{
+		{Name: "my-battery", Lua: "/data/drivers/pixii.lua"},
+		{Name: "silent", Lua: "drivers/sma_pv.lua"},
+		{Name: "old", Lua: "drivers/zap.lua"},
+		{Name: "off", Lua: "drivers/ferroamp.lua", Disabled: true},
+		{Name: "mine", Lua: "/home/x/pappas-laddbox.lua"},
+	}}
+	seen := map[string]time.Time{"my-battery": now.Add(-time.Minute), "old": now.Add(-25 * time.Hour), "mine": now, "off": now}
+	running := RunningDrivers(cfg, now, func(name string) (time.Time, bool) {
+		at, ok := seen[name]
+		return at, ok
+	}, func(lua string) string {
+		if lua == "/data/drivers/pixii.lua" {
+			return "2.1.9"
+		}
+		return "weird"
+	})
+	f := FactsFromConfig(cfg, "v0.162.0", []string{"pixii", "sma_pv", "zap", "ferroamp"}, now)
+	f.Running = running
+	got := Build(f, now).Drivers
+	want := []string{"other", "pixii@2.1.9"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("drivers = %v, want %v", got, want)
+	}
+	// Just after a start nothing has answered yet: the names still count,
+	// without a version.
+	f.Running = map[string]string{}
+	if got := Build(f, now).Drivers; len(got) != 4 {
+		t.Fatalf("after a start: %v", got)
+	}
+}
