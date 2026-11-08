@@ -167,13 +167,19 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			_ = json.Unmarshal(rd.Data, &d)
 			f.ReadbackW, f.OfferedA, f.DeviceReason = d.SetpointW, d.MaxA, d.Reason
 			f.DynamicLimitA = d.DynamicLimitA
-			pilotFresh := pilotReadingFresh(d, now)
+			pilotAge, pilotValid := pilotReadingAge(d, now)
+			pilotFresh := pilotValid && pilotAge <= pilotFreshFor
 			if pilotFresh {
 				f.PilotA, f.PilotObservedAt, f.PilotConfirmedAtMs = d.PilotA, d.PilotObservedAt, *d.PilotConfirmedAtMs
 			}
 			// New pilot-aware drivers must provide usable evidence. Older
-			// drivers keep their existing normalized-limit contract.
-			if d.PilotConfirmedAtMs != nil && (!pilotFresh || *d.PilotA == 0) {
+			// drivers keep their existing normalized-limit contract, and so
+			// does a valid pilot that is only too old: easee_cloud re-reads it
+			// once a minute, a late read can pass 90 s, and Core keeps the
+			// last reading for a minute after the driver stops sending. The
+			// driver checked its limit against the pilot when it was fresh,
+			// so only the pilot becomes unknown.
+			if d.PilotConfirmedAtMs != nil && (!pilotValid || (pilotFresh && *d.PilotA == 0)) {
 				d.LimitA, d.LimitedBy = nil, ""
 			}
 			if d.LimitA != nil {
@@ -498,7 +504,10 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		set("warning", "no_power_response", "warning")
 		return
 	}
-	if f.PilotA == nil && f.RequestedA != nil && f.DeviceLimitA != nil && *f.RequestedA > *f.DeviceLimitA+0.5 {
+	// With a fresh pilot and the current the charger lets the car take, the
+	// draw is judged against them below, so the charger's own limit cannot
+	// hide a car taking less.
+	if !(f.PilotA != nil && f.LimitA != nil) && f.RequestedA != nil && f.DeviceLimitA != nil && *f.RequestedA > *f.DeviceLimitA+0.5 {
 		set("limited", "device_limit", "warning")
 		return
 	}
@@ -534,8 +543,9 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	// shows it (easee_cloud 1.4.1). That explains a car taking about that
 	// much, never more: within 10 %, or as the car follows a step, within
 	// 2 A but at most 15 % of the limit. A car taking far less, nothing, or
-	// more keeps its verdict. A lower current whose cause the driver does
-	// not show still asks for a look.
+	// more keeps its verdict. A fresh pilot names the charger as the cause
+	// only when it is below the order and is that current. A lower current
+	// whose cause the driver does not show still asks for a look.
 	if f.Kind == "ev" && commanded && cmd.Result == "accepted" && f.SentW != nil && f.RequestedW != nil && f.RequestedA != nil && f.LimitA != nil && f.ActualW != nil &&
 		*f.SentW > 100 && *f.RequestedA > 0 && *f.LimitA > 0 && *f.LimitA+0.5 < *f.RequestedA && settled {
 		perA := *f.RequestedW / *f.RequestedA
@@ -544,7 +554,7 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		if *f.ActualW >= limitW-math.Max(tolerance, math.Min(2*perA, 0.15*limitW)) && *f.ActualW <= limitW+tolerance && *f.ActualW < *f.SentW {
 			if f.LimitedBy == "load_balancer" {
 				set("limited", "load_balancer_limit", "info")
-			} else if f.PilotA != nil {
+			} else if f.PilotA != nil && *f.PilotA+0.5 < *f.RequestedA && math.Abs(*f.PilotA-*f.LimitA) <= 0.5 {
 				if f.DeviceLimitA != nil && math.Abs(*f.LimitA-*f.DeviceLimitA) <= 0.5 {
 					set("limited", "device_limit", "info")
 				} else {
@@ -690,11 +700,21 @@ func (s *Server) loadpointsWithFeedback(states []loadpoint.State) []loadpointFee
 	return out
 }
 
-func pilotReadingFresh(d feedbackReading, now time.Time) bool {
-	if d.PilotA == nil || d.PilotConfirmedAtMs == nil || math.IsNaN(*d.PilotA) || math.IsInf(*d.PilotA, 0) || *d.PilotA < 0 {
-		return false
+// pilotFreshFor is how long a pilot's confirmation can explain a draw; it
+// matches the 90 s for which easee_cloud vouches for a cloud read.
+const pilotFreshFor = 90 * time.Second
+
+// pilotReadingAge is how long ago a pilot-aware driver confirmed its pilot.
+// ok is false when the pilot is not a current, or its confirmation is
+// missing or lies after now, or its source time after the confirmation.
+func pilotReadingAge(d feedbackReading, now time.Time) (age time.Duration, ok bool) {
+	if d.PilotA == nil || d.PilotConfirmedAtMs == nil || *d.PilotConfirmedAtMs <= 0 || math.IsNaN(*d.PilotA) || math.IsInf(*d.PilotA, 0) || *d.PilotA < 0 {
+		return 0, false
 	}
 	confirmed := time.UnixMilli(*d.PilotConfirmedAtMs)
 	source, err := time.Parse(time.RFC3339Nano, d.PilotObservedAt)
-	return err == nil && *d.PilotConfirmedAtMs > 0 && !confirmed.After(now) && now.Sub(confirmed) <= 90*time.Second && !source.After(confirmed)
+	if err != nil || confirmed.After(now) || source.After(confirmed) {
+		return 0, false
+	}
+	return now.Sub(confirmed), true
 }

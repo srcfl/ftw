@@ -13,16 +13,23 @@ func TestPilotFreshnessRequiresSpecificConfirmation(t *testing.T) {
 	now := time.Now().Truncate(time.Millisecond)
 	ms := now.UnixMilli()
 	base := feedbackReading{PilotA: watts(13), PilotObservedAt: now.Add(-24 * time.Hour).Format(time.RFC3339Nano), PilotConfirmedAtMs: &ms}
-	if !pilotReadingFresh(base, now) {
+	if age, ok := pilotReadingAge(base, now); !ok || age != 0 {
 		t.Fatal("unchanged old source value with current confirmation rejected")
+	}
+	// A confirmation past the window is valid but too old to explain a draw.
+	old := now.Add(-91 * time.Second).UnixMilli()
+	stale := base
+	stale.PilotConfirmedAtMs = &old
+	if age, ok := pilotReadingAge(stale, now); !ok || age <= pilotFreshFor {
+		t.Fatalf("stale confirmation: age %v ok %v", age, ok)
 	}
 	for _, tc := range []struct {
 		name   string
 		change func(*feedbackReading)
 	}{
 		{"missing confirmation", func(d *feedbackReading) { d.PilotConfirmedAtMs = nil }},
+		{"zero confirmation", func(d *feedbackReading) { v := int64(0); d.PilotConfirmedAtMs = &v }},
 		{"missing source", func(d *feedbackReading) { d.PilotObservedAt = "" }},
-		{"stale confirmation", func(d *feedbackReading) { v := now.Add(-91 * time.Second).UnixMilli(); d.PilotConfirmedAtMs = &v }},
 		{"future confirmation", func(d *feedbackReading) { v := now.Add(time.Second).UnixMilli(); d.PilotConfirmedAtMs = &v }},
 		{"future source", func(d *feedbackReading) { d.PilotObservedAt = now.Add(time.Second).Format(time.RFC3339Nano) }},
 		{"negative pilot", func(d *feedbackReading) { d.PilotA = watts(-1) }},
@@ -30,7 +37,7 @@ func TestPilotFreshnessRequiresSpecificConfirmation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			d := base
 			tc.change(&d)
-			if pilotReadingFresh(d, now) {
+			if _, ok := pilotReadingAge(d, now); ok {
 				t.Fatal("invalid pilot accepted")
 			}
 		})
@@ -38,38 +45,52 @@ func TestPilotFreshnessRequiresSpecificConfirmation(t *testing.T) {
 }
 
 func TestPilotAwareDriverFeedback(t *testing.T) {
+	// The charger holds FTW's 15 A order; limit is the driver's current the
+	// car may take, and age the pilot confirmation's age at the verdict.
+	const at13 = `,"current_limit_a":13`
+	const balanced = at13 + `,"current_limited_by":"load_balancer"`
 	for _, tc := range []struct {
-		name           string
-		draw           float64
-		age            time.Duration
-		result, reason string
+		name                     string
+		draw, pilot              float64
+		limit                    string
+		device                   bool // the charger's own 13 A limit
+		age                      time.Duration
+		result, reason, severity string
 	}{
-		{"fresh lower pilot, internal cause unknown", 8850, 0, "limited", "charger_pilot_limit"},
-		{"confirmed static limit", 8850, 0, "limited", "device_limit"},
-		{"static limit cannot hide low draw", 4000, 0, "not_following", "power_below_target"},
-		{"stale pilot cannot explain power", 8850, 91 * time.Second, "not_following", "power_below_target"},
-		{"future confirmation cannot explain power", 8850, -time.Minute, "not_following", "power_below_target"},
-		{"zero delivery stays visible", 0, 0, "not_following", "no_power_response"},
-		{"zero pilot cannot explain ongoing draw", 8850, 0, "not_following", "power_below_target"},
-		{"delivery below effective pilot stays visible", 4000, 0, "not_following", "power_below_target"},
+		{"fresh lower pilot, internal cause unknown", 8850, 13, at13, false, 5 * time.Second, "limited", "charger_pilot_limit", "info"},
+		{"confirmed static limit", 8850, 13, at13, true, 5 * time.Second, "limited", "device_limit", "warning"},
+		{"static limit cannot hide low draw", 4000, 13, at13, true, 5 * time.Second, "not_following", "power_below_target", "warning"},
+		{"static limit without a current limit", 8850, 13, "", true, 5 * time.Second, "limited", "device_limit", "warning"},
+		{"pilot at the end of its window", 8850, 13, at13, false, pilotFreshFor, "limited", "charger_pilot_limit", "info"},
+		{"stale pilot cannot explain power", 8850, 13, at13, false, pilotFreshFor + time.Second, "limited", "offered_current_lower", "warning"},
+		{"stale pilot keeps the load balancing", 8850, 13, balanced, false, pilotFreshFor + time.Second, "limited", "load_balancer_limit", "info"},
+		{"future confirmation cannot explain power", 8850, 13, at13, false, -time.Minute, "not_following", "power_below_target", "warning"},
+		{"zero delivery stays visible", 0, 13, at13, false, 5 * time.Second, "not_following", "no_power_response", "warning"},
+		{"zero pilot cannot explain ongoing draw", 8850, 0, at13, false, 5 * time.Second, "not_following", "power_below_target", "warning"},
+		{"delivery below effective pilot stays visible", 4000, 13, at13, false, 5 * time.Second, "not_following", "power_below_target", "warning"},
+		{"pilot above the order", 8850, 20, at13, false, 5 * time.Second, "limited", "offered_current_lower", "warning"},
+		{"pilot above the limit", 8850, 14.2, at13, false, 5 * time.Second, "limited", "offered_current_lower", "warning"},
+		{"pilot within 0.5 A of the order", 9900, 14.8, `,"current_limit_a":14.4`, false, 5 * time.Second, "limited", "offered_current_lower", "warning"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				e := newEVTrace(tc.draw)
 				for range 6 * 60 / 5 {
-					pilot := 13.0
-					if tc.name == "zero pilot cannot explain ongoing draw" {
-						pilot = 0
-					}
-					e.extra = fmt.Sprintf(`,"max_a":15,"dynamic_limit_a":15,"current_limit_a":13,"pilot_a":%g,"pilot_observed_at":%q,"pilot_confirmed_at_ms":%d`, pilot, time.Now().Add(-time.Hour).Format(time.RFC3339Nano), time.Now().Add(-tc.age).UnixMilli())
-					if tc.name == "confirmed static limit" || tc.name == "static limit cannot hide low draw" {
+					// tick waits five seconds before the verdict.
+					confirmed := time.Now().Add(5*time.Second - tc.age)
+					e.extra = fmt.Sprintf(`,"max_a":15,"dynamic_limit_a":15%s,"pilot_a":%g,"pilot_observed_at":%q,"pilot_confirmed_at_ms":%d`, tc.limit, tc.pilot, time.Now().Add(-time.Hour).Format(time.RFC3339Nano), confirmed.UnixMilli())
+					if tc.device {
 						e.extra += `,"device_limit_a":13,"device_limit_age_s":0`
 					}
 					e.tick(10350, "plan")
 				}
 				f := e.verdict(t)
-				if f.Status != tc.result || f.Reason != tc.reason {
-					t.Fatalf("got %s/%s want %s/%s", f.Status, f.Reason, tc.result, tc.reason)
+				if f.Status != tc.result || f.Reason != tc.reason || f.Severity != tc.severity {
+					t.Fatalf("got %s/%s/%s want %s/%s/%s", f.Status, f.Reason, f.Severity, tc.result, tc.reason, tc.severity)
+				}
+				// A pilot past its window is unknown, not shown.
+				if tc.age > pilotFreshFor && (f.PilotA != nil || f.PilotConfirmedAtMs != 0) {
+					t.Fatalf("stale pilot shown: %+v", f)
 				}
 				if tc.reason == "charger_pilot_limit" {
 					if f.Severity != "info" || f.PilotA == nil || *f.PilotA != 13 || f.DynamicLimitA == nil || *f.DynamicLimitA != 15 {
