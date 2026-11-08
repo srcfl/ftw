@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.162.0
+
+### Minor Changes
+
+- 5f52d9c: Show EV charging energy and cost for today, this week and this month using configured consumer prices.
+
+### Patch Changes
+
+- 4a8e509: An Easee charger's energy now comes from measured power. Easee's session figure moves in steps of about 1 kWh and FTW rejected many of them, so History showed too little: 10 of 24.3 kWh on one charge. Past days keep their old totals.
+- 68d05a6: EV charging cost says "Partial cost" when the charger's counter readings were rejected, instead of showing a low total as if it were complete.
+
 ## 0.161.0
 
 ### Minor Changes
