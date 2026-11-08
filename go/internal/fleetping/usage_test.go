@@ -60,6 +60,18 @@ func TestUsageWithNoAnswerShowsNothingAndWaits(t *testing.T) {
 	}
 }
 
+// The feed from before boxes reported versions must not read as nobody
+// running anything.
+func TestUsageWithoutVersionsShowsNothing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"days":[{"date":"2026-11-07","drivers":{"pixii":13,"easee_cloud":8}}]}`))
+	}))
+	defer srv.Close()
+	if got := NewUsage(srv.URL).Counts(context.Background()); got != nil {
+		t.Fatalf("counts = %v", got)
+	}
+}
+
 func TestReportCountsOnlyDriversThatDeliveredWithTheirVersion(t *testing.T) {
 	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	cfg := &config.Config{Drivers: []config.Driver{

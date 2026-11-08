@@ -92,5 +92,11 @@ func (u *Usage) fetch(ctx context.Context) (map[string]int, error) {
 			newest, counts = d.Date, d.Drivers
 		}
 	}
-	return counts, nil
+	// Until boxes report versions every driver would read as run by nobody.
+	for label := range counts {
+		if strings.Contains(label, "@") {
+			return counts, nil
+		}
+	}
+	return nil, nil
 }
