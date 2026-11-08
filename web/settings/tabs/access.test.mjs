@@ -251,14 +251,32 @@ describe("what stops a grant before a code is spent", () => {
   it("names each block, in the order to fix them", () => {
     assert.equal(P.readiness(null, "off", on).kind, "unavailable");
     assert.equal(P.readiness(null, "", on).kind, "loading");
-    assert.equal(P.readiness(ok, "", { lan_auth: false, configured: true }).kind, "password");
-    assert.equal(P.readiness(ok, "", { lan_auth: true, configured: false }).kind, "password");
-    assert.equal(P.readiness(ok, "", null).kind, "password");
-    // On the box itself, or through a tunnel, the password does not count.
-    assert.equal(P.readiness({ box: { ...ok.box, widen: false } }, "", on).kind, "here");
+    // No house password yet: the page lets the owner choose one right here.
+    assert.equal(P.readiness(ok, "", { lan_auth: false, configured: false }).kind, "choose");
+    assert.equal(P.readiness(ok, "", { lan_auth: false, configured: true }).kind, "choose");
+    assert.equal(P.readiness(ok, "", { lan_auth: true, configured: false }).kind, "choose");
+    // A box that could not say whether it has one is not offered "choose".
+    assert.equal(P.readiness(ok, "", null).kind, "unknown");
+    // A password, but this browser has not signed in, wherever it runs.
+    assert.equal(P.readiness({ box: { ...ok.box, widen: false } }, "", on).kind, "signin");
     assert.equal(P.readiness({ box: { ...ok.box, offers: false } }, "", on).kind, "keys");
     assert.equal(P.readiness({ box: { ...ok.box, clock: "behind", nowMs: 1, markMs: 2 } }, "", on).kind, "behind");
     assert.equal(P.readiness({ box: { ...ok.box, clock: "unsynced" } }, "", on).kind, "clock");
+  });
+});
+
+describe("the house password in the owner's words", () => {
+  it("never shows the box's own wording for a wrong or short password", () => {
+    assert.match(P.passwordFailureText(401, { error: "invalid password" }), /not the house password.*30 seconds/);
+    assert.match(P.passwordFailureText(401, { error: "valid LAN password required" }), /Sign in with the house password/);
+    assert.match(P.passwordFailureText(503, {}), /did not answer/);
+    assert.doesNotMatch(P.passwordFailureText(401, { error: "invalid password" }), /loopback|Bearer|curl|docker/i);
+  });
+
+  it("warns about a short password and never refuses it", () => {
+    assert.match(P.shortPasswordHint("1234"), /easy to guess.*still use/);
+    assert.equal(P.shortPasswordHint(""), "");
+    assert.equal(P.shortPasswordHint("eight ch"), "");
   });
 });
 

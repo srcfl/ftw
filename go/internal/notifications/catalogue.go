@@ -18,6 +18,7 @@ const (
 	PushUpdateInstalled         = protocol.PushUpdateInstalled
 	PushDriverOffline           = protocol.PushDriverOffline
 	PushFuseOverLimit           = protocol.PushFuseOverLimit
+	PushControlNotFollowing     = protocol.PushControlNotFollowing
 	PushBoxUnreachable          = protocol.PushBoxUnreachable
 	PushCloudGranted            = protocol.PushCloudGranted
 	PushAgentAdded              = protocol.PushAgentAdded

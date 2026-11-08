@@ -98,6 +98,7 @@
 		'  .sys-fleet-preview { grid-column: 1 / -1; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 0.75rem/1.45 var(--mono, monospace); background: var(--line, rgba(255,255,255,0.06)); border-radius: 6px; padding: 10px; }' +
 		'  .sys-help-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }' +
 		'  .sys-help-secondary { margin:10px 0 0; color:var(--text-dim); font-size:0.8rem; }' +
+		'  .sys-help-secondary a { color:var(--accent-e, #f5b942); }' +
         '</style>' +
         '<fieldset>' +
         '<legend>Savings</legend>' +
@@ -107,18 +108,18 @@
         (window.FTWHomeAssistant ?
           '<fieldset><legend>Home Assistant access</legend><p>Home Assistant manages access to FTW. No separate FTW password is needed.</p></fieldset>' :
         '<fieldset>' +
-        '<legend>LAN password</legend>' +
+        '<legend>House password</legend>' +
         '<p class="sys-meta" id="sys-lan-auth-status">…</p>' +
-        '<label for="sys-lan-auth-password">Password</label>' +
+        '<label for="sys-lan-auth-password">New password</label>' +
         '<input type="password" id="sys-lan-auth-password" autocomplete="new-password">' +
-        '<label for="sys-lan-auth-confirm">Confirm</label>' +
+        '<label for="sys-lan-auth-confirm">Type it again</label>' +
         '<input type="password" id="sys-lan-auth-confirm" autocomplete="new-password">' +
         '<div class="sys-help-actions" style="margin-top:10px">' +
-        '  <button class="btn-add" type="button" id="sys-lan-auth-enable">Enable</button>' +
-        '  <button class="btn-add" type="button" id="sys-lan-auth-disable">Disable</button>' +
+        '  <button class="btn-add" type="button" id="sys-lan-auth-enable">Turn on</button>' +
+        '  <button class="btn-add" type="button" id="sys-lan-auth-disable">Turn off</button>' +
         '</div>' +
         '<p class="sys-help-secondary" id="sys-lan-auth-msg"></p>' +
-        '<p class="sys-help-secondary">Asks for this password on the LAN before settings and writes. Live status stays visible. curl still uses Bearer.</p>' +
+        '<p class="sys-help-secondary">Other devices on your network need this password before they change settings or let an assistant in. Live numbers stay visible without it. <a href="https://github.com/srcfl/ftw/blob/master/docs/operations.md#house-password" target="_blank" rel="noopener">Forgot it, and details for experts</a></p>' +
         '</fieldset>') +
         '<fieldset>' +
         '<legend>Host</legend>' +
@@ -322,16 +323,26 @@
 
       function lanStatusText(d) {
         if (!d || typeof d !== "object") return "Status unavailable";
-        if (d.lan_auth && d.configured) return "On — password is set";
-        if (d.lan_auth && !d.configured) return "On — no password stored";
-        if (!d.lan_auth && d.configured) return "Off — password is stored";
-        return "Off";
+        if (d.lan_auth && d.configured) return "On. Other devices sign in with it.";
+        if (d.lan_auth && !d.configured) return "On, but no password is stored. Choose one below.";
+        return "Off. Any device on your Wi-Fi can change settings. Choose a password to stop that.";
       }
 
+      // The box's refusal, in the owner's words.
+      function lanFailureText(status, body) {
+        if (status === 401) return "Sign in with the current house password first.";
+        var said = String((body && body.error) || "");
+        return said || "The box did not answer. Try again in a moment.";
+      }
+
+      var lanOn = false;
       function refreshLanAuth() {
         apiFetch("/api/auth/status").then(function (r) { return r.json(); }).then(function (d) {
           var statusEl = document.getElementById("sys-lan-auth-status");
           if (statusEl) statusEl.textContent = lanStatusText(d);
+          lanOn = !!(d.lan_auth && d.configured);
+          var enableBtn = document.getElementById("sys-lan-auth-enable");
+          if (enableBtn) enableBtn.textContent = lanOn ? "Change password" : "Turn on";
           var disableBtn = document.getElementById("sys-lan-auth-disable");
           if (disableBtn) disableBtn.disabled = !d.lan_auth;
         }).catch(function () {
@@ -340,20 +351,28 @@
         });
       }
 
+      // A short password is the owner's choice: a word, not a refusal.
+      var pwInput = document.getElementById("sys-lan-auth-password");
+      if (pwInput) pwInput.addEventListener("input", function () {
+        var n = Array.from(pwInput.value).length;
+        setLanMsg(n > 0 && n < 8 ? "Short passwords are easy to guess. You can still use this one." : "");
+      });
+
       var enableBtn = document.getElementById("sys-lan-auth-enable");
       if (enableBtn) enableBtn.onclick = function () {
         var pwEl = document.getElementById("sys-lan-auth-password");
         var cfEl = document.getElementById("sys-lan-auth-confirm");
         var pw = pwEl ? pwEl.value : "";
         var cf = cfEl ? cfEl.value : "";
-        if (pw.length < 10) {
-          setLanMsg("Password must be at least 10 characters");
+        if (!pw) {
+          setLanMsg("Choose a password.");
           return;
         }
         if (pw !== cf) {
-          setLanMsg("Password and confirm do not match");
+          setLanMsg("The two passwords are not the same.");
           return;
         }
+        var changing = lanOn;
         enableBtn.disabled = true;
         setLanMsg("");
         apiFetch("/api/auth/password", {
@@ -361,15 +380,15 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ password: pw, enabled: true }),
         }).then(function (r) {
-          return r.json().then(function (body) {
-            if (!r.ok) throw new Error(body.error || "enable failed");
+          return r.json().catch(function () { return {}; }).then(function (body) {
+            if (!r.ok) throw new Error(lanFailureText(r.status, body));
             if (pwEl) pwEl.value = "";
             if (cfEl) cfEl.value = "";
-            setLanMsg("LAN password is on");
+            setLanMsg(changing ? "Changed. Other browsers must sign in again." : "The house password is on. This browser stays signed in.");
             refreshLanAuth();
           });
         }).catch(function (err) {
-          setLanMsg(err.message || "enable failed");
+          setLanMsg(err.message || "The box did not answer. Try again in a moment.");
         }).then(function () {
           enableBtn.disabled = false;
         });
@@ -384,13 +403,13 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ enabled: false }),
         }).then(function (r) {
-          return r.json().then(function (body) {
-            if (!r.ok) throw new Error(body.error || "disable failed");
-            setLanMsg("LAN password is off");
+          return r.json().catch(function () { return {}; }).then(function (body) {
+            if (!r.ok) throw new Error(lanFailureText(r.status, body));
+            setLanMsg("The house password is off.");
             refreshLanAuth();
           });
         }).catch(function (err) {
-          setLanMsg(err.message || "disable failed");
+          setLanMsg(err.message || "The box did not answer. Try again in a moment.");
           disableBtn.disabled = false;
         });
       };

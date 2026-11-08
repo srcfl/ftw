@@ -267,6 +267,7 @@ header h1 {
 }
 .energy-history-pager button:disabled { opacity: 0.4; cursor: default; }
 .history-disclosure .energy-history-note { margin: 0.75rem 0 0; text-align: center; }
+.history-disclosure .energy-history-note a { color: var(--text); }
 #view-energy > .history-row { margin-top: 0; }
 #view-energy > .history-row > .history-disclosure { width: 100%; }
 .history-numbers-disclosure .history-disclosure-body { padding: 0; }
@@ -1873,6 +1874,21 @@ footer {
 }
 .access-blocked p { margin: 0 0 8px; }
 .access-blocked button { margin-right: 8px; }
+/* The house password, asked for right where the owner needs it: a step,
+   not a warning. */
+.access-password {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+.access-password p { margin: 0 0 8px; }
+.modal-body .access-password input[type="password"] { display: block; width: 100%; max-width: 32ch; }
+.access-password .btn-send { display: block; margin-top: 12px; }
+.access-password .access-note { margin: 6px 0; }
+.access-password a { color: var(--accent); }
 .access-code-row {
   display: flex;
   gap: 8px;

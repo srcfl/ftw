@@ -19,7 +19,7 @@ func TestExternalModbusOwnerKeepsTelemetryButLeavesPlannerAndDispatch(t *testing
 	if got := driverCapacitiesFrom(cfg.Drivers, nil, evCatalog(), false); got["sungrow"] != 10000 {
 		t.Fatalf("telemetry capacity lost: %v", got)
 	}
-	if len(driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries)) != 0 {
+	if len(driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries, cfg.Planner)) != 0 {
 		t.Fatal("external battery remains in dispatch limits")
 	}
 	if !config.ObserveOnlyDriverSet(cfg)["sungrow"] {

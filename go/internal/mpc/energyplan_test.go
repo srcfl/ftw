@@ -95,7 +95,7 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	svc := shadowTestService(t)
 	svc.Optimizer = o
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
-	if err != nil || info.Name != "ftw-solver" || info.Version != "0.5.2" {
+	if err != nil || info.Name != "ftw-solver" || info.Version != "0.7.0" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
 	}
 	start := time.Now().UTC().Truncate(time.Hour)
@@ -373,11 +373,16 @@ func TestEnergyplanTimeBudgetRespectsRemainingSlot(t *testing.T) {
 	if got := energyplanTimeBudget(slots, p); got != 0 {
 		t.Fatalf("200ms remaining fleet budget=%v, want fail-fast", got)
 	}
-	trimFirstSlotRemaining(slots, 2*time.Second)
-	got := energyplanTimeBudget(slots, p)
-	remaining := remainingFirstSlot(slots)
-	if got <= 0 || got > remaining || remaining-got != energyplanPublishMargin {
-		t.Fatalf("2s remaining fleet budget=%v remaining=%v", got, remaining)
+	// Core's call ends energyplanPublishMargin before the slot does. A
+	// worker that spends its whole budget must still answer before that:
+	// 5 % of the time left, at least 30 ms.
+	for _, left := range []time.Duration{2 * time.Second, 500 * time.Millisecond, energyplanFleetBudget + 60*time.Millisecond} {
+		trimFirstSlotRemaining(slots, left)
+		got, remaining := energyplanTimeBudget(slots, p), remainingFirstSlot(slots)
+		deadline := remaining - energyplanPublishMargin
+		if want := deadline - max(deadline/20, 30*time.Millisecond); got <= 0 || got != want {
+			t.Fatalf("%v remaining: fleet budget=%v, want %v under the %v call deadline", left, got, want, deadline)
+		}
 	}
 	small, smallParams := topologyFixture(1, 0)
 	trimFirstSlotRemaining(small, 2*time.Second)
@@ -423,12 +428,154 @@ func TestEnergyplanCapsWorkerBudgetAndWaitToRemaining(t *testing.T) {
 	if err := json.Unmarshal(capture.last, &request); err != nil {
 		t.Fatal(err)
 	}
-	want := energyplanTimeBudget(slots, p).Seconds()
-	if request.Settings.TimeLimitS != want || request.Settings.TimeLimitS > 2 {
-		t.Fatalf("TimeLimitS=%g, want %g (≤ remaining)", request.Settings.TimeLimitS, want)
-	}
 	if !capture.hasDeadline || capture.deadlineWait > 2*time.Second || capture.deadlineWait < time.Second {
 		t.Fatalf("process wait %v, want ≤ remaining 2s", capture.deadlineWait)
+	}
+	// The limit also fits the time still left before the call's deadline
+	// when the request is sent, which is never less than the wait seen here.
+	want, least := energyplanTimeBudget(slots, p).Seconds(), energyplanSolveTime(capture.deadlineWait).Seconds()
+	if got := request.Settings.TimeLimitS; got > want || got < least {
+		t.Fatalf("TimeLimitS=%g, want in [%g, %g] (≤ remaining)", got, least, want)
+	}
+}
+
+// The budget counts from the frozen execution start. After a point call that
+// used its whole limit, the caution call has less time before its own
+// deadline, and a worker that uses its full time limit must still answer.
+func TestEnergyplanLateCautionCallLimitFitsItsDeadline(t *testing.T) {
+	capture := &countingTransport{}
+	engine := &EnergyplanOptimizer{ExternalOptimizer: &ExternalOptimizer{
+		cfg:        ExternalOptimizerConfig{Timeout: 7 * time.Second},
+		transport:  capture,
+		timeBudget: energyplanTimeBudget,
+	}}
+	// Core's plan stands in for the point reply, so use a site it replays.
+	slots, p := externalTestFixture()
+	p.SoCLevels, p.ActionLevels = 21, 11
+	_, ev := topologyFixture(0, 1)
+	p.Loadpoint, p.Loadpoints = ev.Loadpoint, ev.Loadpoints
+	const frozen = 2500 * time.Millisecond
+	trimFirstSlotRemaining(slots, frozen)
+	budget := energyplanTimeBudget(slots, p)
+	if budget != energyplanEVBudget {
+		t.Fatalf("budget=%v, want the full EV budget %v", budget, energyplanEVBudget)
+	}
+	risk := append([]Slot(nil), slots...)
+	risk[0].LoadW += 100
+	start := time.UnixMilli(slots[0].ExecutionStart())
+	var elapsed time.Duration
+	limits := map[string]float64{}
+	_, err := planWithForecastMargin(context.Background(), slots, risk, p,
+		func() time.Time { return start.Add(elapsed) },
+		func(ctx context.Context, in []Slot, p Params) (Plan, []Slot, error) {
+			trips := capture.n
+			_, err := engine.Optimize(ctx, in, p)
+			if capture.n != trips+1 {
+				t.Fatalf("worker trips %d, want %d: %v", capture.n, trips+1, err)
+			}
+			var request externalRequest
+			if jsonErr := json.Unmarshal(capture.last, &request); jsonErr != nil {
+				t.Fatal(jsonErr)
+			}
+			if in[0].LoadW == risk[0].LoadW {
+				limits["caution"] = request.Settings.TimeLimitS
+				return Plan{}, in, err
+			}
+			limits["point"] = request.Settings.TimeLimitS
+			// The point worker uses its full time limit; Core's own plan
+			// stands in for its reply.
+			elapsed = budget
+			return corePlanWithRecovery(ctx, in, p)
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits["point"] != budget.Seconds() {
+		t.Fatalf("point time_limit_s=%g, want the unchanged budget %g", limits["point"], budget.Seconds())
+	}
+	left := frozen - budget - energyplanPublishMargin
+	want := left - max(left/20, energyplanReplyMargin)
+	if got := limits["caution"]; got <= 0 || got > want.Seconds() {
+		t.Fatalf("caution time_limit_s=%g, want in (0, %g]: the call has %v before its deadline", got, want.Seconds(), left)
+	}
+}
+
+func TestEnergyplanCallWithTimeLeftKeepsItsBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		frozen, caller time.Duration
+	}{
+		{"full slot without a call deadline", 0, 0},
+		{"frozen start near the slot end", 2500 * time.Millisecond, 0},
+		{"caller deadline past the budget", 0, 2 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &countingTransport{}
+			engine := &EnergyplanOptimizer{ExternalOptimizer: &ExternalOptimizer{
+				cfg:        ExternalOptimizerConfig{Timeout: 7 * time.Second},
+				transport:  capture,
+				timeBudget: energyplanTimeBudget,
+			}}
+			slots, p := topologyFixture(1, 1)
+			if tc.frozen > 0 {
+				trimFirstSlotRemaining(slots, tc.frozen)
+			}
+			ctx := context.Background()
+			if tc.caller > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tc.caller)
+				defer cancel()
+			}
+			_, _ = engine.Optimize(ctx, slots, p)
+			if capture.n != 1 {
+				t.Fatalf("worker trips=%d", capture.n)
+			}
+			var request externalRequest
+			if err := json.Unmarshal(capture.last, &request); err != nil {
+				t.Fatal(err)
+			}
+			if want := energyplanEVBudget.Seconds(); request.Settings.TimeLimitS != want {
+				t.Fatalf("time_limit_s=%g, want the unchanged budget %g", request.Settings.TimeLimitS, want)
+			}
+		})
+	}
+}
+
+// The frozen start may allow a call that its own deadline no longer does.
+// Below Core's no-call threshold the worker is not started; above it, the
+// limit is positive and fits the deadline.
+func TestEnergyplanLateCallLimitFollowsNoCallThreshold(t *testing.T) {
+	for _, caller := range []time.Duration{300 * time.Millisecond, 600 * time.Millisecond} {
+		t.Run(caller.String(), func(t *testing.T) {
+			capture := &countingTransport{}
+			engine := &EnergyplanOptimizer{ExternalOptimizer: &ExternalOptimizer{
+				cfg:        ExternalOptimizerConfig{Timeout: 7 * time.Second},
+				transport:  capture,
+				timeBudget: energyplanTimeBudget,
+			}}
+			slots, p := topologyFixture(1, 1)
+			trimFirstSlotRemaining(slots, 2500*time.Millisecond)
+			ctx, cancel := context.WithTimeout(context.Background(), caller)
+			defer cancel()
+			_, err := engine.Optimize(ctx, slots, p)
+			if caller < energyplanSmallBudget-energyplanPublishMargin {
+				if capture.n != 0 || err == nil || !strings.Contains(err.Error(), "below the Energyplan budget") {
+					t.Fatalf("worker trips=%d err=%v, want a skipped call", capture.n, err)
+				}
+				return
+			}
+			if capture.n != 1 {
+				t.Fatalf("worker trips=%d: %v", capture.n, err)
+			}
+			var request externalRequest
+			if err := json.Unmarshal(capture.last, &request); err != nil {
+				t.Fatal(err)
+			}
+			want := caller - max(caller/20, energyplanReplyMargin)
+			if got := request.Settings.TimeLimitS; got <= 0 || got > want.Seconds() {
+				t.Fatalf("time_limit_s=%g, want in (0, %g]", got, want.Seconds())
+			}
+		})
 	}
 }
 

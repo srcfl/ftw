@@ -19,7 +19,7 @@ func TestExternalRequestNegotiatesPublishedPricesAcrossWorkerRollback(t *testing
 	for _, supported := range []bool{true, false, true} {
 		transport.publishedPrices = supported
 		request := external.buildRequest(slots, params)
-		if err := optimizer.prepareEnergyplanRequest(context.Background(), &request, params); err != nil {
+		if err := optimizer.prepareEnergyplanRequest(context.Background(), &request, slots, params); err != nil {
 			t.Fatal(err)
 		}
 		raw, err := json.Marshal(request)

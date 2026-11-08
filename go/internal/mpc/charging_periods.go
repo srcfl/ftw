@@ -1,6 +1,9 @@
 package mpc
 
-import "context"
+import (
+	"context"
+	"math"
+)
 
 // ChargingPeriods describes a preference, after deadline energy and physical
 // reserves. It never delays Core safety, manual stop, or charge completion.
@@ -41,7 +44,7 @@ func (l *LoadpointSpec) departureMissWh() float64 {
 	return 1
 }
 
-func (o *EnergyplanOptimizer) prepareEnergyplanRequest(ctx context.Context, request *externalRequest, p Params) error {
+func (o *EnergyplanOptimizer) prepareEnergyplanRequest(ctx context.Context, request *externalRequest, slots []Slot, p Params) error {
 	// Negotiate against the running worker on every request. Restart or a
 	// binary rollback must not inherit a feature learned from another process.
 	probeCtx, cancel := context.WithTimeout(ctx, o.cfg.Timeout)
@@ -53,6 +56,31 @@ func (o *EnergyplanOptimizer) prepareEnergyplanRequest(ctx context.Context, requ
 	if optimizerHasFeature(info, "published_prices") {
 		for i := range request.Slots {
 			request.Slots[i].Confidence = 0
+		}
+	}
+	// A worker without demand_elapsed_hours gets the demand charges as
+	// before: no hour that began before the first slot, each completed day
+	// in already_kw. Its budget follows the charges it gets, so a charge with
+	// only the hour in progress leaves with its fleet budget.
+	if !optimizerHasFeature(info, "demand_elapsed_hours") && hasElapsedDemand(p.DemandCharges) {
+		p.DemandCharges = legacyDemandCharges(p.DemandCharges)
+		request.DemandCharges = externalDemandCharges(p.DemandCharges)
+		if o.timeBudget != nil {
+			request.Settings.TimeLimitS = math.Min(o.cfg.Timeout.Seconds()*0.8, o.timeBudget(slots, p).Seconds())
+		}
+	}
+	// A worker without the hours plans past them; Core's check rejects
+	// such a plan and uses its own. The worker plans the hours in its fleet
+	// model, with the demand charges' budget.
+	if optimizerHasFeature(info, "hourly_import_caps") && len(slots) > 0 {
+		for _, h := range p.ImportHours {
+			if importHourPlannedH(slots, h) > 0 {
+				request.HourlyImportCaps = append(request.HourlyImportCaps, externalImportCap{
+					StartMs: h.StartMs, EndMs: h.EndMs, MaxMeanW: p.ImportMeanW, ElapsedImportWh: h.ElapsedImportWh})
+			}
+		}
+		if len(request.HourlyImportCaps) > 0 {
+			request.Settings.TimeLimitS = math.Min(o.cfg.Timeout.Seconds()*0.8, energyplanBudget(slots, p, true).Seconds())
 		}
 	}
 	loads := p.activeLoadpoints()

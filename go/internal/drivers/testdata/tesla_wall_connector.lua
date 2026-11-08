@@ -23,12 +23,13 @@
 DRIVER = {
   host_api_min = 1,
   host_api_max = 1,
-  id           = "tesla-wall-connector",
+  id           = "tesla_wall_connector",
   name         = "Tesla Wall Connector",
   manufacturer = "Tesla",
-  version      = "0.1.0",
+  version      = "0.1.2",
   protocols    = { "http" },
   capabilities = { "ev" },
+  read_only    = true,
   description  = "Tesla Wall Connector Gen 3 on the LAN. Observation only; no cloud account.",
   homepage     = "https://www.tesla.com/support/charging/wall-connector",
   authors      = { "FTW contributors" },
@@ -91,9 +92,16 @@ end
 
 local function decode_json(raw)
   if raw == nil or raw == "" then return nil, "empty body" end
-  local data, err = host.json_decode(repair_json(raw))
-  if data == nil then return nil, tostring(err or "decode failed") end
+  local ok, data = pcall(host.json_decode, repair_json(raw))
+  if not ok then return nil, tostring(data) end
+  if data == nil then return nil, "decode failed" end
   return data, nil
+end
+
+local function safe_http_get(url, headers)
+  local ok, resp, err = pcall(host.http_get, url, headers)
+  if not ok then return nil, tostring(resp) end
+  return resp, err
 end
 
 local function origin_from_config(config)
@@ -105,6 +113,11 @@ local function origin_from_config(config)
   host = tostring(host)
   if host:find("://", 1, true) then
     return host:gsub("/$", "")
+  end
+  -- Optional config.port; scheme-only URL uses HTTP default 80.
+  local port = tonumber(config.port)
+  if port and port > 0 and port ~= 80 then
+    return "http://" .. host .. ":" .. tostring(port)
   end
   return "http://" .. host
 end
@@ -118,20 +131,31 @@ local function phase_power(v, a)
   return v * a
 end
 
-local function charge_power(vitals)
-  if split_phase then
-    local w = (as_number(vitals.grid_v) or 0) * (as_number(vitals.vehicle_current_a) or 0)
-    if w < 0 then w = 0 end
-    return w
+-- The contactor joins the car to the grid and closes only with a car on
+-- the cable. While it is open no current reaches a car: an idle unit still
+-- reads about 0.5–1 A of sensor offset on its legs, and that is not load.
+-- A reply without contactor_closed falls back to vehicle_connected and
+-- the EVSE state.
+local function contactor_closed(state, vitals)
+  if vitals.contactor_closed ~= nil then return vitals.contactor_closed == true end
+  if vitals.vehicle_connected == false then return false end
+  return state == EVSE_CHARGE_LOW or state == EVSE_CHARGE_FULL
+end
+
+local function charge_power(state, vitals)
+  if not contactor_closed(state, vitals) then return 0 end
+  local grid_w = (as_number(vitals.grid_v) or 0) * (as_number(vitals.vehicle_current_a) or 0)
+  if grid_w < 0 then grid_w = 0 end
+  if split_phase then return grid_w end
+  -- The legs are measured on the car side of the contactor. Only a reply
+  -- with no leg voltage at all falls back to the grid voltage; a leg that
+  -- reads 0 V carries no power.
+  if vitals.voltageA_v == nil and vitals.voltageB_v == nil and vitals.voltageC_v == nil then
+    return grid_w
   end
-  local w = phase_power(vitals.voltageA_v, vitals.currentA_a)
+  return phase_power(vitals.voltageA_v, vitals.currentA_a)
     + phase_power(vitals.voltageB_v, vitals.currentB_a)
     + phase_power(vitals.voltageC_v, vitals.currentC_a)
-  if w <= 0 then
-    local fallback = (as_number(vitals.grid_v) or 0) * (as_number(vitals.vehicle_current_a) or 0)
-    if fallback > 0 then w = fallback end
-  end
-  return w
 end
 
 local function active_phases(vitals)
@@ -143,16 +167,11 @@ local function active_phases(vitals)
   return n
 end
 
-local function is_charging(state, vitals)
-  if state == EVSE_CHARGE_LOW or state == EVSE_CHARGE_FULL then return true end
-  return vitals.contactor_closed == true
-end
-
 local function is_connected(state, vitals)
   if vitals.vehicle_connected == true then return true end
   return state == EVSE_CONNECTED or state == EVSE_READY
     or state == EVSE_HANDSHAKE or state == EVSE_FINISHED
-    or state == EVSE_WAIT_CAR or is_charging(state, vitals)
+    or state == EVSE_WAIT_CAR or contactor_closed(state, vitals)
 end
 
 function driver_init(config)
@@ -167,7 +186,7 @@ function driver_init(config)
     split_phase = true
   end
 
-  local raw, err = host.http_get(BASE_URL .. "/api/1/version")
+  local raw, err = safe_http_get(BASE_URL .. "/api/1/version")
   if not err then
     local ver = decode_json(raw)
     if ver then
@@ -184,7 +203,7 @@ end
 
 function driver_poll()
   if not BASE_URL then return 10000 end
-  local raw, err = host.http_get(BASE_URL .. "/api/1/vitals")
+  local raw, err = safe_http_get(BASE_URL .. "/api/1/vitals")
   if err then
     host.log("warn", "Tesla Wall Connector: vitals failed")
     return 10000
@@ -196,10 +215,10 @@ function driver_poll()
   end
 
   local state = as_number(vitals.evse_state) or EVSE_IDLE
-  local power_w = charge_power(vitals)
+  local power_w = charge_power(state, vitals)
   local session_wh = as_number(vitals.session_energy_wh) or 0
   local connected = is_connected(state, vitals)
-  local charging = is_charging(state, vitals)
+  local charging = contactor_closed(state, vitals)
   local phases = active_phases(vitals)
 
   host.emit("ev", {

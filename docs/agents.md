@@ -628,7 +628,7 @@ above and its approval key, and an agent can never reach them.
 | `GET /api/agents` | A client on the LAN. Rows, requests and keys, the box's facts and the registry's agent ops |
 | `GET /api/agents/audit?before=&n=` | A client on the LAN |
 | `POST /api/agents/offer {offer}` | A client on the LAN. The offer as the box reads it; grants nothing |
-| `POST /api/agents {offer, scopes, ops, caps, ttlS}` | A LAN client signed in with the house password |
+| `POST /api/agents {offer, scopes, ops, caps, ttlS}` | A browser signed in with the house password, on the LAN or on the box |
 | `POST /api/agents/{id}/widen {epoch, scopes, ops, caps, ttlS}` | The same |
 | `POST /api/agent-requests/{reqId} {approve: true}` | The same |
 | `POST /api/agents/approval-key {deviceId, pub}` | The same: a phone that lost its key |
@@ -672,13 +672,14 @@ above and its approval key, and an agent can never reach them.
   replace the offer's when given. Without `ttlS` the grant lasts 30 days, or
   the offer's length if shorter. A `ttlS` past the role's longest grant is
   `E_CAP_EXCEEDED {cap: "expiresAtMs", max}`.
-- **Every route that widens access needs another device on the home
-  network, signed in with the house password.** The box never reads the
-  sign-in from loopback, so a browser on the box, or one through an SSH
-  tunnel to it, cannot widen access with or without the password: a
-  driver's Lua and the session passthrough can both reach the box from
-  inside it. `box.widen` in `GET /api/agents` says whether this request
-  would pass, so the page stops before a code is spent.
+- **Every route that widens access needs a browser signed in with the
+  house password,** on another device or on the box itself. The password,
+  not the address, proves the owner. Loopback stays an owner for settings
+  without it, so it could replace the password and then sign in: it is not
+  a wall against programs on the box. A driver cannot reach the API
+  (below), and the session passthrough is refused. `box.widen` in
+  `GET /api/agents` says whether this request would pass, so the page stops
+  before a code is spent.
 - **Drivers never reach the box's API.** A driver's HTTP, TCP or WebSocket
   connection to a port the API listens on is refused, whether it goes to a
   loopback address or to an address of the box. The check runs on the
@@ -691,16 +692,25 @@ above and its approval key, and an agent can never reach them.
 
 What the sign-in is worth today:
 
-- **Off by default.** With `api.lan_auth` off, which is the default, every
-  client on the home network is an owner with no sign-in. Granting a remote
-  agent from there would let any device on the Wi-Fi give the outside world
-  a way in, so those routes refuse with 403 until the house password is on.
-- **With the house password on.** The password has at least 10 characters
-  and is stored as argon2id (64 MiB, 3 passes). Five wrong guesses lock every
-  sign-in for 30 seconds, box-wide. A sign-in sets a random 32-byte cookie,
-  `HttpOnly` and `SameSite=Strict`, that lasts 12 hours and dies with a
-  restart. Browser requests from other sites are refused by Origin and
-  `Sec-Fetch-Site` checks.
+- **Off until someone chooses it.** A new box asks for it during setup; an
+  older box may still have it off. With `api.lan_auth` off every client on
+  the home network is an owner with no sign-in. Granting a remote agent
+  from there would let any device on the Wi-Fi give the outside world a way
+  in, so those routes refuse with 403 until the house password is on. The
+  Access page asks for it right above the code: any browser that reaches
+  the box may choose the first one, which signs that browser in. While the
+  lock is off that browser is already an owner, so choosing it grants
+  nothing new (Fredrik, 25 October 2026). An owner locked out by someone
+  else's password, or who forgot it, runs `ftw password reset` on the box;
+  see [operations.md](operations.md#house-password).
+- **With the house password on.** Its length is the owner's choice: the
+  page warns below 8 characters but takes any password that is not empty
+  (Fredrik, 25 October 2026). It is stored as argon2id (64 MiB, 3
+  passes). Five wrong guesses lock every sign-in for 30 seconds, box-wide.
+  A sign-in sets a random 32-byte cookie,
+  `HttpOnly` and `SameSite=Strict`, that lasts 30 days, survives a restart
+  and ends when the password changes. Browser requests from other sites are
+  refused by Origin and `Sec-Fetch-Site` checks.
 - **What it lacks.** The page is plain HTTP, so anyone who can read the home
   network's traffic can read the password and the cookie. There is one
   shared password and no person behind it, so the audit row names the
@@ -756,8 +766,8 @@ receipts for current agents, plus 32 old receipts, with a 128-row storage
 bound. No expired or cancelled record can reopen a valid code after pruning.
 
 The local routes are `GET/POST /api/agent-invites` and
-`DELETE /api/agent-invites/{id}`. POST uses the same house-password and
-non-loopback LAN gate as an ordinary grant. Signed app messages allow an
+`DELETE /api/agent-invites/{id}`. POST uses the same house-password gate
+as an ordinary grant. Signed app messages allow an
 owner to share access away from home. The recipient connects FTW from its
 own assistant, selects **I have an invitation code** on the consent page and
 pastes the code there. Core must be online. The normal signed-roster,

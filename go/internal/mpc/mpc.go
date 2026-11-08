@@ -248,6 +248,14 @@ type Params struct {
 	// DemandCharges are peak-power tariffs Core expanded to clock hours.
 	// Empty leaves Energyplan on energy prices only.
 	DemandCharges []DemandCharge
+
+	// ImportHours carry the owner's hourly import ceiling: each clock hour
+	// the plan spans may import ImportMeanW over its length, less what it had
+	// used. ValidatePlan holds every plan to them, Core's own planners spread
+	// each hour over its slots, and a worker that announces
+	// hourly_import_caps gets them on its wire.
+	ImportMeanW float64
+	ImportHours []ImportHour
 }
 
 // StorageAssetSpec is one independently constrained home battery in the
@@ -660,6 +668,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 
 	// The mean price scales the EV deadline penalty and labels reasons.
 	meanPrice := horizonMeanPrice(slots)
+	importCaps, carImportCaps := importHourCapsW(slots, p)
 
 	// Action grid spans −MaxDischargeW … +MaxChargeW and always contains
 	// 0 W. With asymmetric charge/discharge limits, an odd number of evenly
@@ -866,8 +875,12 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 							continue
 						}
 
-						// Per-slot power limits.
+						// Per-slot power limits, and the slot's share of
+						// its clock hour's import budget.
 						if !slot.Limits.allowsImport(gridW) || !slot.Limits.allowsExport(gridW) {
+							continue
+						}
+						if importCaps != nil && (gridW > importCaps[t] || evW > 0 && gridW > carImportCaps[t]) {
 							continue
 						}
 
@@ -1102,6 +1115,20 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 			}
 		}
 		gridW := loadpoint.GridW(slot.LoadW, slot.PVW, actW, evW)
+		// The real SoC can leave the battery short of the policy's
+		// discharge. The car then gives way to the hour's import, as
+		// Core's live limit cuts the car first.
+		if evW > 0 && carImportCaps != nil && gridW > carImportCaps[t] {
+			evW = 0
+			for k := len(evSteps) - 1; k > 0; k-- {
+				if loadpoint.GridW(slot.LoadW, slot.PVW, actW, evSteps[k]) <= carImportCaps[t] {
+					evW = evSteps[k]
+					break
+				}
+			}
+			evSoc2 = evSoc + evW*dtH*evChargeEff/lp.CapacityWh
+			gridW = loadpoint.GridW(slot.LoadW, slot.PVW, actW, evW)
+		}
 		gridKWh := gridW * dtH / 1000.0
 		// Report the ACTUAL expected cost using the raw (un-blended)
 		// prices so the UI summary reflects "what we'd actually pay

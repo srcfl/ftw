@@ -16,8 +16,21 @@ import (
 func fallback(t *testing.T, h *harness) (ok bool, maxW float64) {
 	t.Helper()
 	svc := &mpc.Service{LoadpointStates: h.mgr.States}
-	d, _ := svc.SlotDirectiveAt(h.now)
+	// Ask at the goal's deadline: before its latest start a goal with
+	// slack holds 0 W (#1718).
+	at := h.now
+	if st, ok := h.mgr.State("easee"); ok && st.TargetTime.After(at) {
+		at = st.TargetTime
+	}
+	d, _ := svc.SlotDirectiveAt(at)
 	return d.LoadpointFallback["easee"], d.LoadpointMaxPowerW["easee"]
+}
+
+// reserveNeed is the reserve's need for a session on the charger's own
+// table, as fallback's service holds it.
+func reserveNeed(st loadpoint.State) (energyWh, powerW float64, ok bool) {
+	minW, maxW, steps := loadpoint.LimitPower(st, st.AllowedStepsW)
+	return loadpoint.DeadlineNeed(st, minW, maxW, steps)
 }
 
 // A failed replan keeps the session car's goal charging, held to that car's
@@ -91,7 +104,7 @@ func TestAFailedReplanKeepsTheSessionCarsGoal(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := h.state("easee")
-	need, peak, ok := loadpoint.DeadlineNeed(st)
+	need, peak, ok := reserveNeed(st)
 	want := (0.6 - 0.3) * 40000 / loadpoint.DefaultChargeEfficiency
 	if !ok || st.VehicleCapacityWh != 40000 || math.Abs(st.CurrentSoC-.3) > 1e-9 || math.Abs(need-want) > 1 || peak > 7400 {
 		t.Fatalf("the Volvo's need %v (want %v) at %v W, capacity %v, level %v", need, want, peak, st.VehicleCapacityWh, st.CurrentSoC)
@@ -117,7 +130,7 @@ func TestAFailedReplanKeepsTheSessionCarsGoal(t *testing.T) {
 	if ok, _ := fallback(t, h); !ok {
 		t.Fatal("a visitor's goal got no reserve")
 	}
-	if need, _, _ := loadpoint.DeadlineNeed(st); math.Abs(need-0.5*76000/loadpoint.DefaultChargeEfficiency) > 1 {
+	if need, _, _ := reserveNeed(st); math.Abs(need-0.5*76000/loadpoint.DefaultChargeEfficiency) > 1 {
 		t.Fatalf("a visitor's need %v, want it from empty", need)
 	}
 	h.tick(time.Second)
@@ -145,7 +158,7 @@ func TestTheReserveStopsAtTheCarsChargeLimit(t *testing.T) {
 	h.obs["tesla-ha"] = telemetry.VehicleObservation{Driver: "tesla-ha", SoC: .5, ChargeLimit: .7, At: h.now, ReportedAt: h.now}
 	h.tick(time.Second)
 	st := h.state("easee")
-	need, _, ok := loadpoint.DeadlineNeed(st)
+	need, _, ok := reserveNeed(st)
 	if want := (0.7 - 0.5) * 76000 / loadpoint.DefaultChargeEfficiency; !ok || st.CarChargeLimit != .7 || math.Abs(need-want) > 50 {
 		t.Fatalf("need %v (want about %v), limit %v", need, want, st.CarChargeLimit)
 	}

@@ -73,6 +73,22 @@ func PlanningLimits(st State, cfg Config, site SiteFuse) (minW, maxW float64, st
 	return LimitPower(st, planning)
 }
 
+// PlanningLimits is PlanningLimits on this loadpoint's charger and the site
+// fuse, as both stand now. The deadline reserve holds to them, as the plan
+// does. Without a controller the reserve holds to the charger's own table.
+func (c *Controller) PlanningLimits(st State) (minW, maxW float64, steps []float64) {
+	if c == nil {
+		return LimitPower(st, st.AllowedStepsW)
+	}
+	cfg := Config{MinChargeW: st.MinChargeW, MaxChargeW: st.MaxChargeW, AllowedStepsW: st.AllowedStepsW}
+	for _, lp := range c.manager.Configs() {
+		if lp.ID == st.ID {
+			cfg.PhaseMode = lp.PhaseMode
+		}
+	}
+	return PlanningLimits(st, cfg, c.siteFuse())
+}
+
 // ThreePhaseCapable reports whether a charger can run three phases at 6 A
 // each; see threePhaseCapable.
 func ThreePhaseCapable(cfg Config, site SiteFuse) bool { return threePhaseCapable(cfg, site) }

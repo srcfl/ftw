@@ -50,6 +50,7 @@ func coreReservePlan(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		target = min(lp.TargetSoC, ceiling) * lp.CapacityWh
 		steps = lp.normalizedSteps()
 	}
+	_, importCaps := importHourCapsW(slots, p)
 	for i, slot := range slots {
 		if err := ctx.Err(); err != nil {
 			return Plan{}, err
@@ -62,7 +63,12 @@ func coreReservePlan(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		minBatteryW = max(minBatteryW, reservePowerForEnergy(bands[i+1].min-energy, hours, chargeEff, dischargeEff))
 		maxBatteryW = min(maxBatteryW, reservePowerForEnergy(bands[i+1].max-energy, hours, chargeEff, dischargeEff))
 		house := slot.LoadW + slot.PVW
-		chooseBattery := func(peak float64) (float64, bool) {
+		capW := math.Inf(1)
+		if importCaps != nil {
+			capW = importCaps[i]
+		}
+		// most bounds the battery from above, so it may cover the house.
+		chooseBattery := func(peak, most float64) (float64, bool) {
 			low, high := reserveBatteryPowerRange(slot, p, peak)
 			low, high = max(low, minBatteryW), min(high, maxBatteryW)
 			if peak > 0 && lp != nil && lp.blocksBatteryToEV() {
@@ -72,13 +78,16 @@ func coreReservePlan(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 				return 0, false
 			}
 			b := min(max(0, low), high)
+			if b > most {
+				b = max(low, most)
+			}
 			if !modeAllows(p.Mode, house, house+b, b) || !modeAllows(p.Mode, house+peak, house+peak+b, b) {
 				return 0, false
 			}
 			return b, true
 		}
-		peak, battery := 0.0, 0.0
-		battery, ok := chooseBattery(0)
+		peak, battery, average := 0.0, 0.0, 0.0
+		battery, ok := chooseBattery(0, math.Inf(1))
 		if !ok {
 			return Plan{}, fmt.Errorf("slot %d: battery cannot keep the forecast within the site power limits", i)
 		}
@@ -89,13 +98,28 @@ func coreReservePlan(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 				if lp.SurplusOnly && surplusOnlyExceedsHousePV(step, slot.LoadW, slot.PVW) {
 					continue
 				}
-				if b, ok := chooseBattery(step); ok {
-					peak, battery = step, b
-					break
+				b, ok := chooseBattery(step, math.Inf(1))
+				if !ok {
+					continue
 				}
+				want := min(step, need/(eff*hours))
+				if evAverageRoomW(capW, house+b, step) < want {
+					// The hour's import holds the car back: the battery
+					// covers the house to make room, never into export.
+					if covered, ok := chooseBattery(step, max(-max(0, house), capW-house-want)); ok {
+						b = covered
+					}
+				}
+				avg := min(want, evAverageRoomW(capW, house+b, step))
+				if !math.IsInf(capW, 1) && (avg <= 1e-6 || b < -solverZeroPowerToleranceW && house+b+avg < -50) {
+					// The hour leaves this step no room, or only part of the
+					// slot while the battery the step needs drives export.
+					continue
+				}
+				peak, battery, average = step, b, avg
+				break
 			}
 		}
-		average := min(peak, need/(eff*hours))
 		evEnergy += average * eff * hours
 		energy += loadpoint.BatteryEnergyDeltaWh(battery, hours, chargeEff, dischargeEff)
 		a := Action{ExecutionStartMs: slot.ExecutionStartMs, SlotStartMs: slot.StartMs, SlotLenMin: slot.LenMin, PriceOre: slot.PriceOre, SpotOre: slot.SpotOre, PVW: slot.PVW, LoadW: slot.LoadW, BatteryW: battery, GridW: house + battery + average, SoC: energy / p.CapacityWh, Reason: "Site power reserve"}
@@ -200,6 +224,20 @@ func reserveSlotCost(slot Slot, p Params, a Action) float64 {
 	if len(a.LoadpointMaxPowerW) == 0 {
 		return SlotGridCostOre(slot, a.GridW*slot.DurationHours()/1000, p)
 	}
+	cost := 0.0
+	pulseGridW(a, func(share, gridW float64) {
+		cost += share * SlotGridCostOre(slot, gridW*slot.DurationHours()/1000, p)
+	})
+	return cost
+}
+
+// pulseGridW calls f with each pulse state's share of the slot and its grid
+// flow. Without a pulse the slot is one state at its mean flow.
+func pulseGridW(a Action, f func(share, gridW float64)) {
+	if len(a.LoadpointMaxPowerW) == 0 {
+		f(1, a.GridW)
+		return
+	}
 	cuts := []float64{0, 1}
 	totalAverage := 0.0
 	for id, peak := range a.LoadpointMaxPowerW {
@@ -210,7 +248,6 @@ func reserveSlotCost(slot Slot, p Params, a Action) float64 {
 		}
 	}
 	slices.Sort(cuts)
-	cost := 0.0
 	for i := 1; i < len(cuts); i++ {
 		midpoint := (cuts[i-1] + cuts[i]) / 2
 		grid := a.GridW - totalAverage
@@ -219,9 +256,8 @@ func reserveSlotCost(slot Slot, p Params, a Action) float64 {
 				grid += peak
 			}
 		}
-		cost += (cuts[i] - cuts[i-1]) * SlotGridCostOre(slot, grid*slot.DurationHours()/1000, p)
+		f(cuts[i]-cuts[i-1], grid)
 	}
-	return cost
 }
 
 // Check the minimum and maximum simultaneous EV draw. Full-interval charges

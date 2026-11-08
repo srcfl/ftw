@@ -131,3 +131,22 @@ func TestPeakImportCeilingNotAppliedWhenTheSaveFails(t *testing.T) {
 		t.Fatalf("ceiling = %.0f W after a failed save, want 6,000", ctrl.PeakImportCeilingW)
 	}
 }
+
+// A new ceiling changes what the plan may deliver, so the plan follows it at
+// once instead of at the next quarter.
+func TestPeakImportCeilingChangeReplans(t *testing.T) {
+	_, _, svc := newScheduleServer(t)
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	srv := newCeilingServer(t, st, &control.State{})
+	srv.deps.MPC = svc
+
+	postCeiling(t, srv, "4500")
+	waitForSchedulePlan(t, svc)
+	if _, reason := svc.LastReplanInfo(); reason != "import_ceiling_changed" {
+		t.Fatalf("replan reason = %q, want import_ceiling_changed", reason)
+	}
+}

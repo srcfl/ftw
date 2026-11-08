@@ -8,13 +8,14 @@
 // owner sees here is what the box read, not what a web page claimed. The
 // owner then grants it, or less of it, never more.
 //
-// Granting needs another device on the home network, signed in with the
-// house password. With it off, every device on the Wi-Fi is an owner with no
-// sign-in, and letting the outside world in must not be one click from any of
-// them; on the box itself the password does not count. The box refuses; this
-// page says so before it asks for a code, because a code works once and
-// should not be spent on a refusal. Removing access and declining a request
-// stay open, as removing a phone does.
+// Granting needs a browser signed in with the house password, on any device,
+// the box itself included. With it off, every device on the Wi-Fi is an owner
+// with no sign-in, and letting the outside world in must not be one click
+// from any of them. So the page asks for the password right above the code:
+// it lets the owner choose one when there is none, and choosing it signs this
+// browser in. It asks before the code, because a code works once and should
+// not be spent on a refusal. Removing access and declining a request stay
+// open, as removing a phone does.
 //
 // Names that come from outside — the assistant's name, its host, its own
 // words in a request — only ever go into the page as text.
@@ -62,6 +63,7 @@
     auth: null,      // GET /api/auth/status
     held: null,      // {raw, view, lookup, fetchedAt}
     note: null,      // {text, kind} under the code field
+    passwordNote: "", // shown once in the next house password form
     done: null,      // what the last grant gave
     editing: "",     // the row being changed
   };
@@ -254,11 +256,13 @@
     if (state.cloudChecked && (!state.cloud || state.cloud.link !== "on" || state.cloud.statisticsOnly || !state.cloud.cloudTermsAccepted)) return {kind:"cloud"};
     if (unavailable) return { kind: "unavailable" };
     if (!list) return { kind: "loading" };
-    if (!auth || (!auth.home_assistant && (!auth.lan_auth || !auth.configured))) return { kind: "password" };
+    // A box that could not say offers no "choose": a signed-in owner would
+    // replace a password that is already set.
+    if (!auth) return { kind: "unknown" };
+    if (!auth.home_assistant && (!auth.lan_auth || !auth.configured)) return { kind: "choose" };
     var box = list.box || {};
-    // The box's answer for this very request: on the box itself, or through
-    // an SSH tunnel to it, the house password does not count.
-    if (!box.widen) return { kind: "here" };
+    // The box's answer for this very request: is this browser signed in?
+    if (!box.widen) return { kind: "signin" };
     if (!box.offers) return { kind: "keys" };
     if (box.clock === "behind") return { kind: "behind", nowMs: box.nowMs, markMs: box.markMs };
     if (box.clock !== "ok") return { kind: "clock" };
@@ -268,9 +272,8 @@
 
   var KEYS_TEXT = "This version of FTW cannot let assistants in yet: it does not know FTW " +
     "Cloud's signing key. An update brings it.";
-  var HERE_TEXT = "Open this page from another device on your home network, and sign in with " +
-    "the house password there. On the box itself, or through a tunnel to it, the password " +
-    "does not count, because anything running on the box could use it too.";
+  // For the owner who forgot the password: the expert steps live in the docs.
+  var RESET_URL = "https://github.com/srcfl/ftw/blob/master/docs/operations.md#house-password";
   var CLOCK_TEXT = "The box's clock is not set, so it cannot time an assistant's access. It sets " +
     "itself over the internet; check that the box is online.";
 
@@ -501,16 +504,17 @@
         box.appendChild(el("button", { type: "button", className: "btn-send", text: "Open FTW app settings",
           onclick: function () { ctx.navigateTab("app"); } }));
         return;
-      case "password":
-        box.appendChild(el("p", { text: "Turn on the house password first. Without it, any device on " +
-          "your Wi-Fi could let an assistant into your home." }));
-        box.appendChild(el("button", { type: "button", className: "btn-send", text: "Set a house password",
-          onclick: function () { ctx.navigateTab("system"); } }));
-        box.appendChild(el("p", { className: "access-quiet", text: "It is under System, LAN password. " +
-          "Come back here once it is on." }));
+      case "unknown":
+        box.appendChild(el("p", { text: "Could not check the house password on the box. " +
+          "Press Check requests and access to try again." }));
         return;
-      case "here":
-        box.appendChild(el("p", { text: HERE_TEXT }));
+      case "choose":
+        box.className = "access-password";
+        passwordForm(ctx, box, true);
+        return;
+      case "signin":
+        box.className = "access-password";
+        passwordForm(ctx, box, false);
         return;
       case "keys":
         box.appendChild(el("p", { text: KEYS_TEXT }));
@@ -540,6 +544,89 @@
         box.appendChild(reset);
         return;
     }
+  }
+
+  // Why the box refused a house password, in the owner's words.
+  function passwordFailureText(status, body) {
+    var said = String((body && body.error) || "");
+    if (status === 401 && /invalid password/.test(said)) {
+      return "That is not the house password. After five wrong tries, wait 30 seconds.";
+    }
+    if (status === 401) return "This browser is not signed in. Sign in with the house password, then try again.";
+    return said ? "The box said: " + cleanText(said, 160) : "The box did not answer. Try again in a moment.";
+  }
+
+  // Any password is the owner's choice; a short one gets a word, not a
+  // refusal (Fredrik, 25 October 2026).
+  function shortPasswordHint(password) {
+    var n = Array.from(String(password || "")).length;
+    return n > 0 && n < 8 ? "Short passwords are easy to guess. You can still use this one." : "";
+  }
+
+  // The house password, right where the owner needs it. choose is a box with
+  // none yet: the owner picks one, which locks Settings for other devices and
+  // signs this browser in. Otherwise this browser signs in with it.
+  function passwordForm(ctx, box, choose) {
+    var form = el("form", { className: "access-password-form", autocomplete: "on" });
+    form.appendChild(el("p", { text: choose ?
+      "First, choose a house password. Other devices on your Wi-Fi then need it to let an " +
+      "assistant in or change settings. This browser stays signed in." :
+      "Sign in with the house password to let an assistant in." }));
+    var first = el("input", { type: "password", id: "access-house-password",
+      maxlength: "512", required: "required", autocomplete: choose ? "new-password" : "current-password" });
+    form.appendChild(el("label", { for: "access-house-password", text: "House password" }));
+    form.appendChild(first);
+    var again = null;
+    if (choose) {
+      var hint = el("p", { className: "access-quiet", "aria-live": "polite" });
+      first.addEventListener("input", function () { hint.textContent = shortPasswordHint(first.value); });
+      form.appendChild(hint);
+      again = el("input", { type: "password", id: "access-house-password-again", maxlength: "512",
+        required: "required", autocomplete: "new-password" });
+      form.appendChild(el("label", { for: "access-house-password-again", text: "Type it again" }));
+      form.appendChild(again);
+    }
+    var button = el("button", { type: "submit", className: "btn-send", text: choose ? "Set password and continue" : "Sign in" });
+    form.appendChild(button);
+    var note = el("p", { className: "access-note", "aria-live": "polite", text: state.passwordNote || "" });
+    state.passwordNote = "";
+    form.appendChild(note);
+    form.appendChild(el("p", { className: "access-quiet" }, [
+      document.createTextNode(choose ? "Keep it somewhere safe. " : "Forgot it? "),
+      el("a", { href: RESET_URL, target: "_blank", rel: "noopener", text: choose ? "If you forget it" : "How to reset it" }),
+    ]));
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var password = first.value;
+      if (!password) { note.textContent = choose ? "Choose a password." : "Type the house password."; first.focus(); return; }
+      if (choose && password !== again.value) { note.textContent = "The two passwords are not the same."; again.focus(); return; }
+      button.disabled = true;
+      note.textContent = choose ? "Setting the password…" : "Signing in…";
+      postJSON(choose ? "/api/auth/password" : "/api/auth/login",
+        choose ? { enabled: true, password: password } : { password: password })
+        .then(function (r) {
+          return readJSON(r).then(function (body) {
+            if (!r.ok && choose && r.status === 401) {
+              // Someone set a password meanwhile: ask for it instead.
+              state.passwordNote = "This box has a house password now. Sign in with it.";
+              return refresh(ctx);
+            }
+            if (!r.ok) throw new Error(passwordFailureText(r.status, body));
+            first.value = "";
+            if (again) again.value = "";
+            if (window.dispatchEvent && typeof window.Event === "function") window.dispatchEvent(new window.Event("ftw-owner-ready"));
+            return refresh(ctx).then(function () {
+              var code = document.getElementById("access-code");
+              if (code && !code.disabled) code.focus();
+            });
+          });
+        })
+        .catch(function (err) {
+          note.textContent = err.message || String(err);
+          button.disabled = false;
+        });
+    });
+    box.appendChild(form);
   }
 
   function setNote(text, kind) {
@@ -831,7 +918,7 @@
       var actions = el("div", { className: "access-actions" });
       var change = el("button", { type: "button", className: "btn-ghost", text: state.editing === row.id ? "Close" : "Renew or narrow" });
       change.disabled = !canWiden();
-      if (change.disabled) change.title = "Changing access needs another device on your network, signed in with the house password.";
+      if (change.disabled) change.title = "Changing access needs this browser signed in with the house password. Sign in above.";
       change.addEventListener("click", function () {
         state.editing = state.editing === row.id ? "" : row.id;
         drawRows();
@@ -939,7 +1026,7 @@
       var approve = el("button", { type: "button", className: "btn-send", text: "Approve" });
       var decline = el("button", { type: "button", className: "btn-ghost", text: "Decline" });
       approve.disabled = !canWiden();
-      if (approve.disabled) approve.title = "Approving needs another device on your network, signed in with the house password.";
+      if (approve.disabled) approve.title = "Approving needs this browser signed in with the house password. Sign in above.";
       function decide(yes) {
         approve.disabled = decline.disabled = true;
         postJSON("/api/agent-requests/" + encodeURIComponent(req.reqId), { approve: yes }).then(function (r) {
@@ -1033,7 +1120,7 @@
       var create = el("button", { type: "button", className:"btn-send", text: "Create an invitation", onclick: function(){ state.inviteDraft={}; drawInvites(); } });
       create.disabled = !canWiden() || !state.list.box || !state.list.box.offers || state.list.box.clock !== "ok";
       slot.appendChild(create);
-      if (create.disabled) slot.appendChild(el("p", { className: "access-quiet", text: "Give access in the FTW app, or sign in with the house password on another device on your home network. The box also needs a set clock." }));
+      if (create.disabled) slot.appendChild(el("p", { className: "access-quiet", text: "Give access in the FTW app, or sign in with the house password above. The box also needs a set clock." }));
     }
     (info.invitations || []).forEach(function(v){
       var item = el("div", { className: "access-card" });
@@ -1135,7 +1222,7 @@
         "decides what it may do and checks every call. No phone app is needed.</p>" +
         '<p class="access-quiet">' + (window.FTWHomeAssistant ?
           'Home Assistant has signed you in. Review Cloud terms, then ask your assistant to begin FTW setup and approve its connection below.' :
-          'For a new box: sign in with the house password you chose, review Cloud terms, then ask your assistant to begin FTW setup. Approve its setup connection below. If its connection page offers a choice, choose “Set up and configure”. The assistant can resume the draft stored on this box.') + '</p>' +
+          'For a new box: review Cloud terms, then ask your assistant to begin FTW setup. Approve its setup connection below with the house password. If its connection page offers a choice, choose “Set up and configure”. The assistant can resume the draft stored on this box.') + '</p>' +
         '<div id="access-cloud-settings" data-project-statistics-settings></div>' +
         '<div id="access-ready"></div>' +
         '<form id="access-code-form" class="access-code-form" autocomplete="off">' +
@@ -1200,6 +1287,8 @@
     lengthText: lengthText,
     kwExact: kwExact,
     readiness: readiness,
+    passwordFailureText: passwordFailureText,
+    shortPasswordHint: shortPasswordHint,
     lookupFailureText: lookupFailureText,
     offerRefusalText: offerRefusalText,
     refusalText: refusalText,

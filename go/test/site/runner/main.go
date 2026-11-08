@@ -1,7 +1,7 @@
 // siterig-runner runs FTW's site test (go/test/site) on a machine of its own
 // and publishes the result as a GitHub commit status on the exact commit:
 // siterig/full on each new master commit, siterig/short on the head of each
-// open pull request that touches control, loadpoint, OCPP or telemetry code,
+// open pull request that touches code on the control path (watchedPaths),
 // and siterig/random for a night's random seeds. native-release.yml reads
 // siterig/full before it publishes a beta. See README.md.
 package main
@@ -80,13 +80,21 @@ func (r *runner) prepare() error {
 // tick runs everything that is due, one job at a time.
 func (r *runner) tick() {
 	stateFile := filepath.Join(r.work, "last-random")
-	last, _ := os.ReadFile(stateFile)
-	jobs, err := plan(r.gh, r.cfg, time.Now(), strings.TrimSpace(string(last)))
-	if err != nil {
-		log.Printf("plan: %v", err)
-		return
-	}
-	for _, j := range jobs {
+	// Plan again before each job: a run takes about 20 minutes, in which a
+	// pull request can move on or a second runner can take the same commit.
+	ran := map[string]bool{}
+	for {
+		last, _ := os.ReadFile(stateFile)
+		jobs, err := plan(r.gh, r.cfg, time.Now(), strings.TrimSpace(string(last)))
+		if err != nil {
+			log.Printf("plan: %v", err)
+			break
+		}
+		j, ok := next(jobs, ran)
+		if !ok {
+			break
+		}
+		ran[j.Context+" "+j.SHA] = true
 		log.Printf("start %s", j)
 		state, desc := r.runJob(j)
 		log.Printf("done %s: %s, %s", j, state, desc)

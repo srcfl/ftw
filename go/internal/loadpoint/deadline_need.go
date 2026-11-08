@@ -4,15 +4,16 @@ import (
 	"math"
 )
 
-// DeadlineNeed is the remaining AC energy and legal on-power of a saved goal,
-// held to the session car's own charger and charge limit as the plan is. It
-// does not promise future site capacity or authorize a hardware command.
-func DeadlineNeed(st State) (energyWh, powerW float64, ok bool) {
+// DeadlineNeed is the remaining AC energy of a saved goal, held to the car's
+// charge limit, and its legal on-power within minW-maxW and steps: the limits
+// the plan gets for the session (PlanningLimits). It does not promise future
+// site capacity or authorize a hardware command.
+func DeadlineNeed(st State, minW, maxW float64, steps []float64) (energyWh, powerW float64, ok bool) {
 	if !st.PluggedIn || st.ChargingDeclined || st.GoalComplete || st.TargetTime.IsZero() ||
 		!finite(st.CurrentSoC) || st.CurrentSoC < 0 || st.CurrentSoC > 1 ||
 		!finite(st.TargetSoC) || st.TargetSoC < 0 || st.TargetSoC > 1 ||
 		!finite(st.VehicleCapacityWh) || st.VehicleCapacityWh <= 0 ||
-		!finite(st.MinChargeW) || !finite(st.MaxChargeW) || st.MinChargeW <= 0 || st.MaxChargeW < st.MinChargeW {
+		!finite(st.MinChargeW) || !finite(st.MaxChargeW) || !(minW > 0) || st.MaxChargeW < st.MinChargeW {
 		return 0, 0, false
 	}
 	// A vehicle-limit goal aims at 1, and the controller still stops at the
@@ -27,7 +28,6 @@ func DeadlineNeed(st State) (energyWh, powerW float64, ok bool) {
 			return 0, 0, false
 		}
 	}
-	minW, maxW, steps := LimitPower(st, st.AllowedStepsW)
 	for _, step := range steps {
 		if step >= minW {
 			powerW = math.Max(powerW, step)

@@ -5,13 +5,15 @@ package api
 // An owner phone manages agents over its session, each grant signed by its
 // approval key. On the home network the box is itself the authority, so
 // these routes ask for no signature. They ask for something else: widening
-// access needs another device on the home network, signed in with the house
-// password. The box itself never counts, password or not: a driver's Lua and
-// the session passthrough reach it from inside. With api.lan_auth off, which
-// is the default, every device on the home network is an owner with no
-// sign-in at all, and granting a remote agent from there would let any of
-// them open the house to the outside. Narrowing stays open to any LAN
-// client, as DELETE /api/cloud/grant does.
+// access needs a browser signed in with the house password, on another
+// device or on the box itself. What proves the owner is the password, not
+// the address: a driver's Lua reaches the box from inside but does not know
+// it, and the session passthrough is refused outright. With api.lan_auth
+// off every device on the home network is an owner with no sign-in at all,
+// and granting a remote agent from there would let any of them open the
+// house to the outside; the page asks for a password first, and choosing
+// one signs that browser in. Narrowing stays open to any LAN client, as
+// DELETE /api/cloud/grant does.
 //
 // Every route is local: the session passthrough never carries them, so a
 // phone must use its signed messages and an agent can never reach them.
@@ -86,9 +88,9 @@ type AgentFacts struct {
 	NowMs  int64 `json:"nowMs"`
 	MarkMs int64 `json:"markMs"`
 	// Widen says this request would pass the gate for widening access: a
-	// LAN client signed in with the house password, never the box itself.
-	// The list sets it per request, so the page stops before a code is
-	// spent on a grant the box would refuse.
+	// browser signed in with the house password. The list sets it per
+	// request, so the page stops before a code is spent on a grant the box
+	// would refuse.
 	Widen bool `json:"widen"`
 	// LongestMs is the longest grant the box takes for each role, so the
 	// page offers no length the box would refuse.
@@ -135,9 +137,8 @@ func (s *Server) handleAgentsClockReset(w http.ResponseWriter, r *http.Request) 
 }
 
 // agentsGate admits a client on the home network, and with widen only one
-// signed in with the house password. Loopback never is: the sign-in is not
-// read there, since a driver's Lua and the session passthrough can both reach
-// the box from inside it. It returns the caller's name for the audit log.
+// signed in with the house password, the box itself included. It returns
+// the caller's name for the audit log.
 func (s *Server) agentsGate(w http.ResponseWriter, r *http.Request, widen bool) (string, bool) {
 	if s.deps == nil || s.deps.Agents == nil {
 		writeAppLinkError(w, http.StatusServiceUnavailable, "agents are not available on this box")

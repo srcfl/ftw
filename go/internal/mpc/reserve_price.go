@@ -73,6 +73,7 @@ func priceReserveCharging(ctx context.Context, slots []Slot, p Params, reserve P
 		a.LoadpointSoCByID = map[string]float64{lp.ID: lp.InitialSoC}
 	}
 	remaining := energyWh
+	_, importCaps := importHourCapsW(slots, p)
 	for _, o := range offers {
 		if err := ctx.Err(); err != nil {
 			return Plan{}, err
@@ -82,6 +83,13 @@ func priceReserveCharging(ctx context.Context, slots []Slot, p Params, reserve P
 		}
 		hours := slots[o.index].DurationHours()
 		average := min(o.peakW, remaining/(eff*hours))
+		if importCaps != nil {
+			slot := slots[o.index]
+			average = min(average, evAverageRoomW(importCaps[o.index], slot.LoadW+slot.PVW+reserve.Actions[o.index].BatteryW, o.peakW))
+			if average <= 1e-6 {
+				continue
+			}
+		}
 		a := &priced.Actions[o.index]
 		a.LoadpointW = average
 		a.LoadpointPowerW[lp.ID] = average

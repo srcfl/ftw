@@ -1,0 +1,494 @@
+package control
+
+import (
+	"math"
+	"testing"
+	"time"
+
+	"github.com/srcfl/ftw/go/internal/telemetry"
+)
+
+// A planner mode with no plan falls back to self-consumption. It must keep
+// the owner's reserve (planner soc_min 10 %), not discharge to Core's 5 %.
+func TestPlannerFallbackKeepsHouseReserve(t *testing.T) {
+	for _, mode := range []Mode{ModePlannerSelf, ModePlannerCheap, ModePlannerPassiveArbitrage, ModePlannerArbitrage} {
+		t.Run(string(mode), func(t *testing.T) {
+			store := seedStore(2000, []struct {
+				name          string
+				currentW, soc float64
+			}{
+				{"ferroamp", 0, 0.08},
+			})
+			st := NewState(0, 50, "ferroamp")
+			st.Mode = mode
+			st.UseEnergyDispatch = true
+			st.SlewRateW = 10000
+			st.MinDispatchIntervalS = 0
+			st.DriverLimits = map[string]PowerLimits{"ferroamp": {SoCMin: 0.10}}
+			st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
+			st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "", 0, "", false }
+
+			targets := ComputeDispatch(store, st, caps(map[string]float64{"ferroamp": 15200}), 11040)
+			if !st.PlanStale {
+				t.Fatalf("expected stale-plan fallback")
+			}
+			for _, tg := range targets {
+				if tg.TargetW < 0 {
+					t.Errorf("%s: stale plan, SoC 8%% < 10%% house reserve, TargetW=%.0f W (discharges below reserve)", tg.Driver, tg.TargetW)
+				}
+			}
+		})
+	}
+}
+
+// The hourly import ceiling (a billing limit) runs through the fuse relief.
+// 25 A site, every phase at 11.6 A (far from the fuse), meter 8 kW,
+// ceiling 5 kW. Neither the SoC floor nor the boost reserve may be crossed.
+func importCeilingSite(soc float64) (*State, func(targets []DispatchTarget) []DispatchTarget) {
+	store, st, caps := setupPerPhaseSite(3, 230, 8000, 11.6, 11.6, 11.6, soc, 10000)
+	st.SiteFuseAmps = 25
+	st.PeakImportCeilingW = 5000
+	lim := st.DriverLimits["bat"]
+	lim.SoCMin = 0.10
+	st.DriverLimits["bat"] = lim
+	return st, func(targets []DispatchTarget) []DispatchTarget {
+		return applyDispatchSafetyPipeline(targets, store, st, caps, 25*230*3, dispatchSafetyOptions{})
+	}
+}
+
+func TestImportCeilingKeepsSoCFloor(t *testing.T) {
+	_, run := importCeilingSite(0.06)
+	if out := run([]DispatchTarget{{Driver: "bat"}}); out[0].TargetW < 0 {
+		t.Fatalf("import ceiling ordered %.0f W at SoC 6 %%, floor 10 %%", out[0].TargetW)
+	}
+	// Above the floor the ceiling still shaves the peak.
+	_, run = importCeilingSite(0.50)
+	if out := run([]DispatchTarget{{Driver: "bat"}}); out[0].TargetW > -2999 {
+		t.Fatalf("import ceiling at SoC 50 %%: got %.0f W, want -3000 W", out[0].TargetW)
+	}
+}
+
+func TestImportCeilingKeepsBoostReserve(t *testing.T) {
+	st, run := importCeilingSite(0.20)
+	st.BatteryBoostReserveSoC = 0.30
+	if out := run([]DispatchTarget{{Driver: "bat"}}); out[0].TargetW < 0 {
+		t.Fatalf("boost reserve 30 %%, SoC 20 %%, no fuse risk: ordered %.0f W", out[0].TargetW)
+	}
+}
+
+func TestImportCeilingComputeDispatchKeepsBoostReserve(t *testing.T) {
+	store, st, caps := setupPerPhaseSite(3, 230, 8000, 11.6, 11.6, 11.6, 0.06, 10000)
+	st.SiteFuseAmps = 25
+	st.PeakImportCeilingW = 5000
+	st.BatteryBoostReserveSoC = 0.30
+	st.SetGridTarget(0)
+	st.MinDispatchIntervalS = 0
+	for _, tg := range ComputeDispatch(store, st, caps, 25*230*3) {
+		if tg.TargetW < 0 {
+			t.Fatalf("ComputeDispatch (mode %v) ordered %s %.0f W at SoC 6 %%, reserve 30 %%", st.Mode, tg.Driver, tg.TargetW)
+		}
+	}
+}
+
+// A real fuse overage may still go past the boost reserve, but not past the
+// SoC floor: below it the car is the lever.
+func TestFuseReliefPassesBoostReserveButKeepsSoCFloor(t *testing.T) {
+	run := func(soc float64) float64 {
+		// 16 A fuse, 11040 W, meter 13 kW: about 2 kW over.
+		store, st, caps := setupPerPhaseSite(3, 230, 13000, 18.8, 18.8, 18.8, soc, 10000)
+		st.BatteryBoostReserveSoC = 0.30
+		lim := st.DriverLimits["bat"]
+		lim.SoCMin = 0.10
+		st.DriverLimits["bat"] = lim
+		out := applyDispatchSafetyPipeline([]DispatchTarget{{Driver: "bat"}}, store, st, caps, 11040, dispatchSafetyOptions{})
+		return out[0].TargetW
+	}
+	if got := run(0.20); got >= 0 {
+		t.Fatalf("fuse overage at SoC 20 %%, reserve 30 %%: got %.0f W, want discharge", got)
+	}
+	if got := run(0.08); got < 0 {
+		t.Fatalf("fuse overage at SoC 8 %%, floor 10 %%: got %.0f W, want no discharge", got)
+	}
+}
+
+func staleFloorState(slew float64) *State {
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModePlannerCheap
+	st.UseEnergyDispatch = true
+	st.SlewRateW = slew
+	st.MinDispatchIntervalS = 0
+	st.DriverLimits = map[string]PowerLimits{"bat": {SoCMin: 0.10}, "bat2": {SoCMin: 0.10}}
+	st.SlotDirective = func(time.Time) (SlotDirective, bool) { return SlotDirective{}, false }
+	st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "", 0, "", false }
+	return st
+}
+
+// SoC drifts under the floor while the battery already covers the house.
+// Inside the deadband a tick with no targets leaves the driver on its last
+// -2000 W setpoint, and outside it slew hands back -1500 W. Both must stop.
+func TestStaleFloorStopsRunningDischarge(t *testing.T) {
+	cases := []struct {
+		name         string
+		gridW, slewW float64
+	}{
+		{"inside deadband", 20, 10000},
+		{"after slew", 2000, 500},
+	}
+	for _, c := range cases {
+		for _, soc := range []float64{0.08, 0.04} {
+			store := seedStore(c.gridW, []struct {
+				name          string
+				currentW, soc float64
+			}{{"bat", -2000, soc}})
+			st := staleFloorState(c.slewW)
+			targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+			if len(targets) == 0 {
+				t.Errorf("%s, SoC %.2f: no target, the -2000 W setpoint stays", c.name, soc)
+			}
+			for _, tg := range targets {
+				if tg.TargetW < 0 {
+					t.Errorf("%s, SoC %.2f: %s %.0f W under the floor", c.name, soc, tg.Driver, tg.TargetW)
+				}
+			}
+		}
+	}
+}
+
+// A battery under the floor hands its share to a sibling above it.
+func TestStaleFloorSiblingTakesShare(t *testing.T) {
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", 0, 0.08}, {"bat2", 0, 0.50}})
+	st := staleFloorState(10000)
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200, "bat2": 15200}), 11040)
+	var sum float64
+	for _, tg := range targets {
+		if tg.Driver == "bat" && tg.TargetW < 0 {
+			t.Errorf("bat under the floor discharged %.0f W", tg.TargetW)
+		}
+		sum += tg.TargetW
+	}
+	if sum > -1000 {
+		t.Errorf("sibling did not take the share: sum %.0f W", sum)
+	}
+}
+
+// Plain self_consumption keeps Core's 5 % floor; soc_min is a planner rule.
+func TestSelfConsumptionStillDischargesUnderSoCMin(t *testing.T) {
+	store := seedStore(2000, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", 0, 0.08}})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 10000
+	st.MinDispatchIntervalS = 0
+	st.DriverLimits = map[string]PowerLimits{"bat": {SoCMin: 0.10}}
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+	if len(targets) == 0 || targets[0].TargetW >= 0 {
+		t.Errorf("self_consumption at SoC 8 %%: %+v", targets)
+	}
+}
+
+// Two batteries, one under the boost reserve. 3 kW fuse overage plus 5 kW
+// that only the hourly limit asks for. The battery above the reserve takes
+// the limit part; the other still serves the fuse.
+func TestSplitReliefUsesBothBatteries(t *testing.T) {
+	store, st, cp := setupPerPhaseSite(3, 230, 20250, 29.35, 29.35, 29.35, 0.20, 5000)
+	soc := 0.60
+	store.Update("bat2", telemetry.DerBattery, 0, &soc, nil)
+	store.DriverHealthMut("bat2").RecordSuccess()
+	cp["bat2"] = 15200
+	st.DriverLimits["bat2"] = PowerLimits{MaxChargeW: 10000, MaxDischargeW: 5000}
+	st.SiteFuseAmps = 25
+	st.PeakImportCeilingW = 12250
+	st.BatteryBoostReserveSoC = 0.30
+	out := applyDispatchSafetyPipeline([]DispatchTarget{{Driver: "bat"}, {Driver: "bat2"}}, store, st, cp, 25*230*3, dispatchSafetyOptions{})
+	got := map[string]float64{}
+	for _, o := range out {
+		got[o.Driver] = o.TargetW
+	}
+	if got["bat"] > -2999 || got["bat2"] > -4999 {
+		t.Errorf("want bat -3000 W, bat2 -5000 W; got bat %.0f W, bat2 %.0f W", got["bat"], got["bat2"])
+	}
+}
+
+// No discharge order goes out at exactly the floor (C7: rig seeds 207534
+// and 207536 ordered discharge at 5.0 %).
+func TestClampWithSoCBlocksDischargeAtFloor(t *testing.T) {
+	if v, was := clampWithSoC(-1000, batteryInfo{soc: dischargeFloorSoC}); v != 0 || !was {
+		t.Fatalf("SoC exactly 5 %%: got %.0f W clamped=%v, want 0 W", v, was)
+	}
+	if v, was := clampWithSoC(-1000, batteryInfo{soc: 0.051}); v != -1000 || was {
+		t.Fatalf("SoC 5.1 %%: got %.0f W clamped=%v, want -1000 W", v, was)
+	}
+}
+
+// A fresh plan that asks for discharge at exactly 5 % gets no discharge.
+func TestFreshPlanNoDischargeAtFloor(t *testing.T) {
+	for _, energy := range []bool{false, true} {
+		store := seedStore(2000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", 0, 0.05}})
+		st := NewState(0, 50, "ferroamp")
+		st.Mode = ModePlannerArbitrage
+		st.UseEnergyDispatch = energy
+		st.SlewRateW = 10000
+		st.MinDispatchIntervalS = 0
+		st.SlotDirective = func(now time.Time) (SlotDirective, bool) {
+			return SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: -500, Strategy: "arbitrage"}, true
+		}
+		st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "discharge", -2000, "discharge", true }
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+		if st.PlanStale {
+			t.Fatalf("energy=%v: expected a fresh plan", energy)
+		}
+		for _, tg := range targets {
+			if tg.TargetW < 0 {
+				t.Errorf("energy=%v: SoC exactly 5 %%, %s ordered %.0f W", energy, tg.Driver, tg.TargetW)
+			}
+		}
+	}
+}
+
+// Stale plan, soc_min 10 %: just under the floor (207531, 207532 at
+// 5.5-5.8 %) and exactly at it, the battery gets 0 W.
+func TestStaleFloorZeroAtAndUnderFloor(t *testing.T) {
+	for _, soc := range []float64{0.058, 0.10} {
+		store := seedStore(2000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", -1500, soc}})
+		st := staleFloorState(10000)
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+		if !st.PlanStale {
+			t.Fatalf("SoC %.3f: expected stale-plan fallback", soc)
+		}
+		if len(targets) != 1 || targets[0].TargetW != 0 {
+			t.Errorf("SoC %.3f, floor 10 %%: got %+v, want bat 0 W", soc, targets)
+		}
+	}
+}
+
+// Fuse relief and the hourly import limit stop at exactly the floor.
+func TestFuseTargetBoundsAtFloor(t *testing.T) {
+	soc := 0.10
+	r := &telemetry.DerReading{SoC: &soc}
+	if lower, _ := fuseTargetBounds(r, PowerLimits{SoCMin: 0.10}); lower != 0 {
+		t.Fatalf("SoC exactly at the 10 %% floor: lower bound %.0f W, want 0", lower)
+	}
+	soc = 0.101
+	if lower, _ := fuseTargetBounds(r, PowerLimits{SoCMin: 0.10}); lower >= 0 {
+		t.Fatalf("SoC 10.1 %%, floor 10 %%: lower bound %.0f W, want discharge allowed", lower)
+	}
+}
+
+// A planner mode keeps the owner's floor with a fresh plan too. In the rig
+// the planner sets soc_min 10 %, and most discharge orders in seeds 207534
+// and 207536 came on a fresh plan.
+func TestFreshPlanKeepsSoCMin(t *testing.T) {
+	run := func(energy bool, soc float64) []DispatchTarget {
+		store := seedStore(2000, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", 0, soc}})
+		st := NewState(0, 50, "ferroamp")
+		st.Mode = ModePlannerSelf
+		st.UseEnergyDispatch = energy
+		st.SlewRateW = 10000
+		st.MinDispatchIntervalS = 0
+		st.DriverLimits = map[string]PowerLimits{"bat": {SoCMin: 0.10}}
+		st.SlotDirective = func(now time.Time) (SlotDirective, bool) {
+			return SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), BatteryEnergyWh: -500, Strategy: "self_consumption"}, true
+		}
+		st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "self_consumption", 0, "self", true }
+		targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+		if st.PlanStale {
+			t.Fatalf("energy=%v SoC %.2f: expected a fresh plan", energy, soc)
+		}
+		return targets
+	}
+	for _, energy := range []bool{false, true} {
+		for _, soc := range []float64{0.08, 0.10} {
+			for _, tg := range run(energy, soc) {
+				if tg.TargetW < 0 {
+					t.Errorf("energy=%v SoC %.2f, soc_min 10 %%: %s ordered %.0f W", energy, soc, tg.Driver, tg.TargetW)
+				}
+			}
+		}
+		if targets := run(energy, 0.12); len(targets) == 0 || targets[0].TargetW >= 0 {
+			t.Errorf("energy=%v SoC 12 %%, soc_min 10 %%: %+v, want discharge", energy, targets)
+		}
+	}
+}
+
+// Core's 5 % floor stops a discharge already running, in every mode.
+// Inside the deadband a tick with no targets leaves the driver on its last
+// -2000 W setpoint; outside it slew hands back part of the discharge.
+func TestHardFloorStopsRunningDischarge(t *testing.T) {
+	cases := []struct {
+		name         string
+		gridW, slewW float64
+	}{
+		{"inside deadband", 20, 10000},
+		{"after slew", 2000, 500},
+	}
+	for _, mode := range []Mode{ModeSelfConsumption, ModePlannerSelf} {
+		for _, c := range cases {
+			for _, soc := range []float64{0.05, 0.04} {
+				store := seedStore(c.gridW, []struct {
+					name          string
+					currentW, soc float64
+				}{{"bat", -2000, soc}})
+				st := NewState(0, 50, "ferroamp")
+				st.Mode = mode
+				st.SlewEnabled = true
+				st.SlewRateW = c.slewW
+				st.MinDispatchIntervalS = 0
+				st.SlotDirective = func(now time.Time) (SlotDirective, bool) {
+					return SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), Strategy: "self_consumption"}, true
+				}
+				st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "self_consumption", 0, "self", true }
+				targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+				if len(targets) == 0 {
+					t.Errorf("%s %s SoC %.2f: no target, the -2000 W setpoint stays", mode, c.name, soc)
+				}
+				for _, tg := range targets {
+					if tg.TargetW < 0 {
+						t.Errorf("%s %s SoC %.2f: %s %.0f W at or under 5 %%", mode, c.name, soc, tg.Driver, tg.TargetW)
+					}
+				}
+			}
+		}
+	}
+}
+
+// Closed loop: the battery covers a 2 kW house at -2000 W and SoC walks
+// down through 5 %. The driver keeps its last setpoint when no target
+// comes. No tick at or under the floor may keep a discharge.
+func TestHardFloorDeadbandClosedLoop(t *testing.T) {
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewEnabled = true
+	st.SlewRateW = 3000
+	st.MinDispatchIntervalS = 0
+	setpoint := -2000.0
+	soc := 0.0505
+	bad := 0
+	for tick := 0; tick < 60; tick++ {
+		store := seedStore(2000+setpoint, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", setpoint, soc}})
+		for _, tg := range ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040) {
+			setpoint = tg.TargetW
+		}
+		if soc <= dischargeFloorSoC && setpoint < 0 {
+			bad++
+		}
+		soc -= -setpoint / 10000 / 3600 * 2 // 10 kWh, 2 s tick
+	}
+	if bad > 0 {
+		t.Errorf("%d of 60 ticks kept a discharge at or under 5 %% (final SoC %.4f, setpoint %.0f W)", bad, soc, setpoint)
+	}
+}
+
+// Fuse relief through the full safety pipeline, no soc_min: SoC exactly
+// 5 % orders no discharge; 5.1 % may.
+func TestFuseReliefPipelineAtHardFloor(t *testing.T) {
+	run := func(soc, curW float64) float64 {
+		store, st, cp := setupPerPhaseSite(3, 230, 13000, 19, 19, 19, soc, 5000)
+		if curW != 0 {
+			s := soc
+			store.Update("bat", telemetry.DerBattery, curW, &s, nil)
+		}
+		out := applyDispatchSafetyPipeline([]DispatchTarget{{Driver: "bat"}}, store, st, cp, 16*230*3, dispatchSafetyOptions{})
+		return out[0].TargetW
+	}
+	for _, cur := range []float64{0, -5000} {
+		if got := run(0.05, cur); got < 0 {
+			t.Errorf("SoC exactly 5 %% (battery at %.0f W): ordered %.0f W", cur, got)
+		}
+	}
+	if got := run(0.051, 0); got >= 0 {
+		t.Errorf("SoC 5.1 %%: got %.0f W, want discharge", got)
+	}
+}
+
+// floorStandbyWalk runs 300 ticks with a pack parked at its floor that
+// reads a -15 W standby draw while the grid wanders inside the 50 W
+// deadband. It returns how many ticks sent an order.
+func floorStandbyWalk(st *State, soc float64) int {
+	sent := 0
+	gridW := 0.0
+	seed := uint32(7)
+	for tick := 0; tick < 300; tick++ {
+		seed = seed*1664525 + 1013904223
+		gridW += float64(int(seed>>24)%21 - 10)
+		gridW = math.Max(-45, math.Min(45, gridW))
+		store := seedStore(gridW, []struct {
+			name          string
+			currentW, soc float64
+		}{{"bat", -15, soc}})
+		if len(ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)) > 0 {
+			sent++
+		}
+	}
+	return sent
+}
+
+// A pack parked at Core's 5 % floor with standby draw is not discharging.
+// The deadband holds, so the PI does not chase meter noise.
+func TestHardFloorStandbyRandomWalk(t *testing.T) {
+	for _, soc := range []float64{0.05, 0.049} {
+		st := NewState(0, 50, "ferroamp")
+		st.Mode = ModeSelfConsumption
+		st.SlewEnabled = true
+		st.SlewRateW = 3000
+		st.MinDispatchIntervalS = 0
+		if sent := floorStandbyWalk(st, soc); sent != 0 {
+			t.Errorf("SoC %.3f, -15 W standby: %d of 300 ticks sent an order, want 0", soc, sent)
+		}
+	}
+}
+
+// The same at the owner floor, in a planner mode with a fresh plan.
+func TestOwnerFloorStandbyRandomWalk(t *testing.T) {
+	for _, energy := range []bool{false, true} {
+		st := NewState(0, 50, "ferroamp")
+		st.Mode = ModePlannerSelf
+		st.UseEnergyDispatch = energy
+		st.SlewEnabled = true
+		st.SlewRateW = 3000
+		st.MinDispatchIntervalS = 0
+		st.DriverLimits = map[string]PowerLimits{"bat": {SoCMin: 0.10}}
+		st.SlotDirective = func(now time.Time) (SlotDirective, bool) {
+			return SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), Strategy: "self_consumption"}, true
+		}
+		st.PlanTarget = func(time.Time) (string, float64, string, bool) { return "self_consumption", 0, "self", true }
+		if sent := floorStandbyWalk(st, 0.10); sent != 0 {
+			t.Errorf("planner_self energy=%v, SoC 10 %%, -15 W standby: %d of 300 ticks sent an order, want 0", energy, sent)
+		}
+	}
+}
+
+// A small discharge that FTW itself ordered still stops at the floor,
+// though it reads under the standby threshold: the driver would hold it.
+func TestHardFloorStopsOwnSmallDischarge(t *testing.T) {
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewEnabled = true
+	st.SlewRateW = 3000
+	st.MinDispatchIntervalS = 0
+	st.PrevTargets["bat"] = -30
+	store := seedStore(10, []struct {
+		name          string
+		currentW, soc float64
+	}{{"bat", -30, 0.05}})
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat": 15200}), 11040)
+	if len(targets) == 0 || targets[0].TargetW < 0 {
+		t.Fatalf("own -30 W order at 5 %%: %+v, want a 0 W order", targets)
+	}
+}

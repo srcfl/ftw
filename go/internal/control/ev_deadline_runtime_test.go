@@ -88,7 +88,7 @@ func TestJoinedNoBatteryNoPlanGoalContinuity(t *testing.T) {
 			legal = true
 		}
 	}
-	if !legal || 6000+got > 17250.001 || phaseA+got/(3*230) > 24.001 {
+	if !legal || 6000+got > 17250.001 || phaseA+got/(3*230) > st.fuseLineA()+.001 {
 		t.Fatalf("unsafe or illegal EV offer=%v, grid=%v phaseA=%v", got, 6000+got, phaseA+got/(3*230))
 	}
 	if svc.Latest() != nil {
@@ -206,16 +206,40 @@ func TestJoinedMixedPhaseNoCreditBeforeMeasuredReduction(t *testing.T) {
 // Without a plan, a car whose own charger takes less than a stepless
 // charger's minimum (a 3.7 kW plug-in hybrid on an 11 or 22 kW charger) is
 // ordered that minimum, as the plan orders it: never 0 W because the car's
-// own maximum is lower.
+// own maximum is lower. On a table with one-phase and three-phase levels it
+// is ordered the lowest three-phase level, not a one-phase level the
+// three-phase order cannot run (review of #1807).
 func TestJoinedNoPlanGoalSmallCarGetsChargerMinimum(t *testing.T) {
 	ctx := context.Background()
-	for _, maxW := range []float64{11040, 22080} {
+	mixed := []float64{0}
+	for _, phases := range []float64{1, 3} {
+		for a := 6.0; a <= 16; a++ {
+			mixed = append(mixed, a*230*phases)
+		}
+	}
+	for _, ch := range []struct {
+		name       string
+		mode       string
+		minW, maxW float64
+		steps      []float64
+		carMaxW    float64
+	}{
+		{"11 kW", "", 4140, 11040, nil, 3680},
+		{"22 kW", "", 4140, 22080, nil, 3680},
+		{"mixed table", "", 1380, 11040, mixed, 3680},
+		{"mixed table, auto", "auto", 1380, 11040, mixed, 3680},
+		{"mixed table, 3p", "3p", 1380, 11040, mixed, 3680},
+		// The charger's minimum above the car's maximum, and that above
+		// the lowest one-phase level: the car's own limits leave no level.
+		{"mixed table, minimum 2,000 W, a 1.5 kW car", "", 2000, 11040, mixed, 1500},
+	} {
 		now := time.Now()
-		cfg := loadpoint.Config{ID: "garage", DriverName: "charger", VehicleCapacityWh: 15000, PluginSoC: .3, MinChargeW: 4140, MaxChargeW: maxW}
+		cfg := loadpoint.Config{ID: "garage", DriverName: "charger", VehicleCapacityWh: 15000, PluginSoC: .3, PhaseMode: ch.mode,
+			MinChargeW: ch.minW, MaxChargeW: ch.maxW, AllowedStepsW: ch.steps}
 		mgr := loadpoint.NewManager()
 		mgr.Load([]loadpoint.Config{cfg})
 		mgr.Observe(cfg.ID, true, 0, 0, true)
-		if !mgr.SetCarBinding(cfg.ID, loadpoint.CarBinding{ID: "phev", MaxW: 3680}) ||
+		if !mgr.SetCarBinding(cfg.ID, loadpoint.CarBinding{ID: "phev", MaxW: ch.carMaxW}) ||
 			!mgr.SetCurrentSoC(cfg.ID, .3) || !mgr.SetTarget(cfg.ID, .8, now.Add(3*time.Hour)) {
 			t.Fatal("goal fixture rejected")
 		}
@@ -256,11 +280,12 @@ func TestJoinedNoPlanGoalSmallCarGetsChargerMinimum(t *testing.T) {
 				return nil
 			})
 		controller.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 25, Voltage: 230, PhaseCnt: 3})
+		svc.PlanningLimits = controller.PlanningLimits // as main.go wires it
 		controller.SetFuseEVMax(func() (float64, bool) { return EVFuseBudget(tel, st, mgr.States(), controller.FuseConfigs(), 17250) })
 		controller.SetFusePhaseRoomA(func() (float64, bool) { return EVFusePhaseRoomA(st) })
 		controller.TickWithDispatch(ctx, now, true)
 		if len(commands) == 0 || commands[len(commands)-1] != 4140 {
-			t.Fatalf("%.0f W charger: orders %v, want the charger's minimum 4140 W", maxW, commands)
+			t.Errorf("%s: orders %v, want 4140 W", ch.name, commands)
 		}
 	}
 }

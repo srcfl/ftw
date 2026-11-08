@@ -34,7 +34,7 @@ func TestChargingPeriodsNegotiatesEachWorkerAndKeepsLegacyWire(t *testing.T) {
 		if r.FlexLoads[0].Charging != nil {
 			t.Fatal("generic sidecar received an unnegotiated field")
 		}
-		if err := o.prepareEnergyplanRequest(context.Background(), &r, p); err != nil {
+		if err := o.prepareEnergyplanRequest(context.Background(), &r, slots, p); err != nil {
 			t.Fatal(err)
 		}
 		c := r.FlexLoads[0].Charging

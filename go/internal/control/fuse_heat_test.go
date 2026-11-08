@@ -107,21 +107,73 @@ func TestFuseHeatCountsGapAtLastCurrentSeen(t *testing.T) {
 	}
 }
 
-// A Core restart has no memory: the first reading sets the heat.
+// A Core restart has no memory: the first reading sets the heat, at most
+// the working limit. One reading cannot show that an overage has lasted.
 func TestFuseHeatStartsAtFirstReadingAfterRestart(t *testing.T) {
 	store, state := fuseHeatState()
 	state.stepFuseHeat0(meterAt(store, time.Unix(1_800_000_000, 0), [3]float64{26, 3, 0}))
-	if state.fuseHeat.sq != [3]float64{676, 9, 0} {
-		t.Fatalf("first reading set %v", state.fuseHeat.sq)
+	if state.fuseHeat.sq != [3]float64{625, 9, 0} {
+		t.Fatalf("first reading set %v, want L1 at the 25 A working limit", state.fuseHeat.sq)
+	}
+	if state.fuseHeat.amps != [3]float64{26, 3, 0} {
+		t.Fatalf("first reading held %v, want its own currents", state.fuseHeat.amps)
+	}
+}
+
+// firstStart runs until the first offer above 0 W and returns how long
+// after the first reading of the run that was.
+func (s *evMeterSite) firstStart(limit time.Duration) time.Duration {
+	s.t.Helper()
+	first := s.now.Add(time.Second)
+	for s.now.Sub(first) < limit {
+		s.step()
+		if s.offer() > 0 {
+			return s.now.Sub(first)
+		}
+	}
+	return -1
+}
+
+// Seed 207539: Core starts while one reading shows 1.4 × In on L1, then the
+// house is back at 10 A per phase. A reading without room starts the idle
+// car's dwell, as it always does; the heat that one second added is gone
+// within a couple of readings. The car must not also wait the ~52 s a fuse
+// already at 35 A would need to cool under the working limit.
+func TestEVStartAfterRestartDoesNotWaitOutOneHighReading(t *testing.T) {
+	s := newEVMeterSite(t, 0, 6900)
+	s.addHouseA(.4*25+25-10, 0, 0) // 35 A on L1
+	s.step()                       // Core's first reading
+	s.addHouseA(-(.4*25 + 25 - 10), 0, 0)
+	got := s.firstStart(3 * time.Minute)
+	if got < 0 || got > evRestartDwell+3*time.Second {
+		t.Fatalf("after one 35 A reading the car started after %v, want the %v dwell and at most 3 s of heat", got, evRestartDwell)
+	}
+}
+
+// A sustained 1.15 × In on L1 right after a restart gets no fresh budget:
+// the heat starts at the working limit and the second reading cuts. A cold
+// model would let it run for about 72 s before it reached the 24 A line.
+func TestEVHardLimitSustainedOverageAfterRestartCuts(t *testing.T) {
+	if cold := secondsToSpend(0, 1.15*25, 24); cold < 60 {
+		t.Fatalf("setup: a cold model spends the budget after %d s", cold)
+	}
+	s := fuseHeatSite(t)
+	s.boot()
+	s.addHouseA(1.15*25-20, 0, 0) // 28.75 A, under the instant cut
+	took, offer := s.firstCut(2 * time.Minute)
+	if took < 0 || took > time.Second || offer >= 10350 {
+		t.Fatalf("1.15 × In after a restart cut after %v to %.0f W, want the second reading", took, offer)
 	}
 }
 
 // fuseHeatSite charges at 15 A beside 5 A of house load on each phase of a
 // 25 A fuse with no import ceiling: 20 A per phase, long enough for the heat
-// to settle there.
+// to settle there. The site opts into a 1 A safety margin, so the working
+// limit is 24 A.
 func fuseHeatSite(t *testing.T) *evMeterSite {
 	t.Helper()
 	s := newEVMeterSite(t, 0, 3450)
+	s.state.SiteFuseSafetyA = 1
 	s.run(10 * time.Minute)
 	if s.offer() != 10350 || s.evW != 10350 || math.Abs(s.state.fuseHeat.worstA()-20) > .01 {
 		t.Fatalf("setup: offer %.0f draw %.0f heat %.2f A", s.offer(), s.evW, s.state.fuseHeat.worstA())
@@ -273,9 +325,10 @@ func TestEVHardLimitHeatBudgetAcrossMeterGap(t *testing.T) {
 	}
 }
 
-// After a Core restart the heat starts at the first reading. Restarting
-// 30 s into 26 A on L1 counts the fuse as already at 26 A and cuts at once,
-// which is conservative only because that reading is high.
+// After a Core restart the heat starts at the first reading, at most the
+// working limit. Restarting 30 s into 26 A on L1, with about 31 s of budget
+// left, counts the fuse as at the line: the second reading spends the
+// budget and cuts.
 func TestEVHardLimitRestartStartsHeatAtFirstReading(t *testing.T) {
 	s := fuseHeatSite(t)
 	s.addHouseA(6, 0, 0)
@@ -285,8 +338,8 @@ func TestEVHardLimitRestartStartsHeatAtFirstReading(t *testing.T) {
 	}
 	s.boot()
 	took, offer := s.firstCut(5 * time.Second)
-	if took != 0 || offer != 8970 {
-		t.Fatalf("restart at 26 A cut after %v to %.0f W, want the first reading to 8,970 W", took, offer)
+	if took != time.Second || offer != 8970 {
+		t.Fatalf("restart at 26 A cut after %v to %.0f W, want the second reading to 8,970 W", took, offer)
 	}
 }
 
@@ -339,11 +392,14 @@ func TestFuseHeatSixteenAmpPeaks(t *testing.T) {
 }
 
 // fuse16Site is Fredrik's case end to end: a 16 A fuse, 4 A of house load
-// and the car at 10 A on each phase, 14 A in all, settled.
+// and the car at 10 A on each phase, 14 A in all, settled. The site opts
+// into a 1 A safety margin, so the working limit is 15 A, and the car asks
+// for 10 A: a rise that fits under the line would otherwise fill it.
 func fuse16Site(t *testing.T) *evMeterSite {
 	t.Helper()
 	s := newEVMeterSite(t, 0, 2760)
-	s.state.SiteFuseAmps = 16
+	s.state.SiteFuseAmps, s.state.SiteFuseSafetyA = 16, 1
+	s.ctrl.SetManualHold("garage", loadpoint.ManualHold{PowerW: 6900, PhaseMode: "3p", Persistent: true})
 	s.ctrl.SetSiteFuse(loadpoint.SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3})
 	s.ctrl.SetFuseEVMax(func() (float64, bool) {
 		return EVFuseBudget(s.store, s.state, s.mgr.States(), s.mgr.Configs(), 16*690)
@@ -357,22 +413,27 @@ func fuse16Site(t *testing.T) *evMeterSite {
 
 // The same peaks on L1 with the car charging: patterns whose heat stays
 // under 15 A while the meter shows a peak never move the offer; the others
-// cut once when the budget is spent and settle where the peaks fit. A rise reads the heat as well as
-// the reading, so the car does not climb back between peaks and cut again.
+// cut when the budget is spent. A rise reads the heat as well as the
+// reading, and needs its whole step under the line, so the car climbs back
+// only once the heat has cooled a step under it. Where the pattern's heat
+// sits right at the line (17 A for 10 s, 14 A for 20 s: 15.07 A rms at
+// 10 A) the car steps up and down slowly, about once in five minutes, and
+// never stops.
 func TestEVHardLimitSixteenAmpPeaksCutOnceAndSettle(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		gap      time.Duration // 0: the 17 A stays
 		cutAfter time.Duration // 0: never
-		settleW  float64
+		maxCuts  int
+		settleW  float64 // 0: not judged
 	}{
-		{"14A_50s", 50 * time.Second, 0, 6900},
+		{"14A_50s", 50 * time.Second, 0, 0, 6900},
 		// The heat passes 15 A only as the peak ends, when the meter
 		// already shows 14 A: nothing is left to cut.
-		{"14A_30s", 30 * time.Second, 0, 6900},
-		{"14A_20s", 20 * time.Second, 98 * time.Second, 6210},
-		{"14A_10s", 10 * time.Second, 48 * time.Second, 5520},
-		{"steady_17A", 0, 23 * time.Second, 5520},
+		{"14A_30s", 30 * time.Second, 0, 0, 6900},
+		{"14A_20s", 20 * time.Second, 98 * time.Second, 3, 0},
+		{"14A_10s", 10 * time.Second, 48 * time.Second, 1, 6210},
+		{"steady_17A", 0, 23 * time.Second, 1, 5520},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := fuse16Site(t)
@@ -401,12 +462,13 @@ func TestEVHardLimitSixteenAmpPeaksCutOnceAndSettle(t *testing.T) {
 					cuts = append(cuts, offers[i])
 				}
 			}
-			want := 0
-			if tc.cutAfter > 0 {
-				want = 1
+			if len(cuts) > tc.maxCuts || tc.cutAfter > 0 && len(cuts) == 0 {
+				t.Fatalf("cuts %v, want 1 to %d", offerWatts(cuts), tc.maxCuts)
 			}
-			if len(cuts) != want {
-				t.Fatalf("cuts %v, want %d", offerWatts(cuts), want)
+			for _, o := range offers {
+				if o.w <= 0 {
+					t.Fatalf("the peaks stopped the car: %v", offerWatts(offers))
+				}
 			}
 			if tc.cutAfter > 0 {
 				// From the first reading of the first peak.
@@ -414,7 +476,7 @@ func TestEVHardLimitSixteenAmpPeaksCutOnceAndSettle(t *testing.T) {
 					t.Errorf("cut after %v, want ~%v", took, tc.cutAfter)
 				}
 			}
-			if s.offer() != tc.settleW {
+			if tc.settleW > 0 && s.offer() != tc.settleW {
 				t.Errorf("settled at %.0f W, want %.0f W", s.offer(), tc.settleW)
 			}
 			if maxHeat > 15.2 {
@@ -553,6 +615,20 @@ func TestExportingPhaseLevelIsItsReading(t *testing.T) {
 	}
 	if got := h.startLevelA(amps, [3]float64{}, 24); got != 2 {
 		t.Fatalf("start level %.1f A, want L2's 2 A", got)
+	}
+}
+
+// lastingFuseHeat sets the heat model as if the site meter's last reading
+// had held for an hour: the case under test has lasted.
+func lastingFuseHeat(store *telemetry.Store, state *State) {
+	meter := store.Get(state.SiteMeterDriver, telemetry.DerMeter)
+	amps, _, valid := phaseCurrentsA(meter, state, meter.RawW)
+	if !valid {
+		panic("lastingFuseHeat: no usable phase currents")
+	}
+	state.fuseHeat = fuseHeat{set: true, at: meter.UpdatedAt.Add(-time.Hour)}
+	for i, a := range amps {
+		state.fuseHeat.amps[i], state.fuseHeat.sq[i] = a, a*a
 	}
 }
 

@@ -204,8 +204,9 @@ type State struct {
 	CarMaxW        float64 `json:"-"`
 	CarChargeLimit float64 `json:"-"`
 	// CarPhases is 1 when this session's car draws on one phase of a
-	// three-phase order, seen on the site meter, and 0 when unknown; a car
-	// profile's phases may set it later. CarPhase is that phase, 1-3. The
+	// three-phase order, seen on the site meter, 3 when it draws on all
+	// three, and 0 when unknown; a car profile's phases may set it later.
+	// CarPhase is the phase of a one-phase car, 1-3. The
 	// plan counts the car's one-phase levels (OnePhaseCarSteps) and the
 	// order names the current per phase it should take.
 	CarPhases int `json:"-"`
@@ -1382,8 +1383,11 @@ func (lp *loadpointRuntime) snapshot() State {
 		CommandedPhases:          lp.commandedPhases,
 		CarPhase:                 lp.carPhases.phase,
 	}
-	if lp.carPhases.phase > 0 {
+	switch {
+	case lp.carPhases.phase > 0:
 		st.CarPhases = 1
+	case lp.carPhases.three:
+		st.CarPhases = 3
 	}
 	if lp.VehicleCapacityWh <= 0 {
 		st.VehicleCapacityWh = 60000

@@ -102,7 +102,19 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		}
 		writeBootstrapJSON(w, http.StatusOK, chargers)
 	})
-	mux.HandleFunc("POST /api/config", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/config", bootstrapConfig(configPath, saveInitial, func() error { return execCurrentProcess(nil) }))
+
+	srv := newHTTPServer(":8080", secureBootstrapMutations(mux))
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Error("bootstrap server", "err", err)
+		os.Exit(1)
+	}
+}
+
+// bootstrapConfig saves the wizard's settings, with the house password it
+// asked for, then restarts into the normal server.
+func bootstrapConfig(configPath string, save func(*config.Config) error, restart func() error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		r.Body.Close()
 		if err != nil {
@@ -118,23 +130,21 @@ func runBootstrap(configPath, webDir, driverDir string) {
 			writeBootstrapJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
-		if err := saveInitial(&cfg); err != nil {
+		if err := applyInitialHousePassword(r, body, &cfg); err != nil {
+			writeBootstrapJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := save(&cfg); err != nil {
 			writeBootstrapJSON(w, http.StatusInternalServerError, map[string]string{"error": "write config: " + err.Error()})
 			return
 		}
 		slog.Info("config written by setup wizard — restarting", "path", configPath)
 		writeBootstrapJSON(w, http.StatusOK, map[string]string{"status": "ok", "restart": "true"})
 		go func() {
-			if err := execCurrentProcess(nil); err != nil {
+			if err := restart(); err != nil {
 				slog.Error("bootstrap re-exec failed", "err", err)
 			}
 		}()
-	})
-
-	srv := newHTTPServer(":8080", secureBootstrapMutations(mux))
-	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		slog.Error("bootstrap server", "err", err)
-		os.Exit(1)
 	}
 }
 
@@ -165,7 +175,7 @@ func bootstrapAssistant(save func(*config.Config) error, restart func() error) h
 			Confirmed bool   `json:"confirmed"`
 			Password  string `json:"password"`
 		}
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024))
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&q); err != nil || !q.Confirmed {
 			writeBootstrapJSON(w, http.StatusBadRequest, map[string]string{"error": "confirm starting an empty measurement installation"})
@@ -197,6 +207,25 @@ func bootstrapAssistant(save func(*config.Config) error, restart func() error) h
 			}
 		}()
 	}
+}
+
+// applyInitialHousePassword locks a new box with the house password the
+// wizard asked for, beside its settings. Home Assistant signs its users in
+// itself and sends none. A script that posts settings without one leaves the
+// lock off, as before; the page asks for a password later.
+func applyInitialHousePassword(r *http.Request, body []byte, cfg *config.Config) error {
+	var q struct {
+		HousePassword string `json:"house_password"`
+	}
+	if err := json.Unmarshal(body, &q); err != nil || q.HousePassword == "" || api.HomeAssistantIngress(r) {
+		return nil
+	}
+	hash, err := api.HashInitialLANPassword(q.HousePassword)
+	if err != nil {
+		return err
+	}
+	cfg.API.LANAuth, cfg.LANPasswordHash = true, hash
+	return nil
 }
 
 // Bootstrap needs the same country/zone choices before any config exists.

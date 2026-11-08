@@ -82,17 +82,19 @@ func TestChargeNowWithoutSessionIDResumesAfterRestart(t *testing.T) {
 	samples["easee"] = sample
 	tickWants(t, c, sender, now.Add(21*time.Second), 4140, false)
 
+	// The cable stays out for UnplugGrace.
 	sample.Connected = false
 	samples["easee"] = sample
 	c.Tick(context.Background(), now.Add(22*time.Second))
+	c.Tick(context.Background(), now.Add(22*time.Second+UnplugGrace))
 	sample.Connected = true
 	samples["easee"] = sample
-	tickWants(t, c, sender, now.Add(23*time.Second), 0, false)
+	tickWants(t, c, sender, now.Add(23*time.Second+UnplugGrace), 0, false)
 	if h, ok := c.GetManualHold("garage", now); ok {
 		t.Fatalf("the next car inherited Charge now: %+v", h)
 	}
 	c, sender = bootController(t, store, samples)
-	tickWants(t, c, sender, now.Add(30*time.Second), 0, false)
+	tickWants(t, c, sender, now.Add(30*time.Second+UnplugGrace), 0, false)
 	if h, ok := c.GetManualHold("garage", now); ok {
 		t.Fatalf("Charge now returned after unplug and restart: %+v", h)
 	}

@@ -307,16 +307,17 @@ func TestTheAgentListCarriesTheBoxFacts(t *testing.T) {
 	}
 }
 
-// On the box itself the house password does not count, so the list tells the
-// page that this request cannot widen access before the owner spends a code
-// on a grant the box would refuse. Another device signed in can.
+// The list tells the page whether this request can widen access before the
+// owner spends a code on a grant the box would refuse. The house password
+// counts wherever the browser runs, the box itself included; without it,
+// even the box cannot.
 func TestTheListSaysWhetherThisRequestCanWiden(t *testing.T) {
 	resetLANGuesses(t)
 	policy := lanAuthPolicy(testHousePassword)
 	s := New(&Deps{Agents: newStubAgents("")})
-	widen := func(url, remote string) (bool, int) {
+	widenWith := func(url, remote, auth string) (bool, int) {
 		var after *http.Request
-		serveLANAuth(policy, lanAuthRequest(http.MethodGet, url, remote, "Bearer "+testHousePassword),
+		serveLANAuth(policy, lanAuthRequest(http.MethodGet, url, remote, auth),
 			func(r *http.Request) { after = r })
 		w := httptest.NewRecorder()
 		s.handleAgentsList(w, after)
@@ -331,8 +332,15 @@ func TestTheListSaysWhetherThisRequestCanWiden(t *testing.T) {
 		s.handleAgentsAdd(add, post)
 		return got.Box.Widen, add.Code
 	}
-	if ok, code := widen("http://127.0.0.1:8080/api/agents", "127.0.0.1:1234"); ok || code != http.StatusForbidden {
+	widen := func(url, remote string) (bool, int) { return widenWith(url, remote, "Bearer "+testHousePassword) }
+	if ok, code := widen("http://127.0.0.1:8080/api/agents", "127.0.0.1:1234"); !ok || code != http.StatusCreated {
 		t.Errorf("on the box itself, with the house password: widen %v, grant %d", ok, code)
+	}
+	if ok, code := widenWith("http://127.0.0.1:8080/api/agents", "127.0.0.1:1234", ""); ok || code != http.StatusForbidden {
+		t.Errorf("on the box itself, without it: widen %v, grant %d", ok, code)
+	}
+	if ok, code := widenWith("http://127.0.0.1:8080/api/agents", "127.0.0.1:1234", "Bearer not-the-password"); ok || code != http.StatusForbidden {
+		t.Errorf("on the box itself, with a wrong one: widen %v, grant %d", ok, code)
 	}
 	if ok, code := widen("http://192.168.1.1:8080/api/agents", "192.168.1.5:1234"); !ok || code != http.StatusCreated {
 		t.Errorf("another device, signed in: widen %v, grant %d", ok, code)

@@ -30,7 +30,7 @@
   <!-- Design tokens FIRST — every sheet and every <ftw-*> shadow root reads
        from :root declared in /components/theme.css. -->
   <link rel="stylesheet" href="/components/theme.css">
-  <link rel="stylesheet" href="/style.css?v=forecasts1">
+  <link rel="stylesheet" href="/style.css?v=password1">
   <!-- Dashboard layout is layered on the shared base styles. -->
   <link rel="stylesheet" href="/app.css?v=menu1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
@@ -778,6 +778,32 @@
       </div>
     </details>
 
+    <details id="battery-return-details" class="history-disclosure">
+      <summary>
+        <span>
+          <strong>Energy tax refund for battery storage</strong>
+          <small>Sweden: the figure to give Skatteverket for one calendar year</small>
+        </span>
+        <span id="battery-return-meta" class="history-disclosure-meta">Open</span>
+      </summary>
+      <div class="history-disclosure-body">
+        <div class="energy-history-controls">
+          <label>Year
+            <select id="battery-return-year"></select>
+          </label>
+          <a id="battery-return-csv" class="btn-send" href="/api/energy/battery-return.csv">Download hourly basis (CSV)</a>
+        </div>
+        <p id="battery-return-result" class="energy-history-quality-note" aria-live="polite">Open this section to work out the year.</p>
+        <section class="energy-history-table-wrap">
+          <table class="energy-history-table">
+            <thead><tr><th>Month</th><th>Returned</th><th>Complete hours</th></tr></thead>
+            <tbody id="battery-return-rows"></tbody>
+          </table>
+        </section>
+        <p class="energy-history-note">The figure is grid electricity that a battery stored and later sent back to the grid. Where the readings cannot tell where energy went, FTW counts low: solar, a car and the other batteries count first in every hour, each battery keeps its own account, what the house takes from a battery counts as grid energy first and what goes to the grid as other energy first, losses count as other energy, and an hour counts only when every meter read all of it. The figure assumes FTW reads every solar inverter, battery and car charger on the site, and it uses the battery sizes set today. You can apply within three years after the year ends, and FTW keeps the hourly readings that long. Keep the CSV, one row per battery and hour, with your application. <a href="https://www.skatteverket.se/privat/skatter/skattpabransleochel/aterbetalningavskattpaelefterbatterilagring.4.5fb2fa71a0b0adb74a23d8.html" target="_blank" rel="noopener">Skatteverket's rules</a></p>
+      </div>
+    </details>
+
     <details id="plan-history-details" class="history-disclosure history-plan-disclosure">
       <summary>
         <span>
@@ -994,7 +1020,7 @@
   </ftw-modal>
 
   <script src="/project-statistics.js?v=terms2"></script>
-  <script src="/lan-auth.js?v=terms2"></script>
+  <script src="/lan-auth.js?v=password1"></script>
   <script type="module" src="/control-feedback-view.js"></script>
   <script src="/app.js?v=noask1"></script>
   <script src="/settings.js?v=diag3"></script>
@@ -1009,11 +1035,11 @@
   <script src="/settings/tabs/planner.js?v=cvxpy1"></script>
   <script src="/settings/tabs/ha.js?v=modbusproxy2"></script>
   <script src="/settings/tabs/app.js?v=terms2"></script>
-  <script src="/settings/tabs/access.js?v=access5"></script>
+  <script src="/settings/tabs/access.js?v=password1"></script>
   <script src="/settings/tabs/fleet.js?v=terms2"></script>
   <script src="/settings/tabs/notifications.js?v=tabsplit2"></script>
   <script src="/settings/tabs/ev.js?v=tabsplit2"></script>
-  <script src="/settings/tabs/system.js?v=menu1"></script>
+  <script src="/settings/tabs/system.js?v=password1"></script>
   <script src="/diagnostics-modal.js?v=diag3"></script>
   <script src="/models.js?v=diag2"></script>
   <script type="module" src="/plan.js?v=soc2"></script>
@@ -1021,6 +1047,7 @@
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=zones2"></script>
   <script src="/energy-history.js?v=story1"></script>
+  <script src="/battery-return.js?v=3"></script>
   <script src="/diagnose.js?v=zones1"></script>
   <script type="module" src="/mobile-navigation.js?v=scroll1"></script>
   <script src="/update-badge.js?v=native1" defer></script>

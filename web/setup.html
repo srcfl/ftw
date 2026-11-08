@@ -110,6 +110,8 @@
     .assistant-setup p {margin:0.8rem 0 1.1rem}
     .assistant-setup h3 {font-size:1rem}
     .assistant-setup button {width:100%}
+    .password-hint {margin:0.4rem 0 0;color:var(--text-dim);font-size:0.85rem}
+    .password-hint:empty {display:none}
     /* ---- Form elements ---- */
     .form-group {
       margin-bottom: 1.1rem;
@@ -537,10 +539,11 @@
       <h3 id="assistant-title">Set up with your AI assistant</h3>
       <p>Use ChatGPT or another MCP client to configure this box. FTW starts with no equipment and keeps control off while you set it up.</p>
       <p>Set a house password to claim this new box. After it starts, sign in and approve the assistant here. Remote assistants use FTW Cloud; you choose whether to accept its terms.</p>
-      <div class="form-group"><label for="assistant-password">House password (at least 10 characters)</label>
-      <input id="assistant-password" type="password" minlength="10" maxlength="512" autocomplete="new-password"></div>
+      <div class="form-group"><label for="assistant-password">House password</label>
+      <input id="assistant-password" type="password" maxlength="512" autocomplete="new-password">
+      <p class="password-hint" id="assistant-password-hint" aria-live="polite"></p></div>
       <div class="form-group"><label for="assistant-password-confirm">Repeat house password</label>
-      <input id="assistant-password-confirm" type="password" minlength="10" maxlength="512" autocomplete="new-password"></div>
+      <input id="assistant-password-confirm" type="password" maxlength="512" autocomplete="new-password"></div>
       <button class="btn-primary" id="assistant-start" onclick="startAssistantSetup()">Start assistant setup</button>
       <p id="assistant-status" role="status" aria-live="polite"></p>
       <a id="assistant-resume" href="/?setup=assistant" hidden>Open the box and continue setup</a>
@@ -872,6 +875,15 @@
     <p>Confirm your configuration before starting.</p>
 
     <div id="review-content"></div>
+    <section id="house-password-step" class="assistant-setup" aria-labelledby="house-password-title" hidden>
+      <h3 id="house-password-title">House password</h3>
+      <p>Choose a password for this box. Other devices on your Wi-Fi need it to change settings or let an assistant in. Live numbers stay visible without it.</p>
+      <div class="form-group"><label for="house-password">House password</label>
+      <input id="house-password" type="password" maxlength="512" autocomplete="new-password">
+      <p class="password-hint" id="house-password-hint" aria-live="polite"></p></div>
+      <div class="form-group"><label for="house-password-confirm">Type it again</label>
+      <input id="house-password-confirm" type="password" maxlength="512" autocomplete="new-password"></div>
+    </section>
     <div id="save-error" style="display:none"></div>
 
     <div id="save-actions" class="wizard-actions">
@@ -883,6 +895,7 @@
       <div class="checkmark">&#10003;</div>
       <h2>Configuration saved!</h2>
       <p>Restarting... you will be redirected to the dashboard.</p>
+      <p id="save-success-password" hidden>When the box asks, sign in with the house password you chose.</p>
     </div>
   </div>
 
@@ -894,7 +907,7 @@
      dashboard component catalogue (ftw-energy-flow etc.) — dead weight on
      the first setup paint. -->
 <script type="module" src="/components/ftw-update-check.js?v=native1"></script>
-<script src="/lan-auth.js?v=lan1"></script>
-<script src="/setup.js?v=connection1"></script>
+<script src="/lan-auth.js?v=password1"></script>
+<script src="/setup.js?v=password1"></script>
 </body>
 </html>

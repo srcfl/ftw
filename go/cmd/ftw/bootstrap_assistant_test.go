@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -132,4 +133,81 @@ func TestHomeAssistantBootstrapNeedsNoSecondPassword(t *testing.T) {
 	if !cfg.MeasurementOnly() || cfg.API.LANAuth || cfg.LANPasswordHash != "" || len(cfg.Drivers) != 0 {
 		t.Fatal("HA setup invented a password or equipment")
 	}
+}
+
+// The wizard's own settings save carries the house password it asked for,
+// so a new box starts locked. Home Assistant signs its users in itself, and
+// a script that sends none keeps the lock off as before.
+func TestBootstrapWizardSavesTheHousePassword(t *testing.T) {
+	t.Setenv("FTW_API_TOKEN", "")
+	const settings = `"site":{"name":"Home","control_interval_s":5,"grid_tolerance_w":42,"watchdog_timeout_s":60,"smoothing_alpha":0.3,"gain":0.5,"slew_rate_w":500,"min_dispatch_interval_s":5},"fuse":{"max_amps":16,"phases":3,"voltage":230},"drivers":[],"api":{"port":8080}`
+	for _, tc := range []struct {
+		name, body string
+		want       int
+		locked     bool
+	}{
+		{"with a password", `{` + settings + `,"house_password":"first-owner-password"}`, 200, true},
+		{"a short one, the owner's choice", `{` + settings + `,"house_password":"1234"}`, 200, true},
+		{"too long", `{` + settings + `,"house_password":"` + strings.Repeat("x", 513) + `"}`, 400, false},
+		{"from a script without one", `{` + settings + `}`, 200, false},
+		{"through Home Assistant", `{` + settings + `,"house_password":"first-owner-password"}`, 200, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			restarted := make(chan struct{}, 1)
+			handler := secureBootstrapMutations(bootstrapConfig(path, func(cfg *config.Config) error { return saveInitialConfig(path, cfg) },
+				func() error { restarted <- struct{}{}; return nil }))
+			req := httptest.NewRequest("POST", "http://box.local/api/config", strings.NewReader(tc.body))
+			req.RemoteAddr = "192.168.1.12:1234"
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "http://box.local")
+			if tc.name == "through Home Assistant" {
+				handler = api.WithHomeAssistantIngress(handler)
+				req.RemoteAddr = "172.30.32.2:1234"
+				req.Header.Del("Origin")
+				req.Header.Set("X-Ingress-Path", "/api/hassio_ingress/test")
+				req.Header.Set("X-Remote-User-Id", "owner")
+			}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("%d %s", w.Code, w.Body.String())
+			}
+			if tc.want != 200 {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatal("a refused save wrote settings")
+				}
+				return
+			}
+			<-restarted
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.API.LANAuth != tc.locked || (cfg.LANPasswordHash != "") != tc.locked {
+				t.Fatalf("lan_auth %v, hash set %v; want %v", cfg.API.LANAuth, cfg.LANPasswordHash != "", tc.locked)
+			}
+			raw, _ := os.ReadFile(path)
+			if strings.Contains(string(raw), "first-owner-password") {
+				t.Fatal("the locator holds the house password")
+			}
+			var sent struct {
+				HousePassword string `json:"house_password"`
+			}
+			_ = json.Unmarshal([]byte(tc.body), &sent)
+			if tc.locked && !api.VerifyStoredLANSecret(mustOpenState(t, cfg.ConfigDatabase), sent.HousePassword) {
+				t.Fatal("the stored hash does not match the password the wizard sent")
+			}
+		})
+	}
+}
+
+func mustOpenState(t *testing.T, path string) *state.Store {
+	t.Helper()
+	st, err := state.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
 }

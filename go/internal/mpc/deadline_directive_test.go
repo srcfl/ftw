@@ -131,3 +131,44 @@ func TestGoalReserveGivesASmallCarTheChargersMinimum(t *testing.T) {
 		}
 	}
 }
+
+// Review of #1807: on a table with one-phase and three-phase levels the
+// reserve holds to the limits the plan gets, as planned charging runs on
+// three phases. A 3.7 kW car is reserved the lowest three-phase level, at
+// full need and near its goal; marked one-phase, it is reserved the third of
+// a three-phase level it takes. A one-phase level was ordered 0 W.
+func TestGoalReserveHoldsToThePlansLimits(t *testing.T) {
+	now := time.Now()
+	steps := []float64{0}
+	for _, phases := range []float64{1, 3} {
+		for a := 6.0; a <= 16; a++ {
+			steps = append(steps, a*230*phases)
+		}
+	}
+	site := loadpoint.SiteFuse{MaxAmps: 16, Voltage: 230, PhaseCnt: 3}
+	for _, c := range []struct {
+		name      string
+		carPhases int
+		soc       float64
+		want      float64
+	}{
+		{"a 3.7 kW car", 0, .3, 4140},
+		{"a 3.7 kW car near its goal", 0, .7999, 4140},
+		{"marked one-phase", 1, .3, 3680},
+		{"marked one-phase near its goal", 1, .7999, 1380},
+	} {
+		st := deadlineGoalState(now, "a")
+		st.MinChargeW, st.MaxChargeW, st.AllowedStepsW, st.CarMaxW, st.CarPhases, st.CurrentSoC = 1380, 11040, steps, 3680, c.carPhases, c.soc
+		st.TargetTime = now.Add(30 * time.Minute) // Within the latest start, even near the goal.
+		svc := &Service{
+			LoadpointStates: func() []loadpoint.State { return []loadpoint.State{st} },
+			PlanningLimits: func(st loadpoint.State) (float64, float64, []float64) {
+				return loadpoint.PlanningLimits(st, loadpoint.Config{MinChargeW: st.MinChargeW, MaxChargeW: st.MaxChargeW, AllowedStepsW: st.AllowedStepsW}, site)
+			},
+		}
+		d, ok := svc.SlotDirectiveAt(now)
+		if !ok || !d.LoadpointFallback["a"] || d.LoadpointMaxPowerW["a"] != c.want || d.LoadpointEnergyWh["a"] <= 0 {
+			t.Errorf("%s: reserve %v W, %v Wh, ok=%v; want %v W", c.name, d.LoadpointMaxPowerW["a"], d.LoadpointEnergyWh["a"], ok, c.want)
+		}
+	}
+}

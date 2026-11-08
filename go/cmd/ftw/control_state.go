@@ -21,19 +21,19 @@ func newControlStateFromConfig(cfg *config.Config) *control.State {
 		ctrl.SlewEnabled = *cfg.Site.SlewEnabled
 	}
 	ctrl.MinDispatchIntervalS = cfg.Site.MinDispatchIntervalS
+	ctrl.ControlIntervalS = cfg.Site.ControlIntervalS
 	ctrl.InverterGroups = inverterGroupsFrom(cfg.Drivers)
 	ctrl.SupportsPVCurtail = supportsPVCurtailFrom(cfg.Drivers)
 	ctrl.SolarFeedDrivers = solarFeedDriversFrom(cfg.Drivers)
-	ctrl.DriverLimits = driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries)
+	ctrl.DriverLimits = driverLimitsFrom(cfg.ModbusControlDrivers(), cfg.Batteries, cfg.Planner)
 	// Per-phase fuse params for the per-phase clamp inside applyFuseGuard
 	// + forceFuseDischarge. Reads l1_a/l2_a/l3_a from the meter driver
 	// when SiteFuseAmps > 0; otherwise the per-phase clamp is disabled.
 	ctrl.SiteFuseAmps = cfg.Fuse.MaxAmps
 	ctrl.SiteFuseVoltage = cfg.Fuse.Voltage
 	ctrl.SiteFusePhases = cfg.Fuse.Phases
-	// EffectiveSafetyMarginA distinguishes nil ("unset, use default")
-	// from explicit 0 ("operator chose to disable"). The earlier
-	// `<= 0 -> default` shortcut clobbered the disable case.
+	// EffectiveSafetyMarginA resolves nil to the default (0: work to the
+	// fuse rating) and keeps any explicit value, 0 included.
 	ctrl.SiteFuseSafetyA = cfg.Fuse.EffectiveSafetyMarginA()
 	// PV surplus absorber underlay (opt-in). cap == 0 keeps it off.
 	ctrl.PVSurplusAbsorbSoCCap = cfg.Site.PVSurplusAbsorbSoCCap
@@ -77,12 +77,37 @@ func energyDispatchEnabled(cfg *config.Config) bool {
 // and weighted split equally because nothing set its weights.
 var removedModes = map[string]bool{"priority": true, "weighted": true}
 
-// restoreStoredMode applies the mode saved in state.db. A removed mode becomes
-// manual self-consumption and is saved back, so the stored mode matches what
-// the site runs. Any other unknown value keeps the default mode, as before.
-func restoreStoredMode(ctrl *control.State, st *state.Store) {
+// restoreStoredMode keeps durable modes, but never resumes forced Charge.
+// Charge returns to the planner, or Idle if planning is disabled. Removed
+// modes become self-consumption; unknown values keep the default mode.
+func restoreStoredMode(ctrl *control.State, st *state.Store, cfg *config.Config) {
 	v, ok := st.LoadConfig("mode")
 	if !ok {
+		return
+	}
+	if control.Mode(v) == control.ModeCharge {
+		next := control.ModeIdle
+		values := map[string]string{}
+		if cfg != nil && cfg.Planner != nil && cfg.Planner.Enabled {
+			export := config.BatteryExportUnknown
+			if e, valid := config.ParseBatteryExport(cfg.Planner.BatteryExport); valid {
+				export = e
+			}
+			storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
+			if e, valid := config.ParseBatteryExport(storedExport); valid {
+				export = e
+			}
+			next = control.Mode(export.PlannerModeKey())
+			// Keep unknown as unknown. Otherwise the later preference
+			// migration would infer a refusal from the new passive mode.
+			values[config.StateKeyBatteryExport] = string(export)
+		}
+		ctrl.Mode = next
+		values["mode"] = string(next)
+		if err := st.SaveConfigValues(values); err != nil {
+			slog.Warn("could not save the mode after ending manual Charge at restart", "mode", next, "err", err)
+		}
+		slog.Info("manual Charge ended at restart", "previous_mode", v, "mode", next)
 		return
 	}
 	if m := control.Mode(v); control.IsValidMode(m) {

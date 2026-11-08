@@ -331,7 +331,12 @@ func runGoldenScenarioAt(sc goldenScenario, scenarioNow time.Time, slotDirective
 
 	// Pre-dispatch attribution reads (pure).
 	intent := planSignIntent(st)
-	perPhase := perPhaseOverageW(store, st)
+	// The worst phase's overage either way, in watts on that phase.
+	var perPhase float64
+	importW, exportW := phaseFuseReliefW(livePhaseSample(store, st.SiteMeterDriver, store.Get(st.SiteMeterDriver, telemetry.DerMeter)), st, 0)
+	if st.SiteFusePhases > 0 {
+		perPhase = math.Max(importW, exportW) / float64(st.SiteFusePhases)
+	}
 	effImp := st.effectiveImportCeilingW(sc.Inputs.FuseMaxW)
 	effExp := st.effectiveExportCeilingW(sc.Inputs.FuseMaxW)
 
@@ -1316,8 +1321,9 @@ func slewScenarios() []goldenScenario {
 		State:     plan(ModePlannerSelf, 500),
 		Slot:      staleSlot(),
 	}))
-	// A discharge-blocked battery is parked at 0 W by the distributor and
-	// then walked back toward its live discharge by the same mechanism.
+	// A discharge-blocked battery is parked at 0 W by the distributor. Slew
+	// used to walk it back toward its live discharge; floorBlockedDischarge
+	// now holds it at 0 W while the fuse does not need the ramp.
 	blk := gb("ferroamp", 15200, -2000, 0.50)
 	blk.DischargeBlocked = true
 	out = append(out, mk("blocked_sibling_slew_reopens_parked_target", goldenInputs{

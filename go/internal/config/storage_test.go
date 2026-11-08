@@ -492,3 +492,25 @@ func TestDropRetiredSettingsDeletesTheAskWhyKey(t *testing.T) {
 		t.Fatalf("second DropRetiredSettings = %v, %v; want nothing", removed, err)
 	}
 }
+
+// A box that stored zero timings before they counted as unset must still boot.
+// Slew stays 0, because zero slew means "no limit".
+func TestStoredZeroTimingsLoadAsDefaults(t *testing.T) {
+	path, _, st := importedLiveSettings(t)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Site.ControlIntervalS, cfg.Site.WatchdogTimeoutS, cfg.Site.SlewRateW = 0, 0, 0
+	if err := SaveStored(st, path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Site.ControlIntervalS != 2 || got.Site.WatchdogTimeoutS != 60 || got.Site.SlewRateW != 0 {
+		t.Fatalf("reloaded interval=%d watchdog=%d slew=%v, want 2, 60, 0",
+			got.Site.ControlIntervalS, got.Site.WatchdogTimeoutS, got.Site.SlewRateW)
+	}
+}

@@ -1,7 +1,6 @@
 package state
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -215,21 +214,23 @@ func (s *Store) CachedDevices() []Device {
 
 // LookupDeviceByDriverName finds the most recently-seen device bound to a
 // given driver name. Returns nil if no device has been registered yet
-// (cold start before the driver has reported its identity).
+// (cold start before the driver has reported its identity). It reads the
+// committed identity cache, so the control tick never waits for SQLite.
 func (s *Store) LookupDeviceByDriverName(name string) *Device {
-	row := s.db.QueryRow(`SELECT device_id, driver_name,
-		COALESCE(make,''), COALESCE(serial,''), COALESCE(mac,''), COALESCE(endpoint,''),
-		first_seen_ms, last_seen_ms
-		FROM devices WHERE driver_name = ? ORDER BY last_seen_ms DESC LIMIT 1`, name)
-	var d Device
-	if err := row.Scan(&d.DeviceID, &d.DriverName, &d.Make, &d.Serial, &d.MAC, &d.Endpoint,
-		&d.FirstSeenMs, &d.LastSeenMs); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
+	s.deviceCacheMu.RLock()
+	defer s.deviceCacheMu.RUnlock()
+	var found *Device
+	for _, device := range s.deviceCache {
+		if device.DriverName != name {
+			continue
 		}
-		return nil
+		if found == nil || device.LastSeenMs > found.LastSeenMs ||
+			(device.LastSeenMs == found.LastSeenMs && device.DeviceID < found.DeviceID) {
+			d := device
+			found = &d
+		}
 	}
-	return &d
+	return found
 }
 
 // AllDevices returns every registered device, most recently seen first.

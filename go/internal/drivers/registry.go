@@ -61,8 +61,11 @@ func (e *commandMayHaveRunError) Is(target error) bool {
 
 const (
 	defaultRecoveryTimeout = 5 * time.Second
-	defaultRetryInitial    = 100 * time.Millisecond
-	defaultRetryMax        = 30 * time.Second
+	// commandRunTimeout is the least time a started command gets to finish.
+	// The caller's deadline bounds its wait, not the device's answer.
+	commandRunTimeout   = defaultRecoveryTimeout
+	defaultRetryInitial = 100 * time.Millisecond
+	defaultRetryMax     = 30 * time.Second
 )
 
 // DriverControlStatus describes the safety state that the API may expose to
@@ -122,6 +125,9 @@ type Registry struct {
 	lifecycleHook    func(name string)
 	lifecycleMu      sync.Mutex
 	lifecycleGates   map[string]*lifecycleGate
+	spawnRetries     map[string]*spawnRetry
+	spawnInflight    map[string]struct{}
+	spawnRetryClosed bool
 }
 
 // lifecycleGate serializes every lifecycle transition for one driver name.
@@ -291,6 +297,10 @@ type runningDriver struct {
 	evPauseRevision uint64
 	evPauseCycleID  uint64
 	evPausePending  bool
+	// Default-recovery backoff bounds; zero means defaultRetryInitial and
+	// defaultRetryMax. Tests set them.
+	retryInitial time.Duration
+	retryMax     time.Duration
 	// Poll loop coordination
 	cmdCh     chan driverCmd
 	defaultCh chan driverCmd
@@ -357,6 +367,26 @@ func (rd *runningDriver) markDefaultRecoveryPending() {
 	rd.defaultConfirmed = false
 	rd.recoveryPending = true
 	rd.statusMu.Unlock()
+}
+
+// commandRunContext gives a started command at least commandRunTimeout. A
+// caller deadline shorter than that ends only the caller's wait; an explicit
+// cancel still stops the command.
+func commandRunContext(caller context.Context) (context.Context, func()) {
+	deadline, ok := caller.Deadline()
+	if !ok || time.Until(deadline) >= commandRunTimeout {
+		return caller, func() {}
+	}
+	run, cancel := context.WithTimeout(context.WithoutCancel(caller), commandRunTimeout)
+	stop := context.AfterFunc(caller, func() {
+		if errors.Is(caller.Err(), context.Canceled) {
+			cancel()
+		}
+	})
+	return run, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (rd *runningDriver) beginCommand(ctx context.Context) (context.Context, func()) {
@@ -436,9 +466,12 @@ func (s *commandState) snapshot() (err error, started, completed bool) {
 	return err, started, completed
 }
 
+// commandContextError says whether a command that returned success was cut
+// short. The caller's deadline only ends its wait, so a success that arrives
+// after it still counts; an explicit cancel does not.
 func commandContextError(requestCtx, executionCtx context.Context) error {
 	if requestCtx != nil {
-		if err := requestCtx.Err(); err != nil {
+		if err := requestCtx.Err(); errors.Is(err, context.Canceled) {
 			return err
 		}
 	}
@@ -536,7 +569,7 @@ func legacyDriverRequiresDefaultMode(path string, hasCommand bool) (bool, error)
 // add is the shared driver construction path. The caller must hold the
 // lifecycle gate for cfg.Name. startupDefault is false only for connection
 // probes; operational drivers use the startup safety gate.
-func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bool) error {
+func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bool) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -546,6 +579,15 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 		return fmt.Errorf("driver %q already registered", cfg.Name)
 	}
 	r.mu.Unlock()
+	if startupDefault {
+		prevDelay := r.takeSpawnRetry(cfg.Name)
+		retryCfg := cfg
+		defer func() {
+			if err != nil {
+				r.scheduleSpawnRetry(retryCfg, prevDelay, err)
+			}
+		}()
+	}
 
 	if cfg.Lua == "" {
 		return fmt.Errorf("driver %q: must specify `lua` path", cfg.Name)
@@ -856,7 +898,17 @@ func (r *Registry) runLoop(rd *runningDriver) {
 	}
 	var recoveryTimer *time.Timer
 	var recoveryC <-chan time.Time
-	retryDelay := defaultRetryInitial
+	retryInitial, retryMax := rd.retryInitial, rd.retryMax
+	if retryInitial <= 0 {
+		retryInitial = defaultRetryInitial
+	}
+	if retryMax <= 0 {
+		retryMax = defaultRetryMax
+	}
+	retryDelay := retryInitial
+	// pollFailed holds while the device's reads fail. The first good poll
+	// after it is the device's return.
+	pollFailed := false
 	clearRecoveryTimer := func() {
 		if recoveryTimer != nil {
 			if !recoveryTimer.Stop() {
@@ -867,12 +919,12 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			}
 		}
 		recoveryC = nil
-		retryDelay = defaultRetryInitial
+		retryDelay = retryInitial
 	}
 	scheduleRecovery := func() {
 		d := retryDelay
 		if d <= 0 {
-			d = defaultRetryInitial
+			d = retryInitial
 		}
 		if recoveryTimer == nil {
 			recoveryTimer = time.NewTimer(d)
@@ -887,10 +939,10 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		}
 		recoveryC = recoveryTimer.C
 		rd.markDefaultRecoveryPending()
-		if retryDelay < defaultRetryMax {
+		if retryDelay < retryMax {
 			retryDelay *= 2
-			if retryDelay > defaultRetryMax {
-				retryDelay = defaultRetryMax
+			if retryDelay > retryMax {
+				retryDelay = retryMax
 			}
 		}
 	}
@@ -1073,13 +1125,21 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					// own (manual ev_resume does not require a cycle id).
 					invalidateCommandSequence()
 				}
-				commandCtx, finishCommand := rd.beginCommand(cmdCtx)
+				// A wallbox-cycle step keeps its caller's deadline. Its owner gives
+				// up at that deadline and sends no resume, so a pause that lands
+				// late must fail and restore the default, not latch as pending.
+				runCtx, finishRun := cmdCtx, func() {}
+				if cmd.cycleID == 0 {
+					runCtx, finishRun = commandRunContext(cmdCtx)
+				}
+				commandCtx, finishCommand := rd.beginCommand(runCtx)
 				// SendDefault may close the control window after the earlier queue
 				// check but before this actor installs activeCancel. Recheck once the
 				// cancel hook exists; after this point a racing default cancels the
 				// context passed to the runtime.
 				if rejection := rd.commandRejection(cmd.controlEpoch); rejection != nil {
 					finishCommand()
+					finishRun()
 					err = rejection
 					break
 				}
@@ -1112,6 +1172,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					timer.Reset(rd.env.PollInterval())
 				}
 				finishCommand()
+				finishRun()
 				if err == nil && cyclePause {
 					rd.evPausePending = true
 					rd.evPauseRevision = rd.commandRevision
@@ -1133,6 +1194,8 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			pollCtx, finishPoll := rd.beginCommand(ctx)
 			returned, err := rd.driver.Poll(pollCtx)
 			finishPoll()
+			returnedFromOutage := err == nil && pollFailed
+			pollFailed = err != nil
 			if r.tel != nil {
 				r.tel.CountPoll(err != nil)
 			}
@@ -1160,6 +1223,17 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			// Re-arm at the interval the poll returned, or the standing one.
 			interval = rd.env.nextPollInterval(returned)
 			timer.Reset(interval)
+			// A default that failed while the device was away is retried
+			// on its first good poll, not when the backoff (up to 30 s)
+			// next allows. Once per return: a device that reads but still
+			// refuses waits for the backoff again.
+			if returnedFromOutage && recoveryC != nil {
+				if err := attemptDefault(); err != nil {
+					slog.Error("driver default failed on its first good poll after an outage; control remains blocked", "name", rd.cfg.Name, "err", err)
+				} else {
+					slog.Info("driver default confirmed on its first good poll after an outage", "name", rd.cfg.Name)
+				}
+			}
 		case <-recoveryC:
 			if err := attemptDefault(); err != nil {
 				slog.Error("driver default recovery failed; control remains blocked", "name", rd.cfg.Name, "err", err)
@@ -1206,6 +1280,7 @@ func (r *Registry) remove(name string, skipDefault bool) {
 // lets Restart and Reload keep the old generation and its replacement in one
 // serialized transition instead of opening an Add/Remove gap.
 func (r *Registry) removeLocked(name string, skipDefault bool) {
+	r.takeSpawnRetry(name)
 	skipDefault = skipDefault || r.controlBlocked()
 	r.mu.Lock()
 	rd, ok := r.rec[name]
@@ -1441,6 +1516,11 @@ func (r *Registry) Names() []string {
 
 // ShutdownAll stops every driver. Blocks until all poll loops exit.
 func (r *Registry) ShutdownAll() {
+	// An attempt in flight holds its gate and tears its driver down itself
+	// once it sees the registry closed. Wait for it.
+	for _, n := range r.closeSpawnRetries() {
+		r.acquireLifecycle(n)()
+	}
 	r.mu.Lock()
 	names := make([]string, 0, len(r.rec))
 	for n := range r.rec {
@@ -1466,6 +1546,14 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troub
 			continue
 		}
 		active = append(active, d)
+	}
+	// Stop retrying a driver that failed to start and has left the config.
+	for _, n := range r.pendingSpawnRetries() {
+		if _, ok := findDriver(active, n); !ok {
+			release := r.acquireLifecycle(n)
+			r.removeLocked(n, false)
+			release()
+		}
 	}
 
 	r.mu.Lock()

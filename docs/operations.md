@@ -185,30 +185,61 @@ mutations remain locked.
 remote access; remote access is the FTW app. See
 [architecture.md](architecture.md#remote-access-boundary).
 
-`api.lan_auth` is off by default. Turn it on from loopback inside the
-process: `http://127.0.0.1:8080` Settings → System on the machine, or `curl`
-to `127.0.0.1`. When on, protected LAN routes need the house password or
-`FTW_API_TOKEN`. `curl` sends `Authorization: Bearer <house-password>` or
-`Authorization: Bearer <FTW_API_TOKEN>`. The browser login form sets a
-session cookie (`ftw_lan`, 12 hours). Loopback (`127.0.0.1` / `::1`) never
-asks. Live status stays readable without the password; a viewer caller is
-minted for those reads. The two secrets do not share a lockout: retrying the
-API token cannot lock the household out of Settings. A first enable from
-another LAN address is refused, so a visitor cannot set the password.
-`POST /api/config` cannot flip the flag.
+### House password
 
-On an older Docker install under Docker Desktop (`docker-compose.macos.yml`),
-a host curl to localhost arrives as the bridge gateway, not loopback, so
-Settings and host curl get 403. Desktop SNAT uses that same peer for every
-published-port client, including LAN visitors, so it must not count as
-loopback. Enable from inside the container:
+The house password (`api.lan_auth`) keeps other devices on the home network
+out of Settings and stops them letting an assistant in. Live status stays
+readable without it; a viewer caller is minted for those reads.
+
+- **A new box** asks for it on the setup wizard's last step and on the
+  assistant setup path. The Home Assistant app asks for none: Home
+  Assistant signs its users in. A script that posts first-run settings
+  without `house_password` leaves the lock off.
+- **A running box without one** asks for it where it is needed: Settings →
+  System → House password, or Settings → Access, right above the
+  assistant's code. Any browser that reaches the box may set the first
+  one. While the lock is off that browser is already an owner, so setting
+  it grants nothing new; it closes the door behind it. Choosing it signs
+  that browser in. `POST /api/config` cannot flip the flag.
+- **Any password** is accepted, however short. The page warns below 8
+  characters; the choice is the owner's.
+- **When it is on**, protected LAN routes need the password, a browser
+  session, or `FTW_API_TOKEN`. Scripts send `Authorization: Bearer
+  <house-password>` or `Authorization: Bearer <FTW_API_TOKEN>`. The browser
+  sign-in sets an `HttpOnly` session cookie (`ftw_lan`, 30 days). Five
+  wrong passwords lock every sign-in for 30 seconds; retrying the API
+  token never counts. From another device, changing or turning off the
+  password needs it.
+- **The box itself** (`127.0.0.1` / `::1`) needs no password for settings,
+  so `ftw` commands keep working and `ftw password reset` can turn it off.
+  A browser on the box signs in like any other before it lets an
+  assistant in. Drivers cannot reach the API at all; anything else that
+  runs on the box can already change every setting.
+
+**Forgot it**, or someone else set it first: turn it off on the box, then
+choose a new one on the box's page.
 
 ```bash
-docker compose -f docker-compose.macos.yml exec ftw \
-  wget -qO- --header='Content-Type: application/json' \
-  --post-data='{"enabled":true,"password":"ETT-LANGT-LOSEN"}' \
-  http://127.0.0.1:8080/api/auth/password
+ftw password reset
 ```
+
+The `ftw` command moves with `install.sh --refresh`, not with `ftw update`.
+If it answers `unknown command password`, run the same step with Core's own
+binary for the release `ftw status` names:
+
+```bash
+/opt/ftw/releases/v0.X.Y/ftw password reset
+```
+
+On Docker, run the box's own binary in its container (add
+`-f docker-compose.macos.yml` on Docker Desktop):
+
+```bash
+docker compose exec ftw /app/ftw password reset
+```
+
+Either signs every browser out. Without shell access to the box, the
+password cannot be reset.
 
 An owner pairing QR is minted only from loopback or with the house
 password. Promoting a paired phone to owner uses the same gate. The
@@ -217,9 +248,6 @@ that mint also stays at the box. A viewer invite still works from the
 LAN once an owner exists.
 
 The FTW app and Home Assistant MQTT are unchanged.
-
-Recovery: `curl` to `127.0.0.1`, or set `api.lan_auth: false` in
-`config.yaml` and restart Core.
 
 ### "remote access to protected API routes is disabled"
 

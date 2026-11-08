@@ -638,7 +638,13 @@ func FromConfig(cfg *config.Price, st *state.Store, fx FXConverter) *Service {
 		sp.FX = fx
 		p = withFallback(sp, np)
 	case "elprisetjustnu":
-		p = withFallback(NewElpriser(), np)
+		ep := NewElpriser()
+		if base := strings.TrimRight(cfg.BaseURL, "/"); base != "" {
+			ep.BaseURL = base
+			p = ep
+		} else {
+			p = withFallback(ep, np)
+		}
 	case "entsoe":
 		ep := NewENTSOE(cfg.APIKey)
 		ep.Currency = currency

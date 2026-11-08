@@ -387,14 +387,16 @@ func TestRulesPutSeedsDefaultsOnFirstTouch(t *testing.T) {
 		t.Fatalf("defaults not seeded: %+v", notif)
 	}
 	// Everything is opt-in except the FTW Cloud and agent notices, which
-	// every owner should hear without having asked, and car.which: with
+	// every owner should hear without having asked, car.which: with
 	// several cars and no answer, the box plans for a visitor until someone
-	// taps, and only this asks (docs/cars.md).
+	// taps, and only this asks (docs/cars.md), and control.not_following: a
+	// device that does not do what FTW asked (Fredrik, 5 Nov 2026).
 	onByDefault := map[string]bool{
 		notifications.PushCloudGranted: true, notifications.PushCloudRevoked: true,
 		notifications.PushAgentAdded: true, notifications.PushAgentRequest: true,
 		notifications.PushAgentExpiring: true, notifications.PushApprovalKeySet: true,
 		notifications.PushOwnerAdded: true, notifications.PushCarWhich: true,
+		notifications.PushControlNotFollowing: true,
 	}
 	enabled := 0
 	for _, e := range notif.Events {

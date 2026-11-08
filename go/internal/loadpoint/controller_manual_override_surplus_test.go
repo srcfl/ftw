@@ -108,11 +108,17 @@ func TestPersistentManualHoldClearedOnUnplug(t *testing.T) {
 		t.Fatalf("hold not installed")
 	}
 
-	// Car unplugs.
+	// Car unplugs. One reading is not yet an unplug.
 	samples[cfg.DriverName] = EVSample{Connected: false}
 	c.Tick(context.Background(), now.Add(5*time.Second))
+	if _, active := c.GetManualHold(cfg.ID, now.Add(5*time.Second)); !active {
+		t.Fatalf("persistent hold cleared by one unplugged reading; want kept for UnplugGrace")
+	}
 
-	if _, active := c.GetManualHold(cfg.ID, now.Add(5*time.Second)); active {
+	// The cable stays out for UnplugGrace.
+	at := now.Add(5*time.Second + UnplugGrace)
+	c.Tick(context.Background(), at)
+	if _, active := c.GetManualHold(cfg.ID, at); active {
 		t.Errorf("persistent hold survived unplug; want cleared")
 	}
 }

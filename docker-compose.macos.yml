@@ -22,10 +22,10 @@
 #     In config.yaml set the MQTT host to `mosquitto` (port 1883), NOT
 #     `localhost` / `127.0.0.1`. There is no host networking to make
 #     localhost mean "the broker".
-#   - First enable of the house password (api.lan_auth) is loopback-only
-#     inside the container. A Mac curl to http://127.0.0.1:8080 arrives as
-#     the bridge gateway. Use `docker compose -f docker-compose.macos.yml
-#     exec ftw` and then curl http://127.0.0.1:8080 from there.
+#   - A Mac browser on http://127.0.0.1:8080 arrives as the bridge
+#     gateway, not loopback. Set the house password in the page as usual.
+#     To reset a forgotten one: `docker compose -f docker-compose.macos.yml
+#     exec ftw /app/ftw password reset`.
 #   - mDNS (`zap.local`) and UDP broadcast device discovery do NOT cross
 #     the Docker Desktop VM boundary. Configure every driver with an
 #     EXPLICIT IP address. Outbound unicast TCP (Modbus TCP to a known

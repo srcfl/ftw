@@ -24,7 +24,21 @@ describe("lan-auth UI", () => {
 
   it("turns the lock from Settings with /api/auth/password, not the config checkbox", () => {
     assert.match(system, /\/api\/auth\/password/);
-    assert.match(system, /LAN password/);
+    assert.match(system, /House password/);
     assert.doesNotMatch(system, /data-path="api\.lan_auth"/);
+  });
+
+  it("speaks to a household, not to a developer", () => {
+    const section = (from, to) => {
+      const start = system.indexOf(from);
+      const end = system.indexOf(to, start);
+      assert.ok(start >= 0 && end > start, from + " must be present");
+      return system.slice(start, end);
+    };
+    const page = section("<legend>House password</legend>", "</fieldset>");
+    const answers = section("function lanStatusText", "function settingsOpen");
+    for (const text of [page, answers, lanAuth]) {
+      assert.doesNotMatch(text, /loopback|curl|docker compose|Bearer/i);
+    }
   });
 });

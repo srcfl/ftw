@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -133,6 +134,14 @@ type Service struct {
 	// watts. Nil or 0 plans against the aggregate fuse alone. Called
 	// without s.mu; it may take the control lock.
 	PhaseImbalanceW func() float64
+	// ImportCeiling returns the owner's hourly import ceiling as Core
+	// enforces it. Nil or zero W plans without it. Called without s.mu; it
+	// may take the control lock.
+	ImportCeiling func() ImportCeiling
+	// HourImport returns the clock hour in progress as Core's live import
+	// counter measured it (control.MeasuredHourImport). The demand charges'
+	// hour in progress uses it before the import history. Nil: history only.
+	HourImport func() HourImport
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
 	Load               LoadPredictor // optional — overrides flat BaseLoad
@@ -160,6 +169,10 @@ type Service struct {
 	// LoadpointStates supplies current saved goals without taking the control
 	// lock. It is independent of forecasts, prices and battery qualification.
 	LoadpointStates func() []loadpoint.State
+	// PlanningLimits is the power range and the steps the plan gets for a
+	// session (loadpoint.PlanningLimits); the deadline reserve holds to them
+	// too. Nil holds the reserve to the charger's own table (LimitPower).
+	PlanningLimits func(loadpoint.State) (minW, maxW float64, steps []float64)
 
 	// SaveDiag is called synchronously after every successful replan that
 	// remains the newest request, with the same Diagnostic the
@@ -1694,6 +1707,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	}
 	limitNearImportForPhases(slots, now, fuseMaxW, phaseImbalanceW)
 	limitNearImportForPhases(fallbackSlots, now, fuseMaxW, phaseImbalanceW)
+	var importCeiling ImportCeiling
+	if s.ImportCeiling != nil {
+		importCeiling = s.ImportCeiling()
+	}
 
 	if s.PVCurtailmentProbe != nil {
 		p.PVCurtailment = s.PVCurtailmentProbe()
@@ -1741,6 +1758,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	p.ExportFloorOreKwh = site.ExportFloorOreKwh
 	p.PVForecastSafetyK = request.safetyK
 	p.DemandCharges = s.demandChargesFor(site, slots, executionNow)
+	p.ImportHours = importHours(slots, importCeiling)
+	if p.ImportHours != nil {
+		p.ImportMeanW = importCeiling.MeanW
+	}
 	if pvUncertainty != nil || s.ForecastSnapshot != nil {
 		p.PVUncertaintyW = pvUncertaintyW
 	}
@@ -2059,6 +2080,17 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			}
 
 			plan = candidate
+		} else if overrun := (*importHourOverrun)(nil); errors.As(err, &overrun) && (recoveryRequired && !downsidePrimary || coreDPModelError(p) != nil) {
+			// Core cannot plan this site itself. The worker's plan keeps
+			// every rule but the hours, as before the hours existed; the
+			// live limit still holds each hour.
+			if request.wasCanceledByService() {
+				return s.canceledReplan(request, "primary-fallback")
+			}
+			s.recordPlanningFailure(request, "primary_optimizer", err.Error(), slots, p, optimizerErr)
+			plan = overrun.plan
+			p.ImportHours, p.ImportMeanW = nil, 0
+			warnings = append(warnings, "Core cannot plan this site itself, so the plan may import more in an hour than the limit allows; Core still holds each hour to it: "+err.Error())
 		} else {
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")

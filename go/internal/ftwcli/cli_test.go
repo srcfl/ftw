@@ -818,3 +818,28 @@ func TestUpdateReportsHealthOnlyOnceItHolds(t *testing.T) {
 		t.Fatalf("reported after %s, before ok held", elapsed)
 	}
 }
+
+// A forgotten house password is turned off from the box itself, and the
+// page then asks for a new one.
+func TestPasswordResetTurnsTheHousePasswordOff(t *testing.T) {
+	f, srv := newFakeCore(t)
+	f.on("POST", "/api/auth/password", reply(200, `{"status":"ok","lan_auth":false,"configured":false}`))
+	code, out, errOut := runCLI(t, testEnv(), "password", "reset", "--url", srv.URL)
+	if code != exitOK || !strings.Contains(out, "The house password is off") {
+		t.Fatalf("reset %d %q %q", code, out, errOut)
+	}
+	if got := f.bodies; len(got) != 1 || got[0] != `{"enabled":false}` {
+		t.Fatalf("posted %v", got)
+	}
+
+	f.on("POST", "/api/auth/password", reply(401, `{"error":"valid LAN password required"}`))
+	if code, _, errOut := runCLI(t, testEnv(), "password", "reset", "--url", srv.URL); code != exitFailed || !strings.Contains(errOut, "run this on the box itself") {
+		t.Fatalf("from elsewhere %d %q", code, errOut)
+	}
+
+	for _, args := range [][]string{{"password"}, {"password", "set"}, {"password", "reset", "now"}} {
+		if code, _, errOut := runCLI(t, testEnv(), args...); code != exitUsage || !strings.Contains(errOut, "ftw password reset") {
+			t.Fatalf("%v: exit %d, stderr %q", args, code, errOut)
+		}
+	}
+}

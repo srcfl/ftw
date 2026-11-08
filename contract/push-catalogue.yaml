@@ -44,6 +44,13 @@ events:
     # kettle must not page anyone.
     title: The house is drawing too much
     body: "{phase} is over the fuse rating."
+  - kind: control.not_following
+    # After the box's own threshold: ten minutes in which the box's answer
+    # to "Are we in control?" said a device does not do what FTW asked, as
+    # a battery that charges when told to discharge. A slow battery must not
+    # page anyone. Once until the device follows again.
+    title: A device is not following FTW
+    body: "{name} does not do what FTW asks. Open FTW to see why."
   - kind: box.unreachable
     # The one sentence the box cannot send about itself. The relay holds
     # this pre-encrypted and posts it only when the box has missed its

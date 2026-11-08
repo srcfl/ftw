@@ -26,6 +26,7 @@ Usage:
   ftw rollback                        return to the previous release
   ftw backup [--output-dir DIR]       make a verified full backup; DIR gets a checked copy
   ftw support [--output FILE]         write the redacted support file
+  ftw password reset                  turn the house password off, to choose a new one
   ftw help
 
 Every command takes --url URL (default http://127.0.0.1:8080).
@@ -114,6 +115,8 @@ func run(args []string, stdout, stderr io.Writer, e env) int {
 		err = runBackup(args[1:], stdout, e)
 	case "support":
 		err = runSupport(args[1:], stdout, e)
+	case "password":
+		err = runPassword(args[1:], stdout, e)
 	default:
 		err = usageError("unknown command " + args[0])
 	}

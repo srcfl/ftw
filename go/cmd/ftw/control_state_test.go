@@ -167,6 +167,29 @@ func TestBatteryLimitConfigBothZeroUsesDefault(t *testing.T) {
 	}
 }
 
+// A config with no fuse.safety_margin_a reaches Core at the fuse rating, and
+// an explicit value still wins.
+func TestUnsetFuseMarginReachesCoreAsZero(t *testing.T) {
+	cfg := parseBatteryLimitConfig(t, "", "    max_charge_w: 10000\n")
+	ctrl := newControlStateFromConfig(cfg)
+	if ctrl.SiteFuseSafetyA != 0 {
+		t.Fatalf("unset margin reached Core as %v A, want 0", ctrl.SiteFuseSafetyA)
+	}
+	// 63 A × 230 V × 3 = 43470 W is the ceiling with no margin.
+	if err := ctrl.SetPeakLimit(43470); err != nil {
+		t.Fatalf("peak limit at the fuse: %v", err)
+	}
+	if err := ctrl.SetPeakLimit(43471); err == nil {
+		t.Fatal("a peak limit 1 W over the fuse was accepted")
+	}
+
+	half := 0.5
+	cfg.Fuse.SafetyMarginA = &half
+	if got := newControlStateFromConfig(cfg).SiteFuseSafetyA; got != 0.5 {
+		t.Fatalf("explicit 0.5 A reached Core as %v A", got)
+	}
+}
+
 // A "NaN" saved from an MQTT command must not come back as the PI setpoint
 // on every boot.
 func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {
@@ -184,10 +207,15 @@ func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {
 // self-consumption and store it, not keep a mode no door accepts any more.
 func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 	for stored, want := range map[string]control.Mode{
-		"priority":          control.ModeSelfConsumption,
-		"weighted":          control.ModeSelfConsumption,
-		"planner_arbitrage": control.ModePlannerArbitrage,
-		"peak_shaving":      control.ModePeakShaving,
+		"priority":                  control.ModeSelfConsumption,
+		"weighted":                  control.ModeSelfConsumption,
+		"idle":                      control.ModeIdle,
+		"self_consumption":          control.ModeSelfConsumption,
+		"peak_shaving":              control.ModePeakShaving,
+		"planner_self":              control.ModePlannerSelf,
+		"planner_cheap":             control.ModePlannerCheap,
+		"planner_passive_arbitrage": control.ModePlannerPassiveArbitrage,
+		"planner_arbitrage":         control.ModePlannerArbitrage,
 	} {
 		t.Run(stored, func(t *testing.T) {
 			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
@@ -201,7 +229,7 @@ func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 			ctrl := control.NewState(0, 50, "meter")
 			ctrl.Mode = control.ModeIdle
 
-			restoreStoredMode(ctrl, st)
+			restoreStoredMode(ctrl, st, nil)
 
 			if ctrl.Mode != want {
 				t.Fatalf("mode = %q, want %q", ctrl.Mode, want)
@@ -225,7 +253,7 @@ func TestRestoreStoredModeLeavesAnUnknownValueAlone(t *testing.T) {
 	}
 	ctrl := control.NewState(0, 50, "meter")
 
-	restoreStoredMode(ctrl, st)
+	restoreStoredMode(ctrl, st, nil)
 
 	if ctrl.Mode != control.ModeSelfConsumption {
 		t.Fatalf("mode = %q, want the default", ctrl.Mode)

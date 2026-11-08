@@ -37,6 +37,7 @@ func TestMissingReadingDoesNotEndManualSession(t *testing.T) {
 	}
 	samples[cfg.DriverName] = EVSample{Connected: false}
 	c.Tick(context.Background(), now.Add(3*time.Second))
+	c.Tick(context.Background(), now.Add(3*time.Second+UnplugGrace))
 	if _, ok := c.GetManualHold(cfg.ID, now); ok {
 		t.Fatal("a confirmed unplug must clear the hold")
 	}

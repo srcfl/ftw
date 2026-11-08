@@ -238,3 +238,38 @@ describe("setup wizard — mDNS-first device addressing", () => {
       "the hint must track manual edits of the host field");
   });
 });
+
+describe("setup wizard — the house password on a new box", () => {
+  it("asks for it on the last step and sends it with the settings", () => {
+    assert.match(HTML, /id=["']house-password-step["'][^>]*hidden/,
+      "the step starts hidden until the wizard knows it claims a new box");
+    assert.match(HTML, /id=["']house-password["']/);
+    assert.match(HTML, /id=["']house-password-confirm["']/);
+    assert.match(JS, /cfg\.house_password\s*=\s*password/,
+      "the wizard sends the password with the settings it saves");
+  });
+
+  it("asks only on a new box, never through Home Assistant", () => {
+    assert.match(JS, /firstRun\s*=\s*r\.status\s*===\s*404/,
+      "a box that already runs answers /api/auth/status and keeps its password");
+    assert.match(JS, /firstRun\s*&&\s*!window\.FTWHomeAssistant/);
+  });
+
+  it("refuses only an empty or mistyped password; a short one gets a warning", () => {
+    assert.match(JS, /!password\s*\|\|\s*password\s*!==\s*document\.getElementById\(['"]house-password-confirm['"]\)\.value/);
+    assert.doesNotMatch(JS + HTML, /at least 10|minlength="10"|length\s*<\s*10/);
+    assert.match(JS, /Short passwords are easy to guess/);
+  });
+});
+
+describe("setup wizard — household clock", () => {
+  it("stores the browser's zone as site.time_zone", () => {
+    assert.match(JS, /time_zone:\s*browserTimeZone\(\)/,
+      "a Docker box runs on UTC; the home's zone comes from the browser that sets it up");
+    assert.match(JS, /resolvedOptions\(\)\.timeZone/);
+  });
+
+  it("names the clock on the review screen", () => {
+    assert.match(JS, /' · clock ' \+ esc\(clock\)/);
+  });
+});

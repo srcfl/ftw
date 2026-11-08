@@ -122,10 +122,15 @@ func launch(root, config, userDrivers string, extra []string, execFn execFunc) e
 	if err != nil {
 		return err
 	}
-	if trial {
-		return fmt.Errorf("fallback selected another trial %s", tag)
+	// With current damaged, the fallback is the previous release as a
+	// trial. It gets one attempt; a failure marks it so it is not retried.
+	err = execRelease(path, tag, trial, root, config, userDrivers, extra, execFn)
+	if err != nil && trial {
+		if failErr := manager.FailTrial(tag); failErr != nil {
+			return fmt.Errorf("fallback trial exec failed (%v) and could not be recorded: %w", err, failErr)
+		}
 	}
-	return execRelease(path, tag, false, root, config, userDrivers, extra, execFn)
+	return err
 }
 
 func execRelease(path, tag string, trial bool, root, config, userDrivers string, extra []string, execFn execFunc) error {

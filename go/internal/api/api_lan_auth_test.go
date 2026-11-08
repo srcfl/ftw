@@ -484,46 +484,38 @@ func TestAuthPasswordEnableAndStatus(t *testing.T) {
 		t.Fatalf("empty enable status = %d, want 400 (body=%s)", rr.Code, rr.Body.String())
 	}
 
-	short := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(`{"password":"short","enabled":true}`))
-	short.RemoteAddr = "127.0.0.1:43210"
-	short.Header.Set("Content-Type", "application/json")
+	long := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password",
+		strings.NewReader(`{"password":"`+strings.Repeat("x", maxLANPasswordLen+1)+`","enabled":true}`))
+	long.RemoteAddr = "127.0.0.1:43210"
+	long.Header.Set("Content-Type", "application/json")
 	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, short)
+	srv.Handler().ServeHTTP(rr, long)
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("short enable status = %d, want 400 (body=%s)", rr.Code, rr.Body.String())
+		t.Fatalf("over-long enable status = %d, want 400 (body=%s)", rr.Code, rr.Body.String())
 	}
 
+	// The first password may come from a LAN device: while the lock is off
+	// it is already an owner. Choosing it signs that browser in.
 	body := `{"password":"` + testHousePassword + `","enabled":true}`
 	lanEnable := httptest.NewRequest(http.MethodPost, "http://ftw.local:8080/api/auth/password", strings.NewReader(body))
 	lanEnable.RemoteAddr = "192.168.1.10:43210"
 	lanEnable.Header.Set("Content-Type", "application/json")
 	rr = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rr, lanEnable)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("first LAN enable status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
-	}
-
-	// Docker Desktop published ports SNAT to the bridge gateway, not
-	// loopback. That peer is RFC1918, same as a LAN visitor.
-	bridge := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(body))
-	bridge.RemoteAddr = "172.17.0.1:43210"
-	bridge.Header.Set("Content-Type", "application/json")
-	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, bridge)
-	if rr.Code != http.StatusForbidden {
-		t.Fatalf("docker-bridge enable status = %d, want 403 (body=%s)", rr.Code, rr.Body.String())
-	}
-	if !strings.Contains(rr.Body.String(), "docker compose") {
-		t.Fatalf("403 body should name the Docker Desktop exec path, got %s", rr.Body.String())
-	}
-
-	post := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password", strings.NewReader(body))
-	post.RemoteAddr = "127.0.0.1:43210"
-	post.Header.Set("Content-Type", "application/json")
-	rr = httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rr, post)
 	if rr.Code != http.StatusOK {
-		t.Fatalf("loopback enable status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+		t.Fatalf("first LAN enable status = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"signed_in":true`) {
+		t.Fatalf("first LAN enable should sign the browser in: %s", rr.Body.String())
+	}
+	cookie := lanSessionFromRecorder(t, rr)
+	signedIn := httptest.NewRequest(http.MethodGet, "http://ftw.local:8080/api/config", nil)
+	signedIn.RemoteAddr = "192.168.1.10:43210"
+	signedIn.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: cookie})
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, signedIn)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("signed-in config read = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/auth/status", nil)
@@ -552,6 +544,179 @@ func TestAuthPasswordEnableAndStatus(t *testing.T) {
 	encoded, ok := srv.deps.State.LoadConfig(lanAuthPasswordKey)
 	if !ok || !strings.Contains(encoded, "$argon2id$") {
 		t.Fatalf("stored hash = %q, want argon2id encoding", encoded)
+	}
+}
+
+// Where the request comes from does not decide who may set the first
+// password: a LAN device, a published Docker port and the box itself all
+// may, and each is signed in. Afterwards the password is what counts.
+func TestTheFirstHousePasswordFromAnyAddress(t *testing.T) {
+	for _, remote := range []string{"192.168.1.10:43210", "172.17.0.1:43210", "127.0.0.1:43210", "[::1]:43210"} {
+		t.Run(remote, func(t *testing.T) {
+			resetLANGuesses(t)
+			srv := newLANAuthServer(t)
+			body := `{"password":"` + testHousePassword + `","enabled":true}`
+			rr := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/password", remote, body)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("first enable = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+			}
+			if token := lanSessionFromRecorder(t, rr); !lanSessionValid(token) {
+				t.Fatal("the browser that chose the password is not signed in")
+			}
+
+			// Someone else on the network cannot change it without it.
+			again := `{"password":"another-house-pass","enabled":true}`
+			rr = postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/password", "192.168.1.77:5000", again)
+			if rr.Code != http.StatusUnauthorized {
+				t.Fatalf("second device changing it = %d, want 401 (body=%s)", rr.Code, rr.Body.String())
+			}
+			if !VerifyStoredLANSecret(srv.deps.State, testHousePassword) {
+				t.Fatal("the first password was replaced")
+			}
+		})
+	}
+}
+
+// Two first enables race: Authenticate let both in while the lock was off,
+// and the write lock serialises them. The second proved nothing once the
+// lock is on, so it may not replace the first browser's password.
+func TestASecondFirstEnableCannotReplaceTheFirst(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	first := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/password", "192.168.1.10:43210",
+		`{"password":"`+testHousePassword+`","enabled":true}`)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first = %d (body=%s)", first.Code, first.Body.String())
+	}
+	// The second request as the handler sees it after Authenticate ran with
+	// the lock still off: a LAN owner with no proof on its context.
+	for _, body := range []string{`{"password":"visitor-pass","enabled":true}`, `{"enabled":false}`} {
+		late := httptest.NewRequest(http.MethodPost, "http://ftw.local:8080/api/auth/password", strings.NewReader(body))
+		late.RemoteAddr = "192.168.1.77:5000"
+		late.Header.Set("Content-Type", "application/json")
+		late = late.WithContext(apiauth.WithCaller(late.Context(), localCaller(late)))
+		rr := httptest.NewRecorder()
+		srv.handleAuthPassword(rr, late)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("%s after the lock came on = %d, want 401 (body=%s)", body, rr.Code, rr.Body.String())
+		}
+	}
+	if !VerifyStoredLANSecret(srv.deps.State, testHousePassword) || !srv.deps.Cfg.API.LANAuth {
+		t.Fatal("the late request changed the lock")
+	}
+}
+
+// The box itself may replace a password it never proved, as it may change
+// any setting, but that does not sign it in. Signed in, it stays signed in.
+func TestTheBoxItselfChangingThePasswordEarnsNoSignIn(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	enableStoredLANAuth(t, srv)
+	rr := postLANAuthJSON(srv, http.MethodPost, "http://127.0.0.1:8080/api/auth/password", "127.0.0.1:43210",
+		`{"password":"replaced-on-the-box","enabled":true}`)
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), `"signed_in":true`) {
+		t.Fatalf("unproved change on the box = %d %s, want 200 without a sign-in", rr.Code, rr.Body.String())
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == lanSessionCookieName && c.Value != "" {
+			t.Fatal("an unproved change set a session cookie")
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/auth/password",
+		strings.NewReader(`{"password":"changed-while-signed-in","enabled":true}`))
+	req.RemoteAddr = "127.0.0.1:43210"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer replaced-on-the-box")
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"signed_in":true`) {
+		t.Fatalf("proved change on the box = %d %s, want a sign-in", rr.Code, rr.Body.String())
+	}
+}
+
+// The browser on the box itself signs in with the cookie, and that cookie
+// lets it widen an assistant's access.
+func TestACookieOnTheBoxItselfCanWiden(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	srv.deps.Agents = newStubAgents("")
+	rr := postLANAuthJSON(srv, http.MethodPost, "http://127.0.0.1:8080/api/auth/password", "127.0.0.1:43210",
+		`{"password":"`+testHousePassword+`","enabled":true}`)
+	token := lanSessionFromRecorder(t, rr)
+	list := func(cookie string) bool {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8080/api/agents", nil)
+		req.RemoteAddr = "127.0.0.1:43210"
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: lanSessionCookieName, Value: cookie})
+		}
+		rr := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		var got struct {
+			Box AgentFacts `json:"box"`
+		}
+		_ = json.Unmarshal(rr.Body.Bytes(), &got)
+		return got.Box.Widen
+	}
+	if !list(token) {
+		t.Fatal("the box's own browser, signed in, cannot widen")
+	}
+	if list("") {
+		t.Fatal("the box itself widens without signing in")
+	}
+}
+
+// An app session reaches the box looking like loopback. Its own key proves
+// it; a house password in its headers is never read.
+func TestAnAppSessionNeverPresentsTheHousePassword(t *testing.T) {
+	resetLANGuesses(t)
+	req := sessionRequest(http.MethodGet, "/api/agents", "")
+	req.Header.Set("Authorization", "Bearer "+testHousePassword)
+	ok, after := resolveLANSecret(req, lanAuthPolicy(testHousePassword))
+	if _, checked := lanSecretFrom(after.Context()); ok || checked {
+		t.Fatalf("a session's header was read as the house password: ok %v checked %v", ok, checked)
+	}
+}
+
+// How long the password is, is the owner's choice: the page warns about a
+// short one, and the box takes it.
+func TestAShortHousePasswordIsTheOwnersChoice(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	rr := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/password", "192.168.1.10:43210", `{"password":"1234","enabled":true}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("short password = %d, want 200 (body=%s)", rr.Code, rr.Body.String())
+	}
+	if !VerifyStoredLANSecret(srv.deps.State, "1234") {
+		t.Fatal("the short password does not sign in")
+	}
+	if _, err := HashInitialLANPassword("1234"); err != nil {
+		t.Fatalf("a new box refused a short password: %v", err)
+	}
+	if _, err := HashInitialLANPassword(""); err == nil {
+		t.Fatal("a new box took an empty password")
+	}
+}
+
+// Turning the lock off, as ftw password reset does from the box, signs
+// nobody in and ends every session.
+func TestTurningTheHousePasswordOffSignsNobodyIn(t *testing.T) {
+	resetLANGuesses(t)
+	srv := newLANAuthServer(t)
+	body := `{"password":"` + testHousePassword + `","enabled":true}`
+	rr := postLANAuthJSON(srv, http.MethodPost, "http://ftw.local:8080/api/auth/password", "192.168.1.10:43210", body)
+	token := lanSessionFromRecorder(t, rr)
+	rr = postLANAuthJSON(srv, http.MethodPost, "http://127.0.0.1:8080/api/auth/password", "127.0.0.1:43210", `{"enabled":false}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("disable = %d (body=%s)", rr.Code, rr.Body.String())
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == lanSessionCookieName && c.Value != "" {
+			t.Fatal("turning the lock off set a session cookie")
+		}
+	}
+	if lanSessionValid(token) {
+		t.Fatal("a session outlived turning the lock off")
 	}
 }
 
