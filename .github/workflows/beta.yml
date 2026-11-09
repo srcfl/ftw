@@ -150,7 +150,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Login to canonical GHCR namespace
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -344,7 +344,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Login to canonical GHCR namespace
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -397,7 +397,7 @@ jobs:
           echo "digest=${source_digest}" >> "${GITHUB_OUTPUT}"
 
       - name: Login to compatibility GHCR namespace
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: frahlg
@@ -525,7 +525,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Login to canonical GHCR namespace
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -612,7 +612,7 @@ jobs:
       # with the credential that can write the compatibility namespace.
       - name: Login to compatibility GHCR namespace
         if: ${{ steps.canonical_aliases.outputs.move == 'true' }}
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@v4.7.0
         with:
           registry: ghcr.io
           username: frahlg
