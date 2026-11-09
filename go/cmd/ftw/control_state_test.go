@@ -203,8 +203,9 @@ func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {
 	}
 }
 
-// Priority and weighted were removed. A site that stored one must boot into
-// self-consumption and store it, not keep a mode no door accepts any more.
+// Priority and weighted were removed, and planner_self and planner_cheap are
+// legacy. A site that stored one must boot into the replacement and store it,
+// not keep a mode the dashboard no longer offers.
 func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 	for stored, want := range map[string]control.Mode{
 		"priority":                  control.ModeSelfConsumption,
@@ -212,8 +213,8 @@ func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 		"idle":                      control.ModeIdle,
 		"self_consumption":          control.ModeSelfConsumption,
 		"peak_shaving":              control.ModePeakShaving,
-		"planner_self":              control.ModePlannerSelf,
-		"planner_cheap":             control.ModePlannerCheap,
+		"planner_self":              control.ModePlannerPassiveArbitrage,
+		"planner_cheap":             control.ModePlannerPassiveArbitrage,
 		"planner_passive_arbitrage": control.ModePlannerPassiveArbitrage,
 		"planner_arbitrage":         control.ModePlannerArbitrage,
 	} {

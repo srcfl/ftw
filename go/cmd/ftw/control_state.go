@@ -72,14 +72,23 @@ func energyDispatchEnabled(cfg *config.Config) bool {
 	return cfg.Planner == nil || !cfg.Planner.LegacyDispatch
 }
 
-// removedModes are control modes FTW no longer runs. Priority held every
-// battery at its measured power, because nothing ever set its battery order,
-// and weighted split equally because nothing set its weights.
-var removedModes = map[string]bool{"priority": true, "weighted": true}
+// replacedModes maps stored control modes FTW no longer resumes to the mode
+// it boots into instead. Priority held every battery at its measured power,
+// because nothing ever set its battery order, and weighted split equally
+// because nothing set its weights. planner_self and planner_cheap are the
+// legacy planner modes; passive arbitrage covers both and, like them, never
+// sells from the battery.
+var replacedModes = map[string]control.Mode{
+	"priority":      control.ModeSelfConsumption,
+	"weighted":      control.ModeSelfConsumption,
+	"planner_self":  control.ModePlannerPassiveArbitrage,
+	"planner_cheap": control.ModePlannerPassiveArbitrage,
+}
 
 // restoreStoredMode keeps durable modes, but never resumes forced Charge.
 // Charge returns to the planner, or Idle if planning is disabled. Removed
-// modes become self-consumption; unknown values keep the default mode.
+// and legacy modes become their replacement; unknown values keep the default
+// mode.
 func restoreStoredMode(ctrl *control.State, st *state.Store, cfg *config.Config) {
 	v, ok := st.LoadConfig("mode")
 	if !ok {
@@ -110,18 +119,18 @@ func restoreStoredMode(ctrl *control.State, st *state.Store, cfg *config.Config)
 		slog.Info("manual Charge ended at restart", "previous_mode", v, "mode", next)
 		return
 	}
-	if m := control.Mode(v); control.IsValidMode(m) {
-		ctrl.Mode = m
+	next, replaced := replacedModes[v]
+	if !replaced {
+		if m := control.Mode(v); control.IsValidMode(m) {
+			ctrl.Mode = m
+		}
 		return
 	}
-	if !removedModes[v] {
+	ctrl.Mode = next
+	if err := st.SaveConfig("mode", string(next)); err != nil {
+		slog.Warn("the stored control mode is no longer used; running its replacement, but it could not be saved",
+			"stored", v, "mode", next, "err", err)
 		return
 	}
-	ctrl.Mode = control.ModeSelfConsumption
-	if err := st.SaveConfig("mode", string(ctrl.Mode)); err != nil {
-		slog.Warn("the stored control mode was removed; running self_consumption, but it could not be saved",
-			"stored", v, "err", err)
-		return
-	}
-	slog.Warn("the stored control mode was removed; running and saving self_consumption instead", "stored", v)
+	slog.Warn("the stored control mode is no longer used; running and saving its replacement", "stored", v, "mode", next)
 }
