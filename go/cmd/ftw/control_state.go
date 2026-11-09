@@ -76,8 +76,9 @@ func energyDispatchEnabled(cfg *config.Config) bool {
 // it boots into instead. Priority held every battery at its measured power,
 // because nothing ever set its battery order, and weighted split equally
 // because nothing set its weights. planner_self and planner_cheap are the
-// legacy planner modes; passive arbitrage covers both and, like them, never
-// sells from the battery.
+// legacy planner modes; passive arbitrage is the planner mode that replaced
+// both and, like them, never sells from the battery. With the planner off
+// they become self-consumption, since no plan would drive them.
 var replacedModes = map[string]control.Mode{
 	"priority":      control.ModeSelfConsumption,
 	"weighted":      control.ModeSelfConsumption,
@@ -126,8 +127,23 @@ func restoreStoredMode(ctrl *control.State, st *state.Store, cfg *config.Config)
 		}
 		return
 	}
+	values := map[string]string{}
+	if next.IsPlannerMode() {
+		if cfg == nil || cfg.Planner == nil || !cfg.Planner.Enabled {
+			next = control.ModeSelfConsumption
+		}
+		// Neither legacy mode sold from the battery. Keep that answer, or
+		// the replacement would derive "unknown" and ask the household to
+		// allow selling again. A stored or configured answer still wins.
+		storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
+		_, stored := config.ParseBatteryExport(storedExport)
+		if !stored && (cfg == nil || cfg.Planner == nil || cfg.Planner.BatteryExport == "") {
+			values[config.StateKeyBatteryExport] = string(config.BatteryExportNotAllowed)
+		}
+	}
+	values["mode"] = string(next)
 	ctrl.Mode = next
-	if err := st.SaveConfig("mode", string(next)); err != nil {
+	if err := st.SaveConfigValues(values); err != nil {
 		slog.Warn("the stored control mode is no longer used; running its replacement, but it could not be saved",
 			"stored", v, "mode", next, "err", err)
 		return

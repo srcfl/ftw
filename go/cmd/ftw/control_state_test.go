@@ -206,7 +206,7 @@ func TestRestoredGridTargetIgnoresNonFinite(t *testing.T) {
 // Priority and weighted were removed, and planner_self and planner_cheap are
 // legacy. A site that stored one must boot into the replacement and store it,
 // not keep a mode the dashboard no longer offers.
-func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
+func TestRestoreStoredModeReplacesRemovedAndLegacyModes(t *testing.T) {
 	for stored, want := range map[string]control.Mode{
 		"priority":                  control.ModeSelfConsumption,
 		"weighted":                  control.ModeSelfConsumption,
@@ -230,7 +230,7 @@ func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 			ctrl := control.NewState(0, 50, "meter")
 			ctrl.Mode = control.ModeIdle
 
-			restoreStoredMode(ctrl, st, nil)
+			restoreStoredMode(ctrl, st, &config.Config{Planner: &config.Planner{Enabled: true}})
 
 			if ctrl.Mode != want {
 				t.Fatalf("mode = %q, want %q", ctrl.Mode, want)
@@ -239,6 +239,63 @@ func TestRestoreStoredModeMapsRemovedModesToSelfConsumption(t *testing.T) {
 				t.Fatalf("stored mode = %q, want %q", saved, want)
 			}
 		})
+	}
+}
+
+// A legacy planner mode must not start selling from the battery: with no
+// stored permission, the replacement still derives "not allowed". With the
+// planner off there is no plan to follow, so it becomes self-consumption.
+func TestRestoreStoredModeLegacyPlannerModes(t *testing.T) {
+	enabled := &config.Config{Planner: &config.Planner{Enabled: true}}
+	disabled := &config.Config{Planner: &config.Planner{Enabled: false}}
+	for _, tc := range []struct {
+		stored string
+		cfg    *config.Config
+		want   control.Mode
+	}{
+		{"planner_self", enabled, control.ModePlannerPassiveArbitrage},
+		{"planner_cheap", enabled, control.ModePlannerPassiveArbitrage},
+		{"planner_self", disabled, control.ModeSelfConsumption},
+		{"planner_cheap", disabled, control.ModeSelfConsumption},
+		{"planner_self", &config.Config{}, control.ModeSelfConsumption},
+		{"planner_cheap", nil, control.ModeSelfConsumption},
+	} {
+		st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = st.Close() })
+		if err := st.SaveConfig("mode", tc.stored); err != nil {
+			t.Fatal(err)
+		}
+		ctrl := control.NewState(0, 50, "meter")
+
+		restoreStoredMode(ctrl, st, tc.cfg)
+
+		if ctrl.Mode != tc.want {
+			t.Fatalf("%s: mode = %q, want %q", tc.stored, ctrl.Mode, tc.want)
+		}
+		if saved, _ := st.LoadConfig("mode"); saved != string(tc.want) {
+			t.Fatalf("%s: stored mode = %q, want %q", tc.stored, saved, tc.want)
+		}
+		storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
+		if _, export, _, _ := config.ResolvePlannerPrefs("", storedExport, "", string(ctrl.Mode), "", "", nil); export != config.BatteryExportNotAllowed {
+			t.Fatalf("%s: derived battery export = %q, want not_allowed", tc.stored, export)
+		}
+	}
+
+	// A stored permission is the household's answer and is kept.
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	if err := st.SaveConfigValues(map[string]string{"mode": "planner_self", config.StateKeyBatteryExport: "allowed"}); err != nil {
+		t.Fatal(err)
+	}
+	restoreStoredMode(control.NewState(0, 50, "meter"), st, enabled)
+	if export, _ := st.LoadConfig(config.StateKeyBatteryExport); export != "allowed" {
+		t.Fatalf("stored battery export = %q, want it kept as allowed", export)
 	}
 }
 
