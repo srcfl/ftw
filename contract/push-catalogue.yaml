@@ -2,7 +2,7 @@
 # may carry, and the one place they are written.
 #
 # The app owns all prose; the box sends codes. Push is the sole exception,
-# stated in CLAUDE.md since the beginning: a push must render text when the
+# stated in the product rules from the beginning: a push must render text when the
 # app is not running, so the box renders it — FROM THIS FILE, never from
 # words of its own. The box's copy is byte-identical and CI on both sides
 # compares them, exactly as contract/registry.yaml is paired.
