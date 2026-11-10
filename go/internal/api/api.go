@@ -61,6 +61,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/thermaltwin"
 	"github.com/srcfl/ftw/go/internal/units"
 	v2xpolicy "github.com/srcfl/ftw/go/internal/v2x"
 	"github.com/srcfl/ftw/go/protocol"
@@ -174,7 +175,9 @@ type Deps struct {
 	PVModel *pvmodel.Service
 
 	// Optional: load digital-twin self-learner.
-	LoadModel        *loadmodel.Service
+	LoadModel *loadmodel.Service
+	// Optional: shadow thermal twins of declared room sensors.
+	ThermalTwin      *thermaltwin.Service
 	ForecastLearning ForecastLearning
 
 	// Optional: EV loadpoint state consumed by the API and MPC.
@@ -544,6 +547,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/pvmodel", Read, s.handlePVModel)
 	s.handle("POST /api/pvmodel/reset", Configure, s.handlePVModelReset)
 	s.handle("GET  /api/loadmodel", Read, s.handleLoadModel)
+	s.handle("GET  /api/thermal/twins", Read, s.handleThermalTwins)
 	s.handle("POST /api/loadmodel/profile", Configure, s.handleLoadModelProfile)
 	s.handle("POST /api/loadmodel/reset", Configure, s.handleLoadModelReset)
 	s.handle("GET  /api/research/load/dump", Read, s.handleLoadResearchDump)
