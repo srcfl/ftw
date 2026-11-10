@@ -20,13 +20,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math"
 	"net/http"
 	"slices"
-	"sync"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/drivercontrol"
 	"github.com/srcfl/ftw/go/internal/drivers"
 )
 
@@ -37,25 +36,7 @@ import (
 const (
 	maxControlHoldSeconds     = 24 * 60 * 60
 	defaultControlHoldSeconds = 4 * 60 * 60
-	controlDefaultTimeout     = 10 * time.Second
 )
-
-type controlDriverState struct {
-	mu   sync.Mutex
-	hold *controlHold
-}
-
-// controlHold is one active operator setting. The timer is what releases it;
-// the fields are what the UI shows meanwhile.
-type controlHold struct {
-	Control    string `json:"control"`
-	Value      any    `json:"value,omitempty"`
-	ExpiresAt  int64  `json:"expires_at_ms"`
-	Generation uint64 `json:"-"`
-
-	armedAt time.Time
-	timer   *time.Timer
-}
 
 type controlRequest struct {
 	Control   string          `json:"control"`
@@ -143,53 +124,49 @@ func (s *Server) handleDriverControl(w http.ResponseWriter, r *http.Request) {
 		s.beforeDriverControlSend()
 	}
 
-	// Keep command dispatch and hold transitions under one per-driver lock.
-	// Registry.SendWithGeneration selects the concrete running instance and
-	// returns its generation, so expiry can never pair a new command with an
-	// old status snapshot. The state lookup and lock are also one lifecycle
-	// transaction: clearDriverControlState takes the same locks in the same
-	// order, so it cannot remove the map entry between these operations.
-	state := s.lockControlState(name, s.beforeDriverControlStateLock)
-	defer state.mu.Unlock()
-	// The lock is held across the device call, so the call gets a deadline:
-	// a request context has none, and hold expiry waits on this lock.
-	sendCtx, cancel := context.WithTimeout(r.Context(), controlDefaultTimeout)
-	defer cancel()
-	generation, err := s.deps.Registry.SendWithGeneration(sendCtx, name, body)
-	if err != nil {
-		s.clearControlHoldLocked(state)
-		if errors.Is(err, drivers.ErrObserveOnly) {
-			writeJSON(w, http.StatusForbidden, map[string]any{
-				"error":        err.Error(),
-				"observe_only": true,
+	// drivercontrol.Holds.Send keeps dispatch and the hold transition under
+	// one per-driver lock and binds the hold to the generation that took the
+	// command. The response is written inside done, still under that lock, so
+	// the status read that explains an error is the one that caused it.
+	s.controlHolds.Send(r.Context(), name, control.ID, applied, body,
+		time.Duration(seconds)*time.Second, s.beforeDriverControlStateLock,
+		func(hold drivercontrol.Hold, err error) {
+			if err != nil {
+				s.writeControlSendError(w, name, err)
+				return
+			}
+			writeJSON(w, 200, map[string]any{
+				"control":       control.ID,
+				"applied":       applied,
+				"evidence":      control.Evidence,
+				"expires_at_ms": hold.ExpiresAt,
 			})
-			return
-		}
-		if errors.Is(err, drivers.ErrControlBlocked) {
-			status, _ := s.deps.Registry.ControlStatus(name)
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":             err.Error(),
-				"control_blocked":   true,
-				"default_confirmed": false,
-				"recovery_pending":  status.RecoveryPending,
-			})
-			return
-		}
-		if _, running := s.deps.Registry.ControlStatus(name); !running {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "driver not running"})
-			return
-		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		})
+}
+
+func (s *Server) writeControlSendError(w http.ResponseWriter, name string, err error) {
+	if errors.Is(err, drivers.ErrObserveOnly) {
+		writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":        err.Error(),
+			"observe_only": true,
+		})
 		return
 	}
-	hold := s.armControlHoldLocked(name, state, control.ID, applied, generation, time.Duration(seconds)*time.Second)
-
-	writeJSON(w, 200, map[string]any{
-		"control":       control.ID,
-		"applied":       applied,
-		"evidence":      control.Evidence,
-		"expires_at_ms": hold.ExpiresAt,
-	})
+	if errors.Is(err, drivers.ErrControlBlocked) {
+		status, _ := s.deps.Registry.ControlStatus(name)
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":             err.Error(),
+			"control_blocked":   true,
+			"default_confirmed": false,
+			"recovery_pending":  status.RecoveryPending,
+		})
+		return
+	}
+	if _, running := s.deps.Registry.ControlStatus(name); !running {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "driver not running"})
+		return
+	}
+	writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 }
 
 // DELETE /api/drivers/{name}/control — end the hold now.
@@ -264,215 +241,18 @@ func clampToDeclared(value float64, in drivers.CatalogControlInput) float64 {
 	return value
 }
 
-// armControlHold replaces any existing hold for the driver. One driver holds
-// one control at a time: two overlapping holds on the same device would each
-// expire into a default that undoes the other.
-func (s *Server) controlState(name string) *controlDriverState {
-	s.controlStateMu.Lock()
-	defer s.controlStateMu.Unlock()
-	return s.controlStateLocked(name)
-}
-
-func (s *Server) controlStateLocked(name string) *controlDriverState {
-	if s.controlStates == nil {
-		s.controlStates = make(map[string]*controlDriverState)
-	}
-	state := s.controlStates[name]
-	if state == nil {
-		state = &controlDriverState{}
-		s.controlStates[name] = state
-	}
-	return state
-}
-
-// lockControlState serializes a state map lookup with acquisition of that
-// driver's mutex. Lifecycle invalidation uses controlStateMu -> state.mu as
-// well, so a request can either own the state before removal starts or see a
-// removed state after removal finishes; it cannot keep a pointer that was
-// deleted in between.
-func (s *Server) lockControlState(name string, beforeStateLock func()) *controlDriverState {
-	s.controlStateMu.Lock()
-	state := s.controlStateLocked(name)
-	if beforeStateLock != nil {
-		beforeStateLock()
-	}
-	state.mu.Lock()
-	s.controlStateMu.Unlock()
-	return state
-}
-
-// tryLockExistingControlState locks a state that already exists without
-// creating one for a driver that may have been removed concurrently, and
-// without waiting: locked is false when another request holds the state.
-// Lifecycle invalidation uses the same controlStateMu -> state.mu order.
-func (s *Server) tryLockExistingControlState(name string) (state *controlDriverState, locked bool) {
-	s.controlStateMu.Lock()
-	defer s.controlStateMu.Unlock()
-	state = s.controlStates[name]
-	if state == nil {
-		return nil, false
-	}
-	return state, state.mu.TryLock()
-}
-
-func (s *Server) armControlHoldLocked(name string, state *controlDriverState, control string, value any, generation uint64, d time.Duration) *controlHold {
-	s.clearControlHoldLocked(state)
-	now := time.Now()
-	hold := &controlHold{
-		Control:    control,
-		Value:      value,
-		ExpiresAt:  now.Add(d).UnixMilli(),
-		Generation: generation,
-		armedAt:    now,
-	}
-	hold.timer = time.AfterFunc(d, func() {
-		if err := s.expireControlHold(name, state, hold); err != nil {
-			slog.Error("control hold expiry default failed; registry recovery gate remains active", "driver", name, "err", err)
-		}
-	})
-	state.hold = hold
-	return hold
-}
-
-func (s *Server) clearControlHoldLocked(state *controlDriverState) {
-	if state.hold != nil && state.hold.timer != nil {
-		state.hold.timer.Stop()
-	}
-	state.hold = nil
-}
-
-// expireControlHold hands the device back to itself. It checks identity
-// first: a hold that was replaced or released already had its timer stopped,
-// but a timer that had begun firing cannot be stopped, and defaulting a
-// driver that an operator has just set again is the one wrong answer here.
-func (s *Server) expireControlHold(name string, state *controlDriverState, fired *controlHold) error {
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.hold != fired {
-		return nil
-	}
+// controlRegistry is what the holds see of the registry. A nil
+// *drivers.Registry must stay a nil interface, or the holds would call it.
+func (s *Server) controlRegistry() drivercontrol.Registry {
 	if s.deps == nil || s.deps.Registry == nil {
-		s.clearControlHoldLocked(state)
-		return errors.New("driver registry not available")
-	}
-	status, ok := s.deps.Registry.ControlStatus(name)
-	if !ok || status.Generation != fired.Generation {
-		// A stopped generation must never default a replacement instance.
-		s.clearControlHoldLocked(state)
 		return nil
 	}
-	s.clearControlHoldLocked(state)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return s.sendDefaultLocked(ctx, name)
+	return s.deps.Registry
 }
 
-// SendDriverDefault is the shared safety path for watchdogs and API release.
-// It clears the operator hold while holding the same per-driver lock used by
-// command dispatch, then sends the driver's own default with a bounded
-// context. A caller without a deadline gets the 10-second safety deadline.
-//
-// The control tick calls this, so it never waits for an operator command in
-// flight. When one holds the lock, the default goes first: SendDefault cancels
-// that command and refuses new ones until the default is confirmed. The hold
-// is cleared once the lock is free, but only a hold armed before the default
-// returned. A later one belongs to a command sent after the default and keeps
-// its own expiry.
+// SendDriverDefault is the shared safety path for watchdogs and API release:
+// it clears any hold under the per-driver lock and sends the driver's own
+// default. See drivercontrol.Holds.SendDefault.
 func (s *Server) SendDriverDefault(ctx context.Context, name string) error {
-	if s.deps == nil || s.deps.Registry == nil {
-		return errors.New("driver registry not available")
-	}
-	if _, ok := s.deps.Registry.ControlStatus(name); !ok {
-		return fmt.Errorf("driver %q not found", name)
-	}
-	if s.beforeDriverDefaultStateLock != nil {
-		s.beforeDriverDefaultStateLock()
-	}
-	state, locked := s.tryLockExistingControlState(name)
-	if locked {
-		defer state.mu.Unlock()
-		s.clearControlHoldLocked(state)
-		return s.sendDefaultLocked(ctx, name)
-	}
-	err := s.sendDefaultLocked(ctx, name)
-	if state != nil {
-		defaulted := time.Now()
-		go func() {
-			state.mu.Lock()
-			defer state.mu.Unlock()
-			if state.hold != nil && !state.hold.armedAt.After(defaulted) {
-				s.clearControlHoldLocked(state)
-			}
-		}()
-	}
-	return err
-}
-
-func (s *Server) sendDefaultLocked(ctx context.Context, name string) error {
-	if s.deps == nil || s.deps.Registry == nil {
-		return errors.New("driver registry not available")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, controlDefaultTimeout)
-		defer cancel()
-	}
-	return s.deps.Registry.SendDefault(ctx, name)
-}
-
-func (s *Server) activeControlHold(name string) *controlHold {
-	state := s.peekControlState(name)
-	if state == nil {
-		return nil
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.hold == nil {
-		return nil
-	}
-	if s.deps == nil || s.deps.Registry == nil {
-		s.clearControlHoldLocked(state)
-		return nil
-	}
-	status, ok := s.deps.Registry.ControlStatus(name)
-	if !ok || status.Generation != state.hold.Generation {
-		s.clearControlHoldLocked(state)
-		return nil
-	}
-	hold := *state.hold
-	hold.timer = nil
-	return &hold
-}
-
-func (s *Server) peekControlState(name string) *controlDriverState {
-	s.controlStateMu.Lock()
-	state := s.controlStates[name]
-	s.controlStateMu.Unlock()
-	return state
-}
-
-// clearDriverControl is called by Registry before a driver generation is
-// removed. It stops the old timer and drops the map entry so a re-added driver
-// cannot inherit an operator hold from the previous instance.
-func (s *Server) clearDriverControl(name string) {
-	s.clearDriverControlState(name, nil)
-}
-
-func (s *Server) clearDriverControlState(name string, expected *controlDriverState) {
-	s.controlStateMu.Lock()
-	defer s.controlStateMu.Unlock()
-	state := s.controlStates[name]
-	if expected != nil && state != expected {
-		return
-	}
-	if state == nil {
-		return
-	}
-	state.mu.Lock()
-	s.clearControlHoldLocked(state)
-	delete(s.controlStates, name)
-	state.mu.Unlock()
+	return s.controlHolds.SendDefault(ctx, name, s.beforeDriverDefaultStateLock)
 }

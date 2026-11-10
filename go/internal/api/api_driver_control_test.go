@@ -364,7 +364,7 @@ func TestDriverControlPreservesDeclaredBooleanAndStringValues(t *testing.T) {
 		t.Fatalf("boolean POST = %d, body %s", rec.Code, rec.Body.String())
 	}
 	waitMetric(t, tel, "heat", "applied", 1)
-	if hold := srv.activeControlHold("heat"); hold == nil || hold.Value != true {
+	if hold := srv.controlHolds.Active("heat"); hold == nil || hold.Value != true {
 		t.Fatalf("boolean hold = %+v, want true", hold)
 	}
 
@@ -373,7 +373,7 @@ func TestDriverControlPreservesDeclaredBooleanAndStringValues(t *testing.T) {
 		t.Fatalf("string POST = %d, body %s", rec.Code, rec.Body.String())
 	}
 	waitMetric(t, tel, "heat", "applied", 3)
-	if hold := srv.activeControlHold("heat"); hold == nil || hold.Value != "eco" {
+	if hold := srv.controlHolds.Active("heat"); hold == nil || hold.Value != "eco" {
 		t.Fatalf("string hold = %+v, want eco", hold)
 	}
 }
@@ -409,7 +409,7 @@ func TestDriverControlHoldIsVisibleAndReleasable(t *testing.T) {
 	// Releasing calls the driver's own default mode, not a value this
 	// package invented.
 	waitMetric(t, tel, "heat", "defaulted", 1)
-	if hold := srv.activeControlHold("heat"); hold != nil {
+	if hold := srv.controlHolds.Active("heat"); hold != nil {
 		t.Errorf("hold survived release: %+v", hold)
 	}
 }
@@ -425,7 +425,7 @@ func TestDriverControlHoldExpiresIntoDefault(t *testing.T) {
 	}
 	waitMetric(t, tel, "heat", "applied", 2)
 	waitMetric(t, tel, "heat", "defaulted", 1)
-	if hold := srv.activeControlHold("heat"); hold != nil {
+	if hold := srv.controlHolds.Active("heat"); hold != nil {
 		t.Errorf("hold survived expiry: %+v", hold)
 	}
 }
@@ -485,7 +485,7 @@ func TestDriverControlBindsHoldToRestartedGeneration(t *testing.T) {
 		t.Fatalf("POST after restart race = %d, body %s", rec.Code, rec.Body.String())
 	}
 	waitMetric(t, tel, "heat", "applied", 2)
-	hold := srv.activeControlHold("heat")
+	hold := srv.controlHolds.Active("heat")
 	if hold == nil {
 		t.Fatal("control request did not create a hold")
 	}
@@ -493,19 +493,17 @@ func TestDriverControlBindsHoldToRestartedGeneration(t *testing.T) {
 		t.Fatalf("hold generation = %d, want replacement generation %d", hold.Generation, newStatus.Generation)
 	}
 
-	state := srv.peekControlState("heat")
+	state := srv.controlHolds.Peek("heat")
 	if state == nil {
 		t.Fatal("control state disappeared before expiry")
 	}
-	state.mu.Lock()
-	fired := state.hold
-	state.mu.Unlock()
-	if err := srv.expireControlHold("heat", state, fired); err != nil {
+	fired := state.CurrentHold()
+	if err := srv.controlHolds.Expire("heat", state, fired); err != nil {
 		t.Fatalf("expiry after generation-bound command = %v", err)
 	}
 	waitMetric(t, tel, "heat", "defaulted", 1)
 	waitMetric(t, tel, "heat", "applied", 0)
-	if got := srv.activeControlHold("heat"); got != nil {
+	if got := srv.controlHolds.Active("heat"); got != nil {
 		t.Fatalf("hold survived successful expiry: %+v", got)
 	}
 }
@@ -568,7 +566,7 @@ func TestDriverControlLookupRaceCannotOrphanStateOrTimer(t *testing.T) {
 			lifecycleDone := make(chan error, 1)
 			go func() { lifecycleDone <- test.lifecycle(srv, cfg) }()
 			mapProbeDone := make(chan bool, 1)
-			go func() { mapProbeDone <- srv.peekControlState("heat") == nil }()
+			go func() { mapProbeDone <- srv.controlHolds.Peek("heat") == nil }()
 			select {
 			case removed := <-mapProbeDone:
 				if removed {
@@ -596,7 +594,7 @@ func TestDriverControlLookupRaceCannotOrphanStateOrTimer(t *testing.T) {
 				t.Fatal("lifecycle deadlocked after the request released state.mu")
 			}
 
-			if got := srv.activeControlHold("heat"); got != nil {
+			if got := srv.controlHolds.Active("heat"); got != nil {
 				t.Fatalf("%s left an orphaned hold: %+v", test.name, got)
 			}
 			if got := driverDetail(t, srv, "heat"); got.Hold != nil {
@@ -637,21 +635,19 @@ func TestDriverControlExpiryDefaultFailureBlocksUntilRecovery(t *testing.T) {
 		`{"control":"set_offset","value":2,"duration_s":600}`); rec.Code != http.StatusOK {
 		t.Fatalf("POST = %d, body %s", rec.Code, rec.Body.String())
 	}
-	state := srv.peekControlState("heat")
+	state := srv.controlHolds.Peek("heat")
 	if state == nil {
 		t.Fatal("missing control state")
 	}
-	state.mu.Lock()
-	hold := state.hold
-	state.mu.Unlock()
+	hold := state.CurrentHold()
 	if hold == nil {
 		t.Fatal("missing control hold")
 	}
 
-	if err := srv.expireControlHold("heat", state, hold); err == nil {
+	if err := srv.controlHolds.Expire("heat", state, hold); err == nil {
 		t.Fatal("expiry hid a failed default")
 	}
-	if got := srv.activeControlHold("heat"); got != nil {
+	if got := srv.controlHolds.Active("heat"); got != nil {
 		t.Fatalf("failed expiry left hold active: %+v", got)
 	}
 	status, ok := srv.deps.Registry.ControlStatus("heat")
@@ -735,7 +731,7 @@ func TestDriverControlAmbiguousCommandRestoresDefault(t *testing.T) {
 		t.Fatalf("ambiguous POST = %d, body %s", rec.Code, rec.Body.String())
 	}
 	waitMetric(t, tel, "heat", "defaulted", 1)
-	if hold := srv.activeControlHold("heat"); hold != nil {
+	if hold := srv.controlHolds.Active("heat"); hold != nil {
 		t.Fatalf("ambiguous command left hold active: %+v", hold)
 	}
 	waitMetric(t, tel, "heat", "applied", 0)
@@ -751,10 +747,10 @@ func TestDriverControlDefaultPathClearsHold(t *testing.T) {
 	if err := srv.SendDriverDefault(context.Background(), "heat"); err != nil {
 		t.Fatalf("SendDriverDefault = %v", err)
 	}
-	if hold := srv.activeControlHold("heat"); hold != nil {
+	if hold := srv.controlHolds.Active("heat"); hold != nil {
 		t.Fatalf("default path left hold active: %+v", hold)
 	}
-	if state := srv.peekControlState("heat"); state == nil {
+	if state := srv.controlHolds.Peek("heat"); state == nil {
 		t.Fatal("default path removed the existing control state")
 	}
 	waitMetric(t, tel, "heat", "defaulted", 1)
@@ -834,7 +830,7 @@ func TestSendDriverDefaultDoesNotWaitForAnOperatorCommand(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("operator command did not return after the default cancelled it")
 	}
-	if hold := srv.activeControlHold("heat"); hold != nil {
+	if hold := srv.controlHolds.Active("heat"); hold != nil {
 		t.Fatalf("hold survived the safety default: %+v", hold)
 	}
 }
@@ -857,31 +853,31 @@ func TestSendDriverDefaultClearsOnlyHoldsArmedBeforeIt(t *testing.T) {
 			if !ok {
 				t.Fatal("driver not running")
 			}
-			state := srv.controlState("heat")
-			state.mu.Lock() // an operator request in flight
+			state := srv.controlHolds.State("heat")
+			state.Lock() // an operator request in flight
 			if tc.armBefore {
-				srv.armControlHoldLocked("heat", state, "set_offset", 1.0, status.Generation, time.Hour)
+				srv.controlHolds.ArmLocked("heat", state, "set_offset", 1.0, status.Generation, time.Hour)
 			}
 			done := make(chan error, 1)
 			go func() { done <- srv.SendDriverDefault(context.Background(), "heat") }()
 			select {
 			case err := <-done:
 				if err != nil {
-					state.mu.Unlock()
+					state.Unlock()
 					t.Fatalf("SendDriverDefault = %v", err)
 				}
 			case <-time.After(time.Second):
-				state.mu.Unlock()
+				state.Unlock()
 				t.Fatal("SendDriverDefault waited for the operator request")
 			}
 			if !tc.armBefore {
-				srv.armControlHoldLocked("heat", state, "set_offset", 2.0, status.Generation, time.Hour)
+				srv.controlHolds.ArmLocked("heat", state, "set_offset", 2.0, status.Generation, time.Hour)
 			}
-			state.mu.Unlock()
+			state.Unlock()
 
 			if tc.wantCleared {
 				deadline := time.Now().Add(time.Second)
-				for srv.activeControlHold("heat") != nil {
+				for srv.controlHolds.Active("heat") != nil {
 					if time.Now().After(deadline) {
 						t.Fatal("hold armed before the default survived it")
 					}
@@ -891,7 +887,7 @@ func TestSendDriverDefaultClearsOnlyHoldsArmedBeforeIt(t *testing.T) {
 			}
 			// Give the deferred clear time to take the lock and decide.
 			time.Sleep(200 * time.Millisecond)
-			if srv.activeControlHold("heat") == nil {
+			if srv.controlHolds.Active("heat") == nil {
 				t.Fatal("default cleared a hold armed after it; that command would never expire")
 			}
 		})
@@ -900,7 +896,7 @@ func TestSendDriverDefaultClearsOnlyHoldsArmedBeforeIt(t *testing.T) {
 
 func TestSendDriverDefaultDoesNotRecreateStateAfterRemove(t *testing.T) {
 	srv, _ := controlServer(t)
-	srv.controlState("heat")
+	srv.controlHolds.State("heat")
 
 	paused := make(chan struct{})
 	resume := make(chan struct{})
@@ -930,7 +926,7 @@ func TestSendDriverDefaultDoesNotRecreateStateAfterRemove(t *testing.T) {
 		close(resume)
 		t.Fatal("RemoveProbe deadlocked behind SendDriverDefault")
 	}
-	if state := srv.peekControlState("heat"); state != nil {
+	if state := srv.controlHolds.Peek("heat"); state != nil {
 		t.Fatalf("removed driver still has control state before default resumes: %p", state)
 	}
 	close(resume)
@@ -943,14 +939,14 @@ func TestSendDriverDefaultDoesNotRecreateStateAfterRemove(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("SendDriverDefault did not finish after lifecycle removal")
 	}
-	if state := srv.peekControlState("heat"); state != nil {
+	if state := srv.controlHolds.Peek("heat"); state != nil {
 		t.Fatalf("default path recreated removed control state: %p", state)
 	}
 }
 
 func TestSendDriverDefaultDoesNotAccumulateRemovedStates(t *testing.T) {
 	srv, _ := controlServer(t)
-	srv.controlState("heat")
+	srv.controlHolds.State("heat")
 	base := srv.deps.Cfg.Drivers[0]
 
 	for i := 0; i < 64; i++ {
@@ -960,7 +956,7 @@ func TestSendDriverDefaultDoesNotAccumulateRemovedStates(t *testing.T) {
 		if err := srv.deps.Registry.Add(context.Background(), cfg); err != nil {
 			t.Fatalf("add %s: %v", name, err)
 		}
-		srv.controlState(name)
+		srv.controlHolds.State(name)
 
 		paused := make(chan struct{})
 		resume := make(chan struct{})
@@ -989,14 +985,12 @@ func TestSendDriverDefaultDoesNotAccumulateRemovedStates(t *testing.T) {
 			t.Fatalf("SendDriverDefault(%s) did not finish", name)
 		}
 		srv.beforeDriverDefaultStateLock = nil
-		if state := srv.peekControlState(name); state != nil {
+		if state := srv.controlHolds.Peek(name); state != nil {
 			t.Fatalf("removed driver %s left a control state", name)
 		}
 	}
 
-	srv.controlStateMu.Lock()
-	defer srv.controlStateMu.Unlock()
-	if got := len(srv.controlStates); got != 1 {
+	if got := srv.controlHolds.Len(); got != 1 {
 		t.Fatalf("control state map has %d entries after removed names, want only heat", got)
 	}
 }
@@ -1011,17 +1005,15 @@ func TestDriverControlSerializesExpiryAndReplacement(t *testing.T) {
 		`{"control":"set_offset","value":1,"duration_s":600}`); rec.Code != http.StatusOK {
 		t.Fatalf("POST = %d, body %s", rec.Code, rec.Body.String())
 	}
-	state := srv.controlState("heat")
-	state.mu.Lock()
-	hold := state.hold
-	state.mu.Unlock()
+	state := srv.controlHolds.State("heat")
+	hold := state.CurrentHold()
 	if hold == nil {
 		t.Fatal("missing hold")
 	}
 
 	done := make(chan struct{})
 	go func() {
-		srv.expireControlHold("heat", state, hold)
+		srv.controlHolds.Expire("heat", state, hold)
 		close(done)
 	}()
 	waitMetric(t, tel, "heat", "default_started", 1)
@@ -1124,13 +1116,11 @@ func TestDriverControlClearsHoldAcrossLifecycle(t *testing.T) {
 		t.Fatalf("initial POST = %d, body %s", rec.Code, rec.Body.String())
 	}
 	waitMetric(t, tel, "heat", "applied", 2)
-	oldState := srv.peekControlState("heat")
+	oldState := srv.controlHolds.Peek("heat")
 	if oldState == nil {
 		t.Fatal("initial control state is missing")
 	}
-	oldState.mu.Lock()
-	oldHold := oldState.hold
-	oldState.mu.Unlock()
+	oldHold := oldState.CurrentHold()
 	if oldHold == nil {
 		t.Fatal("initial control hold is missing")
 	}
@@ -1138,10 +1128,10 @@ func TestDriverControlClearsHoldAcrossLifecycle(t *testing.T) {
 	if err := srv.deps.Registry.Restart(context.Background(), cfg); err != nil {
 		t.Fatalf("restart = %v", err)
 	}
-	if got := srv.activeControlHold("heat"); got != nil {
+	if got := srv.controlHolds.Active("heat"); got != nil {
 		t.Fatalf("hold survived restart: %+v", got)
 	}
-	if got := srv.peekControlState("heat"); got != nil {
+	if got := srv.controlHolds.Peek("heat"); got != nil {
 		t.Fatal("control state map entry survived restart")
 	}
 	if got := driverDetail(t, srv, "heat"); got.Hold != nil {
@@ -1156,7 +1146,7 @@ func TestDriverControlClearsHoldAcrossLifecycle(t *testing.T) {
 	waitMetric(t, tel, "heat", "applied", -2)
 	// Simulate a timer callback that was already in flight when the old
 	// generation was removed. It must not default the new instance.
-	srv.expireControlHold("heat", oldState, oldHold)
+	srv.controlHolds.Expire("heat", oldState, oldHold)
 	time.Sleep(250 * time.Millisecond)
 	if got, _, ok := tel.LatestMetric("heat", "defaulted"); !ok || got != 0 {
 		t.Fatalf("old timer changed the replacement: defaulted=%v/%v", got, ok)
@@ -1168,7 +1158,7 @@ func TestDriverControlClearsHoldAcrossLifecycle(t *testing.T) {
 	disabled := cfg
 	disabled.Disabled = true
 	srv.deps.Registry.Reload(context.Background(), []config.Driver{disabled}, false)
-	if got := srv.peekControlState("heat"); got != nil {
+	if got := srv.controlHolds.Peek("heat"); got != nil {
 		t.Fatal("control state map entry survived disable")
 	}
 	if got := driverDetail(t, srv, "heat"); got.Hold != nil {
@@ -1176,7 +1166,7 @@ func TestDriverControlClearsHoldAcrossLifecycle(t *testing.T) {
 	}
 
 	srv.deps.Registry.Reload(context.Background(), []config.Driver{cfg}, false)
-	if got := srv.peekControlState("heat"); got != nil {
+	if got := srv.controlHolds.Peek("heat"); got != nil {
 		t.Fatal("control state map entry survived re-add")
 	}
 	if got := driverDetail(t, srv, "heat"); got.Hold != nil {
@@ -1194,9 +1184,7 @@ func TestDriverDetailUnknownNamesDoNotCreateControlState(t *testing.T) {
 			t.Fatalf("GET %s = %d, body %s", name, rec.Code, rec.Body.String())
 		}
 	}
-	srv.controlStateMu.Lock()
-	defer srv.controlStateMu.Unlock()
-	if got := len(srv.controlStates); got != 0 {
+	if got := srv.controlHolds.Len(); got != 0 {
 		t.Fatalf("unknown GETs created %d control states", got)
 	}
 }
