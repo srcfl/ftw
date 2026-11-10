@@ -251,3 +251,9 @@ Prior Apache license, retained verbatim
 
 
 End of prior Apache license.
+
+Shared contracts: 2026-11-10
+----------------------------
+The Sourceful-owned shared registry and push catalogue in contract/,
+including future changes, use Apache-2.0 as contract/LICENSE states.
+This grant does not change the license of the rest of Core.

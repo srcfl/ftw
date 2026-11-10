@@ -46,6 +46,10 @@ attributions. A sign-off does not assign copyright or authorize commercial
 relicensing; Sourceful must separately hold those rights where needed.
 See [LICENSING.md](LICENSING.md).
 
+Separately licensed paths use their own terms for contributions. In
+`contract/` and `go/protocol/`, contributions use Apache-2.0 as their LICENSE
+files state, including future changes. The rest of Core keeps the terms above.
+
 ## Developer Certificate of Origin (DCO)
 
 We use the [Developer Certificate of Origin](https://developercertificate.org/)
