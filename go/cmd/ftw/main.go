@@ -75,6 +75,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/thermaltwin"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
@@ -1468,6 +1469,29 @@ func main() {
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
 
+	// ---- Thermal twins, shadow only (docs/adr/0012) ----
+	// Learns each declared room sensor's inertia and heat response from the
+	// same outdoor temperature as the load model. It reads and stores, and
+	// nothing plans or dispatches from it.
+	twinDrivers := func() []config.Driver {
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
+		return append([]config.Driver(nil), cfg.Drivers...)
+	}
+	thermalTwins := thermaltwin.NewService(st, tel)
+	thermalTwins.Temp = loadSvc.Temp
+	thermalTwins.Zones = func() []thermaltwin.Zone {
+		catalog, err := drivers.LoadCatalogSources(drivers.CatalogSource{Dir: *userDriversDirFlag, Source: "local"}, drivers.CatalogSource{Dir: config.ManagedDriversDirOverride, Source: "managed"}, drivers.CatalogSource{Dir: resolveDriverDir(), Source: "bundled"})
+		if err != nil {
+			slog.Warn("thermal twin: driver catalog unavailable", "err", err)
+			return nil
+		}
+		return thermalTwinZones(twinDrivers(), catalog)
+	}
+	thermalTwins.PowerDrivers = func() []string { return thermalTwinPowerDrivers(twinDrivers()) }
+	thermalTwins.Start(ctx)
+	defer thermalTwins.Stop()
+
 	// ---- Start OCPP 1.6J Central System (optional) ----
 	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
 	// driver involved. A charge point whose identity (the last segment of the
@@ -2602,6 +2626,7 @@ func main() {
 		PlannerPrefs:     plannerPrefs,
 		PVModel:          pvSvc,
 		LoadModel:        loadSvc,
+		ThermalTwin:      thermalTwins,
 		ForecastLearning: forecastTrackerSvc,
 		Loadpoints:       lpMgr,
 		Cars:             carsRT,
