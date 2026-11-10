@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivercontrol"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -46,7 +47,7 @@ type driverDetailResp struct {
 	// temperature. Absent for every driver that declares none.
 	Sensors []drivers.CatalogSensor `json:"sensors,omitempty"`
 	// Hold is the operator setting in force, if any, and when it ends.
-	Hold *controlHold `json:"hold,omitempty"`
+	Hold *drivercontrol.Hold `json:"hold,omitempty"`
 	// ControlState says whether Core has confirmed autonomous default mode.
 	// It must not call a failed default safe or settled.
 	ControlState driverControlStateResp `json:"control_state"`
@@ -128,12 +129,12 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 		resp.Controls = entry.Controls
 		resp.Sensors = entry.Sensors
 	}
-	resp.Hold = s.activeControlHold(name)
+	resp.Hold = s.controlHolds.Active(name)
 	resp.ControlState = s.driverControlState(name, resp.Hold)
 	writeJSON(w, 200, resp)
 }
 
-func (s *Server) driverControlState(name string, hold *controlHold) driverControlStateResp {
+func (s *Server) driverControlState(name string, hold *drivercontrol.Hold) driverControlStateResp {
 	if s.deps == nil || s.deps.Registry == nil {
 		return driverControlStateResp{State: "unknown"}
 	}
