@@ -143,8 +143,8 @@ telemetry-only driver or require every house to supply a thermal model.
 | `srcfl/ftw` | Core safety, state, commissioning, dispatch, on-box UI, history, API and shared product direction. |
 | `srcfl/energyplan` | Private solver and forecast implementation; defaults and model quality must match Core's contract. Only compiled artifacts and public integration metadata go to Core. |
 | `srcfl/device-drivers` | Mixed-device support, stable identity, trustworthy readings, declared limits, structured command results and hardware evidence. |
-| `srcfl/ftw-webapp` | Fast everyday UI, charging interaction, intent/result feedback, notifications and encrypted client/session contracts. |
-| `srcfl/ftw-app` | The same product principles, with current Pair + Now verification gates preserved before expanding native scope. |
+| `srcfl/ftw-webapp` (private) | Fast everyday UI, charging interaction, intent/result feedback, notifications and encrypted client/session contracts. |
+| `srcfl/ftw-app` (private) | The same product principles, with current Pair + Now verification gates preserved before expanding native scope. |
 | `srcfl/ftw-web` | Explain the product and contribution route accurately. Separate available behaviour from product goals. |
 
 ## How work enters the roadmap

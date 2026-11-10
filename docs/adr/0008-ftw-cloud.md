@@ -4,6 +4,11 @@
 - Date: 2026-10-12
 - Decided by: Fredrik on 12 October 2026, decisions 1–5 and 7. Decision 6 is
   the recommendation, taken as the working choice until he answers it.
+- Changed 10 November 2026: `srcfl/ftw-cloud` is private and its own code
+  proprietary, and FTW Cloud no longer serves `/source` (ftw-cloud #58).
+  Decision 1's public AGPL repository and the published running digest
+  under the controls below no longer hold; the wire format stays public in
+  `go/protocol`.
 - Revisits: [ADR 0006](0006-app-uplink.md), which made the relay the only
   remote path. That still holds for homes that do not turn FTW Cloud on.
 - Turns away from: [#1323](https://github.com/srcfl/ftw/issues/1323), which

@@ -16,7 +16,7 @@ when that repository became private. "The app" means any client.
 
 ## Product direction for agent clients
 
-[The shared vision](https://github.com/srcfl/ftw/blob/master/VISION.md) calls for structured
+[The shared vision](../VISION.md) calls for structured
 analysis, durable schedule and goal changes, and proposed-plan submission by
 authorized agents, locally and through cloud MCP. These are targets. They do
 not imply that the operations below already implement them. Extend the registry
@@ -52,7 +52,7 @@ the telemetry it carries. If the box has nothing to say it sends `tick` anyway.
 Through FTW Cloud's tunnel the box sends a padded frame when a reading lands,
 plus a beat while quiet. The relay's fixed cadence applies only to the relay.
 The tunnel's envelope, limits and session ids follow Core's
-[Cloud protocol](https://github.com/srcfl/ftw/blob/master/docs/protocol-cloud.md#tunnel).
+[Cloud protocol](protocol-cloud.md#tunnel).
 The browser uses the same Noise and CBOR as iPhone over the service's existing
 WebSocket endpoint; its custom QUIC transport is not a WebTransport endpoint.
 

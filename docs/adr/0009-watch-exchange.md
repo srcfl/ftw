@@ -39,7 +39,7 @@ Five facts shape the answer:
   would push a phone out.
 - The command log lives in the handler (`cmds: newCmdLog()` in
   `appproto/handler.go`), and a handler lives as long as its session.
-  ftw-webapp's `docs/protocol.md` and the comment on `CmdRetentionMs` say the
+  [`docs/protocol.md`](../protocol.md) and the comment on `CmdRetentionMs` say the
   box keeps a `cmdId` for 24 h. Today it keeps it for one session, so a retry
   in a new session would act again.
 - `notValidAfterMs` counts in box uptime. A client learns the uptime from
