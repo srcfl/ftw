@@ -1,28 +1,26 @@
-# Shared contract snapshot
+# FTW shared contracts
 
-`registry.yaml` is a snapshot of `contract/registry.yaml` in
-[`srcfl/ftw-webapp`](https://github.com/srcfl/ftw-webapp), which is where it is
-edited. It names everything the app and the box both have to agree on: frozen
-field ids, capabilities, scopes, error codes, source states and history
-resolutions.
+Core owns `registry.yaml` and `push-catalogue.yaml`. These files and their
+future changes use Apache-2.0, as LICENSE states. They remain public when
+the official clients are private.
 
-Both sides generate from it rather than typing the names out, because three
-separate authorisation namespaces already grew in this codebase once. The Go
-constants live in
-[`go/internal/appproto/contract_gen.go`](../go/internal/appproto/contract_gen.go)
-and are produced by:
+The registry fixes field ids, capabilities, scopes, errors, source states
+and history resolutions. The catalogue holds notification templates.
+Edit these files here, then copy them byte for byte into
+`ftw-webapp/contract/` and `ftw-app/protocol/` in paired PRs. Copy LICENSE too.
+The clients compare their snapshots against a public Core checkout. Core
+never needs a private client checkout to build or test.
+
+From `go/`, run `go generate ./internal/...` and the contract tests:
 
 ```bash
-go generate ./internal/appproto/...
+go test ./internal/appproto ./internal/apiauth ./internal/notifications
 ```
 
-`TestContractGenIsCurrent` fails when the checked-in file no longer matches the
-YAML, so a snapshot update that skips the generator does not merge.
+The generator tests reject stale constants and templates. The registry's
+`modes:` must match `control.AllModes()`. Public wire types live in
+`go/protocol/`; the Cloud protocol is in `docs/protocol-cloud.md`.
 
-Changing a name means changing it upstream first, then copying the file here and
-regenerating. Editing this copy on its own only creates the drift the registry
-exists to prevent.
-
-The `modes:` block is the exception in the other direction: those keys belong to
-`control.AllModes()` in this repository and are copied *into* the registry so the
-app can validate them. `TestRegistryModesMatchCatalog` holds the two together.
+Earlier client releases and their original licenses remain public in
+[the webapp archive](https://github.com/srcfl/ftw-webapp-source-archive) and
+[the native archive](https://github.com/srcfl/ftw-app-source-archive).
