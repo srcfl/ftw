@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 EN = ROOT / 'docs/native-beta.md'
 SV = ROOT / 'docs/setup-guide/update-sv.md'
+FIRST_INSTALL = (ROOT / 'docs/install.md', ROOT / 'docs/setup-guide/install-sv.md')
 
 
 def recipe(path, marker):
@@ -62,6 +63,12 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
 
     def test_translations_use_the_same_native_commands(self):
         self.assertEqual(recipe(EN, '--fresh-host'), recipe(SV, '--fresh-host'))
+
+    def test_first_install_pages_use_the_same_native_commands(self):
+        # The short pages repeat the block; the tests below run the one in EN.
+        for page in FIRST_INSTALL:
+            with self.subTest(page=page.name):
+                self.assertEqual(recipe(EN, '--fresh-host'), recipe(page, '--fresh-host'))
 
     def test_rejects_placeholder_old_line_and_mistyped_tag_before_work(self):
         for marker in ('--fresh-host', 'compose up'):
