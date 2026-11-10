@@ -2,9 +2,11 @@
 
 This guide is for you if you've never set up a Raspberry Pi before. Relax — it's easier than it sounds. Just follow the steps, one at a time.
 
-> **2.x and 3.x receive no further updates.** Switch to new 0.x to follow the latest releases. Do not install 3.x beta. Already running FTW? Start with [Install and update FTW](../native-beta.md). Use a **new SD card** and keep the old card and its data.
+> **Already running FTW?** Follow the [switch guide](../native-beta.md#coming-from-an-older-ftw) first. Use a **new SD card** and keep the old card and its data.
 
-> **Don't have a Raspberry Pi?** A fresh 64-bit Debian or Ubuntu host can use the same native beta installer. Skip the Pi hardware steps and read **Step 11 — Install FTW**.
+> **Running Home Assistant OS?** You need no Raspberry Pi: [install the FTW app](../install.md#home-assistant) instead.
+
+> **Another Linux computer?** A fresh 64-bit Debian or Ubuntu computer uses the same installer. Skip the Pi steps and read **Step 11 — Install FTW**.
 
 ## What you'll need
 
@@ -118,7 +120,7 @@ Well done — you're now "inside" the Raspberry Pi.
 
 ## Step 11 — Install FTW
 
-Follow [Install and update FTW](../native-beta.md#install) and choose an exact published new 0.x beta. You can install now on a fresh 64-bit Pi. If FTW already runs on your Pi, follow [the switch guide](../native-beta.md#coming-from-an-older-ftw) first: use a new card and set up the site again. Guided migration of old settings and history is not ready.
+Follow [Install FTW](../install.md#raspberry-pi-or-linux): copy the newest version name, paste one block and open the setup page. If FTW already runs on your Pi, follow [the switch guide](../native-beta.md#coming-from-an-older-ftw) first: use a new card and set up the site again. Guided migration of old settings and history is not ready.
 
 ## After installation
 

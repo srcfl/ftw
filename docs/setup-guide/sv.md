@@ -2,9 +2,11 @@
 
 Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi förut. Lugn — det är lättare än det låter. Följ stegen ett i taget, så går det fint.
 
-> **2.x och 3.x får inga fler uppdateringar.** Byt till nya 0.x för att följa det senaste. Installera inte 3.x-beta. Kör du redan FTW, börja med [Byt till nya FTW](update-sv.md). Använd ett **nytt SD-kort** och behåll det gamla med dess data.
+> **Kör du redan FTW?** Följ [bytesguiden](update-sv.md) först. Använd ett **nytt SD-kort** och behåll det gamla med dess data.
 
-> **Ingen Raspberry Pi?** En ny 64-bitars värd med Debian eller Ubuntu kan använda samma native beta. Hoppa över Pi-stegen och läs **Steg 11 — Installera FTW**.
+> **Kör du Home Assistant OS?** Då behöver du ingen Raspberry Pi: [installera FTW-appen](install-sv.md#home-assistant) i stället.
+
+> **En annan Linux-dator?** En ny 64-bitars dator med Debian eller Ubuntu använder samma installer. Hoppa över Pi-stegen och läs **Steg 11 — Installera FTW**.
 
 ## Vad du behöver
 
@@ -118,7 +120,7 @@ Grattis — du är nu "inne" i Raspberry Pin.
 
 ## Steg 11 — Installera FTW
 
-Följ [installationsguiden för nya 0.x på svenska](update-sv.md#installera-på-det-nya-kortet-eller-en-tom-linux-maskin) och välj en exakt publicerad beta. På en ny 64-bitars Pi kan du installera nu. Kör FTW redan på din Pi, följ [bytesguiden](update-sv.md) först: använd ett nytt kort och ställ in anläggningen på nytt. Den guidade flytten av gamla inställningar och historik är ännu inte klar.
+Följ [Installera FTW](install-sv.md#raspberry-pi-eller-linux): kopiera namnet på den nyaste versionen, klistra in ett block och öppna installationssidan. Kör FTW redan på din Pi, följ [bytesguiden](update-sv.md) först: använd ett nytt kort och ställ in anläggningen på nytt. Den guidade flytten av gamla inställningar och historik är ännu inte klar.
 
 ## Efter installationen
 

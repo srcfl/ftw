@@ -2,9 +2,11 @@
 
 Diese Anleitung ist für dich, wenn du noch nie einen Raspberry Pi eingerichtet hast. Keine Sorge — es ist leichter, als es klingt. Folge den Schritten einfach einer nach dem anderen.
 
-> **2.x und 3.x erhalten keine weiteren Updates.** Wechsle zu neuen 0.x-Versionen, um die aktuellen Änderungen zu erhalten. Installiere keine 3.x-Beta. Läuft FTW bereits, beginne mit [Install and update FTW](../native-beta.md). Nutze eine **neue SD-Karte** und behalte die alte Karte mit ihren Daten.
+> **Läuft FTW bereits?** Folge zuerst [der Anleitung zum Wechsel](../native-beta.md#coming-from-an-older-ftw). Nutze eine **neue SD-Karte** und behalte die alte Karte mit ihren Daten.
 
-> **Kein Raspberry Pi?** Ein neuer 64-Bit-Rechner mit Debian oder Ubuntu kann denselben nativen Beta-Installer nutzen. Überspringe die Pi-Hardware-Schritte und lies **Schritt 11 — FTW installieren**.
+> **Nutzt du Home Assistant OS?** Dann brauchst du keinen Raspberry Pi: [Installiere stattdessen die FTW-App](../install.md#home-assistant).
+
+> **Ein anderer Linux-Rechner?** Ein neuer 64-Bit-Rechner mit Debian oder Ubuntu nutzt denselben Installer. Überspringe die Pi-Schritte und lies **Schritt 11 — FTW installieren**.
 
 ## Was du brauchst
 
@@ -118,7 +120,7 @@ Gut gemacht — du bist jetzt "im" Raspberry Pi.
 
 ## Schritt 11 — FTW installieren
 
-Folge [Install and update FTW](../native-beta.md#install) und wähle eine veröffentlichte neue 0.x-Beta mit genauem Tag. Auf einem frischen 64-Bit-Pi kannst du jetzt installieren. Läuft FTW schon, folge zuerst [der Anleitung zum Wechsel](../native-beta.md#coming-from-an-older-ftw): nutze eine neue Karte und richte die Anlage neu ein. Die geführte Übernahme alter Einstellungen und Verlaufsdaten ist noch nicht fertig.
+Folge [Install FTW](../install.md#raspberry-pi-or-linux): Kopiere den Namen der neuesten Version, füge einen Block ein und öffne die Einrichtungsseite. Läuft FTW schon, folge zuerst [der Anleitung zum Wechsel](../native-beta.md#coming-from-an-older-ftw): nutze eine neue Karte und richte die Anlage neu ein. Die geführte Übernahme alter Einstellungen und Verlaufsdaten ist noch nicht fertig.
 
 ## Nach der Installation
 

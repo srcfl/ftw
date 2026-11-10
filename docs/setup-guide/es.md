@@ -2,9 +2,11 @@
 
 Esta guía es para ti que nunca has configurado una Raspberry Pi antes. Tranquila — es más fácil de lo que parece. Basta con seguir los pasos, uno a uno.
 
-> **2.x y 3.x no recibirán más actualizaciones.** Cambia a la nueva serie 0.x para seguir las últimas versiones. No instales la beta 3.x. Si ya usas FTW, empieza por [Install and update FTW](../native-beta.md). Usa una **tarjeta SD nueva** y conserva la antigua con sus datos.
+> **¿Ya usas FTW?** Sigue primero [la guía de cambio](../native-beta.md#coming-from-an-older-ftw). Usa una **tarjeta SD nueva** y conserva la antigua con sus datos.
 
-> **¿No tienes Raspberry Pi?** Un equipo nuevo de 64 bits con Debian o Ubuntu puede usar el mismo instalador de la beta nativa. Salta los pasos de la Pi y lee el **Paso 11 — Instalar FTW**.
+> **¿Usas Home Assistant OS?** No necesitas una Raspberry Pi: [instala la aplicación FTW](../install.md#home-assistant) en su lugar.
+
+> **¿Otro equipo con Linux?** Un equipo nuevo de 64 bits con Debian o Ubuntu usa el mismo instalador. Salta los pasos de la Pi y lee el **Paso 11 — Instalar FTW**.
 
 ## Lo que necesitas
 
@@ -118,7 +120,7 @@ Bien hecho — ya estás "dentro" de la Raspberry Pi.
 
 ## Paso 11 — Instalar FTW
 
-Sigue [Install and update FTW](../native-beta.md#install) y elige la etiqueta exacta de una nueva beta 0.x publicada. Puedes instalarla ahora en una Pi de 64 bits nueva. Si ya usas FTW, sigue primero [la guía de cambio](../native-beta.md#coming-from-an-older-ftw): usa otra tarjeta y configura el sitio de nuevo. La migración guiada de los ajustes y del historial antiguos aún no está lista.
+Sigue [Install FTW](../install.md#raspberry-pi-or-linux): copia el nombre de la versión más reciente, pega un bloque y abre la página de configuración. Si ya usas FTW, sigue primero [la guía de cambio](../native-beta.md#coming-from-an-older-ftw): usa otra tarjeta y configura el sitio de nuevo. La migración guiada de los ajustes y del historial antiguos aún no está lista.
 
 ## Después de la instalación
 
