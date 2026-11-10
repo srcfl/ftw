@@ -255,7 +255,7 @@ FTW spans several repositories. This one is Core; the others are:
 | [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) | Lua driver source, contracts, tests and the signed driver bundle Core pins. Change drivers there. |
 | [`srcfl/device-simulator`](https://github.com/srcfl/device-simulator) | Simulated house: inverters, batteries, chargers and meters over Modbus TCP, MQTT and OCPP. |
 | [`srcfl/ftw-webapp`](https://github.com/srcfl/ftw-webapp) | Installable everyday client. |
-| [`srcfl/ftw-app`](https://github.com/srcfl/ftw-app) | Native iOS and Android app. |
+| `srcfl/ftw-app` (private) | Native iOS and Android app, closed source since 10 November 2026. Earlier open versions are in [`srcfl/ftw-app-source-archive`](https://github.com/srcfl/ftw-app-source-archive). |
 | [`srcfl/ftw-cloud`](https://github.com/srcfl/ftw-cloud) | Opt-in, box-signed, read-only copy of each home's state for the apps. |
 | [`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons) | Home Assistant app packaging of each FTW release. |
 | [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web) | The project website. |
