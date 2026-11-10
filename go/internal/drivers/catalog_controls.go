@@ -40,6 +40,9 @@ type CatalogControlInput struct {
 	// Options is the closed set a string input accepts. Empty means any
 	// string, as before.
 	Options []string `json:"options,omitempty"`
+	// Default is the value a number control's device runs at by itself,
+	// inside min..max. Nil means the driver does not say.
+	Default *float64 `json:"default,omitempty"`
 }
 
 var controlEvidence = map[string]bool{"readback": true, "write_ack": true}
@@ -130,6 +133,8 @@ func pickControls(block string) []CatalogControl {
 			continue
 		}
 		control.Input.Options = options
+		hasDefault := fieldPresent(withoutBlock(input, "options"), "default")
+		control.Input.Default = fieldNumber(input, "default")
 		switch control.Input.Type {
 		case "number":
 			if control.Input.Min == nil || control.Input.Max == nil ||
@@ -139,11 +144,23 @@ func pickControls(block string) []CatalogControl {
 			if options != nil {
 				continue
 			}
+			// A default outside the range, or not a number, is no
+			// default: the device cannot run at it, and a planner
+			// measuring small steps from it would start in the wrong
+			// place.
+			if hasDefault && (control.Input.Default == nil ||
+				*control.Input.Default < *control.Input.Min ||
+				*control.Input.Default > *control.Input.Max) {
+				continue
+			}
 		case "boolean":
-			if options != nil {
+			if options != nil || hasDefault {
 				continue
 			}
 		case "string":
+			if hasDefault {
+				continue
+			}
 		default:
 			continue
 		}

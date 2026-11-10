@@ -18,8 +18,8 @@ const thermalDriver = `DRIVER = {
       id = "set_heat_curve_offset", label = "Heat curve offset",
       evidence = "write_ack",
       asset = "space_heat", strategy = "curve_offset", zone = "z1",
-      min_interval_s = 600,
-      input = { type = "number", min = -3, max = 3, step = 1, unit = "°C" },
+      min_interval_s = 600, device_hold_max_s = 3600,
+      input = { type = "number", min = -3, max = 3, step = 1, unit = "°C", default = 0 },
     },
     {
       id = "set_power", asset = "space_heat", strategy = "on_off",
@@ -47,7 +47,7 @@ func TestThermalDeclarationParses(t *testing.T) {
 		t.Fatalf("controls = %d, want 3: %+v", len(entry.Controls), entry.Controls)
 	}
 	want := []*CatalogThermalControl{
-		{Asset: thermal.AssetSpaceHeat, Strategy: thermal.InfluenceCurveOffset, Zone: "z1", MinIntervalS: intp(600)},
+		{Asset: thermal.AssetSpaceHeat, Strategy: thermal.InfluenceCurveOffset, Zone: "z1", MinIntervalS: intp(600), DeviceHoldMaxS: intp(3600)},
 		{Asset: thermal.AssetSpaceHeat, Strategy: thermal.InfluenceOnOff, MinOnS: intp(1200), MinOffS: intp(900)},
 		{Asset: thermal.AssetDHW, Strategy: thermal.InfluenceDiscreteMode},
 	}
@@ -62,6 +62,12 @@ func TestThermalDeclarationParses(t *testing.T) {
 	// The offset control's own input still parses as before.
 	if in := entry.Controls[0].Input; in.Min == nil || *in.Min != -3 || in.Max == nil || *in.Max != 3 {
 		t.Errorf("input = %+v", in)
+	}
+	if d := entry.Controls[0].Input.Default; d == nil || *d != 0 {
+		t.Errorf("default = %v, want 0", d)
+	}
+	if entry.Controls[1].Input.Default != nil || entry.Controls[1].Thermal.DeviceHoldMaxS != nil {
+		t.Errorf("on_off control = %+v, want no default and no device hold", entry.Controls[1])
 	}
 
 	wantSensors := []CatalogSensor{
@@ -109,6 +115,9 @@ func TestThermalControlDropsMisdeclarations(t *testing.T) {
 		"min_off as string":    `{ id = "c", asset = "space_heat", strategy = "on_off", min_off_s = "900", input = { type = "boolean" } }`,
 		"min_on on a setpoint": `{ id = "c", asset = "space_heat", strategy = "setpoint", min_on_s = 60, ` + num + ` }`,
 		"interval over a week": `{ id = "c", asset = "space_heat", strategy = "curve_offset", min_interval_s = 700000, ` + num + ` }`,
+		"zero device hold":     `{ id = "c", asset = "space_heat", strategy = "curve_offset", device_hold_max_s = 0, ` + num + ` }`,
+		"device hold string":   `{ id = "c", asset = "space_heat", strategy = "curve_offset", device_hold_max_s = "3600", ` + num + ` }`,
+		"device hold alone":    `{ id = "c", device_hold_max_s = 3600, ` + num + ` }`,
 	}
 	for name, entry := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -148,6 +157,12 @@ func TestControlOptionsValidation(t *testing.T) {
 		"options on a number":  {`{ id = "c", input = { type = "number", min = 0, max = 1, options = { "a" } } }`, false},
 		"options on a boolean": {`{ id = "c", input = { type = "boolean", options = { "a" } } }`, false},
 		"options not a table":  {`{ id = "c", input = { type = "string", options = "a" } }`, false},
+		"default in range":     {`{ id = "c", input = { type = "number", min = -3, max = 3, default = -1.5 } }`, true},
+		"default at a bound":   {`{ id = "c", input = { type = "number", min = 0, max = 1, default = 0 } }`, true},
+		"default out of range": {`{ id = "c", input = { type = "number", min = -3, max = 3, default = 5 } }`, false},
+		"default as string":    {`{ id = "c", input = { type = "number", min = -3, max = 3, default = "0" } }`, false},
+		"default on boolean":   {`{ id = "c", input = { type = "boolean", default = 0 } }`, false},
+		"default on string":    {`{ id = "c", input = { type = "string", default = 0 } }`, false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

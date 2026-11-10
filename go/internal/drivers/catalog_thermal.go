@@ -27,6 +27,11 @@ type CatalogThermalControl struct {
 	// declared only on an on_off control.
 	MinOnS  *int `json:"min_on_s,omitempty"`
 	MinOffS *int `json:"min_off_s,omitempty"`
+	// DeviceHoldMaxS says the device itself keeps a commanded value for at
+	// most this long and then returns to its own regulation: a hub's timed
+	// boost or override. It is the lease that survives FTW stopping. Nil
+	// means the device holds a value until told otherwise.
+	DeviceHoldMaxS *int `json:"device_hold_max_s,omitempty"`
 }
 
 // CatalogSensor names one metric the driver already emits as the temperature
@@ -46,7 +51,7 @@ var controlStrategyInput = map[thermal.InfluenceStrategy]string{
 	thermal.InfluenceDiscreteMode: "string",
 }
 
-var thermalControlKeys = []string{"asset", "strategy", "zone", "min_interval_s", "min_on_s", "min_off_s"}
+var thermalControlKeys = []string{"asset", "strategy", "zone", "min_interval_s", "min_on_s", "min_off_s", "device_hold_max_s"}
 
 var metricNameRE = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
@@ -99,6 +104,14 @@ func pickThermalControl(entry string, input CatalogControlInput) (*CatalogTherma
 		return nil, false
 	}
 	if (out.MinOnS != nil || out.MinOffS != nil) && out.Strategy != thermal.InfluenceOnOff {
+		return nil, false
+	}
+	if out.DeviceHoldMaxS, ok = pickSeconds(entry, "device_hold_max_s"); !ok {
+		return nil, false
+	}
+	// A hold of zero seconds is no hold: the device would revert before
+	// the value took effect, and calling it a lease would be false.
+	if out.DeviceHoldMaxS != nil && *out.DeviceHoldMaxS == 0 {
 		return nil, false
 	}
 	return out, true
