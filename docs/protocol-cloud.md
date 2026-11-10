@@ -18,7 +18,7 @@ and how they lay back together.
 
 The app protocol, which runs inside Noise between a phone and its box, is
 specified in
-[srcfl/ftw-webapp docs/protocol.md](https://github.com/srcfl/ftw-webapp/blob/main/docs/protocol.md).
+[docs/protocol.md](protocol.md).
 FTW Cloud reuses its frame layout, CBOR rules, field encoding and tile format.
 It adds the `cloud.link` capability and one optional field to the app
 protocol's `hello_ok`, `cloud` (see
@@ -1754,11 +1754,9 @@ owner must suspend again.
 
 ## Registry names
 
-These names live in the contract registry. srcfl/ftw-webapp added them there
-first ([#81](https://github.com/srcfl/ftw-webapp/pull/81),
-[#88](https://github.com/srcfl/ftw-webapp/pull/88) and, for agents,
-[#90](https://github.com/srcfl/ftw-webapp/pull/90)), and paired pull requests
-copied them here and to the app.
+These names live in the contract registry, which Core owns. They were first
+added to the webapp's copy (webapp #81, #88 and, for agents, #90), and paired
+pull requests copied them here and to the app.
 
 | Name | Kind | Goes into |
 |---|---|---|
