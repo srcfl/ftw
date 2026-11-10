@@ -3,7 +3,7 @@
 > **Beta / pilot.** The **FTW (0.x beta)** app is for a first Home Assistant
 > Green pilot. Reviewed beta pins
 > arrive as app updates. You choose when to install them. You can also run FTW on a
-> [separate Linux host](native-beta.md) and connect it to Home Assistant with
+> [separate Linux host](install.md#raspberry-pi-or-linux) and connect it to Home Assistant with
 > the [MQTT integration](ha-integration.md).
 
 [Svenska](setup-guide/home-assistant-sv.md)
@@ -12,27 +12,32 @@
 
 - Home Assistant OS (for example Home Assistant Green), amd64
   or aarch64. Home Assistant Container/Core has no apps; use a
-  [separate host](native-beta.md) instead.
+  [separate host](install.md#raspberry-pi-or-linux) instead.
 - Keep at least 1 GB free for the first build, plus room for history and backups.
 - Your inverter, battery, meter or charger on the same network.
 
-## 1. Stop any other FTW first
+## Already running another FTW?
 
-Only one FTW may control a site.
+Only one FTW may control a site. New to FTW? Go to step 1.
 
 - **Old FTW (beta) app (3.x):** open it under **Settings → Apps**, turn
   off **Start on boot** and **Watchdog**, then **Stop**. Take a backup
   first if you want to keep it. Its settings and history do not move over.
 - **FTW on another computer:** stop it there before you continue.
 
-## 2. Add the app repository
+## 1. Add the app repository
+
+[![Add the FTW repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsrcfl%2Fhome-assistant-addons)
+
+The button opens your Home Assistant and asks to add the repository. Or do it
+by hand:
 
 1. **Settings → Apps → Install app** to open the App store.
 2. Menu (⋮) top right → **Repositories**.
 3. Paste `https://github.com/srcfl/home-assistant-addons` and choose **Add**.
 4. Close the dialog. Reload the page if the store has not changed.
 
-## 3. Install
+## 2. Install
 
 1. Find **FTW (0.x beta)** in the store and open it.
 2. Choose **Install**. Home Assistant builds the app on your device from
@@ -43,30 +48,26 @@ Only one FTW may control a site.
    `no config found — starting setup wizard` on a new install.
    After setup, the log shows `HTTP API ready`.
 
-## 4. Open FTW and set it up
+## 3. Open FTW and set it up
 
-Choose **Open web UI** inside Home Assistant. App versions with ingress use
-HA's login; no separate FTW password is needed. You can enable **Show in
-sidebar** on the app page. HA requires an administrator to open FTW.
-The direct web port on the home network is closed.
+Choose **Open web UI** on the app page. It opens FTW on port 8080 of your
+Home Assistant address, directly on your home network. It does not go through
+Home Assistant's login.
 
-A new install opens the setup wizard. Follow it to add your devices. The
-[setup guide](setup-guide/en.md) explains each step. An existing app with a
-saved FTW password uses HA's login after the update too. Its settings and
-history stay in place.
+A new install opens the setup wizard. Follow it to add your devices;
+[Set up your home](install.md#set-up-your-home) shows what to expect.
 
 Give Home Assistant a fixed address (DHCP reservation in the router), so your
 devices keep finding it.
 
-## 5. Connect the FTW app (iPhone) or webapp
+## 4. Connect the FTW app (iPhone) or webapp
 
-The new FTW webapp and iOS app need new FTW 0.x — this app provides it.
-Ingress opens the web UI through HA. Direct LAN access from a separate FTW
-client is not part of this mode. For a separate client, enable FTW Cloud and
-follow [Pair with one iPhone](pairing.md). If you used the webapp with an older FTW,
+The FTW webapp and iPhone app need new FTW 0.x, which this app provides. In
+FTW, open **Settings → FTW app** and follow
+[Pair with one iPhone](pairing.md). If you used the webapp with an older FTW,
 remove it from the home screen and pair again.
 
-## 6. Home Assistant entities (optional)
+## 5. Home Assistant entities (optional)
 
 FTW can publish its values to Home Assistant over MQTT. See
 [Home Assistant integration](ha-integration.md). Use the Mosquitto broker app
@@ -92,7 +93,7 @@ This restores its version and data together. Keep other FTW instances stopped.
 |---|---|
 | The app is not in the store | Check the repository URL, reload the page, or **⋮ → Check for updates**. |
 | Install fails | Open **Settings → System → Logs → Supervisor**. A download or checksum error means the package could not be fetched; try again later. |
-| Web UI does not open | Check the app **Log**. Open it through HA. Ingress port 18099 must be free. |
+| Web UI does not open | Check the app **Log**. Port 8080 must be free. |
 | FTW cannot reach a device | Check the device's IP address and that it is on the same network. |
 | The FTW app/webapp says the box is too old | Make sure you installed **FTW (0.x beta)**, not the old **FTW (beta)**. |
 

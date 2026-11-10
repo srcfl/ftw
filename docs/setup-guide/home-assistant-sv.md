@@ -5,7 +5,7 @@
 > **Beta / pilot.** Appen **FTW (0.x beta)** är avsedd för en första pilot på
 > Home Assistant Green. Granskade betaversioner
 > kommer som appuppdateringar. Du väljer när du installerar dem. Du kan också köra FTW på en
-> [separat Linux-dator](update-sv.md) och koppla den till Home Assistant med
+> [separat Linux-dator](install-sv.md#raspberry-pi-eller-linux) och koppla den till Home Assistant med
 > [MQTT](../ha-integration.md).
 
 ## Det här behöver du
@@ -15,23 +15,28 @@
 - Ha minst 1 GB ledigt för första bygget, plus plats för historik och backup.
 - Växelriktare, batteri, elmätare eller laddbox på samma nätverk.
 
-## 1. Stoppa annan FTW först
+## Kör du redan en annan FTW?
 
-Bara en FTW får styra anläggningen.
+Bara en FTW får styra anläggningen. Är du ny på FTW? Gå till steg 1.
 
 - **Gamla appen FTW (beta), 3.x:** **Inställningar → Appar**, stäng av
   **Starta vid uppstart** och **Watchdog**, sedan **Stoppa**. Ta en backup
   först om du vill spara den. Inställningar och historik följer inte med.
 - **FTW på en annan dator:** stoppa den där.
 
-## 2. Lägg till app-repot
+## 1. Lägg till app-repot
+
+[![Lägg till FTW:s arkiv i min Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsrcfl%2Fhome-assistant-addons)
+
+Knappen öppnar din Home Assistant och frågar om arkivet ska läggas till. Eller
+gör det för hand:
 
 1. **Inställningar → Appar → Installera app** för att öppna appbutiken.
 2. Menyn (⋮) uppe till höger → **Git-arkiv** (**Repositories** på engelska).
 3. Klistra in `https://github.com/srcfl/home-assistant-addons`, välj **Lägg till**.
 4. Stäng och ladda om sidan om inget hänt.
 
-## 3. Installera
+## 2. Installera
 
 1. Öppna **FTW (0.x beta)** i butiken.
 2. Välj **Installera**. Home Assistant bygger appen på enheten från FTW:s
@@ -42,25 +47,22 @@ Bara en FTW får styra anläggningen.
    `no config found — starting setup wizard` vid en nyinstallation.
    Efter installationen visar loggen `HTTP API ready`.
 
-## 4. Öppna FTW och ställ in
+## 3. Öppna FTW och ställ in
 
-Välj **Öppna webbgränssnittet** inne i Home Assistant. Appversioner med
-ingress använder din HA-inloggning; du behöver inget eget FTW-lösenord.
-Du kan slå på **Visa i sidofältet** på appens sida. HA kräver en administratör
-för att öppna FTW. Den direkta webbporten på hemnätverket är stängd.
+Välj **Öppna webbgränssnittet** på appens sida. Det öppnar FTW på port 8080
+på din Home Assistants adress, direkt på hemnätverket. Det går inte genom
+Home Assistants inloggning.
 
-Följ installationsguiden och lägg till dina enheter ([guide](sv.md)).
-Det gäller också en befintlig app med ett sparat FTW-lösenord: efter uppdatering
-öppnar du FTW via HA. Inställningar och historik finns kvar.
+En ny installation öppnar installationsguiden. Följ den och lägg till dina
+enheter; [Ställ in ditt hem](install-sv.md#ställ-in-ditt-hem) visar vad du kan
+vänta dig.
 
 Ge Home Assistant en fast adress (DHCP-reservation i routern).
 
-## 5. Koppla FTW-appen eller webappen
+## 4. Koppla FTW-appen eller webappen
 
-Nya FTW-webappen och iOS-appen kräver nya FTW 0.x, som den här appen ger.
-Ingress ger åtkomst till webbgränssnittet genom HA. Direkt LAN-åtkomst från
-en separat FTW-klient ingår inte i detta läge. För en separat klient behöver
-du aktivera FTW Cloud och följa [parkopplingen](../pairing.md).
+FTW-webappen och iPhone-appen kräver nya FTW 0.x, som den här appen ger.
+Öppna **Settings → FTW app** i FTW och följ [parkopplingen](../pairing.md).
 Har du använt webappen mot äldre FTW: ta bort den från hemskärmen och
 parkoppla igen.
 
@@ -74,5 +76,5 @@ parkoppla igen.
   Native-installationens automatiska återgång finns inte här; HA äger uppdateringen.
 - Syns inte appen: kontrollera repo-URL:en och ladda om. Misslyckas
   installationen: se **Inställningar → System → Loggar → Supervisor**.
-  Öppnas inte webbgränssnittet: öppna appen genom HA och kolla appens logg. Ingressport 18099 måste vara ledig.
+  Öppnas inte webbgränssnittet: kolla appens logg. Port 8080 måste vara ledig.
 - Fråga i [Discord](https://discord.gg/UK2ygPBu8N) och bifoga appens logg.

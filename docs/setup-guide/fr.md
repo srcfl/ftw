@@ -2,9 +2,11 @@
 
 Ce guide est fait pour vous qui n'avez jamais configuré un Raspberry Pi. Pas de panique — c'est plus simple qu'il n'y paraît. Il suffit de suivre les étapes, une par une.
 
-> **Les versions 2.x et 3.x ne recevront plus de mises à jour.** Passez à la nouvelle série 0.x pour suivre les dernières versions. N’installez pas la bêta 3.x. Si FTW fonctionne déjà, commencez par [Install and update FTW](../native-beta.md). Utilisez une **nouvelle carte SD** et conservez l’ancienne avec ses données.
+> **FTW fonctionne déjà ?** Suivez d’abord [le guide de changement](../native-beta.md#coming-from-an-older-ftw). Utilisez une **nouvelle carte SD** et conservez l’ancienne avec ses données.
 
-> **Pas de Raspberry Pi ?** Un nouvel hôte 64 bits sous Debian ou Ubuntu peut utiliser le même installateur natif bêta. Ignorez les étapes propres au Pi et lisez l'**Étape 11 — Installer FTW**.
+> **Vous utilisez Home Assistant OS ?** Vous n’avez pas besoin d’un Raspberry Pi : [installez plutôt l’application FTW](../install.md#home-assistant).
+
+> **Un autre ordinateur Linux ?** Un nouvel ordinateur 64 bits sous Debian ou Ubuntu utilise le même installateur. Ignorez les étapes propres au Pi et lisez l'**Étape 11 — Installer FTW**.
 
 ## Ce dont vous avez besoin
 
@@ -118,7 +120,7 @@ Bravo — vous êtes maintenant "à l'intérieur" du Raspberry Pi.
 
 ## Étape 11 — Installer FTW
 
-Suivez [Install and update FTW](../native-beta.md#install) et choisissez le tag exact d’une nouvelle bêta 0.x publiée. Vous pouvez l’installer maintenant sur un Pi 64 bits vierge. Si FTW fonctionne déjà, suivez d’abord [le guide de changement](../native-beta.md#coming-from-an-older-ftw) : utilisez une nouvelle carte et configurez à nouveau le site. La migration guidée des anciens réglages et de l’historique n’est pas encore prête.
+Suivez [Install FTW](../install.md#raspberry-pi-or-linux) : copiez le nom de la version la plus récente, collez un bloc et ouvrez la page de configuration. Si FTW fonctionne déjà, suivez d’abord [le guide de changement](../native-beta.md#coming-from-an-older-ftw) : utilisez une nouvelle carte et configurez à nouveau le site. La migration guidée des anciens réglages et de l’historique n’est pas encore prête.
 
 ## Après l'installation
 
