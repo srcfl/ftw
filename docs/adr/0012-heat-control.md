@@ -1,9 +1,10 @@
 # ADR 0012: Heat control from a target temperature and a learned thermal twin
 
-- Status: accepted; being built. The declaration
-  ([#1995](https://github.com/srcfl/ftw/pull/1995)) and the twin in shadow
-  ([#1996](https://github.com/srcfl/ftw/pull/1996)) are proposed as PRs.
-  Planned control has not shipped.
+- Status: proposed. The owner has answered the open questions (see
+  [Decisions](#decisions)); the ADR is accepted when this PR merges. The
+  declaration ([#1995](https://github.com/srcfl/ftw/pull/1995)) and the twin
+  in shadow ([#1996](https://github.com/srcfl/ftw/pull/1996)) are proposed as
+  PRs. Planned control has not shipped.
 - Date: 2026-11-10
 - Decided by: Fredrik on 10 November 2026, in his
   [answers on #1994](https://github.com/srcfl/ftw/pull/1994#issuecomment-6763083595).
@@ -90,8 +91,8 @@ thermal:
     - id: hot_water
       enabled: true
       comfort_sensor: { driver: heishamon, metric: hp_dhw_temp_c }
-      target_c: 50.0
-      flex_c: 5.0
+      target_c: 60.0
+      flex_c: 5.0        # the band 55-65 °C; a dhw zone never goes under 55
       controls:
         - { driver: heishamon, id: set_dhw_mode }
 ```
@@ -105,6 +106,13 @@ thermal:
 - `flex_c` is the owner's trade between comfort and savings. Around the
   target it gives the hard band `[target − flex, target + flex]`, which the
   learned twin may never widen.
+- **A hot-water zone has a floor.** A zone whose comfort sensor is declared
+  `asset = "dhw"` never gets a band below 55 °C, whatever its `target_c`
+  and `flex_c`. Stored water that sits around 45 °C lets Legionella grow, and
+  Swedish building rules (BBR 6:62) ask for at least 50 °C at the tap. Core
+  owns the floor: it rejects a configuration whose band goes under it, and
+  releases the tank to the device when the measured temperature is under it.
+  The value 55 °C is proposed, not decided; see [Open](#open).
 - Without a comfort sensor, a zone cannot be planned. The roadmap does not
   let Core assume indoor temperature.
 
@@ -251,11 +259,18 @@ Core does not rely on them.
 | Core | Comfort reading stale or missing | the watchdog timeout | release to device; resume on a fresh reading |
 | Core | Short cycling | `min_on_s`, `min_off_s` | refuse a value that breaks it |
 | Core | Writes too frequent | `min_interval_s` | skip; the next due slot sends |
+| Core | Hot-water zone under its floor | 55 °C, see [Open](#open) | reject the band in config; release the tank to the device; resume above the floor |
 | Layer | Measured temperature outside the band | owner band | propose release; resume back inside |
 | Layer | Twin not trusted, or error over limit | confidence gate | propose nothing; the device runs itself |
 | Layer | Zones conflict on a shared source | every zone's band | release the source and tell the owner |
 
 The site-meter and watchdog paths stay ahead of all of these.
+
+When the layer is down, nothing reacts to a measured temperature outside the
+band. That case rests on the lease alone: a device with a device-side hold
+returns to its own regulation within `device_hold_max_s`, and a control
+without one can never be more than one `step` from its `input.default`. The
+hot-water floor does not depend on the layer, because Core owns it.
 
 ### Not in scope
 
@@ -286,3 +301,9 @@ Fredrik answered on 10 November 2026:
    minimum on and off times, and release to the device when a reading is
    stale or missing. The twin and the planner are a layer that proposes
    values, and Core checks them.
+
+## Open
+
+- **The hot-water floor.** Proposed at 55 °C in review, for Fredrik to
+  confirm or change. A periodic pass to 60 °C or more against Legionella is
+  a later, separate change.
