@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/prices"
 	"github.com/srcfl/ftw/go/internal/state"
 )
@@ -146,5 +147,20 @@ func TestTheLookbackCoversTheLongestSlot(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].StartMs != at {
 		t.Fatalf("the slot in progress was missed: %+v", got)
+	}
+}
+
+// The app and FTW Cloud get the rate the service taxes at, after its default.
+// A box that never set vat_percent taxes at 25 % and must say so, not send
+// the config's 0 as "no VAT".
+func TestAppPricesSendsTheServicesVATRate(t *testing.T) {
+	svc := prices.FromConfig(&config.Price{Provider: "sourceful", Zone: "SE3"}, nil, nil)
+	a := &appPrices{svc: svc}
+	if got := a.VATPercent(); got != 25 {
+		t.Fatalf("unset VAT went out as %v, want the default 25", got)
+	}
+	svc.SetApplier(prices.Applier{VATPercent: 25.5})
+	if got := a.VATPercent(); got != 25.5 {
+		t.Fatalf("after a reload VAT went out as %v, want 25.5", got)
 	}
 }

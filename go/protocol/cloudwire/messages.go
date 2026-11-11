@@ -307,6 +307,9 @@ type Prices struct {
 	// has no price. TotalMinor includes tariff and VAT.
 	SpotMinor  []*int64 `cbor:"spotMinor"`
 	TotalMinor []*int64 `cbor:"totalMinor"`
+	// VATPermille is the VAT rate in TotalMinor, as in the app protocol's
+	// price answer: 250 is 25 %, and 0 means no VAT.
+	VATPermille int64 `cbor:"vatPermille"`
 }
 
 // HB says the box is there and how old its readings are. It never vouches

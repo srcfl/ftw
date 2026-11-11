@@ -343,18 +343,20 @@ func (c *cloudSite) Prices() (cloudwire.Prices, bool) {
 	if err != nil || len(slots) == 0 {
 		return cloudwire.Prices{}, false
 	}
-	return priceColumns(c.prices.Zone(), c.prices.Currency(), slots), true
+	return priceColumns(c.prices.Zone(), c.prices.Currency(), c.prices.VATPercent(), slots), true
 }
 
 // priceColumns lays slots out at the shortest slot length. A longer slot's
-// price repeats across the columns it covers; a gap is null.
-func priceColumns(zone, currency string, slots []appproto.PricePoint) cloudwire.Prices {
+// price repeats across the columns it covers; a gap is null. The VAT rate
+// crosses in permille, rounded once, as in the app protocol's price answer.
+func priceColumns(zone, currency string, vatPercent float64, slots []appproto.PricePoint) cloudwire.Prices {
 	sort.Slice(slots, func(a, b int) bool { return slots[a].StartMs < slots[b].StartMs })
 	slotMs := int64(math.MaxInt64)
 	for _, s := range slots {
 		slotMs = min(slotMs, int64(s.LenMin)*60_000)
 	}
-	p := cloudwire.Prices{Zone: zone, Currency: currency, T0Ms: slots[0].StartMs, SlotMs: slotMs}
+	p := cloudwire.Prices{Zone: zone, Currency: currency, T0Ms: slots[0].StartMs, SlotMs: slotMs,
+		VATPermille: int64(math.Round(vatPercent * 10))}
 	for _, s := range slots {
 		for at := s.StartMs; at < s.StartMs+int64(s.LenMin)*60_000; at += slotMs {
 			i := int((at - p.T0Ms) / slotMs)

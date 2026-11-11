@@ -38,11 +38,16 @@ const maxPriceWindowMs = 8 * 24 * 60 * 60 * 1000
 // asked for at breakfast genuinely ends early.
 //
 // Staleness covers the whole window, both edges and the middle — see below.
-func priceFrom(zone, currency string, points []PricePoint, fromMs, toMs int64) Price {
+//
+// vatPercent is the rate the box applies to the totals. It becomes integer
+// permille here, once, by the same rule as the money: every rate in use has at
+// most one decimal in percent, so 25.5 % crosses as 255 and nothing is lost.
+func priceFrom(zone, currency string, vatPercent float64, points []PricePoint, fromMs, toMs int64) Price {
 	out := Price{
-		Zone:     zone,
-		Currency: currency,
-		Slots:    make([]PriceSlot, 0, len(points)),
+		Zone:        zone,
+		Currency:    currency,
+		Slots:       make([]PriceSlot, 0, len(points)),
+		VATPermille: int64(math.Round(vatPercent * 10)),
 	}
 
 	for _, p := range points {
@@ -136,6 +141,7 @@ func (h *Handler) onPriceGet(ctx context.Context, env Envelope) error {
 	return h.sendPrice(env.ID, priceFrom(
 		h.cfg.Prices.Zone(),
 		h.cfg.Prices.Currency(),
+		h.cfg.Prices.VATPercent(),
 		points,
 		q.FromMs,
 		q.ToMs,

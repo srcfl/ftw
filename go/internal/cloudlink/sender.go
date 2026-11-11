@@ -694,7 +694,7 @@ func abs(v int64) int64 {
 }
 
 func pricesKey(p cloudwire.Prices) string {
-	return digest([]any{p.T0Ms, p.SlotMs, p.SpotMinor, p.TotalMinor})
+	return digest([]any{p.T0Ms, p.SlotMs, p.SpotMinor, p.TotalMinor, p.VATPermille})
 }
 
 // rosterNumber builds the roster and its number. The number rises when the
