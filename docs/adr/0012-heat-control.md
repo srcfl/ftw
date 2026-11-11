@@ -1,10 +1,10 @@
 # ADR 0012: Heat control from a target temperature and a learned thermal twin
 
-- Status: proposed. The owner has answered the open questions (see
-  [Decisions](#decisions)); the ADR is accepted when this PR merges. The
-  declaration ([#1995](https://github.com/srcfl/ftw/pull/1995)) and the twin
-  in shadow ([#1996](https://github.com/srcfl/ftw/pull/1996)) are proposed as
-  PRs. Planned control has not shipped.
+- Status: proposed.
+- Implementation: the declaration
+  ([#1995](https://github.com/srcfl/ftw/pull/1995)) and the twin in shadow
+  ([#1996](https://github.com/srcfl/ftw/pull/1996)) are proposed as PRs.
+  Planned control has not shipped.
 - Date: 2026-11-10
 - Decided by: Fredrik on 10 November 2026, in his
   [answers on #1994](https://github.com/srcfl/ftw/pull/1994#issuecomment-6763083595).
@@ -233,6 +233,11 @@ temperature, standing loss and fill rate.
   When no value satisfies every zone, the plan is infeasible. The shared
   source is then released to the device and the conflict is shown to the
   owner, not hidden by favouring one room. There is no zone ranking.
+  A released source stays with the device for at least 1 hour, and is
+  taken back only when a plan keeps every zone inside its band for that
+  whole hour. The owner is told once per conflict, not once per slot. A
+  conflict that comes and goes therefore costs at most one release and one
+  reclaim an hour, never one per slot.
 - **The planner works out the buffering itself.** It preheats before an
   expensive period exactly as far as the learned inertia lets the zone
   coast, and stores PV surplus as heat where the twin says it will last.
@@ -329,3 +334,6 @@ Fredrik answered on 10 November 2026:
   hot-water charge by themselves at their own start temperature. The planner
   can only delay a reheat on a device whose driver declares a control that
   blocks or lowers the charge.
+- **How long a released shared source stays released.** Proposed: at least
+  1 hour, reclaimed only when a plan keeps every zone in its band for that
+  hour. The hour is a starting value to tune on hardware.
