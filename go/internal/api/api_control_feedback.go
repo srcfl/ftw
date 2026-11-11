@@ -321,6 +321,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			}
 			f.VehicleRequestActive = d.RequestActive
 			classifyControlFeedback(&f, cmd, commanded, fresh, coreReason, d.Connected, now)
+			if lp, ok := lps[rd.Driver]; ok && kind == telemetry.DerEV && f.Reason == "telemetry_stale" && evAwayIdle(lp, f.RequestedW) {
+				f.State, f.Reason, f.Severity = "waiting", "not_connected", "info"
+			}
 			if h := s.deps.Tel.DriverHealth(rd.Driver); h != nil && h.DeviceFault {
 				f.State, f.Reason, f.Severity = "blocked", "device_fault", "warning"
 				f.DeviceReason = h.DeviceFaultReason
@@ -445,6 +448,16 @@ func setControlStatus(f *ControlFeedback) {
 // An acknowledgement is not an alarm during the normal response wait. A
 // function that previously supplied measured proof must recover that proof.
 // This state comes from telemetry, not from whether a browser was open.
+// evAwayIdle reports a charger with nothing to control: Core's own
+// loadpoint state has no car on it, and FTW asks it for nothing. An idle
+// charger may stop reporting once the car leaves (a tester's Easee, 10 Nov
+// 2026), and its quiet then is not lost control. Core keeps the cable's
+// state with its own unplug grace, so a charger that goes quiet with a car
+// on it still says so.
+func evAwayIdle(lp loadpoint.State, requestedW *float64) bool {
+	return !lp.PluggedIn && !lp.ManualActive && (requestedW == nil || *requestedW <= 0)
+}
+
 func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, now time.Time) bool {
 	// Failed or released calls have their own status. They do not by themselves
 	// mean that a previously measured device stopped supplying power readings.
