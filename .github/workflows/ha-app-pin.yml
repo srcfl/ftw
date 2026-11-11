@@ -1,0 +1,130 @@
+name: home assistant app pin
+
+# Every published 0.x beta is handed to srcfl/home-assistant-addons, which pins
+# it for the Home Assistant app. When that stops, nothing here fails: the
+# release is out, and the app stays on an old beta. In November 2026 four betas
+# in two days never reached the app, and nobody saw it.
+#
+# This compares the newest beta here with the pin there. It lives in this
+# repository, not in the one it watches, so it also sees a disabled workflow
+# there or a dispatch token that has expired here. It opens a single issue,
+# keeps editing it, and closes it once the app has caught up.
+
+on:
+  schedule:
+    # Every six hours. The check is quiet unless the app is behind, so four
+    # runs a day are not four notifications. A beta gets three hours to land
+    # before it counts, so a stop shows within nine hours.
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/ha-app-pin.yml
+      - .github/scripts/ha_app_pin.py
+      - .github/scripts/test_ha_app_pin.py
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: python3 -m unittest discover -s .github/scripts -p test_ha_app_pin.py
+
+  behind:
+    name: app pin follows the newest beta
+    needs: test
+    # A pull request only runs the tests above. Forks inherit the schedule as
+    # soon as they sync master, and the run can only misfire there: the
+    # tracking issue belongs on srcfl/ftw. A manual dispatch is someone asking,
+    # so that still runs.
+    if: github.event_name != 'pull_request' && (github.repository == 'srcfl/ftw' || github.event_name != 'schedule')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    concurrency:
+      group: ha-app-pin
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # A failed download fails the run here. It must not read as "the app is
+      # fine", and must not open an issue about a pin we never saw.
+      - name: Read the releases here and the pin there
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate --slurp "repos/srcfl/ftw/releases?per_page=100" \
+            > "${RUNNER_TEMP}/release-pages.json"
+          curl -fsSL --retry 3 --max-time 20 \
+            https://raw.githubusercontent.com/srcfl/home-assistant-addons/main/ftw-0x-beta/config.yaml \
+            > "${RUNNER_TEMP}/ha-app-config.yaml"
+
+      - name: Compare the app pin with the newest beta
+        id: compare
+        run: |
+          set +e
+          output="$(python3 .github/scripts/ha_app_pin.py \
+            "${RUNNER_TEMP}/release-pages.json" "${RUNNER_TEMP}/ha-app-config.yaml" 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          {
+            echo "status=${status}"
+            echo "report<<REPORT_EOF"
+            echo "$output"
+            echo "REPORT_EOF"
+          } >> "$GITHUB_OUTPUT"
+          # 1 means behind, 0 means current, anything else is broken.
+          if [ "$status" != "0" ] && [ "$status" != "1" ]; then
+            echo "::error::the app pin check could not run (exit ${status})"
+            exit "$status"
+          fi
+
+      - name: Open or update the tracking issue
+        if: steps.compare.outputs.status == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ steps.compare.outputs.report }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Home Assistant app is behind the newest FTW beta"
+          body="$(printf '%s\n\n```\n%s\n```\n\n%s\n\n%s\n%s\n%s\n\n%s\n\nFrom %s\n\nThis issue is rewritten by each run of the `home assistant app pin` workflow, which also closes it once the app has caught up. Closing it by hand without moving the pin means it comes back within six hours.\n' \
+            "The Home Assistant app (\`ftw-0x-beta\` in srcfl/home-assistant-addons) has not picked up a published 0.x beta. People who run FTW in Home Assistant are not offered the update." \
+            "${REPORT}" \
+            "Look in the order a release travels:" \
+            "1. The **Offer the published beta to the Home Assistant app** job in the newest [native release run](https://github.com/srcfl/ftw/actions/workflows/native-release.yml). A notice that \`HA_ADDON_DISPATCH_TOKEN\` is absent, or a 401 or 403 from the dispatch, means the token is missing or has expired." \
+            "2. [Pin new FTW 0.x beta](https://github.com/srcfl/home-assistant-addons/actions/workflows/sync-native.yml) in the app repository. No run for the beta means the dispatch never arrived or the workflow is disabled. A failed run says why." \
+            "3. The open [pin pull requests](https://github.com/srcfl/home-assistant-addons/pulls?q=is%3Apr+is%3Aopen+author%3Aapp%2Fgithub-actions). Do not close the newest one by hand: the workflow never reopens a closed pin." \
+            "When the cause is fixed, run **Pin new FTW 0.x beta** by hand with the newest tag." \
+            "${RUN_URL}")"
+
+          existing="$(gh issue list --state open --search "in:title \"${title}\"" \
+            --json number,title --jq "[.[] | select(.title == \"${title}\")][0].number")"
+
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            gh issue edit "$existing" --body "$body"
+            echo "updated issue #${existing}"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Close the tracking issue once the app has caught up
+        if: steps.compare.outputs.status == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Home Assistant app is behind the newest FTW beta"
+          existing="$(gh issue list --state open --search "in:title \"${title}\"" \
+            --json number,title --jq "[.[] | select(.title == \"${title}\")][0].number")"
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            gh issue close "$existing" --comment "The app now pins the newest beta that has had time to land. Closed by the \`home assistant app pin\` workflow."
+            echo "closed issue #${existing}"
+          else
+            echo "the app is current and no issue is open"
+          fi
