@@ -156,15 +156,75 @@ test("the header mark counts only Core; driver versions live in Settings › Dev
   assert.equal(rig.badge._pendingUpdates().total, 1);
 });
 
-test("disabling or removing the badge leaves no detached dialog", () => {
-  for (const action of ["_disable", "disconnectedCallback"]) {
-    const rig = fixture();
-    if (action === "disconnectedCallback") rig.badge.isConnected = false;
-    rig.badge[action]();
-    assert.equal(rig.body.children.length, 0);
-    rig.badge._render();
-    assert.equal(rig.body.children.length, 0, "a late response must not recreate a detached dialog");
-  }
+test("removing the badge leaves no detached dialog", () => {
+  const rig = fixture();
+  rig.badge.isConnected = false;
+  rig.badge.disconnectedCallback();
+  assert.equal(rig.body.children.length, 0);
+  rig.badge._render();
+  assert.equal(rig.body.children.length, 0, "a late response must not recreate a detached dialog");
+});
+
+// The Home Assistant app runs with self-update off: Supervisor installs its
+// updates. The version is still a button, so it answers with what runs and
+// who updates it rather than nothing (#1784).
+function hostManaged(components) {
+  const rig = fixture({ get: url => url.startsWith("/api/components")
+    ? { ok: true, status: 200, json: async () => components }
+    : { ok: false, status: 503, json: async () => ({ error: "self-update disabled" }) } });
+  rig.badge._phase = "idle";
+  rig.badge._info = null;
+  rig.badge._render();
+  return rig;
+}
+
+test("with Home Assistant updating the app, the version says so", async () => {
+  const rig = hostManaged({ core: { version: "v0.157.0-beta.1" },
+    bundle: { kind: "home_assistant_addon", version: "0.157.0-beta.1" } });
+  rig.badge._refresh(false);
+  await settled();
+  rig.badge.open();
+  await settled();
+  const html = rig.root().innerHTML;
+  assert.match(html, /<strong>v0\.157\.0-beta\.1<\/strong> is running\./);
+  assert.match(html, /Home Assistant installs updates and rollbacks for this app\./);
+  assert.match(html, /Home Assistant app 0\.157\.0-beta\.1/);
+  assert.doesNotMatch(html, /data-action="(update|retry-update|check)"/);
+  assert.match(html, /data-action="close"/);
+  assert.equal(rig.requests.filter(r => r.url.startsWith("/api/version/")).length, 1,
+    "a box that said self-update is off is not asked about versions again");
+
+  const close = rig.root().actions.find(a => a.dataset.action === "close");
+  close.click({ currentTarget: close });
+  assert.equal(rig.body.children.length, 0);
+});
+
+test("until the box says how it was installed, the dialog names no host", async () => {
+  const rig = fixture({ get: url => url.startsWith("/api/components")
+    ? new Promise(() => {})
+    : { ok: false, status: 503, json: async () => ({ error: "self-update disabled" }) } });
+  rig.badge._phase = "idle";
+  rig.badge._info = null;
+  rig.badge._refresh(false);
+  await settled();
+  rig.badge.open();
+  await settled();
+  const html = rig.root().innerHTML;
+  assert.match(html, /Reading the running version…/);
+  assert.match(html, /<p>FTW does not update itself here\.<\/p>/);
+  assert.doesNotMatch(html, /Docker|Home Assistant/);
+});
+
+test("an install that updates outside FTW says so", async () => {
+  const rig = hostManaged({ core: { version: "v0.157.0-beta.1" } });
+  rig.badge._refresh(false);
+  await settled();
+  rig.badge.open();
+  await settled();
+  const html = rig.root().innerHTML;
+  assert.match(html, /<strong>v0\.157\.0-beta\.1<\/strong> is running\./);
+  assert.match(html, /FTW does not update itself here\. Update it the way it was installed, for example with Docker\./);
+  assert.doesNotMatch(html, /Home Assistant/);
 });
 
 test("opening the dialog follows an update started with ftw update", async () => {
@@ -182,12 +242,12 @@ test("opening the dialog follows an update started with ftw update", async () =>
   assert.equal(rig.requests.filter(r => r.options?.method === "POST").length, 0);
 });
 
-test("a startup 503 keeps update progress available; only explicit disable hides it", async () => {
+test("a startup 503 keeps update progress available; only self-update off ends the checks", async () => {
   for (const error of ["starting", "self-update disabled"]) {
     const rig = fixture({ get: () => ({ ok: false, status: 503, json: async () => ({ error }) }) });
     rig.badge._refresh(false);
     await settled();
-    assert.equal(rig.badge._disabled, error === "self-update disabled");
+    assert.equal(rig.badge._hostManaged, error === "self-update disabled");
     if (error === "starting") {
       rig.badge.open();
       assert.match(rig.root().innerHTML, /Control has not started yet/);
