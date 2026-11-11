@@ -173,6 +173,10 @@ sensors = {
   without a device-side hold may still be planned, but only within one
   declared `step` of its declared `input.default`. Without both a default
   and a step, it gets no planned control.
+  Two holds seen on hardware: a Wiser hub's room override sent with
+  `DurationMinutes` ends on a quarter hour and returns the room to its
+  manual setpoint or schedule by itself, and CTC's 1000-series registers
+  reset five minutes after the last write.
 - Supporting a device is a driver's work: a user can write a driver for
   their own device, declare these fields and test it. Support is claimed
   per driver with hardware evidence, not by Core.
@@ -211,6 +215,13 @@ temperature, standing loss and fill rate.
 - **Learning from ordinary operation.** The twin learns from what the device
   does by itself and from owner holds. The planner makes no steps only to
   learn.
+- **A zone's neighbours.** A zone inside a heated house loses much of its
+  heat to the zones around it, not straight outdoors. A tiled bathroom
+  with electric floor heating sits between rooms the heat pump keeps warm.
+  Fitted against `T_out` alone, its `UA` is an effective value that holds
+  only while the neighbours stay as they are; warming the house lowers
+  the zone's need. Where a neighbouring zone's temperature is declared,
+  the twin uses it as a second boundary.
 - The twin is advisory, as [safety.md](../safety.md#planner-and-model-containment)
   requires. It never widens the band or a declared limit, and its prediction
   never counts as evidence. Only the measured temperature verifies a plan.
@@ -238,6 +249,16 @@ temperature, standing loss and fill rate.
   whole hour. The owner is told once per conflict, not once per slot. A
   conflict that comes and goes therefore costs at most one release and one
   reclaim an hour, never one per slot.
+- **Cost per kWh of heat, not of electricity.** Each heat input is
+  costed as electricity at the slot's price divided by its efficiency: 1
+  for direct electric heat, the learned COP at that outdoor and supply
+  temperature for a heat pump. Storing heat in a cheap slot pays only when
+  the price ratio beats the efficiency ratio plus the extra loss. A tiled
+  floor charged with direct electric heat (COP 1) in a house that a heat
+  pump also heats (COP 3-4 at 4 °C outdoor) rarely pays, even at a price
+  spread of 1.5; the same hours spent raising the heat pump's flow can.
+  When two sources can warm one zone, the planner prefers the cheaper heat
+  per kWh, not the cheaper electricity.
 - **The planner works out the buffering itself.** It preheats before an
   expensive period exactly as far as the learned inertia lets the zone
   coast, and stores PV surplus as heat where the twin says it will last.
@@ -334,6 +355,11 @@ Fredrik answered on 10 November 2026:
   hot-water charge by themselves at their own start temperature. The planner
   can only delay a reheat on a device whose driver declares a control that
   blocks or lowers the charge.
+- **Where the efficiency comes from.** Proposed: a control declares its
+  heat source (`direct_electric` or `heat_pump`); a heat pump's COP is
+  learned from its metered electrical input where a driver reports one,
+  and otherwise taken from a declared curve. Some controllers, such as the
+  CTC EcoZenith, report no compressor power, so the curve is all there is.
 - **How long a released shared source stays released.** Proposed: at least
   1 hour, reclaimed only when a plan keeps every zone in its band for that
   hour. The hour is a starting value to tune on hardware.
