@@ -25,6 +25,7 @@ var agentAPIHints = []protocol.AgentAPIRoute{
 	{Path: "/api/data-sources", Description: "Available data sources and freshness"},
 	{Path: "/api/battery_models", Description: "Learned battery model and efficiency"},
 	{Path: "/api/loadmodel", Description: "Load forecast model and learning"},
+	{Path: "/api/thermal/twins", Description: "Learned thermal twins of room sensors; shadow only, nothing controls from them"},
 	{Path: "/api/pvmodel", Description: "Solar forecast model and learning"},
 	{Path: "/api/forecast", Description: "Load and solar forecasts", Query: map[string]string{"range": "Time ahead, such as 24h"}},
 	{Path: "/api/prices", Description: "Stored import and export prices", Query: map[string]string{"range": "Time ahead, such as 24h", "since_ms": "Unix milliseconds", "until_ms": "Unix milliseconds"}},

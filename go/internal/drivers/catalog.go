@@ -77,6 +77,10 @@ type CatalogEntry struct {
 	// Controls are the operator-facing commands the driver declares. Empty
 	// for every driver that only reports. See catalog_controls.go.
 	Controls []CatalogControl `json:"controls,omitempty"`
+	// Sensors are the metrics the driver says describe a heat store's
+	// temperature. Empty for every driver that declares none. See
+	// catalog_thermal.go.
+	Sensors []CatalogSensor `json:"sensors,omitempty"`
 
 	// ConfigSecrets lists driver-specific config keys that the Settings
 	// UI / setup wizard should render as password inputs and store
@@ -240,6 +244,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.AuthPostPath = pickString(block, "auth_post_path")
 	e.AuthPostPaths = pickList(block, "auth_post_paths")
 	e.Controls = pickControls(block)
+	e.Sensors = pickSensors(block)
 	return e, nil
 }
 
