@@ -108,8 +108,10 @@ thermal:
   learned twin may never widen.
 - **A hot-water zone has a floor.** A zone whose comfort sensor is declared
   `asset = "dhw"` never gets a band below 55 °C, whatever its `target_c`
-  and `flex_c`. Stored water that sits around 45 °C lets Legionella grow, and
-  Swedish building rules (BBR 6:62) ask for at least 50 °C at the tap. Core
+  and `flex_c`. Legionella grows between about 20 and 45 °C, and the Swedish
+  building rules ask for at least 50 °C at the tap
+  ([BFS 2024:8](https://www.boverket.se/sv/PBL-kunskapsbanken/regler-om-byggande/hygien-halsa-och-miljo/vatten-avlopp/legionella/),
+  chapter 8, section 6); Boverket recommends 60 °C in the water heater. Core
   owns the floor: it rejects a configuration whose band goes under it, and
   releases the tank to the device when the measured temperature is under it.
   The value 55 °C is proposed, not decided; see [Open](#open).
