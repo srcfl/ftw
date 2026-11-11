@@ -92,7 +92,7 @@ thermal:
       enabled: true
       comfort_sensor: { driver: heishamon, metric: hp_dhw_temp_c }
       target_c: 60.0
-      flex_c: 5.0        # the band 55-65 °C; a dhw zone never goes under 55
+      flex_c: 5.0        # the band 55-65 °C; see the hot-water floor below
       controls:
         - { driver: heishamon, id: set_dhw_mode }
 ```
@@ -106,15 +106,28 @@ thermal:
 - `flex_c` is the owner's trade between comfort and savings. Around the
   target it gives the hard band `[target − flex, target + flex]`, which the
   learned twin may never widen.
-- **A hot-water zone has a floor.** A zone whose comfort sensor is declared
-  `asset = "dhw"` never gets a band below 55 °C, whatever its `target_c`
-  and `flex_c`. Legionella grows between about 20 and 45 °C, and the Swedish
-  building rules ask for at least 50 °C at the tap
+- **A hot-water zone has a floor, with a short dip allowed.** For a zone
+  whose comfort sensor is declared `asset = "dhw"`, measured at the top of
+  the tank where water is drawn:
+  - The band never goes below a **floor of 50 °C**, whatever `target_c` and
+    `flex_c` say. Core rejects a configuration that does.
+  - After a draw, such as a shower, the planner may hold off reheating so it
+    can wait for cheaper energy. The tank may then sit under the floor for at
+    most **2 hours** at a time, and never under **45 °C**.
+  - When either limit is reached, Core releases the tank to the device,
+    which reheats by its own regulation. Core keeps the timer, so this does
+    not depend on the layer.
+
+  The reason is Legionella. It multiplies between about 20 and 45 °C, and
+  the risk is water that stays lukewarm for days, not a dip of a few hours:
+  industry sources give a doubling time of 2–6 hours at best, around
+  37–42 °C in stagnant water with biofilm, and days to weeks to reach high
+  counts in real systems. The Swedish building rules ask for at least 50 °C
+  at the tap
   ([BFS 2024:8](https://www.boverket.se/sv/PBL-kunskapsbanken/regler-om-byggande/hygien-halsa-och-miljo/vatten-avlopp/legionella/),
-  chapter 8, section 6); Boverket recommends 60 °C in the water heater. Core
-  owns the floor: it rejects a configuration whose band goes under it, and
-  releases the tank to the device when the measured temperature is under it.
-  The value 55 °C is proposed, not decided; see [Open](#open).
+  chapter 8, section 6), and Boverket recommends 60 °C in the water heater.
+  German guidance for single-family houses says to avoid running below
+  50 °C. The three numbers are proposed, not decided; see [Open](#open).
 - Without a comfort sensor, a zone cannot be planned. The roadmap does not
   let Core assume indoor temperature.
 
@@ -261,7 +274,8 @@ Core does not rely on them.
 | Core | Comfort reading stale or missing | the watchdog timeout | release to device; resume on a fresh reading |
 | Core | Short cycling | `min_on_s`, `min_off_s` | refuse a value that breaks it |
 | Core | Writes too frequent | `min_interval_s` | skip; the next due slot sends |
-| Core | Hot-water zone under its floor | 55 °C, see [Open](#open) | reject the band in config; release the tank to the device; resume above the floor |
+| Core | Hot-water zone band under the floor | 50 °C | reject the band in config |
+| Core | Hot-water zone under the floor too long or too far | 2 h under 50 °C, or under 45 °C | release the tank to the device; resume above the floor |
 | Layer | Measured temperature outside the band | owner band | propose release; resume back inside |
 | Layer | Twin not trusted, or error over limit | confidence gate | propose nothing; the device runs itself |
 | Layer | Zones conflict on a shared source | every zone's band | release the source and tell the owner |
@@ -306,6 +320,12 @@ Fredrik answered on 10 November 2026:
 
 ## Open
 
-- **The hot-water floor.** Proposed at 55 °C in review, for Fredrik to
-  confirm or change. A periodic pass to 60 °C or more against Legionella is
-  a later, separate change.
+- **The hot-water floor.** Proposed: a 50 °C floor, a dip under it of at
+  most 2 hours, and never under 45 °C, for Fredrik to confirm or change. The
+  growth figures behind them are industry sources, not measurements, so the
+  numbers lean cautious. A periodic pass to 60 °C or more against
+  Legionella is a later, separate change.
+- **Holding off a reheat needs a control.** Many heat pumps start a
+  hot-water charge by themselves at their own start temperature. The planner
+  can only delay a reheat on a device whose driver declares a control that
+  blocks or lowers the charge.
