@@ -10,7 +10,7 @@
   function statusView(status, desiredEnabled, nowMs) {
     if (typeof desiredEnabled === "boolean" && desiredEnabled !== !!status.enabled) {
       return {
-        className: "ha-status-indicator ha-warn",
+        className: "ha-status-indicator ha-pending",
         text: desiredEnabled ? "○  unsaved change — Save to enable" : "○  unsaved change — Save to disable",
       };
     }
