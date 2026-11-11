@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -240,6 +241,12 @@ func decodeControlValue(raw json.RawMessage, in drivers.CatalogControlInput) (an
 		var value string
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return nil, errors.New("control requires a string value")
+		}
+		// A declared closed set is the whole allowlist, as the declared
+		// bounds are for a number. Unlike a number there is no nearest
+		// value to clamp to, so anything else is refused.
+		if len(in.Options) > 0 && !slices.Contains(in.Options, value) {
+			return nil, errors.New("control value is not one of the declared options")
 		}
 		return value, nil
 	default:
