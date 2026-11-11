@@ -3,7 +3,7 @@
 This document defines the agent contract. Some operations remain proposed;
 the connected box reports what its build supports. The contract is normative: "must" is a
 requirement on the box, FTW Cloud or the app. It extends the app protocol
-([srcfl/ftw-webapp docs/protocol.md](https://github.com/srcfl/ftw-webapp/blob/main/docs/protocol.md))
+([docs/protocol.md](protocol.md))
 and the [FTW Cloud protocol](protocol-cloud.md). Names in `code` that are
 scopes, roles, operations, error codes, capabilities, push kinds, agent
 arguments or reads live in `contract/registry.yaml` and

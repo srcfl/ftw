@@ -143,9 +143,10 @@ func (s *Server) agentDebugContext() map[string]any {
 			"driver_host": tree + "/go/internal/drivers", "bundled_driver_pin": tree + "/drivers/BUNDLED_SOURCE.json", "issues": "https://github.com/srcfl/ftw/issues"},
 		"related_sources": []map[string]string{
 			{"part": "Editable Lua drivers", "repository": "https://github.com/srcfl/device-drivers", "running_source": "Read /api/drivers/catalog, /api/drivers/{id}/source and /api/device_repository/drivers/{id}/versions for installed code and hashes"},
-			{"part": "FTW Cloud and MCP", "repository": "https://github.com/srcfl/ftw-cloud", "running_source": "https://cloud.ftw.energy/source", "revision": "The Cloud HTTP response names X-Source-Revision"},
-			{"part": "Web client", "repository": "https://github.com/srcfl/ftw-webapp"},
-			{"part": "Native apps", "repository": "https://github.com/srcfl/ftw-app"},
+			{"part": "FTW Cloud and MCP", "repository": "https://github.com/srcfl/ftw-cloud", "access": "Private repository since 10 November 2026; FTW Cloud serves no source"},
+			{"part": "Web client", "repository": "https://github.com/srcfl/ftw-webapp", "access": "Private repository since 10 November 2026", "earlier_source": "https://github.com/srcfl/ftw-webapp-source-archive"},
+			{"part": "Native apps", "repository": "https://github.com/srcfl/ftw-app", "access": "Private repository since 10 November 2026", "earlier_source": "https://github.com/srcfl/ftw-app-source-archive"},
+			{"part": "Client protocol", "repository": "https://github.com/srcfl/ftw", "source": "https://github.com/srcfl/ftw/blob/master/docs/protocol.md", "contracts": "https://github.com/srcfl/ftw/tree/master/contract"},
 			{"part": "Compiled Energyplan solver", "repository": "https://github.com/srcfl/energyplan", "access": "Private repository; Core carries binaries and validates their plans"},
 		},
 		"workflow": []string{
