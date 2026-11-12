@@ -89,6 +89,45 @@ func TestAReportReachesTheGatewayThroughTheRelay(t *testing.T) {
 	}
 }
 
+// Without a relay, the box posts the same padded inner request straight to
+// FTW Cloud, and believes only a 204.
+func TestWithoutARelayAReportGoesStraightToFTWCloud(t *testing.T) {
+	if statsrelay.Pinned() == nil {
+		c := statsrelay.Default()
+		if c.Relay() != "" || c.Endpoint() != statsrelay.DirectURL || c.Endpoint() != "https://cloud.ftw.energy/v1/energy" {
+			t.Fatalf("default goes to %q through %q", c.Endpoint(), c.Relay())
+		}
+	}
+	client, cloud := statsrelaytest.NewDirect(t, now)
+	body, _ := json.Marshal(energywire.Report{Schema: energywire.Schema, Date: "2026-10-23", PVGeneration: 31})
+	if err := client.Send(context.Background(), body); err != nil {
+		t.Fatal(err)
+	}
+	if got := cloud.Energy(); len(got) != 1 || got[0].PVGeneration != 31 {
+		t.Fatalf("FTW Cloud got %+v", got)
+	}
+	h := cloud.Headers()[0]
+	if h.Get("Content-Type") != statsrelay.DirectType || h.Get("User-Agent") != "ftw-report" || cloud.Sizes()[0] != reportwire.RequestSize {
+		t.Fatalf("headers %v, %d bytes", h, cloud.Sizes()[0])
+	}
+	if client.Relay() != "" || client.Endpoint() != cloud.URL {
+		t.Fatalf("relay %q endpoint %q", client.Relay(), client.Endpoint())
+	}
+	for name, h := range map[string]http.HandlerFunc{
+		"error":    func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusBadRequest) },
+		"plain ok": func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) },
+		"redirect": func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://elsewhere.example/", http.StatusTemporaryRedirect)
+		},
+	} {
+		srv := httptest.NewServer(h)
+		if err := statsrelay.NewDirect(srv.URL, nil).Send(context.Background(), body); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+		srv.Close()
+	}
+}
+
 // The box believes only a sealed 204 from the gateway it encrypted to.
 func TestOnlyTheGatewaysSealed204Counts(t *testing.T) {
 	k, _ := ecdh.X25519().GenerateKey(nil)

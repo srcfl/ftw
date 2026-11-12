@@ -30,6 +30,9 @@ type Gateway struct {
 	fleet  []fleetwire.Report
 	energy []energywire.Report
 	last   int
+
+	headers []http.Header
+	sizes   []int
 }
 
 // Relay forwards only the body and its content type, and records what it saw.
@@ -87,6 +90,41 @@ func New(t testing.TB, now time.Time) (*statsrelay.Client, *Gateway, *Relay) {
 	}))
 	t.Cleanup(rl.Close)
 	return statsrelay.New(rl.URL, g.Key, nil).WithClock(func() time.Time { return now }), g, rl
+}
+
+// NewDirect starts a fake FTW Cloud whose clock reads now, taking reports
+// unsealed as POST /v1/energy does, and a client posting straight to it. The
+// Gateway's Headers are what came with each request.
+func NewDirect(t testing.TB, now time.Time) (*statsrelay.Client, *Gateway) {
+	t.Helper()
+	g := &Gateway{now: now}
+	g.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		g.mu.Lock()
+		g.headers = append(g.headers, r.Header.Clone())
+		g.sizes = append(g.sizes, len(body))
+		g.mu.Unlock()
+		if r.Header.Get("Content-Type") != statsrelay.DirectType {
+			w.WriteHeader(http.StatusUnsupportedMediaType)
+			return
+		}
+		w.WriteHeader(g.add(body))
+	}))
+	t.Cleanup(g.Close)
+	return statsrelay.NewDirect(g.URL, nil).WithClock(func() time.Time { return now }), g
+}
+
+// Headers is what came with each direct request, and Sizes each body's length.
+func (g *Gateway) Headers() []http.Header {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]http.Header(nil), g.headers...)
+}
+
+func (g *Gateway) Sizes() []int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]int(nil), g.sizes...)
 }
 
 func (g *Gateway) add(msg []byte) int {

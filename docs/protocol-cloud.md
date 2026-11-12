@@ -1860,6 +1860,6 @@ is empty. Withdrawal and retention continue while it is paused.
 
 Since 24 October 2026 a box without Cloud no longer starts a statistics-only
 roster: its statistics are the two anonymous daily reports, through the
-Oblivious HTTP relay (ADR 0008, "Anonymous daily reports and one statistics
-answer"). Statistics-only rosters already running keep working until the
+Oblivious HTTP relay once one exists and straight to FTW Cloud until then
+(ADR 0008, "Anonymous daily reports and one statistics answer"). Statistics-only rosters already running keep working until the
 owner turns statistics off.
