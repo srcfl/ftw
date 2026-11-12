@@ -236,3 +236,16 @@ test('the plan and what happens now, in words', () => {
   assert.equal(planNowWords({...morning, why: 'other'}).why, 'FTW follows what the home and the sun do now, not the forecast.');
   assert.equal(planNowWords({...morning, planned_battery_w: -3000, battery_w: -1000, why: 'less_home'}).then, 'The battery gives only what the home needs.');
 });
+
+test('EV warnings show fresh pilot evidence with the measured charging power', () => {
+  const ev = row({kind: 'ev', status: 'not_following', severity: 'warning',
+    requested_a: 15, sent_w: 10350, pilot_a: 11, actual_w: 7489, reason: 'power_below_target'});
+  assert.equal(controlStatus(ev).text,
+    'FTW asked for 15 A and the charger signalled 11 A to the car. Measured charging: 7.5 kW.');
+  const stopped = {...ev, pilot_a: 12, actual_w: 0, reason: 'no_power_response'};
+  assert.equal(controlStatus(stopped).text,
+    'FTW asked for 15 A and the charger signalled 12 A to the car. Measured charging: 0 W.');
+  assert.equal(controlStatus(stopped).tone, 'warning');
+  assert.doesNotMatch(controlStatus({...stopped, readings_fresh: false}).text, /signalled/);
+  assert.doesNotMatch(controlStatus({...stopped, pilot_a: null}).text, /signalled/);
+});

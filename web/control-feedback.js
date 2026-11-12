@@ -111,9 +111,9 @@ function sentence(row) {
     case 'load_balancer_limit': return `${row.make ? `${row.make} limits the charger to ${amps(row.limit_a)} (its load balancing)`
       : `The charger’s load balancing limits it to ${amps(row.limit_a)}`}. FTW asked for ${amps(row.requested_a)}; the car takes ${controlPower(actual)}.`;
     case 'one_phase': return `The car charges on ${row.charging_phase || 'one phase'} only${num(row.charging_phase_max_w) ? `, at most ${controlPower(row.charging_phase_max_w)}` : ''}. FTW plans with what it takes.`;
-    case 'power_below_target': case 'power_above_target': return `Asked for ${target(row)}, delivering ${controlPower(actual)}.`;
+    case 'power_below_target': case 'power_above_target': return evPowerWarning(row) || `Asked for ${target(row)}, delivering ${controlPower(actual)}.`;
     case 'power_wrong_direction': return `Asked for ${target(row)}, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
-    case 'no_power_response': return `Asked for ${target(row)}, but it delivers no power.`;
+    case 'no_power_response': return evPowerWarning(row) || `Asked for ${target(row)}, but it delivers no power.`;
     case 'power_while_idle': return `Asked to stay idle, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
     case 'setpoint_changed': return `The ${name} reports a target of ${controlFlow(row, row.readback_w)}, not the ${target(row)} FTW sent.`;
     case 'device_fault': return row.device_reason ? `The ${name} reports a fault: ${row.device_reason}.` : `The ${name} reports a fault that stops control.`;
@@ -132,6 +132,14 @@ function sentence(row) {
     case 'site_phase_currents_stale': return 'FTW stopped control because it lacks fresh phase currents for the main fuse check.';
     default: return `The box reports “${row.reason}”, which this version cannot describe.`;
   }
+}
+
+function evPowerWarning(row) {
+  if (row.kind !== 'ev' || !row.readings_fresh ||
+      !num(row.requested_a) || !num(row.pilot_a) || !num(row.actual_w)) return '';
+  const request = `FTW asked for ${amps(row.requested_a)}`;
+  const pilot = `the charger signalled ${amps(row.pilot_a)} to the car`;
+  return `${request} and ${pilot}. Measured charging: ${controlPower(row.actual_w)}.`;
 }
 
 function nextStep(row) {
