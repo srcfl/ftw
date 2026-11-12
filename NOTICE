@@ -22,6 +22,13 @@ under Apache-2.0 only, as go/protocol/LICENSE states. This includes its
 changes made after the snapshot above. The rest of the project keeps the
 license stated above.
 
+Shared contracts: 2026-11-10
+----------------------------
+The files in contract/, including registry.yaml and push-catalogue.yaml, are
+licensed under Apache-2.0 only, as contract/LICENSE states. This includes
+their changes made after the snapshot above. The rest of the project keeps
+the license stated above.
+
 Prior notice, retained verbatim
 -------------------------------
 FTW
