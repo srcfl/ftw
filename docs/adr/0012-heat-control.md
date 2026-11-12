@@ -1,13 +1,15 @@
 # ADR 0012: Heat control from a target temperature and a learned thermal twin
 
-- Status: proposed.
+- Status: accepted.
 - Implementation: the declaration
   ([#1995](https://github.com/srcfl/ftw/pull/1995)) and the twin in shadow
   ([#1996](https://github.com/srcfl/ftw/pull/1996)) are proposed as PRs.
   Planned control has not shipped.
 - Date: 2026-11-10
 - Decided by: Fredrik on 10 November 2026, in his
-  [answers on #1994](https://github.com/srcfl/ftw/pull/1994#issuecomment-6763083595).
+  [answers on #1994](https://github.com/srcfl/ftw/pull/1994#issuecomment-6763083595),
+  and on the hot-water floor on 12 November 2026
+  ([answer](https://github.com/srcfl/ftw/pull/1994#issuecomment-6832196178)).
   See [Decisions](#decisions).
 - Builds on: [#520](https://github.com/srcfl/ftw/issues/520), the
   [`thermal`](../../go/internal/thermal/model.go) contract, driver
@@ -109,12 +111,17 @@ thermal:
 - **A hot-water zone has a floor, with a short dip allowed.** For a zone
   whose comfort sensor is declared `asset = "dhw"`, measured at the top of
   the tank where water is drawn:
-  - The band never goes below a **floor of 50 °C**, whatever `target_c` and
-    `flex_c` say. Core rejects a configuration that does.
+  - The band never goes below the zone's **floor**, whatever `target_c` and
+    `flex_c` say.
   - After a draw, such as a shower, the planner may hold off reheating so it
-    can wait for cheaper energy. The tank may then sit under the floor for at
-    most **2 hours** at a time, and never under **45 °C**.
-  - When either limit is reached, Core releases the tank to the device,
+    can wait for cheaper energy. The tank may then sit under the floor for a
+    limited time, and never under a minimum.
+  - The defaults are a **floor of 50 °C**, at most **2 hours** under it after
+    a draw, and never under **45 °C**. The owner may choose other values,
+    including ones outside these. An explicit choice by the owner wins, and
+    Core does not reject it.
+  - Core holds the owner's floor and timer, or the defaults when nothing is
+    set. When either limit is reached, Core releases the tank to the device,
     which reheats by its own regulation. Core keeps the timer, so this does
     not depend on the layer.
 
@@ -127,7 +134,9 @@ thermal:
   ([BFS 2024:8](https://www.boverket.se/sv/PBL-kunskapsbanken/regler-om-byggande/hygien-halsa-och-miljo/vatten-avlopp/legionella/),
   chapter 8, section 6), and Boverket recommends 60 °C in the water heater.
   German guidance for single-family houses says to avoid running below
-  50 °C. The three numbers are proposed, not decided; see [Open](#open).
+  50 °C. The growth figures are industry sources, not measurements, so the
+  defaults lean cautious. Fredrik set them on 12 November 2026; see
+  [Decisions](#decisions).
 - Without a comfort sensor, a zone cannot be planned. The roadmap does not
   let Core assume indoor temperature.
 
@@ -300,8 +309,7 @@ Core does not rely on them.
 | Core | Comfort reading stale or missing | the watchdog timeout | release to device; resume on a fresh reading |
 | Core | Short cycling | `min_on_s`, `min_off_s` | refuse a value that breaks it |
 | Core | Writes too frequent | `min_interval_s` | skip; the next due slot sends |
-| Core | Hot-water zone band under the floor | 50 °C | reject the band in config |
-| Core | Hot-water zone under the floor too long or too far | 2 h under 50 °C, or under 45 °C | release the tank to the device; resume above the floor |
+| Core | Hot-water zone under its floor too long or too far | the owner's floor, timer and minimum; by default 2 h under 50 °C, or under 45 °C | release the tank to the device; resume above the floor |
 | Layer | Measured temperature outside the band | owner band | propose release; resume back inside |
 | Layer | Twin not trusted, or error over limit | confidence gate | propose nothing; the device runs itself |
 | Layer | Zones conflict on a shared source | every zone's band | release the source and tell the owner |
@@ -317,8 +325,8 @@ hot-water floor does not depend on the layer, because Core owns it.
 ### Not in scope
 
 Temperature schedules, the Live Energy node for heat pumps (#520, part 1),
-the Settings form and an Energyplan thermal capability. Each is a separate
-change.
+the Settings form, an Energyplan thermal capability and a periodic pass to
+60 °C or more against Legionella. Each is a separate change.
 
 ## Decisions
 
@@ -344,13 +352,16 @@ Fredrik answered on 10 November 2026:
    stale or missing. The twin and the planner are a layer that proposes
    values, and Core checks them.
 
+Fredrik answered on the hot-water floor on 12 November 2026:
+
+8. **Hot-water floor.** A 50 °C floor, at most 2 hours under it after a
+   draw, and never under 45 °C are the defaults. The owner may choose other
+   values, including ones outside these; an explicit choice by the owner
+   wins and Core does not reject it. Core holds the owner's floor and timer,
+   with these three numbers as defaults when nothing is set.
+
 ## Open
 
-- **The hot-water floor.** Proposed: a 50 °C floor, a dip under it of at
-  most 2 hours, and never under 45 °C, for Fredrik to confirm or change. The
-  growth figures behind them are industry sources, not measurements, so the
-  numbers lean cautious. A periodic pass to 60 °C or more against
-  Legionella is a later, separate change.
 - **Holding off a reheat needs a control.** Many heat pumps start a
   hot-water charge by themselves at their own start temperature. The planner
   can only delay a reheat on a device whose driver declares a control that
