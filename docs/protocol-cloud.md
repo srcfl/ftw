@@ -1870,6 +1870,6 @@ Since 24 October 2026 a box without Cloud starts no statistics-only roster
 November 2026 statistics come only with FTW Cloud (ADR 0008, amendment of
 that date). A box ends a statistics-only roster at its next start, so the
 service deletes its rows, and a box without Cloud sends no statistics at
-all. No release names a relay yet: the daily fleet report goes straight to
-`/v1/fleet`, which sees the box's address, and the energy report is not
-sent.
+all. No relay runs: both daily reports go straight to FTW Cloud, the fleet
+report to `/v1/fleet` and the energy report to `/v1/energy`, and each route
+sees the box's address.

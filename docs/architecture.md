@@ -650,11 +650,12 @@ was installed does not become a field. The service accepts both schemas and
 counts health only from reports that carry it.
 
 The report goes over HTTPS to `https://cloud.ftw.energy/v1/fleet`, only from a box
-with FTW Cloud on under its current terms; FTW Cloud sees the box's address
-while the request is open. No release names an Oblivious HTTP relay
-(`go/internal/statsrelay`), and FTW Cloud's gateway for one, `/v1/ohttp`, was
-removed on 28 November 2026 (srcfl/ftw-cloud#72). It never enters the Noise
-session. The HTTP handler validates the fixed payload, adds it to the UTC
+with FTW Cloud on under its current terms, and the energy report the same way
+to `https://cloud.ftw.energy/v1/energy` (ADR 0008, amended 12 November 2026);
+FTW Cloud sees the box's address while the request is open. No release names
+an Oblivious HTTP relay (`go/internal/statsrelay`), and FTW Cloud's gateway for
+one, `/v1/ohttp`, was removed on 28 November 2026 (srcfl/ftw-cloud#72). It
+never enters the Noise session. The HTTP handler validates the fixed payload, adds it to the UTC
 day's counters and drops it. It keeps 90 calendar days of totals, not raw
 reports. An operator reads totals only on the loopback metrics listener. An
 explicitly saved former default resolves to Cloud; a private collector keeps

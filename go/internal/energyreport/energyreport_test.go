@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/statsrelay"
 	"github.com/srcfl/ftw/go/internal/statsrelay/statsrelaytest"
 )
 
@@ -44,30 +45,30 @@ func TestTheSendTimeIsDrawnInTheWindowAfterTheDayCloses(t *testing.T) {
 	}
 }
 
-// Box to relay to gateway: the gateway reads the day's report, and a restart
-// does not send the day again.
-func TestABoxReportReachesTheGatewayThroughTheRelay(t *testing.T) {
-	client, gw, relay := statsrelaytest.New(t, day.Add(30*time.Hour))
+// Box to FTW Cloud: it reads the day's report, and a restart does not send
+// the day again.
+func TestABoxReportReachesFTWCloud(t *testing.T) {
+	client, cloud := statsrelaytest.NewDirect(t, day.Add(30*time.Hour))
 	kv := memKV{}
-	s := newSender(t, Options{Ledger: whole(t), KV: kv, Relay: client, Enabled: func() bool { return true },
+	s := newSender(t, Options{Ledger: whole(t), KV: kv, Client: client, Enabled: func() bool { return true },
 		Now: func() time.Time { return day.Add(30 * time.Hour) }})
 
 	s.send(context.Background(), day)
-	got := gw.Energy()
+	got := cloud.Energy()
 	if len(got) != 1 || got[0].Date != "2026-10-23" || got[0].GridImport != 24 || got[0].VehicleCharge != 24 {
-		t.Fatalf("gateway got %+v", got)
+		t.Fatalf("FTW Cloud got %+v", got)
 	}
-	if kv[lastDayKey] != "2026-10-23" || gw.Answered() != http.StatusNoContent || len(relay.Bodies()) != 1 {
-		t.Fatalf("kv %v answered %d", kv, gw.Answered())
+	if kv[lastDayKey] != "2026-10-23" || cloud.Answered() != http.StatusNoContent || len(cloud.Sizes()) != 1 {
+		t.Fatalf("kv %v answered %d", kv, cloud.Answered())
 	}
 	s.send(context.Background(), day)
-	if len(gw.Energy()) != 1 {
+	if len(cloud.Sizes()) != 1 {
 		t.Fatal("the same day went twice")
 	}
 }
 
 func TestNothingIsSentWithoutTheOwnersAnswer(t *testing.T) {
-	client, _, relay := statsrelaytest.New(t, day.Add(30*time.Hour))
+	client, cloud := statsrelaytest.NewDirect(t, day.Add(30*time.Hour))
 	ledger := whole(t)
 	var mu sync.Mutex
 	reads := 0
@@ -87,30 +88,23 @@ func TestNothingIsSentWithoutTheOwnersAnswer(t *testing.T) {
 		if o.Ledger == nil {
 			o.Ledger = ledger
 		}
-		o.Relay, o.KV = client, memKV{}
+		o.Client, o.KV = client, memKV{}
 		newSender(t, o).send(context.Background(), day)
-		if len(relay.Bodies()) != 0 {
+		if len(cloud.Sizes()) != 0 {
 			t.Fatalf("%s: sent", name)
 		}
 	}
 }
 
-// Without a relay and a gateway key, Run returns and never reads the ledger.
-func TestWithoutARelayRunSendsNothing(t *testing.T) {
-	l := &countingLedger{}
-	s := newSender(t, Options{Ledger: l, Enabled: func() bool { return true }})
-	done := make(chan struct{})
-	go func() { s.Run(context.Background()); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run waited with nowhere to send")
-	}
-	if l.n != 0 {
-		t.Fatal("read the ledger with nowhere to send")
-	}
-	if p := s.Preview(context.Background()); p.Relay != "" || p.Day == "" {
+// A box posts to FTW Cloud's energy route and to nothing else, and Settings
+// says where.
+func TestTheReportGoesStraightToFTWCloud(t *testing.T) {
+	s := newSender(t, Options{Enabled: func() bool { return true }})
+	if p := s.Preview(context.Background()); p.Endpoint != "https://cloud.ftw.energy/v1/energy" || p.Endpoint != statsrelay.DirectURL || !p.Sending || p.Day == "" {
 		t.Fatalf("preview %+v", p)
+	}
+	if p := newSender(t, Options{}).Preview(context.Background()); p.Sending {
+		t.Fatalf("preview without an answer %+v", p)
 	}
 }
 

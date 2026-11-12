@@ -228,11 +228,10 @@ app_link:
 # things: FTW version, release channel, driver types, roughly how much
 # battery, price zone and roughly how old the install is. The energy report
 # carries a closed UTC day's six whole-kWh sums. No box id, no key, no serial,
-# no site name, no counter. Once a release names a relay, both go through it,
-# sealed with a random number drawn new for each report and the day it was
-# sent, so FTW Cloud never sees the address. No release names one yet, so the
-# fleet report goes straight to `endpoint`, which sees the address, and the
-# energy report is not sent.
+# no site name, no counter. No relay runs: the fleet report goes straight to
+# `endpoint` and the energy report to FTW Cloud's /v1/energy, and each sees
+# the box's address while the request is open. The energy report goes with a
+# random number drawn new for each report and the day it was sent.
 # `enabled` is no longer read; FTW Cloud decides. A collector of your own in
 # `endpoint` also gets a report only while FTW Cloud is on.
 fleet_ping:
