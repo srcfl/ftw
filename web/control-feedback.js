@@ -136,6 +136,11 @@ function sentence(row) {
 
 function nextStep(row) {
   const name = noun(row);
+  if (row.kind === 'ev' && row.readings_fresh === true &&
+      ['no_power_response', 'power_below_target', 'offered_current_lower', 'device_limit'].includes(row.reason)) {
+    const reported = typeof row.device_reason === 'string' ? row.device_reason.trim() : '';
+    if (reported) return `The charger reports: ${reported}.`;
+  }
   switch (row.reason) {
     case 'power_below_target': case 'power_above_target': case 'power_wrong_direction':
     case 'no_power_response': case 'power_while_idle':

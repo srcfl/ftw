@@ -236,3 +236,28 @@ test('the plan and what happens now, in words', () => {
   assert.equal(planNowWords({...morning, why: 'other'}).why, 'FTW follows what the home and the sun do now, not the forecast.');
   assert.equal(planNowWords({...morning, planned_battery_w: -3000, battery_w: -1000, why: 'less_home'}).then, 'The battery gives only what the home needs.');
 });
+
+test('EV shortfalls show the reported reason without changing the verdict', () => {
+  for (const reason of ['no_power_response', 'power_below_target', 'offered_current_lower', 'device_limit']) {
+    const ev = row({kind: 'ev', reason, status: 'not_following', severity: 'warning', sent_w: 3680,
+      actual_w: reason === 'no_power_response' ? 0 : 1400, requested_a: 16, offered_a: 6, device_limit_a: 6,
+      device_reason: '  current limited by equalizer  '});
+    const before = controlStatus({...ev, device_reason: undefined});
+    const shown = controlStatus(ev);
+    assert.equal(shown.next, 'The charger reports: current limited by equalizer.');
+    for (const key of ['title', 'text', 'tone', 'proof']) assert.equal(shown[key], before[key], `${reason}: ${key}`);
+    assert.doesNotMatch(Object.values(shown).join(' '), /has not said why/);
+    assert.equal(controlStatus(ev, false).title, 'Status not current');
+    assert.doesNotMatch(controlStatus({...ev, readings_fresh: false}).next, /equalizer/);
+    for (const missing of [undefined, null, '', '   ', 29]) {
+      assert.equal(controlStatus({...ev, device_reason: missing}).next, before.next);
+    }
+  }
+});
+
+test('a charger reason does not explain excess power or replace a known fault', () => {
+  for (const reason of ['power_above_target', 'power_wrong_direction', 'power_while_idle', 'command_failed', 'load_balancer_limit']) {
+    const ev = row({kind: 'ev', reason});
+    assert.deepEqual(controlStatus({...ev, device_reason: 'limited by schedule'}), controlStatus(ev));
+  }
+});
