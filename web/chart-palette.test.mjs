@@ -33,6 +33,7 @@ async function drawHistory(days) {
   const legend = { innerHTML: "" };
   const els = { "energy-history-chart": canvas, "energy-history-legend": legend };
   const context = {
+    URLSearchParams,
     document: { getElementById: (id) => els[id] || null },
     window: {
       devicePixelRatio: 1,

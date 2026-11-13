@@ -191,7 +191,7 @@ header h1 {
 .energy-history-ev-cost span { color: var(--text-dim); font-size: 0.78rem; }
 .energy-history-ev-cost strong { font-size: 1.05rem; }
 .energy-history-ev-cost small { color: var(--text-dim); font-size: 0.7rem; }
-.energy-history-ev-cost .incomplete { color: var(--warning, #f59e0b); }
+.energy-history-ev-cost .incomplete { color: var(--warning, var(--amber)); }
 @media (max-width: 720px) {
   .energy-history-ev-cost { grid-template-columns: 1fr; }
 }
