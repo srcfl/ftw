@@ -28,6 +28,7 @@ var watchedPaths = []string{
 	"go/internal/units/",     // charge steps
 	"go/internal/localzone/", // household clock: goal deadlines, import hour
 	"go/internal/cars/", "go/internal/sitepower/",
+	"go/internal/thermal/", // control heat effects, imported by drivers
 	"go/internal/events/", "go/internal/state/",
 	"drivers/", "optimizer/native/bundle/", // bundled drivers and solver
 	"go/test/site/",

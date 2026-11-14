@@ -22,7 +22,18 @@ const (
 	InfluenceCurveOffset    InfluenceStrategy = "curve_offset"
 	InfluenceSetpoint       InfluenceStrategy = "setpoint"
 	InfluenceDiscreteMode   InfluenceStrategy = "discrete_mode"
+	// InfluenceOnOff is a device whose only lever is start and stop.
+	InfluenceOnOff InfluenceStrategy = "on_off"
 )
+
+// ValidAssetKind reports whether k is one of the declared asset kinds.
+func ValidAssetKind(k AssetKind) bool {
+	switch k {
+	case AssetSpaceHeat, AssetCooling, AssetDHW, AssetBuffer:
+		return true
+	}
+	return false
+}
 
 // IntentKind is planner intent before the driver maps it to vendor commands.
 type IntentKind string

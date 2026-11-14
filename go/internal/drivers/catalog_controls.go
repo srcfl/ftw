@@ -23,6 +23,9 @@ type CatalogControl struct {
 	Label    string              `json:"label,omitempty"`
 	Evidence string              `json:"evidence,omitempty"`
 	Input    CatalogControlInput `json:"input"`
+	// Thermal says what this control does to heat, when the driver declares
+	// it. Nil for every other control. See catalog_thermal.go.
+	Thermal *CatalogThermalControl `json:"thermal,omitempty"`
 }
 
 // CatalogControlInput describes the single value a control carries. Min, max
@@ -34,6 +37,12 @@ type CatalogControlInput struct {
 	Max  *float64 `json:"max,omitempty"`
 	Step *float64 `json:"step,omitempty"`
 	Unit string   `json:"unit,omitempty"`
+	// Options is the closed set a string input accepts. Empty means any
+	// string, as before.
+	Options []string `json:"options,omitempty"`
+	// Default is the value a number control's device runs at by itself,
+	// inside min..max. Nil means the driver does not say.
+	Default *float64 `json:"default,omitempty"`
 }
 
 var controlEvidence = map[string]bool{"readback": true, "write_ack": true}
@@ -51,6 +60,15 @@ func validControlToken(value string) bool {
 // — and a control that appears for one spelling and not the other would look
 // like the driver, not the lookup.
 func ControlsForDriver(catalog []CatalogEntry, luaPath string) []CatalogControl {
+	if e := EntryForDriver(catalog, luaPath); e != nil {
+		return e.Controls
+	}
+	return nil
+}
+
+// EntryForDriver is the catalog entry for luaPath, found as ControlsForDriver
+// describes, or nil.
+func EntryForDriver(catalog []CatalogEntry, luaPath string) *CatalogEntry {
 	if luaPath == "" {
 		return nil
 	}
@@ -58,14 +76,14 @@ func ControlsForDriver(catalog []CatalogEntry, luaPath string) []CatalogControl 
 	wantFilename := filepath.Base(wantPath)
 	// A filename is only a fallback. When two sources contain the same
 	// filename, the configured path is the only safe identity we have.
-	for _, e := range catalog {
-		if strings.EqualFold(filepath.ToSlash(filepath.Clean(e.Path)), wantPath) {
-			return e.Controls
+	for i := range catalog {
+		if strings.EqualFold(filepath.ToSlash(filepath.Clean(catalog[i].Path)), wantPath) {
+			return &catalog[i]
 		}
 	}
-	for _, e := range catalog {
-		if strings.EqualFold(e.Filename, wantFilename) {
-			return e.Controls
+	for i := range catalog {
+		if strings.EqualFold(catalog[i].Filename, wantFilename) {
+			return &catalog[i]
 		}
 	}
 	return nil
@@ -110,16 +128,47 @@ func pickControls(block string) []CatalogControl {
 			Max:  fieldNumber(input, "max"),
 			Step: fieldNumber(input, "step"),
 		}
+		options, ok := pickOptions(input)
+		if !ok {
+			continue
+		}
+		control.Input.Options = options
+		hasDefault := fieldPresent(withoutBlock(input, "options"), "default")
+		control.Input.Default = fieldNumber(input, "default")
 		switch control.Input.Type {
 		case "number":
 			if control.Input.Min == nil || control.Input.Max == nil ||
 				*control.Input.Min >= *control.Input.Max {
 				continue
 			}
-		case "boolean", "string":
+			if options != nil {
+				continue
+			}
+			// A default outside the range, or not a number, is no
+			// default: the device cannot run at it, and a planner
+			// measuring small steps from it would start in the wrong
+			// place.
+			if hasDefault && (control.Input.Default == nil ||
+				*control.Input.Default < *control.Input.Min ||
+				*control.Input.Default > *control.Input.Max) {
+				continue
+			}
+		case "boolean":
+			if options != nil || hasDefault {
+				continue
+			}
+		case "string":
+			if hasDefault {
+				continue
+			}
 		default:
 			continue
 		}
+		thermal, ok := pickThermalControl(entry, control.Input)
+		if !ok {
+			continue
+		}
+		control.Thermal = thermal
 		out = append(out, control)
 	}
 	return out
@@ -128,11 +177,14 @@ func pickControls(block string) []CatalogControl {
 // nestedBlock returns the body of `name = { … }`, matching braces so an inner
 // table does not end the outer one. Braces inside string literals are skipped;
 // a topic or a label is allowed to contain one.
+//
+// The name must stand alone: `temp_sensors = {` is not `sensors = {`.
 func nestedBlock(block, name string) string {
-	loc := regexp.MustCompile(regexp.QuoteMeta(name) + `\s*=\s*\{`).FindStringIndex(block)
-	if loc == nil {
+	m := regexp.MustCompile(`(?:^|[^A-Za-z0-9_])(` + regexp.QuoteMeta(name) + `\s*=\s*\{)`).FindStringSubmatchIndex(block)
+	if m == nil {
 		return ""
 	}
+	loc := []int{m[2], m[3]}
 	depth := 0
 	inString := false
 	for i := loc[1] - 1; i < len(block); i++ {
