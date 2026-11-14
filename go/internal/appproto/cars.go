@@ -30,11 +30,7 @@ func (h *Handler) carOp(cmd Cmd, uptimeMs int64) error {
 		if (id == "") == (charger == "") {
 			return h.rejectArg(cmd, "id", cmd.Args["id"])
 		}
-		goal, clear, bad := goalArgs(cmd.Args)
-		if bad != "" {
-			return h.rejectArg(cmd, bad, cmd.Args[bad])
-		}
-		surplus, bad := optBool(cmd.Args, "surplus_only")
+		goal, clear, surplus, bad := CarGoalArgs(cmd.Args)
 		if bad != "" {
 			return h.rejectArg(cmd, bad, cmd.Args[bad])
 		}
@@ -212,10 +208,7 @@ func carIntentArgs(op string, args map[string]any) *ErrorBody {
 	}
 	switch op {
 	case OpCarGoalSet:
-		if _, _, bad := goalArgs(args); bad != "" {
-			return badArg(op, bad, args[bad])
-		}
-		if _, bad := optBool(args, "surplus_only"); bad != "" {
+		if _, _, _, bad := CarGoalArgs(args); bad != "" {
 			return badArg(op, bad, args[bad])
 		}
 	case OpCarSoCSet:
@@ -348,6 +341,18 @@ func optBool(args map[string]any, k string) (*bool, string) {
 func CarAddArgs(args map[string]any) (car protocol.Car, bad string) { return carArgs(args) }
 
 func CarUpdateArgs(args map[string]any) (u cars.Update, bad string) { return carUpdateArgs(args) }
+
+// CarGoalArgs reads car.goal.set's goal and surplus choice as the op does,
+// for the box page's route. The route's path names the car.
+func CarGoalArgs(args map[string]any) (goal *protocol.CarGoal, clear bool, surplusOnly *bool, bad string) {
+	if goal, clear, bad = goalArgs(args); bad != "" {
+		return nil, false, nil, bad
+	}
+	if surplusOnly, bad = optBool(args, "surplus_only"); bad != "" {
+		return nil, false, nil, bad
+	}
+	return goal, clear, surplusOnly, ""
+}
 
 // carArgs reads car.add: id, which the owner's app mints, and the car's own
 // fields without the level.

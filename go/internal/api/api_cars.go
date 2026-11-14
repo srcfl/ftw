@@ -22,6 +22,7 @@ type CarEdits interface {
 	UpdateCar(id string, u cars.Update) (protocol.Car, error)
 	Remove(id string) error
 	SetSessionCar(lpID, sessionID, carID string) (protocol.ChargerCar, error)
+	SetGoal(id string, goal *protocol.CarGoal, clear bool, surplusOnly *bool) (protocol.Car, error)
 }
 
 // carEdits returns the runtime's edits, or answers 503 as the ops answer
@@ -42,6 +43,17 @@ func mayKeepCars(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	writeJSON(w, http.StatusForbidden, map[string]string{"error": "only an owner keeps the list of cars"})
+	return false
+}
+
+// mayRunCarOp refuses a caller without the scope the registry gives op, so
+// the route lets in whoever the op lets in. The LAN's own page has every
+// scope.
+func mayRunCarOp(w http.ResponseWriter, r *http.Request, op string) bool {
+	if caller, ok := apiauth.FromRequest(r); ok && caller.Scopes.Has(protocol.RegistryOps[op]) {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": "this device may not set a car's goal"})
 	return false
 }
 
@@ -157,6 +169,34 @@ func (s *Server) handleCarRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// PUT /api/cars/{id}/goal is car.goal.set for one car, plugged in or not:
+// the goal is the car's, used wherever it plugs in. The body is the op's
+// arguments; what is absent stays as it was.
+func (s *Server) handleCarGoalSet(w http.ResponseWriter, r *http.Request) {
+	if !mayRunCarOp(w, r, protocol.OpCarGoalSet) {
+		return
+	}
+	edits, ok := s.carEdits(w)
+	if !ok {
+		return
+	}
+	args, ok := carArgs(w, r)
+	if !ok {
+		return
+	}
+	goal, clear, surplusOnly, bad := appproto.CarGoalArgs(args)
+	if bad != "" {
+		writeBadCarArg(w, bad)
+		return
+	}
+	car, err := edits.SetGoal(r.PathValue("id"), goal, clear, surplusOnly)
+	if err != nil {
+		writeCarError(w, protocol.OpCarGoalSet, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"car": car})
 }
 
 // POST /api/loadpoints/{id}/car is session.car.set, the one tap. The body
