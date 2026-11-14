@@ -76,13 +76,15 @@ func TestHandleEnergyDailyUsesBoxTimezoneAcrossMonthTransition(t *testing.T) {
 		return
 	}
 
-	// Run with a Los Angeles process timezone while the box reports Stockholm.
-	// localzone.Name is once-cached, so a subprocess gives this test a clean box
-	// timezone before any other API test can initialize it.
+	// Run with a Los Angeles process timezone while the box stores Stockholm.
+	// A subprocess gives this test a clean process timezone before any other API
+	// test can change time.Local.
 	processLoc := mustLoadLocation(t, "America/Los_Angeles")
 	boxLoc := mustLoadLocation(t, "Europe/Stockholm")
+	if err := localzone.Use("Europe/Stockholm"); err != nil {
+		t.Fatal(err)
+	}
 	time.Local = processLoc
-	t.Setenv("TZ", "Europe/Stockholm")
 	if time.Local.String() == boxLoc.String() {
 		t.Fatal("test setup did not separate process and box timezones")
 	}
