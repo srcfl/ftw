@@ -42,8 +42,7 @@ type CatalogSensor struct {
 	Zone   string            `json:"zone,omitempty"`
 }
 
-// The strategies a control may declare. synthetic_price is a signal Core
-// would publish, not a lever a driver offers, so it is not one of them.
+// The strategies a control may declare, and the input type each needs.
 var controlStrategyInput = map[thermal.InfluenceStrategy]string{
 	thermal.InfluenceCurveOffset:  "number",
 	thermal.InfluenceSetpoint:     "number",
