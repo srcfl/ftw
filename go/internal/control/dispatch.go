@@ -164,6 +164,10 @@ const MaxCommandW = 5000
 // elsewhere in this package for sign decisions.
 const evActiveThresholdW = 100.0
 
+// boostCoverHold is how long the battery stays on grid zero after a boosted
+// car stops drawing.
+const boostCoverHold = 30 * time.Second
+
 // holdoffToleranceS is how much earlier than MinDispatchIntervalS a
 // dispatch may run. It absorbs jitter in the work before each tick.
 const holdoffToleranceS = 0.25
@@ -404,6 +408,9 @@ type State struct {
 	// main.go refreshes both from loadpoint.Controller every dispatch tick.
 	BatteryBoostEVChargingW float64
 	BatteryBoostReserveSoC  float64
+	// boostCoverUntil keeps the battery on grid zero for boostCoverHold
+	// after a boosted car stops, so it drops to the house at once.
+	boostCoverUntil time.Time
 	// EVCommandedW is the frozen sum of final charger offers from this tick.
 	// It reserves site capacity before optional battery charging, even before
 	// an EV ramps up and in modes without an accepted optimizer plan.
@@ -1639,8 +1646,9 @@ func ComputeDispatch(
 	// the house and that car, whatever the plan's slot says (see below the
 	// path switch). The plan's no-discharge rails step aside meanwhile.
 	// A battery at the boost's reserve has nothing to give: the plan goes on.
+	// The live EV reading ends it a tick before the loadpoint's copy does.
 	boostCover := false
-	if !manualHoldActive && state.BatteryBoostEVChargingW > evActiveThresholdW {
+	if !manualHoldActive && math.Min(state.BatteryBoostEVChargingW, state.EVChargingW) > evActiveThresholdW {
 		for _, b := range onlineBats {
 			if !b.dischargeBlocked && !b.socMissing && b.soc > state.BatteryBoostReserveSoC {
 				boostCover = true
@@ -2224,9 +2232,23 @@ func ComputeDispatch(
 	// the boosted car. gridW leaves out car draw the boost does not cover,
 	// so the battery never exports for it. A plan that discharges further
 	// keeps its target; reserve, limits and the fuse apply downstream.
+	//
+	// The plan's reactive controller moves from the battery's live output,
+	// so after the car slows or stops it eased down from the boost's
+	// discharge by about 1 kW a tick, exporting the rest. During a boost and
+	// for boostCoverHold after the car stops, a planner mode's reactive path
+	// goes straight to its grid target instead. The energy path sets an
+	// absolute target and carries no boost discharge over.
 	if boostCover {
-		if boostTotal := currentTotal - gridW; currentTotal+totalCorrection > boostTotal {
+		state.boostCoverUntil = tickAt.Add(boostCoverHold)
+	}
+	if !manualHoldActive && tickAt.Before(state.boostCoverUntil) {
+		target := currentTotal + totalCorrection
+		if boostTotal := currentTotal - gridW; boostCover && target > boostTotal {
 			totalCorrection = boostTotal - currentTotal
+		} else if gridTotal := currentTotal - (gridW - state.GridTargetW); !useEnergyPath &&
+			state.Mode.IsPlannerMode() && target < gridTotal {
+			totalCorrection = gridTotal - currentTotal
 		}
 	}
 

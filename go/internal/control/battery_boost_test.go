@@ -158,3 +158,50 @@ func TestBatteryBoostCoversCarWhatTheSlotSays(t *testing.T) {
 		}
 	}
 }
+
+// The battery follows a boosted car both ways within a tick: down when the
+// car slows, and straight to the house (or the plan's idle) when it stops,
+// instead of exporting while a controller eases it down.
+func TestBatteryBoostFollowsTheCarBothWays(t *testing.T) {
+	now := time.Now()
+	state := NewState(0, 0, "ferroamp")
+	state.Mode = ModePlannerArbitrage
+	state.UseEnergyDispatch = true
+	state.SlewRateW = 100000
+	state.MinDispatchIntervalS = 0
+	state.DriverLimits = map[string]PowerLimits{"battery": {MaxChargeW: 10000, MaxDischargeW: 10000}}
+	state.clock = func() time.Time { return now }
+	dir := SlotDirective{SlotStart: now, SlotEnd: now.Add(15 * time.Minute), HasPlannedGridW: true, PlannedGridW: 500}
+	state.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+
+	tick := func(batteryW, gridW, carW, boostW float64) float64 {
+		t.Helper()
+		store := seedStore(gridW, []struct {
+			name          string
+			currentW, soc float64
+		}{{"battery", batteryW, 0.6}})
+		store.Update("easee", telemetry.DerEV, carW, nil, nil)
+		store.DriverHealthMut("easee").RecordSuccess()
+		state.BatteryBoostEVChargingW = boostW
+		var sum float64
+		for _, tg := range ComputeDispatch(store, state, map[string]float64{"battery": 20000}, 50000) {
+			sum += tg.TargetW
+		}
+		now = now.Add(5 * time.Second)
+		return sum
+	}
+
+	// House 0.5 kW, car 8 kW: the battery takes both.
+	if got := tick(0, 8500, 8000, 8000); math.Abs(got+8500) > 1 {
+		t.Fatalf("car 8 kW: target %.0f, want -8500", got)
+	}
+	// The car slows to 5 kW: the meter shows 3 kW export; back to -5.5 kW now.
+	if got := tick(-8500, -3000, 5000, 5000); math.Abs(got+5500) > 1 {
+		t.Fatalf("car 5 kW: target %.0f, want -5500", got)
+	}
+	// The car stops. The charger reading is 0 while the loadpoint still says
+	// 5 kW. No export: grid zero for the house, or the idle plan's 0 W.
+	if got := tick(-5500, -5000, 0, 5000); got < -501 || got > 0 {
+		t.Fatalf("car stopped: target %.0f, want between -500 and 0", got)
+	}
+}
