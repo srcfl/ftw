@@ -374,3 +374,49 @@ Fredrik answered on the hot-water floor on 12 November 2026:
 - **How long a released shared source stays released.** Proposed: at least
   1 hour, reclaimed only when a plan keeps every zone in its band for that
   hour. The hour is a starting value to tune on hardware.
+- **Heat inside the site's energy plan.** Proposed on 14 November 2026 and
+  not yet answered by Fredrik. Sections 4 and 6 say how heat is planned
+  and released, but not how it stands to the plan for the battery, the
+  solar and the car. Proposed:
+  - **The site's plan comes first.** Heat is planned against it and never
+    asks it to change. Heat is costed at the import price. Surplus is only
+    what the plan still exports after the battery and the car, costed at
+    what it would have earned. Headroom is only what the plan leaves under
+    the import limit.
+  - **The import limit outranks the comfort band.** The planner lets a
+    zone leave its band before it proposes a value whose predicted draw
+    passes the limit, and reports the excursion. This changes one row in
+    section 6: a zone outside its band is today released to the device,
+    which then heats through the limit by itself. Proposed: when the limit
+    is what holds the zone outside its band, FTW keeps the control and
+    tells the owner. The hot-water floor is the exception. It is a health
+    limit, Core owns it, and it still releases the tank.
+  - **A battery holding energy does not make a slot cheap.** The battery
+    follows the site's load, so heat moved into a slot where it discharges
+    empties it earlier. Heat is therefore costed at the import price there.
+    The one exception is energy the battery was to spend in a cheaper slot
+    later in the horizon: heat may take up to half of it, at that later
+    slot's price.
+  - **The site's plan sees heat as known load, and the load model does not
+    learn the moved heat.** Household load is learned as import − export +
+    PV − battery − car. Heat is in it, so heat that moves with the price
+    becomes noise in the learned week, and the battery is planned for
+    where the heat was yesterday. Proposed: the layer reports each zone's
+    planned electricity, and the difference from the zone left alone is
+    taken out before [`loadmodel`](../../go/internal/loadmodel/model.go)
+    learns, as the car's is. This touches the load model and the plan's
+    inputs, so it needs the owner's decision.
+  - **Zones share the site in the order they are planned.** A zone gets
+    the surplus and headroom the zones before it left. This is less than
+    section 4 asks: zones on a shared source are not yet planned together.
+
+  The battery rule comes from a simulation with synthetic houses and
+  prices, not from hardware. A planner that took battery energy for cheap
+  cost up to 23 SEK more per day than one that used the import price, and
+  emptied the battery before the price peak ended. The rule above was
+  never worse than the import price and at most 1 SEK per day better.
+  With a battery large enough to cover every dear slot, moving a small
+  load such as a hot-water tank cost 1–3 SEK per day more than leaving it
+  alone, under every rule: only the site's plan knows what its stored
+  energy is worth. Giving that plan the heat as known load is what
+  answers this case.
