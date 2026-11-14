@@ -2074,7 +2074,6 @@ func main() {
 		lpController.SetBatteryBoostSafety(func(id string, lease loadpoint.BatteryBoostLease) loadpoint.BatteryBoostStopReason {
 			ctrlMu.Lock()
 			mode := ctrl.Mode
-			fuseBlocked, importBlocked := ctrl.FuseSaturated, ctrl.FuseSaturatedByImport
 			_, batteryHeld := ctrl.GetBatteryManualHold(time.Now())
 			siteMeter := ctrl.SiteMeterDriver
 			ctrlMu.Unlock()
@@ -2084,12 +2083,9 @@ func main() {
 			if batteryHeld {
 				return loadpoint.BatteryBoostStoppedBatteryHold
 			}
-			if fuseBlocked && importBlocked {
-				return loadpoint.BatteryBoostStoppedImportLimit
-			}
-			if fuseBlocked {
-				return loadpoint.BatteryBoostStoppedFuseSafety
-			}
+			// A binding fuse or import limit is no reason to stop: the car's
+			// limit comes from the measured meter either way, and the battery's
+			// discharge is what makes room under it.
 			cfgMu.RLock()
 			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
 			staticFloor := make(map[string]float64, len(cfg.Batteries))
