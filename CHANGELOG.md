@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.163.1
+
+### Patch Changes
+
+- 13b085d: A battery boost keeps running while the main fuse or the hourly import limit
+  holds the car back. FTW used to refuse or stop a boost exactly then, with
+  "fuse protection stopped it", although that is when the home battery helps
+  most. The car's limit still comes from the measured site meter, so the fuse
+  is protected as before.
+- fa59212: A charger with no car, which FTW asks for nothing, no longer says FTW lost control when it stops reporting. An idle Easee can go quiet once the car leaves, and the app then showed "Charger · Lost control" while the car was out on the road. Such a charger now says it waits for a car; one that goes quiet with a car on it, or while FTW asks it to charge, still raises the alarm.
+- f1b7c4b: Show requested current, charger pilot current and measured power in EV charging warnings when fresh pilot data is available.
+- 7d2b8af: In the Home Assistant app, the version in the header and the Version button under More now open a dialog. It names the running version and says Home Assistant installs updates and rollbacks for the app. Before, a click did nothing. On a Docker install, the dialog says FTW does not update itself there and to update it the way it was installed. On both, the header also shows the connection light and the optimizer warning again; they were hidden along with the update check.
+- 4824d16: The dashboard's charts now use the phone app's colours too. On the Plan, prices are shades of ink, the battery is cyan when it stores power and orange when it gives power, the car is violet and the home is ink. History draws grid export below the zero line in the grid's one pink. The live chart, the 24-hour battery chart, the heating charts, the car plan and the status marks in device cards and settings follow, and every chart redraws when the theme changes.
+- 7350a3e: A box left on one of the old planner modes, "Planner (self)" or "Planner (cheap)", now starts in Passive arbitrage after a restart and saves it. Passive arbitrage, like both old modes, never sells from the battery. Unlike "Planner (self)", it can charge the battery from the grid in cheap hours. With the planner turned off, the box starts in self-consumption instead. Unknown saved modes still fall back to the default.
+- b3979bf: The box's price answer to the app, and FTW Cloud's price tile, now carry the VAT rate the box taxes the total at, as `vatPermille` (250 is 25 %). The rate is the one in force after the default, so a box that never set `vat_percent` says 250. With it the iPhone app can show the spot price with VAT at the box's own rate instead of a guess.
+- 91a2f0c: The diagnostic catalog an assistant reads now says that FTW Cloud, the web client and the native apps live in private repositories, points to the public archives of earlier client versions, and no longer sends assistants to a Cloud source page that is gone. The client protocol is now in Core as `docs/protocol.md`.
+- 65656e4: Keep the shared client contracts public in Core without a private-client build dependency.
+
 ## 0.163.0
 
 ### Minor Changes
