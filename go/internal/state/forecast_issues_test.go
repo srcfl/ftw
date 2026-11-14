@@ -3,8 +3,10 @@ package state
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -195,5 +197,90 @@ func TestForecastErrorsValidateAndUseFullTieBreak(t *testing.T) {
 	bad.PVErrorW = math.NaN()
 	if err = store.SaveForecastErrors(ctx, []forecasting.ErrorSample{bad}, time.Now().Add(time.Hour).UnixMilli()); err == nil {
 		t.Fatal("nonfinite residual was stored")
+	}
+}
+
+func TestForecastHourlyLoadAfterIndexUpgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	if err := s.InitForecastArchive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	const hour int64 = 3600000
+	const start = 30000 * hour
+	const until = start + 3*hour
+	var indexes int
+	if err := s.db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name='forecast_errors_hourly'").Scan(&indexes); err != nil || indexes != 0 {
+		t.Fatalf("archive initialization created %d hourly indexes, err=%v", indexes, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.EnsureForecastHourlyIndex(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled index creation returned %v", err)
+	}
+	samples := []forecasting.ErrorSample{
+		archiveError("hourly", start-hour, start-hour, start),
+		archiveError("tied", start-hour, start-hour, start),
+		archiveError("quarter", start-hour, start-hour, start+hour/4),
+		archiveError("next", start, start, start+hour),
+		archiveError("late", start, start, start+2*hour),
+	}
+	samples[1].ConfigVersion = "other"
+	samples[4].AvailableAtMS = until + 1
+	if err := s.SaveForecastErrors(ctx, samples, until+1); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.LoadForecastErrors(ctx, start, until, true)
+	if err != nil || len(before) != 3 {
+		t.Fatalf("pre-upgrade hourly load returned %d rows, err=%v", len(before), err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := OpenWithBackgroundHistory(path, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = upgraded
+	after, err := s.LoadForecastErrors(ctx, start, until, true)
+	if err != nil || !reflect.DeepEqual(before, after) {
+		t.Fatalf("hourly history changed after upgrade: before=%v after=%v err=%v", before, after, err)
+	}
+	all, err := s.LoadForecastErrors(ctx, start, until, false)
+	if err != nil || len(all) != 4 {
+		t.Fatalf("all-slot load returned %d rows, err=%v", len(all), err)
+	}
+
+	rows, err := s.db.QueryContext(ctx, "EXPLAIN QUERY PLAN "+forecastErrorLoadQuery(true), start, until, until, MaxForecastErrors+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var usesHourlyIndex bool
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(detail, "TEMP B-TREE") {
+			t.Fatalf("unexpected sort: %s", detail)
+		}
+		usesHourlyIndex = usesHourlyIndex || strings.Contains(detail, "USING INDEX forecast_errors_hourly")
+	}
+	if err := rows.Err(); err != nil || !usesHourlyIndex {
+		t.Fatalf("hourly index selected=%t err=%v", usesHourlyIndex, err)
+	}
+
+	if _, err := s.db.Exec("UPDATE forecast_errors SET payload='{}' WHERE issue_id='hourly'"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.LoadForecastErrors(ctx, start, until, true); got != nil || err == nil || !strings.Contains(err.Error(), "invalid archived forecast error") {
+		t.Fatalf("invalid sample returned %v, err=%v", got, err)
 	}
 }
