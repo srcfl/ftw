@@ -1635,7 +1635,19 @@ func ComputeDispatch(
 	// battery discharging just because slew anchored from a negative live
 	// reading. Plain self_consumption remains the classic grid-zero mode:
 	// it may discharge to cover local load and charge from live surplus.
-	planNonDischargeIntent := !manualHoldActive && planHasNonDischargeIntent(state)
+	// A battery boost the charger reports drawing makes the battery cover
+	// the house and that car, whatever the plan's slot says (see below the
+	// path switch). The plan's no-discharge rails step aside meanwhile.
+	// A battery at the boost's reserve has nothing to give: the plan goes on.
+	boostCover := false
+	if !manualHoldActive && state.BatteryBoostEVChargingW > evActiveThresholdW {
+		for _, b := range onlineBats {
+			if !b.dischargeBlocked && !b.socMissing && b.soc > state.BatteryBoostReserveSoC {
+				boostCover = true
+			}
+		}
+	}
+	planNonDischargeIntent := !manualHoldActive && !boostCover && planHasNonDischargeIntent(state)
 	// planner_self gates intentionally NOT in noSelfDischarge — the
 	// operator's "never import" floor takes precedence over the
 	// planner's slot preference, so discharge to cover load is always
@@ -2208,6 +2220,16 @@ func ComputeDispatch(
 		}
 	}
 
+	// Battery boost: discharge at least down to grid zero for the house and
+	// the boosted car. gridW leaves out car draw the boost does not cover,
+	// so the battery never exports for it. A plan that discharges further
+	// keeps its target; reserve, limits and the fuse apply downstream.
+	if boostCover {
+		if boostTotal := currentTotal - gridW; currentTotal+totalCorrection > boostTotal {
+			totalCorrection = boostTotal - currentTotal
+		}
+	}
+
 	// Share the site ceiling between EV and battery charge. An accepted
 	// EV plan reserves its demand before optional battery charge, including
 	// while the car ramps up. Unscheduled EV draw retains proportional sharing.
@@ -2394,6 +2416,7 @@ func ComputeDispatch(
 	// ---- Fuse guard (bidirectional, #145) ----
 	return applyDispatchSafetyPipeline(raw, store, state, driverCapacities, fuseMaxW, dispatchSafetyOptions{
 		manualHoldActive:  manualHoldActive,
+		boostCover:        boostCover,
 		noSelfDischarge:   noSelfDischarge,
 		noSelfCharge:      noSelfCharge,
 		chargeBlocked:     chargeBlockedDrivers(onlineBats),
@@ -2563,6 +2586,7 @@ func floorBelowOwnerFloorDischarge(targets []DispatchTarget, blocked map[string]
 
 type dispatchSafetyOptions struct {
 	manualHoldActive  bool
+	boostCover        bool // a battery boost covers a car the charger reports drawing
 	noSelfDischarge   bool
 	noSelfCharge      bool
 	chargeBlocked     map[string]bool
@@ -2600,7 +2624,7 @@ func applyDispatchSafetyPipeline(
 	//
 	// Only applied in the energy planner modes. Manual modes have no plan to
 	// disagree with, and manual holds intentionally override planner intent.
-	if !opts.manualHoldActive {
+	if !opts.manualHoldActive && !opts.boostCover {
 		targets = applyPlanSignFloor(targets, state)
 	}
 	if opts.noSelfDischarge {

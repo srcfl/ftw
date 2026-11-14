@@ -1,6 +1,7 @@
 package control
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -107,5 +108,53 @@ func TestFuseEmergencyRemainsSuperiorToBatteryBoostReserve(t *testing.T) {
 	)
 	if len(targets) != 1 || targets[0].TargetW >= 0 {
 		t.Fatalf("fuse emergency did not override lease reserve: %+v", targets)
+	}
+}
+
+// A boost covers the house and the boosted car even when the arbitrage plan
+// keeps the battery for later (idle slot) or charges it (charge slot). The
+// battery stops at grid zero: car draw the charger still reports but the
+// meter no longer shows is never exported.
+func TestBatteryBoostCoversCarWhatTheSlotSays(t *testing.T) {
+	slots := map[string]SlotDirective{
+		"idle":   {BatteryEnergyWh: 0, HasPlannedGridW: true, PlannedGridW: 500},
+		"charge": {BatteryEnergyWh: 500, HasPlannedGridW: true, PlannedGridW: 0},
+	}
+	for name, slot := range slots {
+		for _, tc := range []struct {
+			gridW, boostW, want float64
+		}{
+			{8500, 0, 0},        // no boost: the battery does not cover the car
+			{8500, 8000, -8500}, // car 8 kW + house 0.5 kW from the battery
+			{500, 8000, -500},   // the car stopped; Easee still reports it
+		} {
+			store := seedStore(tc.gridW, []struct {
+				name          string
+				currentW, soc float64
+			}{{"battery", 0, 0.6}})
+			store.Update("easee", telemetry.DerEV, 8000, nil, nil)
+			store.DriverHealthMut("easee").RecordSuccess()
+			now := time.Now()
+			state := NewState(0, 0, "ferroamp")
+			state.Mode = ModePlannerArbitrage
+			state.UseEnergyDispatch = true
+			state.SlewRateW = 100000
+			state.MinDispatchIntervalS = 0
+			state.DriverLimits = map[string]PowerLimits{"battery": {MaxChargeW: 10000, MaxDischargeW: 10000}}
+			state.BatteryBoostEVChargingW = tc.boostW
+			dir := slot
+			dir.SlotStart, dir.SlotEnd = now, now.Add(15*time.Minute)
+			state.SlotDirective = func(time.Time) (SlotDirective, bool) { return dir, true }
+			targets := ComputeDispatch(store, state, map[string]float64{"battery": 20000}, 50000)
+			var got float64
+			for _, tg := range targets {
+				got += tg.TargetW
+			}
+			// Without a boost a slot may still cover the 0.5 kW house, never the car.
+			if (tc.want == 0 && got < -501) || (tc.want < 0 && math.Abs(got-tc.want) > 1) {
+				t.Errorf("%s slot, grid %.0f, boost %.0f: target %.0f, want %.0f (%+v)",
+					name, tc.gridW, tc.boostW, got, tc.want, targets)
+			}
+		}
 	}
 }
