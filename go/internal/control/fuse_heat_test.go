@@ -677,6 +677,8 @@ func TestEVHardLimitCutsWhatAWholeAmpMeterHides(t *testing.T) {
 		store, state, points, configs := evMeterBudgetFixture(t, 0, nil, 10350, "3p")
 		raw, _ := json.Marshal(data)
 		store.Update("meter", telemetry.DerMeter, totalW, nil, raw)
+		// The hard limit cuts an overage that has lasted, not one reading.
+		lastingFuseHeat(store, state)
 		got, known := EVFuseBudget(store, state, points, configs, 17250)
 		if !known {
 			t.Fatalf("%v: cap unknown", data)
