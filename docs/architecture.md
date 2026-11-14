@@ -643,8 +643,9 @@ counts health only from reports that carry it.
 Once a release names an Oblivious HTTP relay (`go/internal/statsrelay`), it goes
 through that relay to FTW Cloud's gateway, sealed, so FTW Cloud never sees the
 box's address. Until then it goes over HTTPS to
-`https://cloud.ftw.energy/v1/fleet`, and only from a box that said yes. It never
-enters the Noise session. The HTTP handler validates the fixed payload, adds it to the UTC
+`https://cloud.ftw.energy/v1/fleet` from every box that shares, and the energy
+report to `https://cloud.ftw.energy/v1/energy` (ADR 0008, amended 8 and 12
+November 2026). It never enters the Noise session. The HTTP handler validates the fixed payload, adds it to the UTC
 day's counters and drops it. It keeps 90 calendar days of totals, not raw
 reports. An operator reads totals only on the loopback metrics listener. An
 explicitly saved former default resolves to Cloud; a private collector keeps

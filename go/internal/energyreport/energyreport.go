@@ -1,15 +1,19 @@
-// Package energyreport sends one anonymous energy report a day, through an
-// independent Oblivious HTTP relay, so that neither the relay nor FTW Cloud
-// can tell which home sent it.
+// Package energyreport sends one anonymous energy report a day to FTW Cloud.
 //
 // The report is six whole-kWh sums of one closed UTC day and its date
-// (package energywire). Package statsrelay seals it to FTW Cloud's gateway
-// key, pinned in this release, and posts it to the relay:
+// (package energywire). Package statsrelay carries it. With a relay pinned in
+// this release, it seals the report to FTW Cloud's gateway key and posts it
+// to the relay:
 //
 //   - the relay sees the box's address, the time and a ciphertext of fixed
 //     length, never the report;
 //   - the gateway sees the report and the relay's address, never the box's.
 //     It adds the sums to that day's totals and keeps nothing of the report.
+//
+// Until a relay exists, the report goes straight to FTW Cloud, as the fleet
+// report does (Fredrik, 12 November 2026): every box that shares reports.
+// FTW Cloud then sees the box's address while the request is open, adds the
+// sums the same way and keeps neither the address nor the report.
 //
 // Two things keep the report from being joined to the daily fleet report,
 // which carries the box's drivers, zone and size: it carries no field the
@@ -59,7 +63,8 @@ type Options struct {
 	Ledger  Ledger
 	KV      KV
 
-	// Relay defaults to statsrelay.Pinned. Tests set a fake relay.
+	// Relay defaults to statsrelay.Default: the pinned relay, or FTW Cloud
+	// directly. Tests set a fake.
 	Relay  *statsrelay.Client
 	Logger *slog.Logger
 
@@ -88,7 +93,7 @@ func New(opts Options) (*Sender, error) {
 	s := &Sender{enabled: opts.Enabled, ledger: opts.Ledger, kv: opts.KV, relay: opts.Relay, log: opts.Logger,
 		now: opts.Now, random: opts.Random, synced: opts.ClockSynced}
 	if s.relay == nil {
-		s.relay = statsrelay.Pinned()
+		s.relay = statsrelay.Default()
 	}
 	if s.enabled == nil {
 		s.enabled = func() bool { return false }
@@ -111,10 +116,12 @@ func New(opts Options) (*Sender, error) {
 
 // Preview is what the box would send for yesterday, for Settings.
 type Preview struct {
-	// Relay is where it goes, empty when this build has no relay.
+	// Relay is the relay it goes through, empty when it goes straight to
+	// FTW Cloud.
 	Relay string `json:"relay"`
-	// Sending is whether this box sends at all: a relay and a gateway key in
-	// this build, and the owner's answer now.
+	// Endpoint is where the box posts it: the relay, or FTW Cloud.
+	Endpoint string `json:"endpoint"`
+	// Sending is whether this box sends at all: the owner's answer now.
 	Sending bool `json:"sending"`
 	// Day is the closed UTC day it describes.
 	Day string `json:"day"`
@@ -127,7 +134,7 @@ func (s *Sender) Preview(ctx context.Context) Preview {
 	day := s.now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
 	p := Preview{Day: day.Format(time.DateOnly)}
 	if s.relay != nil {
-		p.Relay, p.Sending = s.relay.Relay(), s.enabled()
+		p.Relay, p.Endpoint, p.Sending = s.relay.Relay(), s.relay.Endpoint(), s.enabled()
 	}
 	if r, ok, err := Day(ctx, s.ledger, day); err == nil && ok {
 		p.Payload = &r
@@ -135,8 +142,7 @@ func (s *Sender) Preview(ctx context.Context) Preview {
 	return p
 }
 
-// Run sends once a day until ctx ends. Without a relay and a gateway key it
-// returns at once and sends nothing.
+// Run sends once a day until ctx ends.
 func (s *Sender) Run(ctx context.Context) {
 	if s.relay == nil {
 		return
