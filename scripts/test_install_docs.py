@@ -14,7 +14,14 @@ SV = ROOT / 'docs/setup-guide/update-sv.md'
 
 def recipe(path, marker):
     blocks = re.findall(r'```bash\n(.*?)\n```', path.read_text(), re.S)
-    matches = [block for block in blocks if marker in block and 'tag=v0.X.Y-beta.N' in block]
+    matches = [block for block in blocks if marker in block and 'tag=v0.X.Y\n' in block]
+    assert len(matches) == 1, (path, marker, len(matches))
+    return matches[0]
+
+
+def recovery_recipe(path, marker):
+    blocks = re.findall(r'```bash\n(.*?)\n```', path.read_text(), re.S)
+    matches = [block for block in blocks if marker in block and 'docker compose run' in block]
     assert len(matches) == 1, (path, marker, len(matches))
     return matches[0]
 
@@ -49,7 +56,7 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         path.chmod(0o755)
 
     def run_recipe(self, marker, failure='', tag='v0.138.2-beta.1'):
-        block = recipe(EN, marker).replace('v0.X.Y-beta.N', tag)
+        block = recipe(EN, marker).replace('tag=v0.X.Y\n', f'tag={tag}\n')
         # Change only the destination, never the user's HOME or real Docker state.
         if marker == 'compose up':
             self.assertEqual(block.count('"$HOME/ftw-local"'), 1)
@@ -60,12 +67,48 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         calls = self.log.read_text() if self.log.exists() else ''
         return result, calls
 
+    def test_migration_restore_stops_on_failure_and_leaves_core_off(self):
+        blocks = re.findall(r'```bash\n(.*?)\n```',
+                            (ROOT / 'docs/migration.md').read_text(), re.S)
+        block = next(b for b in blocks if 'helper=/opt/ftw/releases/' in b)
+        release = self.work / 'releases' / 'v0.140.11'
+        release.mkdir(parents=True)
+        helper = release / 'ftw-backup'
+        helper.write_text('#!/bin/bash\nset -eu\necho "helper $*" >> "$FTW_TEST_LOG"\n'
+                          '[ "$FTW_TEST_FAIL" != "$1" ]\n')
+        helper.chmod(0o755)
+        self.stub('systemctl', 'echo "systemctl $*" >> "$FTW_TEST_LOG"')
+        self.stub('chown', 'echo "chown $*" >> "$FTW_TEST_LOG"')
+        block = block.replace('tag=v0.X.Y', 'tag=v0.140.11')
+        block = block.replace('/opt/ftw/releases', str(self.work / 'releases'))
+        block = block.replace('/var/lib/ftw', str(self.work / 'target'))
+        for failure in ('verify', 'restore', ''):
+            with self.subTest(failure=failure):
+                self.log.write_text('')
+                self.env['FTW_TEST_FAIL'] = failure
+                result = subprocess.run(['bash', '-c', block], env=self.env,
+                                        cwd=self.work, capture_output=True, text=True)
+                calls = self.log.read_text()
+                self.assertIn('systemctl disable --now ftw', calls)
+                self.assertNotIn('systemctl start', calls)
+                self.assertNotIn('systemctl enable', calls)
+                if failure:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn('chown', calls)
+                    if failure == 'verify':
+                        self.assertNotIn('helper restore', calls)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('helper verify', calls)
+                    self.assertIn('helper restore', calls)
+                    self.assertIn('chown -R ftw:ftw', calls)
+
     def test_translations_use_the_same_native_commands(self):
         self.assertEqual(recipe(EN, '--fresh-host'), recipe(SV, '--fresh-host'))
 
     def test_rejects_placeholder_old_line_and_mistyped_tag_before_work(self):
         for marker in ('--fresh-host', 'compose up'):
-            for tag in ('v0.X.Y-beta.N', 'v3.8.0-beta.1', 'v0.130.0', 'v0.0.138-beta.1'):
+            for tag in ('v0.X.Y', 'v0.X.Y-beta.N', 'v3.8.0-beta.1', 'v0.130.0', 'v0.0.138-beta.1'):
                 with self.subTest(marker=marker, tag=tag):
                     result, calls = self.run_recipe(marker, tag=tag)
                     self.assertNotEqual(result.returncode, 0)
@@ -82,11 +125,15 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         self.assertFalse(Path(download).exists())
 
     def test_native_success_runs_download_and_removes_temp_file(self):
-        result, calls = self.run_recipe('--fresh-host')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('INSTALL\n', calls)
-        download = shlex.split(calls.splitlines()[0])[-1]
-        self.assertFalse(Path(download).exists())
+        for tag in ('v0.140.11', 'v0.138.2-beta.1'):
+            with self.subTest(tag=tag):
+                self.log.write_text('')
+                result, calls = self.run_recipe('--fresh-host', tag=tag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('INSTALL\n', calls)
+                self.assertIn(f'/srcfl/ftw/{tag}/scripts/install.sh', calls)
+                download = shlex.split(calls.splitlines()[0])[-1]
+                self.assertFalse(Path(download).exists())
 
     def test_failed_docker_download_leaves_no_project_and_allows_retry(self):
         for failure in ('download', 'dockerfile'):
@@ -132,6 +179,70 @@ fi''')
         result, calls = self.run_recipe('compose up')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('docker compose up -d --build', calls)
+
+    def run_recovery(self, marker, failure='', archive_exists=True):
+        backup_dir = self.work / 'usb-backups'
+        backup_dir.mkdir(exist_ok=True)
+        archive = backup_dir / 'ftw-full-backup-YYYYMMDDTHHMMSS.ftwbak'
+        if archive_exists:
+            archive.write_text('test archive; helper is stubbed\n')
+        self.stub('install', 'echo "install $*" >> "$FTW_TEST_LOG"')
+        self.stub('docker', '''echo "docker $*" >> "$FTW_TEST_LOG"
+if [ "$FTW_TEST_FAIL" = stop ] && [ "$1 ${2:-}" = 'compose stop' ]; then exit 1; fi
+case " $* " in
+  *' create '*) [ "$FTW_TEST_FAIL" != create ] || exit 1 ;;
+  *' restore '*) [ "$FTW_TEST_FAIL" != restore ] || exit 1 ;;
+  *' revert '*) [ "$FTW_TEST_FAIL" != revert ] || exit 1 ;;
+esac''')
+        block = recovery_recipe(EN, marker).replace(
+            'backup_dir=/media/usb/ftw-backups', 'backup_dir=' + shlex.quote(str(backup_dir)))
+        self.env['FTW_TEST_FAIL'] = failure
+        result = subprocess.run(['bash', '-c', block], cwd=self.work, env=self.env,
+                                capture_output=True, text=True)
+        calls = self.log.read_text() if self.log.exists() else ''
+        return result, calls
+
+    def test_recovery_translations_use_the_same_commands(self):
+        for marker in ('create -state /app/data/state.db', 'restore -archive', 'revert -data'):
+            self.assertEqual(recovery_recipe(EN, marker), recovery_recipe(SV, marker))
+
+    def test_recovery_helper_failure_never_restarts_core(self):
+        for action, marker in (('create', 'create -state /app/data/state.db'),
+                               ('restore', 'restore -archive'), ('revert', 'revert -data')):
+            with self.subTest(action=action):
+                self.log.write_text('')
+                result, calls = self.run_recovery(marker, action)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('docker compose stop ftw\n', calls)
+                self.assertIn('--entrypoint /app/ftw-backup', calls)
+                self.assertNotIn('docker compose start', calls)
+
+    def test_failed_stop_does_not_run_recovery_or_start_core(self):
+        for marker in ('create -state /app/data/state.db', 'restore -archive', 'revert -data'):
+            with self.subTest(marker=marker):
+                self.log.write_text('')
+                result, calls = self.run_recovery(marker, 'stop')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn('docker compose run', calls)
+                self.assertNotIn('docker compose start', calls)
+
+    def test_missing_restore_archive_stops_before_touching_core(self):
+        result, calls = self.run_recovery('restore -archive', archive_exists=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, '')
+
+    def test_recovery_success_starts_only_ftw_after_helper(self):
+        for marker in ('create -state /app/data/state.db', 'restore -archive', 'revert -data'):
+            with self.subTest(marker=marker):
+                self.log.write_text('')
+                result, calls = self.run_recovery(marker)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                docker_calls = [call for call in calls.splitlines() if call.startswith('docker ')]
+                self.assertEqual(docker_calls[0], 'docker compose stop ftw')
+                self.assertIn('compose run --rm --no-deps --entrypoint /app/ftw-backup', docker_calls[1])
+                self.assertEqual(docker_calls[2], 'docker compose start ftw')
+                if marker == 'restore -archive':
+                    self.assertIn(':/backup:ro,z', docker_calls[1])
 
 
 if __name__ == '__main__':
