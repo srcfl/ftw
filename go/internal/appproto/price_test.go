@@ -20,6 +20,7 @@ import (
 type fakePrices struct {
 	zone     string
 	currency string
+	vat      float64
 	points   []PricePoint
 	err      error
 
@@ -27,8 +28,9 @@ type fakePrices struct {
 	askedTo   int64
 }
 
-func (f *fakePrices) Zone() string     { return f.zone }
-func (f *fakePrices) Currency() string { return f.currency }
+func (f *fakePrices) Zone() string        { return f.zone }
+func (f *fakePrices) Currency() string    { return f.currency }
+func (f *fakePrices) VATPercent() float64 { return f.vat }
 
 func (f *fakePrices) Slots(_ context.Context, fromMs, toMs int64) ([]PricePoint, error) {
 	f.askedFrom, f.askedTo = fromMs, toMs
@@ -151,6 +153,37 @@ func TestPriceRoundsToWholeMinorUnits(t *testing.T) {
 	}
 	if p.Slots[0].DurationMs != 900_000 {
 		t.Fatalf("a 15 minute slot is %d ms on the wire, want 900000", p.Slots[0].DurationMs)
+	}
+}
+
+// The answer carries the VAT rate the box taxed the totals at, so an app can
+// show spot with VAT at the box's rate rather than its own guess. Integer
+// permille, rounded once like the money, and sent at zero too: 0 is a rate,
+// and only a box without the field leaves it out.
+func TestPriceCarriesTheAppliedVATRate(t *testing.T) {
+	at := int64(1_760_000_000_000)
+	for _, tc := range []struct {
+		vat  float64
+		want int64
+	}{
+		{25, 250},
+		{25.5, 255}, // Finland since September 2024
+		{0, 0},
+	} {
+		h, rec, _ := newPriceRig(t, &fakePrices{
+			zone: "SE3", currency: "SEK", vat: tc.vat, points: quarterHours(at, 4, 42, 91),
+		})
+
+		deliver(t, h, MsgPriceGet, ptrU32(7), PriceGet{FromMs: at, ToMs: at + 3_600_000})
+
+		f := rec.only(t, MsgPrice)
+		if p := body[Price](t, f); p.VATPermille != tc.want {
+			t.Errorf("VAT %v %% went out as %d permille, want %d", tc.vat, p.VATPermille, tc.want)
+		}
+		keys := body[map[string]any](t, f)
+		if _, ok := keys["vatPermille"]; !ok {
+			t.Errorf("VAT %v %%: no vatPermille key; an absent rate reads as unknown, not as zero", tc.vat)
+		}
 	}
 }
 

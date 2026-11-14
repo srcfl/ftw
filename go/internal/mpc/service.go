@@ -138,6 +138,10 @@ type Service struct {
 	// enforces it. Nil or zero W plans without it. Called without s.mu; it
 	// may take the control lock.
 	ImportCeiling func() ImportCeiling
+	// HourImport returns the clock hour in progress as Core's live import
+	// counter measured it (control.MeasuredHourImport). The demand charges'
+	// hour in progress uses it before the import history. Nil: history only.
+	HourImport func() HourImport
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
 	Load               LoadPredictor // optional — overrides flat BaseLoad
@@ -356,6 +360,57 @@ func overlayLiveHouseLoad(slots []Slot, loadW float64, ok bool) {
 		loadW = 0
 	}
 	slots[0].LoadW = loadW
+}
+
+// anchorPVToMeasured applies the frozen nowcast to the slots that hold forecast
+// PV. A slot with no forecast PV stays at zero: night and missing weather keep
+// their meaning. The in-flight slot is the reference that says how far the
+// forecast currently sits from measured generation, so without one the nowcast
+// has nothing to compare and the forecast stands. Only quarter-hour slots are
+// anchored: a few minutes of measurement says little about a whole hour.
+func anchorPVToMeasured(slots []Slot, nowMs int64, nowcast func(inflightW, forecastW float64, dt time.Duration) float64) {
+	if nowcast == nil || len(slots) == 0 {
+		return
+	}
+	first := slots[0]
+	if first.LenMin > pvNowcastMaxSlotMin || nowMs < first.StartMs || nowMs >= first.StartMs+int64(first.LenMin)*60000 {
+		return
+	}
+	inflightW := -first.PVW
+	if !finite(inflightW) {
+		return
+	}
+	for i := range slots {
+		forecastW := -slots[i].PVW
+		if !(forecastW > 0) {
+			continue
+		}
+		mid := slots[i].StartMs + int64(slots[i].LenMin)*30000
+		slots[i].PVW = -nowcast(inflightW, forecastW, time.Duration(mid-nowMs)*time.Millisecond)
+	}
+}
+
+const pvNowcastMaxSlotMin = 15
+
+func slotPV(slots []Slot) []float64 {
+	out := make([]float64, len(slots))
+	for i, s := range slots {
+		out[i] = s.PVW
+	}
+	return out
+}
+
+// withSelectedPV hands the archive the forecast as it was selected. The
+// nowcast borrows the recent past of the truth the archive scores against, so
+// the scored series must not contain it.
+func withSelectedPV(slots []Slot, selectedPV []float64) []Slot {
+	out := append([]Slot(nil), slots...)
+	for i := range out {
+		if i < len(selectedPV) {
+			out[i].PVW = selectedPV[i]
+		}
+	}
+	return out
 }
 
 // recoveredLoads marks the published loads Core replaced after the selected
@@ -1641,6 +1696,10 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	liveLoadW, liveLoadOK := s.liveHouseLoadW()
 	liveLoadOK = liveLoadOK && finite(liveLoadW) && liveLoadW >= 0
 	overlayLiveHouseLoad(slots, liveLoadW, liveLoadOK)
+	// After selection, so it also corrects a primary forecast whose worker
+	// sees no measured PV of its own. The archive keeps the selected forecast.
+	selectedPV := slotPV(slots)
+	anchorPVToMeasured(slots, now.UnixMilli(), captured.PVNowcast)
 	// The point forecast as selected, with the live meter's in-flight load.
 	// A published load that differs from it is Core's recovery.
 	pointInputs := append([]Slot(nil), slots...)
@@ -2263,7 +2322,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		slog.Info("mpc: forecast caution back on", "decision_id", plan.DecisionID)
 	}
 	if captured.Record != nil {
-		captured.Record(baseForecastSlots, fallbackSlots, recoveredLoads(pointInputs, baseForecastSlots), plan.DecisionID, replanAtMs)
+		captured.Record(withSelectedPV(baseForecastSlots, selectedPV), fallbackSlots, recoveredLoads(pointInputs, baseForecastSlots), plan.DecisionID, replanAtMs)
 	}
 	// Horizon statistics — surfaced in logs so operators can
 	// reconstruct "what did the DP know?" without pulling the full

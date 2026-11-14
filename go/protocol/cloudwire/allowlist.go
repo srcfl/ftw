@@ -35,7 +35,7 @@ var Fields = map[string][]string{
 	},
 	"CarGoal": {"targetPermille", "readyByMin", "days", "finishAtLimit"},
 
-	MsgPrices: {"zone", "currency", "t0Ms", "slotMs", "spotMinor", "totalMinor"},
+	MsgPrices: {"zone", "currency", "t0Ms", "slotMs", "spotMinor", "totalMinor", "vatPermille"},
 
 	MsgHB: {"clock", "srcRev", "liveSeq", "lpSeq", "ages"},
 

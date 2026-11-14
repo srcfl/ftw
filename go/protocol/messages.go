@@ -42,6 +42,11 @@ const (
 	// permission. The box maps that permission onto a planner mode; the
 	// caller does not name the mode.
 	OpPlannerPrefsSet = "planner.prefs.set"
+	// OpSiteTimeZonePropose offers the client's time zone as the household
+	// clock. The box stores it only while it keeps no zone of its own, and
+	// restarts to run on it; a box that keeps one answers E_PRECONDITION
+	// with the zone it keeps in args.tz.
+	OpSiteTimeZonePropose = "site.time_zone.propose"
 	// OpLoadpointHold pins one EV loadpoint to a fixed charging power, or
 	// releases it with `clear`. The same manual hold the HTTP route
 	// installs, reached through this door's gates instead of a verb.
@@ -608,6 +613,14 @@ type Price struct {
 	// afternoon, so a window asked for at breakfast genuinely ends early, and
 	// saying so beats drawing a cliff the market did not have.
 	Stale bool `cbor:"stale"`
+	// VATPermille is the VAT rate the box applies to TotalMinor, in permille:
+	// 250 is 25 %, 255 is 25.5 %. It is the rate after the box's default, so
+	// 0 means no VAT. A box that predates the field leaves it out, and a
+	// client reads absent as unknown. It lets an app show spot with VAT at
+	// the box's own rate instead of a guess. The box applies a rate when it
+	// stores a slot and rewrites today and tomorrow every hour, so after a
+	// change older slots keep the rate they were stored with.
+	VATPermille int64 `cbor:"vatPermille"`
 }
 
 // --------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 This document defines the agent contract. Some operations remain proposed;
 the connected box reports what its build supports. The contract is normative: "must" is a
 requirement on the box, FTW Cloud or the app. It extends the app protocol
-([srcfl/ftw-webapp docs/protocol.md](https://github.com/srcfl/ftw-webapp/blob/main/docs/protocol.md))
+([docs/protocol.md](protocol.md))
 and the [FTW Cloud protocol](protocol-cloud.md). Names in `code` that are
 scopes, roles, operations, error codes, capabilities, push kinds, agent
 arguments or reads live in `contract/registry.yaml` and
@@ -384,7 +384,7 @@ The registry's `reads` table names each read and the scope it needs.
 | `hist.query` | As for a phone | `hist.chunk`, `hist.end` |
 | `health.get` | `{}` | `health {version, uptimeS, clock, drivers: {ok, degraded, faulted, offline}, meter: {srcState, ageMs}, dispatchBlockedBy}` |
 | `drivers.get` | `{}` | `drivers {drivers: [{src, kind, state, ageMs}]}` |
-| `events.get` | `{n, beforeMs, afterMs}`, `n` at most 50 | `events {events, more}`, each FTW Cloud's `event` body with agent ids |
+| `events.get` | `{n, beforeMs, afterMs, src, minSeverity}`, `n` at most 50 | `events {spans, notices, events, more}`: the control journal over the window, newest first (see below) |
 | `logs.get` | `{n, level, beforeMs, afterMs}`; `n` at most 200, `level` `WARN` by default | `logs {lines: [{ts, level, src, msg}], dropped, more}` |
 | `config.get` | `{section}` | `config {sections}` without a section; `config {section, doc}` with one |
 | `diag.run` | `{check, src}`; `check` is `clock`, `link`, `meter`, `planner` or `driver` | `diag {check, ok, facts}` |
@@ -407,8 +407,26 @@ The registry's `reads` table names each read and the scope it needs.
   source that blocks dispatch goes by its agent id. Planner solve times,
   fallbacks, refusals and plan against actual join it when the box keeps
   them; a field the box cannot fill is absent.
-- The box answers `events.get` and `diag.run` with `E_UNKNOWN_OP` until it
-  builds them. `cars.get` carries no name, maker, VIN, identifier or source,
+- `events.get` reads the box's control journal: each stretch in which a
+  device function, a source, the site's dispatch or the mode held one
+  verdict, each scored plan slot, and the notifications the box sent, over
+  `afterMs`..`beforeMs` (the last 24 hours by default). A span gives `kind`
+  (battery, ev, pv, v2x_charger, device, source, dispatch, mode, plan, slot),
+  `src` by agent id, Core's `status`, `reason` and `severity` as in
+  `control_feedback`, `startMs` and `endMs` (0 while it holds), `samples`,
+  `requestedW` and `actualW` as min, max and mean, and `last`: the numbers
+  of the latest verdict by field name. Text leaves only as Core's own codes,
+  never names. A `plan` span says whether the batteries did what the plan
+  meant (`as_planned` or `off_plan`) and, in `reason`, the measured cause:
+  `less_solar`, `more_solar`, `more_home`, `less_home`, `more_car`,
+  `less_car`, `device`, `manual` or `other`; `last` has the planned and
+  measured watts. `minSeverity: "warning"` keeps warnings and alarms; `src`
+  keeps one source. `events` stays empty; it is kept for older readers.
+  A source span is the driver's health as Core's watchdog sees it. A slot
+  span is the battery fleet's planned and delivered energy over one plan
+  slot, as average watts. A warning starts a span at once; a change to an
+  info verdict counts once it has held 15 s, from when it was first seen.
+- The box answers `diag.run` with `E_UNKNOWN_OP` until it builds it. `cars.get` carries no name, maker, VIN, identifier or source,
   and the redactor takes those out of `logs.get` and `config.get`; a box
   without the car store answers it `E_UNAVAILABLE`. `plan.get` names each
   charger and its car by agent id.

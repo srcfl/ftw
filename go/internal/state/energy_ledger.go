@@ -24,8 +24,11 @@ const (
 	// Keep recent ledger detail aligned with the legacy history hot tier.
 	// Older energy is additive, so hourly totals preserve its contract while
 	// bounding history growth. Daily totals remain after the hourly horizon.
+	// Skatteverket's battery refund is worked out hour by hour for a
+	// calendar year and may be claimed until three years after it ends, so
+	// the hours of a whole year must last four.
 	EnergyLedgerDetailedRetention = 30 * 24 * time.Hour
-	EnergyLedgerRetention         = 2 * 365 * 24 * time.Hour
+	EnergyLedgerRetention         = 4 * 366 * 24 * time.Hour
 	EnergyLedgerRollupBucketMS    = int64(time.Hour / time.Millisecond)
 	EnergyLedgerDailyBucketMS     = 24 * EnergyLedgerRollupBucketMS
 )
@@ -505,7 +508,7 @@ func (s *Store) LoadEnergyHistoryContext(ctx context.Context, q EnergyHistoryQue
 }
 
 // PruneEnergyLedger keeps five-minute detail for 30 days, hourly totals for
-// two years and daily totals thereafter. Energy and its source/quality remain
+// four years and daily totals thereafter. Energy and its source/quality remain
 // intact. Each completed hour or day commits before the next begins.
 func (s *Store) PruneEnergyLedger(ctx context.Context, now time.Time) (hourly, daily int64, err error) {
 	for _, tier := range []struct {

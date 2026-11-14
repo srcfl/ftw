@@ -101,3 +101,34 @@ func TestADayCountsHealthOnlyFromReportsThatCarryIt(t *testing.T) {
 		t.Fatalf("%+v", old)
 	}
 }
+
+func TestADriverLabelCanCarryItsVersion(t *testing.T) {
+	report := func(label string) string {
+		return strings.Replace(valid, `"drivers":["pixii","pixii_pv"]`, `"drivers":["`+label+`"]`, 1)
+	}
+	for _, label := range []string{"pixii", "pixii@2.1.9", "50-125k-svk@0.1.12", "other"} {
+		if _, err := Decode([]byte(report(label))); err != nil {
+			t.Errorf("%s refused: %v", label, err)
+		}
+	}
+	for _, label := range []string{"pixii@", "pixii@2.1", "pixii@2.1.9-beta", "Pixii@2.1.9", "pappas laddbox", "pixii@2.1.9@1.0.0"} {
+		if _, err := Decode([]byte(report(label))); err == nil {
+			t.Errorf("%s accepted", label)
+		}
+	}
+}
+
+func TestBatteryIsTheNearestKilowattHour(t *testing.T) {
+	report := func(label string) string { return strings.Replace(valid, `"5-15"`, `"`+label+`"`, 1) }
+	for _, label := range []string{"none", "1", "12", "9999", "0-5", "30+"} {
+		if _, err := Decode([]byte(report(label))); err != nil {
+			t.Errorf("%s refused: %v", label, err)
+		}
+	}
+	for _, label := range []string{"12.4", "12 kWh", "10000", ""} {
+		if _, err := Decode([]byte(report(label))); err == nil {
+			t.Errorf("%s accepted", label)
+		}
+	}
+}
+

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {controlRows, controlStatus, controlReceipt, controlNumbers, controlCurve, controlForPlanet,
-  controlSummary, withControlMarks} from './control-feedback.js';
+  controlSummary, withControlMarks, planNowWords} from './control-feedback.js';
 
 const row = extra => ({driver: 'bat', kind: 'battery', mode: 'planner_arbitrage', status: 'following', reason: 'power_observed',
   severity: 'info', evidence: 'measured', readings_fresh: true, sent_w: -2250, requested_w: -2250, actual_w: -2249,
@@ -33,9 +33,11 @@ test('the default view never shows tier numbers or internal codes', () => {
 });
 
 test('the answer follows Core: following, not following and lost control', () => {
-  const following = controlStatus(row());
+  const following = controlStatus(row({on_plan: true}));
   assert.equal(following.title, 'Following FTW');
   assert.equal(following.text, 'Discharging 2.2 kW as planned.');
+  assert.equal(controlStatus(row({on_plan: false})).text, 'Discharging 2.2 kW as FTW asked.');
+  assert.equal(controlStatus(row()).text, 'Discharging 2.2 kW as FTW asked.');
   assert.equal(following.tone, 'ok');
   const ignored = controlStatus(row({status: 'not_following', reason: 'no_power_response', severity: 'warning', sent_w: 3000, actual_w: 0}));
   assert.equal(ignored.title, 'Not following');
@@ -59,6 +61,27 @@ test('expected limits stay calm and explain themselves', () => {
   assert.equal(car.title, 'Car is full');
   const limit = controlStatus(row({kind: 'ev', status: 'limited', reason: 'device_limit', severity: 'warning', device_limit_a: 8, requested_a: 16}));
   assert.equal(limit.text, 'The charger’s own limit is 8 A, below the 16 A FTW asked for.');
+  // Field trace, 23 Oct 2026: 15 A ordered, Easee's load balancing allowed 13 A.
+  const lb = {kind: 'ev', mode: 'plan', status: 'limited', reason: 'load_balancer_limit', severity: 'info',
+    sent_w: 10350, actual_w: 8850, requested_a: 15, offered_a: 15, device_limit_a: 16, limit_a: 13, limited_by: 'load_balancer'};
+  const balanced = controlStatus(row({...lb, make: 'Easee'}));
+  assert.equal(balanced.title, 'Limited by the charger’s load balancing');
+  assert.equal(balanced.text, 'Easee limits the charger to 13 A (its load balancing). FTW asked for 15 A; the car takes 8.8 kW.');
+  assert.equal(balanced.next, 'If this happens often, compare the charger’s load balancing settings with FTW’s main fuse setting.');
+  assert.equal(balanced.tone, 'neutral');
+  assert.equal(controlStatus(row(lb)).text, 'The charger’s load balancing limits it to 13 A. FTW asked for 15 A; the car takes 8.8 kW.');
+  assert.deepEqual(controlNumbers(row(lb)).filter(([label]) => /current|offer|limit|allows/i.test(label)), [
+    ['Requested current', '15 A'], ['Reported current setting', '15 A'], ['Charger limit', '16 A'], ['Load balancing allows', '13 A']]);
+  // A lower current with no cause shown says what the charger does, no more.
+  const unexplained = {...lb, reason: 'offered_current_lower', severity: 'warning', limited_by: undefined};
+  assert.equal(controlStatus(row(unexplained)).text, 'The charger lets the car take 13 A, below the 15 A FTW asked for.');
+  assert.deepEqual(controlNumbers(row(unexplained)).at(-1), ['Charger lets the car take', '13 A']);
+  // A charger holding a lower order than FTW sent.
+  const lower = controlStatus(row({kind: 'ev', status: 'limited', reason: 'offered_current_lower', severity: 'warning', offered_a: 12, requested_a: 15}));
+  assert.equal(lower.text, 'The charger offers 12 A, below the 15 A FTW asked for.');
+  // A lower held order is said first, even when the driver reports less.
+  const both = controlStatus(row({kind: 'ev', status: 'limited', reason: 'offered_current_lower', severity: 'warning', offered_a: 12, limit_a: 10, requested_a: 15}));
+  assert.equal(both.text, 'The charger offers 12 A, below the 15 A FTW asked for.');
   const onePhase = controlStatus(row({kind: 'ev', mode: 'plan', status: 'limited', reason: 'one_phase', severity: 'info',
     sent_w: 3680, actual_w: 3650, charging_phase: 'L1', charging_phase_max_w: 3680}));
   assert.equal(onePhase.title, 'Charging on one phase');
@@ -159,4 +182,70 @@ test('limited positive EV offer does not explain prolonged zero delivery', () =>
  assert.equal(hour.title,'Limited by the hourly import limit');
  assert.match(hour.text,/this hour’s grid import/);
  assert.doesNotMatch(hour.text,/fuse/);
+});
+
+test('vehicle-side stop is explained without asserting full SoC or a met goal', () => {
+ const s=controlStatus(row({kind:'ev',status:'waiting',reason:'vehicle_declined',severity:'info',actual_w:0,requested_w:10350}));
+ assert.match(s.title,/Car stopped charging/);
+ assert.match(s.text,/finished or paused/);
+ assert.match(s.text,/does not confirm/);
+ assert.match(s.next,/charge limit and schedule/);
+ assert.equal(s.tone,'neutral');
+ assert.doesNotMatch(s.text,/car is full|reached its own charge limit/);
+});
+
+test('Core’s own stop for a car that stopped asking keeps its own words', () => {
+ const s=controlStatus(row({kind:'ev',status:'following',reason:'vehicle_not_requesting',severity:'info',actual_w:0,sent_w:0}));
+ assert.equal(s.title,'Car not taking power');
+ assert.match(s.text,/not asking for power/);
+ assert.equal(s.next,'');
+});
+
+test('a confirmed lower pilot is an explained restriction with separate current values', () => {
+  const r = row({kind:'ev',status:'limited',reason:'charger_pilot_limit',severity:'info',
+    requested_a:15,offered_a:15,dynamic_limit_a:15,pilot_a:13,actual_w:8850,sent_w:10350});
+  const words=controlStatus(r);
+  assert.match(words.title,/Limited by the charger/);
+  assert.match(words.text,/signals 13 A/);
+  assert.match(words.text,/internal limiting cause is unknown/);
+  const numbers=controlNumbers(r);
+  assert.ok(numbers.some(([label,value])=>label==='Actual pilot current'&&value==='13 A'));
+  assert.ok(numbers.some(([label,value])=>label==='Dynamic current setting'&&value==='15 A'));
+  assert.ok(!numbers.some(([label])=>label==='Charger offer'));
+});
+
+test('the plan and what happens now, in words', () => {
+  const morning = {status: 'off_plan', why: 'less_solar', battery_w: -1231, planned_battery_w: 2595, pv_w: -1392, planned_pv_w: -3814, load_w: 1230, planned_load_w: 1219, ev_w: 0, planned_ev_w: 0};
+  assert.deepEqual(planNowWords(morning), {
+    now: 'Discharging 1.2 kW',
+    plan: 'The plan said: charge 2.6 kW',
+    why: 'The sun gives 1.4 kW; the forecast said 3.8 kW.',
+    then: 'The battery covers the home, so you buy less.',
+  });
+  assert.equal(planNowWords({...morning, status: 'as_planned'}), null);
+  assert.equal(planNowWords(null), null);
+  assert.equal(planNowWords({...morning, battery_w: 800}).then, 'The battery charges with what is left over.');
+  assert.equal(planNowWords({...morning, battery_w: 20}).now, 'Idle');
+  assert.equal(planNowWords({...morning, battery_w: 20}).then, 'Nothing is left over to charge with.');
+  assert.equal(planNowWords({...morning, planned_battery_w: 0}).plan, 'The plan said: rest');
+  assert.equal(planNowWords({...morning, why: 'more_home', load_w: 2500, planned_load_w: 1000}).why, 'The home uses 2.5 kW; the forecast said 1.0 kW.');
+  assert.equal(planNowWords({...morning, why: 'more_car', ev_w: 3000}).why, 'The car takes 3.0 kW; the plan said 0 W.');
+  assert.equal(planNowWords({...morning, why: 'manual'}).why, 'You are holding the battery by hand.');
+  assert.equal(planNowWords({...morning, why: 'manual'}).then, '');
+  assert.equal(planNowWords({...morning, why: 'device', device_reason: 'fuse_limit'}).why, 'Limited by the main fuse.');
+  assert.equal(planNowWords({...morning, why: 'other'}).why, 'FTW follows what the home and the sun do now, not the forecast.');
+  assert.equal(planNowWords({...morning, planned_battery_w: -3000, battery_w: -1000, why: 'less_home'}).then, 'The battery gives only what the home needs.');
+});
+
+test('EV warnings show fresh pilot evidence with the measured charging power', () => {
+  const ev = row({kind: 'ev', status: 'not_following', severity: 'warning',
+    requested_a: 15, sent_w: 10350, pilot_a: 11, actual_w: 7489, reason: 'power_below_target'});
+  assert.equal(controlStatus(ev).text,
+    'FTW asked for 15 A and the charger signalled 11 A to the car. Measured charging: 7.5 kW.');
+  const stopped = {...ev, pilot_a: 12, actual_w: 0, reason: 'no_power_response'};
+  assert.equal(controlStatus(stopped).text,
+    'FTW asked for 15 A and the charger signalled 12 A to the car. Measured charging: 0 W.');
+  assert.equal(controlStatus(stopped).tone, 'warning');
+  assert.doesNotMatch(controlStatus({...stopped, readings_fresh: false}).text, /signalled/);
+  assert.doesNotMatch(controlStatus({...stopped, pilot_a: null}).text, /signalled/);
 });

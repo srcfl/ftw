@@ -9,8 +9,8 @@ import (
 )
 
 // evBatteryYield lets an existing car offer wait for a battery charge cut.
-// It never grants a car rise, never runs outside the measured fuse rating,
-// and cannot renew while the site remains over its working limit.
+// It never grants a car rise, never runs above the fuse's working limit
+// (fuseLineA), and cannot renew while the site remains over its working limit.
 type evBatteryYield struct {
 	tried      bool
 	until      time.Time
@@ -35,12 +35,13 @@ func (s *State) yieldBatteryBeforeEVCut(store *telemetry.Store, meter *telemetry
 	// This hold uses only the installation's existing current allowance.
 	// Include offers still on their way; a cut never funds a car increase.
 	amps, present, valid := phaseCurrentsA(meter, s, gridW)
-	if !present || !valid || gridW+rise.w+pendingBatteryW > s.SiteFuseAmps*s.SiteFuseVoltage*float64(s.SiteFusePhases) {
+	lineA := s.fuseLineA()
+	if !present || !valid || gridW+rise.w+pendingBatteryW > lineA*s.SiteFuseVoltage*float64(s.SiteFusePhases) {
 		return false
 	}
 	pendingA := pendingBatteryW / (s.SiteFuseVoltage * float64(s.SiteFusePhases))
 	for i, a := range amps {
-		if math.Max(a, math.Sqrt(s.fuseHeat.sq[i]))+rise.phaseA[i]+pendingA > s.SiteFuseAmps {
+		if math.Max(a, math.Sqrt(s.fuseHeat.sq[i]))+rise.phaseA[i]+pendingA > lineA {
 			return false
 		}
 	}

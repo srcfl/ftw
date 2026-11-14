@@ -180,10 +180,14 @@ func TestDiagnosticPagesRetainEveryByteOfLargeAnswers(t *testing.T) {
 func TestDiagnosticStartIncludesVersionedSourceAndBugEvidence(t *testing.T) {
 	srv := New(&Deps{Version: "0.151.0-beta.1"})
 	answer, _ := diagnosticRead(t, srv, protocol.AgentAPICatalogPath, protocol.APIRead{})
-	for _, text := range []string{"https://github.com/srcfl/ftw/tree/v0.151.0-beta.1", "https://github.com/srcfl/device-drivers", "https://cloud.ftw.energy/source", "reproduction steps", "timezone", "real equipment", "/api/support/report"} {
+	for _, text := range []string{"https://github.com/srcfl/ftw/tree/v0.151.0-beta.1", "https://github.com/srcfl/device-drivers", "https://github.com/srcfl/ftw-webapp-source-archive", "docs/protocol.md", "reproduction steps", "timezone", "real equipment", "/api/support/report"} {
 		if !strings.Contains(answer.Body.String(), text) {
 			t.Errorf("missing debugging context %q", text)
 		}
+	}
+	// FTW Cloud stopped serving its source on 10 November 2026.
+	if strings.Contains(answer.Body.String(), "cloud.ftw.energy/source") {
+		t.Error("the catalog still sends agents to a Cloud source page that no longer exists")
 	}
 }
 

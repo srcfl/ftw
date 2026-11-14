@@ -153,7 +153,7 @@
       '.ftw-hpc-note{font-family:var(--sans);font-size:0.68rem;color:var(--fg-muted);margin-top:6px}',
       '.ftw-hpc-err{font-family:var(--sans);font-size:0.68rem;color:var(--fg);margin-top:6px}',
       '.ftw-hp-leg{font-family:var(--mono);font-size:0.62rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-muted);display:inline-flex;align-items:center;gap:4px}',
-      '.ftw-hp-leg-dot{width:8px;height:8px;border-radius:2px;display:inline-block}',
+      '.ftw-hp-leg-dot{width:14px;height:0;border-top:2px solid;display:inline-block}',
       '.ftw-hp-erow{display:grid;grid-template-columns:1fr auto auto;gap:7px 18px;align-items:baseline}',
       '.ftw-hp-ehead{font-size:0.58rem;letter-spacing:0.12em;text-transform:uppercase;color:var(--fg-muted);font-family:var(--mono)}',
       '.ftw-hp-elabel{font-family:var(--mono);font-size:0.66rem;text-transform:uppercase;letter-spacing:0.06em;color:var(--fg-muted)}',
@@ -220,17 +220,30 @@
   }
 
   // ── Month temperature chart (outdoor / supply / return) ──────────
-  // Multi-line SVG; line hues are fixed (read on both themes), axis chrome
-  // uses theme tokens. Spans whatever history exists (fills toward a month).
+  // Multi-line SVG. Colour is energy and a temperature is not one, so the
+  // lines are ink levels told apart by dash, as the legend shows. Spans
+  // whatever history exists (fills toward a month).
   var TCHART = [
-    { key: 'outdoor', label: 'Outdoor (BT1)', color: '#38bdf8' },
-    { key: 'supply',  label: 'Supply (BT2)',  color: '#ef4444' },
-    { key: 'ret',     label: 'Return (BT3)',  color: '#22c55e' },
-    { key: 'extract', label: 'Extract air (BT20)', color: '#a78bfa' },
+    { key: 'outdoor', label: 'Outdoor (BT1)', color: 'var(--fg-muted)', dash: 'dashed' },
+    { key: 'supply',  label: 'Supply (BT2)',  color: 'var(--fg)', dash: 'solid' },
+    // Supply and return run close together, so return also takes a dash.
+    { key: 'ret',     label: 'Return (BT3)',  color: 'var(--fg-dim)', dash: 'dashed' },
+    { key: 'extract', label: 'Extract air (BT20)', color: 'var(--fg-muted)', dash: 'dotted' },
   ];
+  // SVG dash patterns for the legend's border styles.
+  var DASH = { solid: '', dashed: '6 4', dotted: '1.5 3' };
+  function chartLine(d, s) {
+    return '<path d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="1.4" stroke-linejoin="round"' +
+      (DASH[s.dash] ? ' stroke-dasharray="' + DASH[s.dash] + '"' : '') + '/>';
+  }
+  function chartLegend(series) {
+    return series.map(function (s) {
+      return '<span class="ftw-hp-leg"><span class="ftw-hp-leg-dot" style="border-top-color:' + s.color + ';border-top-style:' + s.dash + '"></span>' + s.label + '</span>';
+    }).join('');
+  }
   function tempChartBlock(temps) {
     if (!temps) return '';
-    var lines = TCHART.map(function (s) { return { color: s.color, points: temps[s.key] || [] }; });
+    var lines = TCHART.map(function (s) { return { series: s, points: temps[s.key] || [] }; });
     var all = [];
     lines.forEach(function (l) { l.points.forEach(function (p) { if (p && p.v != null) all.push(p); }); });
     if (all.length < 2) return '';
@@ -252,11 +265,9 @@
       var pp = l.points.filter(function (p) { return p && p.v != null; });
       if (pp.length < 2) return '';
       var d = pp.map(function (p, i) { return (i ? 'L' : 'M') + X(p.ts) + ',' + Y(p.v); }).join(' ');
-      return '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="1.4" stroke-linejoin="round"/>';
+      return chartLine(d, l.series);
     }).join('');
-    var legend = TCHART.map(function (s) {
-      return '<span class="ftw-hp-leg"><span class="ftw-hp-leg-dot" style="background:' + s.color + '"></span>' + s.label + '</span>';
-    }).join('');
+    var legend = chartLegend(TCHART);
     var yax = [vMax, (vMin + vMax) / 2, vMin].map(function (v) {
       return '<span>' + Math.round(v) + '°</span>';
     }).join('');
@@ -274,15 +285,16 @@
 
   // Power over 24h — Total drawn / Compressor / Internal add. heat, all in kW.
   // Separate from sparkline() so the ~937 tiny detail sparklines stay axis-free.
+  // The heat pump is part of the home, so its power is ink too.
   var PCHART = [
-    { key: 'total',      label: 'Total drawn',        color: 'var(--accent-e)', scale: 0.001 },
-    { key: 'compressor', label: 'Compressor',         color: '#38bdf8', scale: 0.001 },
-    { key: 'internal',   label: 'Internal add. heat', color: '#f472b6', scale: 0.001 },
+    { key: 'total',      label: 'Total drawn',        color: 'var(--fg)', dash: 'solid', scale: 0.001 },
+    { key: 'compressor', label: 'Compressor',         color: 'var(--fg-dim)', dash: 'solid', scale: 0.001 },
+    { key: 'internal',   label: 'Internal add. heat', color: 'var(--fg-muted)', dash: 'dashed', scale: 0.001 },
   ];
   function powerChartBlock(power) {
     if (!power) return '';
     var lines = PCHART.map(function (s) {
-      return { color: s.color, points: (power[s.key] || []).map(function (p) {
+      return { series: s, points: (power[s.key] || []).map(function (p) {
         return { ts: p.ts, v: p.v == null ? null : p.v * s.scale };
       }) };
     });
@@ -303,11 +315,9 @@
       var pp = l.points.filter(function (p) { return p && p.v != null; });
       if (pp.length < 2) return '';
       var d = pp.map(function (p, i) { return (i ? 'L' : 'M') + X(p.ts) + ',' + Y(p.v); }).join(' ');
-      return '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="1.4" stroke-linejoin="round"/>';
+      return chartLine(d, l.series);
     }).join('');
-    var legend = PCHART.map(function (s) {
-      return '<span class="ftw-hp-leg"><span class="ftw-hp-leg-dot" style="background:' + s.color + '"></span>' + s.label + '</span>';
-    }).join('');
+    var legend = chartLegend(PCHART);
     var yax = [vMax, vMax / 2, 0].map(function (v) { return '<span>' + v.toFixed(1) + '</span>'; }).join('');
     var fmtTime = function (t) { return new Date(t).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }); };
     var xticks = 4, xax = '';

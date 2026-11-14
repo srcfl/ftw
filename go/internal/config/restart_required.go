@@ -25,6 +25,9 @@ func RestartRequiredFor(oldCfg, newCfg *Config) []string {
 		reasons = append(reasons, "setup.measurement_only — restart to change equipment control")
 	}
 
+	if oldCfg.Site.TimeZone != newCfg.Site.TimeZone {
+		reasons = append(reasons, "site.time_zone — the household clock is set at startup")
+	}
 	if oldCfg.API.Port != newCfg.API.Port {
 		reasons = append(reasons, "api.port — HTTP server binds the port at startup")
 	}

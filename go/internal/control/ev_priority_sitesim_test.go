@@ -71,7 +71,7 @@ func TestIssue1868ClosedLoopPriorityAndRecovery(t *testing.T) {
 					if s.p.Fuse.Blown != [3]bool{} {
 						t.Fatalf("fuse opened: %+v", s.p.Fuse)
 					}
-					// Outside house steps may exceed the working margin during device
+					// Outside house steps may exceed the working limit during device
 					// response. The fixture checks unsafe raises and sustained overages.
 					if s.failure != "" {
 						t.Fatal(s.failure)

@@ -132,3 +132,51 @@ func TestStoredRetiredControlSettingsMigrateAndAreDeleted(t *testing.T) {
 		t.Fatalf("second DropRetiredSettings = %v, %v; want nothing", removed, err)
 	}
 }
+
+// A stored 0.5 A margin keeps steering the site and stays in state.db; the
+// notice comes from loading it, so dropping retired settings leaves it alone.
+func TestStoredOldDefaultFuseMarginIsKeptWithANotice(t *testing.T) {
+	dir := t.TempDir()
+	path, database := filepath.Join(dir, "config.yaml"), filepath.Join(dir, "state.db")
+	yaml := strings.Replace(minimalYAML, "  max_amps: 16\n", "  max_amps: 16\n  safety_margin_a: 0.5\n", 1)
+	if err := os.WriteFile(path, []byte(yaml), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := state.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := InitializeStorage(path, database, cfg, st); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		loaded, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loaded.ConfigDatabase == "" {
+			t.Fatal("loaded from the YAML file, not from stored settings")
+		}
+		if got := loaded.Fuse.EffectiveSafetyMarginA(); got != 0.5 {
+			t.Fatalf("stored margin = %v, want 0.5", got)
+		}
+		if len(loaded.Retired) != 1 || !strings.Contains(loaded.Retired[0], "safety_margin_a is 0.5 A") {
+			t.Fatalf("notices = %q, want one naming the old 0.5 A default", loaded.Retired)
+		}
+		if removed, err := DropRetiredSettings(st, path, loaded); err != nil || len(removed) != 0 {
+			t.Fatalf("DropRetiredSettings = %v, %v; the margin is a setting, not a retired one", removed, err)
+		}
+	}
+	after, _, err := st.Configuration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(after.Document), `"safety_margin_a":0.5`) {
+		t.Fatalf("stored settings lost the margin: %s", after.Document)
+	}
+}

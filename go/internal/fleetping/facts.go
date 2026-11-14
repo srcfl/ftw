@@ -45,6 +45,30 @@ func FactsFromConfig(cfg *config.Config, version string, catalogue []string, ins
 	return f
 }
 
+// RunningDrivers is the configured drivers that delivered a reading in the
+// last day, by type, each with the version its file declares. lastSuccess and
+// version are the box's telemetry and catalogue, so this package stays free
+// of both.
+func RunningDrivers(cfg *config.Config, now time.Time, lastSuccess func(name string) (time.Time, bool), version func(lua string) string) map[string]string {
+	out := map[string]string{}
+	if cfg == nil {
+		return out
+	}
+	for _, d := range cfg.Drivers {
+		if d.Disabled {
+			continue
+		}
+		at, ok := lastSuccess(d.Name)
+		if !ok || now.Sub(at) > 24*time.Hour {
+			continue
+		}
+		if name := driverFileType(d.Lua); name != "" {
+			out[name] = version(d.Lua)
+		}
+	}
+	return out
+}
+
 // driverFileType is the catalogue name behind a configured `lua:` path —
 // "drivers/sungrow.lua" and "/home/pi/.ftw/drivers/sungrow.lua" are both
 // "sungrow". The directory is dropped rather than reported, because the path a

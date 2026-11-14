@@ -257,6 +257,20 @@ type PlannerPrefs interface {
 	Apply(safetyK *float64, export *string) (PlannerPrefsSnapshot, error)
 }
 
+// TimeZoneAnswer is what the box did with a client's time zone.
+type TimeZoneAnswer struct {
+	// Zone is the household zone the site keeps.
+	Zone string
+	// Taken is true when the offer became the site's zone.
+	Taken bool
+}
+
+// TimeZones takes a client's time zone as the household clock while the box
+// keeps none of its own. Nil answers E_UNAVAILABLE.
+type TimeZones interface {
+	ProposeTimeZone(zone string) (TimeZoneAnswer, error)
+}
+
 // PlanReader hands over the planner's current output.
 //
 // Nil means the planner has produced nothing at all, which the wire reports as
@@ -305,6 +319,9 @@ type PriceReader interface {
 	// Currency is the ISO code their minor units are in. Without it the app
 	// would have to guess whether 45 is öre or cents.
 	Currency() string
+	// VATPercent is the VAT rate the box applies to TotalMinor, after any
+	// default. Still a float, as the config keeps it; the wire rounds it once.
+	VATPercent() float64
 	// Slots returns every stored slot overlapping [fromMs, toMs), oldest
 	// first. Overlapping, not contained: the slot in progress at fromMs is
 	// the price right now, and a window starting at "now" that left it out

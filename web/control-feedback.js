@@ -48,6 +48,8 @@ function target(row) {
 function source(row) {
   if (row.mode === 'manual') return 'as you asked';
   if (row.mode === 'solar') return 'from spare solar';
+  // A battery's row says "as planned" only when Core says it is.
+  if (row.kind === 'battery') return row.on_plan === true ? 'as planned' : 'as FTW asked';
   if (row.mode === 'plan' || String(row.mode || '').startsWith('planner')) return 'as planned';
   return 'as FTW asked';
 }
@@ -62,10 +64,12 @@ const REASON_TITLES = {
   waiting_response: 'Adjusting', no_command: 'No command yet', not_connected: 'No car connected',
   no_plan_budget: 'Waiting for the plan', pv_surplus_pause: 'Waiting for spare solar', wake_kick: 'Starting the charger',
   vehicle_complete: 'Car is full', vehicle_limit_completion: 'Car reached its limit', vehicle_not_requesting: 'Car not taking power',
+  vehicle_declined: 'Car stopped charging',
   battery_full: 'Battery full', battery_nearly_full: 'Battery nearly full', battery_nearly_empty: 'Battery nearly empty',
   core_limit: 'Limited by FTW', fuse_limit: 'Limited by the main fuse', fuse_cooldown: 'Waiting after a site power limit',
   import_limit: 'Limited by the hourly import limit',
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
+  load_balancer_limit: 'Limited by the charger’s load balancing', charger_pilot_limit: 'Limited by the charger',
   one_phase: 'Charging on one phase',
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
   command_failed: 'Commands failing', command_unconfirmed: 'Command not confirmed', default_failed: 'Cannot hand back control',
@@ -84,6 +88,7 @@ function sentence(row) {
     case 'vehicle_complete': return 'Not charging: the car reports that it is full.';
     case 'vehicle_limit_completion': return 'Not charging: the car reached its own charge limit.';
     case 'vehicle_not_requesting': return 'The car is not asking for power right now.';
+    case 'vehicle_declined': return 'The charger reports that the car has finished or paused charging. This does not confirm its battery level or charge limit.';
     case 'waiting_response': return `Moving to ${target(row)}. The ${name} usually responds within ${row.kind === 'ev' ? 'two minutes' : '15 seconds'}.`;
     case 'no_command': return 'FTW has not sent a command since it started.';
     case 'not_connected': return 'Plug in a car to charge.';
@@ -99,11 +104,16 @@ function sentence(row) {
     case 'fuse_cooldown': return 'FTW waits a moment after a site power limit before it raises the rate.';
     case 'charger_limit': return 'The charger limit in FTW’s settings caps the rate.';
     case 'device_limit': return `The charger’s own limit is ${amps(row.device_limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
-    case 'offered_current_lower': return `The charger offers ${amps(row.offered_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
+    case 'offered_current_lower': return num(row.limit_a) && !(num(row.offered_a) && num(row.requested_a) && row.offered_a + 0.5 < row.requested_a)
+      ? `The charger lets the car take ${amps(row.limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`
+      : `The charger offers ${amps(row.offered_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
+    case 'charger_pilot_limit': return `The charger signals ${amps(row.pilot_a)} to the car. FTW asked for ${amps(row.requested_a)}; measured charging is ${controlPower(actual)}. The internal limiting cause is unknown.`;
+    case 'load_balancer_limit': return `${row.make ? `${row.make} limits the charger to ${amps(row.limit_a)} (its load balancing)`
+      : `The charger’s load balancing limits it to ${amps(row.limit_a)}`}. FTW asked for ${amps(row.requested_a)}; the car takes ${controlPower(actual)}.`;
     case 'one_phase': return `The car charges on ${row.charging_phase || 'one phase'} only${num(row.charging_phase_max_w) ? `, at most ${controlPower(row.charging_phase_max_w)}` : ''}. FTW plans with what it takes.`;
-    case 'power_below_target': case 'power_above_target': return `Asked for ${target(row)}, delivering ${controlPower(actual)}.`;
+    case 'power_below_target': case 'power_above_target': return evPowerWarning(row) || `Asked for ${target(row)}, delivering ${controlPower(actual)}.`;
     case 'power_wrong_direction': return `Asked for ${target(row)}, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
-    case 'no_power_response': return `Asked for ${target(row)}, but it delivers no power.`;
+    case 'no_power_response': return evPowerWarning(row) || `Asked for ${target(row)}, but it delivers no power.`;
     case 'power_while_idle': return `Asked to stay idle, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
     case 'setpoint_changed': return `The ${name} reports a target of ${controlFlow(row, row.readback_w)}, not the ${target(row)} FTW sent.`;
     case 'device_fault': return row.device_reason ? `The ${name} reports a fault: ${row.device_reason}.` : `The ${name} reports a fault that stops control.`;
@@ -124,12 +134,21 @@ function sentence(row) {
   }
 }
 
+function evPowerWarning(row) {
+  if (row.kind !== 'ev' || !row.readings_fresh ||
+      !num(row.requested_a) || !num(row.pilot_a) || !num(row.actual_w)) return '';
+  const request = `FTW asked for ${amps(row.requested_a)}`;
+  const pilot = `the charger signalled ${amps(row.pilot_a)} to the car`;
+  return `${request} and ${pilot}. Measured charging: ${controlPower(row.actual_w)}.`;
+}
+
 function nextStep(row) {
   const name = noun(row);
   switch (row.reason) {
     case 'power_below_target': case 'power_above_target': case 'power_wrong_direction':
     case 'no_power_response': case 'power_while_idle':
       return `The ${name} has not said why. Check its app or display.`;
+    case 'vehicle_declined': return 'Check the car’s charge limit and schedule.';
     case 'setpoint_changed': return 'Another app or controller may be changing it.';
     case 'device_fault': return `Check the ${name}.`;
     case 'telemetry_stale': case 'readings_lost': case 'command_failed': case 'default_failed':
@@ -137,6 +156,8 @@ function nextStep(row) {
     case 'site_meter_stale': case 'site_phase_currents_stale': return 'Check the grid meter’s connection.';
     case 'device_limit': return 'Raise the limit in the charger’s app if you want faster charging.';
     case 'offered_current_lower': return 'Check the charger’s load balancing and limits.';
+    case 'charger_pilot_limit': return 'Check Available energy in the charger’s app for the active limit.';
+    case 'load_balancer_limit': return 'If this happens often, compare the charger’s load balancing settings with FTW’s main fuse setting.';
     case 'observe_only': return 'Turn on control in the device settings if you want FTW to steer it.';
     default: return '';
   }
@@ -150,6 +171,43 @@ function proofLine(row) {
 
 // One answer per device function: a title, one sentence and, when the owner
 // can act, the next step. Tone follows Core's severity and status.
+function planBattery(watts, charge, discharge, rest) {
+  if (Math.abs(watts) < 100) return rest;
+  return `${watts > 0 ? charge : discharge} ${controlPower(watts)}`;
+}
+
+function planNowWhy(p) {
+  const pair = (subject, actual, planned, source) => num(actual) && num(planned) ? `${subject} ${controlPower(actual)}; ${source} said ${controlPower(planned)}.` : '';
+  switch (p.why) {
+    case 'less_solar': case 'more_solar': return pair('The sun gives', p.pv_w, p.planned_pv_w, 'the forecast');
+    case 'more_home': case 'less_home': return pair('The home uses', p.load_w, p.planned_load_w, 'the forecast');
+    case 'more_car': case 'less_car': return pair('The car takes', p.ev_w, p.planned_ev_w, 'the plan');
+    case 'manual': return 'You are holding the battery by hand.';
+    case 'device': return REASON_TITLES[p.device_reason] ? `${REASON_TITLES[p.device_reason]}.` : 'The battery cannot follow the plan right now.';
+    default: return 'FTW follows what the home and the sun do now, not the forecast.';
+  }
+}
+
+function planNowThen(p) {
+  if (!/^(less|more)_(solar|home|car)$/.test(p.why || '')) return '';
+  const now = p.battery_w, planned = p.planned_battery_w;
+  if (now <= -100) return planned > -100 || Math.abs(now) > Math.abs(planned) ? 'The battery covers the home, so you buy less.' : 'The battery gives only what the home needs.';
+  if (now >= 100) return 'The battery charges with what is left over.';
+  return planned > 0 ? 'Nothing is left over to charge with.' : 'The battery rests.';
+}
+
+// What the batteries do now beside what the plan meant, and why, when Core
+// says they differ. Null when they do not. Core decides; this only words it.
+export function planNowWords(value) {
+  if (!value || value.status !== 'off_plan' || !num(value.battery_w) || !num(value.planned_battery_w)) return null;
+  return {
+    now: capital(planBattery(value.battery_w, 'charging', 'discharging', 'idle')),
+    plan: `The plan said: ${planBattery(value.planned_battery_w, 'charge', 'discharge', 'rest')}`,
+    why: planNowWhy(value),
+    then: planNowThen(value),
+  };
+}
+
 export function controlStatus(row, live = true) {
   if (!live) return {title: 'Status not current', text: 'FTW has not reported for a while.', proof: '', next: 'Waiting for a fresh report.', tone: 'stale'};
   const title = REASON_TITLES[row.reason] || STATUS_TITLES[row.status] || 'Checking';
@@ -225,8 +283,11 @@ export function controlNumbers(row, live = true) {
   if (num(row.battery_soc)) values.push(['Battery charge', percent(row.battery_soc)]);
   if (num(row.tolerance_w)) values.push(['Response tolerance', `±${controlPower(row.tolerance_w)}`]);
   if (num(row.requested_a)) values.push(['Requested current', amps(row.requested_a)]);
-  if (num(row.offered_a)) values.push(['Charger offer', amps(row.offered_a)]);
+  if (num(row.pilot_a)) values.push(['Actual pilot current', amps(row.pilot_a)]);
+  if (num(row.dynamic_limit_a)) values.push(['Dynamic current setting', amps(row.dynamic_limit_a)]);
+  else if (num(row.offered_a)) values.push(['Reported current setting', amps(row.offered_a)]);
   if (num(row.device_limit_a)) values.push(['Charger limit', amps(row.device_limit_a)]);
+  if (num(row.limit_a)) values.push([row.limited_by === 'load_balancer' ? 'Load balancing allows' : 'Charger lets the car take', amps(row.limit_a)]);
   const e = row.site_evidence;
   if (e && typeof e === 'object') {
     for (const [label, key] of [['Grid before', 'grid_before_w'], ['Grid after', 'grid_after_w']]) {

@@ -1,4 +1,6 @@
-/* Runs generate-vectors.ts against a checkout of srcfl/ftw-webapp.
+/* Runs generate-vectors.ts against a checkout of srcfl/ftw-webapp, which is
+ * private since 10 November 2026 (earlier versions are in
+ * srcfl/ftw-webapp-source-archive).
  *
  *   node go/protocol/appwire/testdata/run-generator.mjs ../ftw-webapp
  *

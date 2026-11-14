@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -27,6 +28,9 @@ type scenario struct {
 	// tolerate names criteria that may fail for a known finding but need
 	// not: random cases, where a seed may or may not reach it.
 	tolerate map[string]string
+	// skip, when set, says what the pinned device-simulator lacks for this
+	// scenario: TestSite reports it skipped instead of running it.
+	skip string
 }
 
 var scenarios = []scenario{
@@ -411,7 +415,7 @@ func s7(c *runCtx, fuse float64, short bool) (map[string]any, error) {
 			sleepS(900)
 		}
 		st.mark("ftw_stop")
-		st.stopFTW()
+		st.stopFTW(syscall.SIGTERM)
 		sleepS(20)
 		st.mark("ftw_start")
 		if err := st.startFTW(); err != nil {
@@ -707,10 +711,10 @@ func judgeS12(d *runData) (metrics, []criterion) {
 		if p.Limit > 0 && p.phasesOr3() == 1 {
 			ones++
 		}
-		// A lower order while every phase has room is a cut on room alone,
-		// unless the plan itself asked for less (a pause between slots).
+		// A lower order while every phase is under the fuse is a cut on room
+		// alone, unless the plan itself asked for less (a pause between slots).
 		if i > 0 && p.offerW() < prs[i-1].offerW()-1 {
-			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-1-0.5 {
+			if r := d.at(t0 + p.T); r != nil && maxAbsI(r) < fuse-0.1 {
 				if after := d.at(t0 + p.T + 2); after == nil || firstLP(after).CommandedReason != "plan" {
 					cuts++
 				}
@@ -721,7 +725,7 @@ func judgeS12(d *runData) (metrics, []criterion) {
 	// recorded, not judged, since a slow charger's pending order may hold it.
 	limited := 0
 	for _, r := range w {
-		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-1-6 {
+		if r.LPs != nil && firstLP(r).CommandedReason == "fuse_limit" && maxAbsI(r) < fuse-6 {
 			limited++
 		}
 	}
@@ -960,9 +964,11 @@ func judgeS15p(d *runData) (metrics, []criterion) {
 // (15 - 3) x 230 - (1 380 + 230) = 1 150 W on its way once kept the car from
 // starting at all (#1805). With the battery's 2 s the car started 25 s late
 // when Charge now caught a raise in flight, and at once when it did not.
+// The run plans in Self: in passive arbitrage the plan may keep the battery
+// idle and export the PV, and then no raise is on its way (#1875).
 func s15bat(c *runCtx, fuse float64) (map[string]any, error) {
 	err := with(c, stackSpec{fuseA: fuse, loadsW: houseA(3), socPct: 50, chargers: []charger{onePhaseCharger},
-		lpExtra: onePhaseExtra, batteryDelayS: 8}, func(st *stack) error {
+		lpExtra: onePhaseExtra, batteryDelayS: 8, mode: "planner_self"}, func(st *stack) error {
 		if err := st.plug(0); err != nil {
 			return err
 		}
@@ -1010,7 +1016,7 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 	start := d.firstT(t0, func(r *sample) bool { return carW(r, 0) >= 0.95*1380 })
 	over, longest := 0.0, 0.0
 	for _, r := range d.window(t0, t1) {
-		if maxAbsI(r) > fuse-1 {
+		if maxAbsI(r) > fuse {
 			over++
 			longest = math.Max(longest, over)
 		} else {
@@ -1018,13 +1024,13 @@ func judgeS15bat(d *runData) (metrics, []criterion) {
 		}
 	}
 	m := metrics{"battery_rise_w_20s_before": math.Round(rise), "car_start_s": roundp(start, 1),
-		"car_w_last60":               math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
-		"over_fuse_minus1_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
+		"car_w_last60":        math.Round(meanOf(d.window(t1-60, t1), func(r *sample) float64 { return carW(r, 0) })),
+		"over_fuse_longest_s": longest, "max_abs_i": round(maxOf(d.window(t0, t1), maxAbsI), 1)}
 	return m, []criterion{
 		crit("the battery order rose over 1 150 W in the 20 s before Charge now", rise > 1150), // the setup
 		crit("car charging within 10 s of Charge now", le(start, 10)),
 		crit("fuse holds", !anyBlown(d.window(t0, t1))),
-		crit("over fuse - 1 A at most 3 s", longest <= 3),
+		crit("over the fuse at most 3 s", longest <= 3),
 	}
 }
 

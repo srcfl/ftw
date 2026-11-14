@@ -991,6 +991,34 @@ func (s *Store) migrate() error {
 			error      TEXT NOT NULL DEFAULT ''
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_notification_log_ts ON notification_log(ts_ms DESC)`,
+		// control_journal: each stretch a subject held one control verdict
+		// (control_journal.go). Small; kept in recovery snapshots.
+		`CREATE TABLE IF NOT EXISTS control_journal (
+			id            INTEGER PRIMARY KEY AUTOINCREMENT,
+			subject       TEXT NOT NULL,
+			driver        TEXT NOT NULL DEFAULT '',
+			kind          TEXT NOT NULL DEFAULT '',
+			status        TEXT NOT NULL,
+			reason        TEXT NOT NULL DEFAULT '',
+			severity      TEXT NOT NULL DEFAULT '',
+			mode          TEXT NOT NULL DEFAULT '',
+			start_ms      INTEGER NOT NULL,
+			end_ms        INTEGER,
+			updated_ms    INTEGER NOT NULL,
+			samples       INTEGER NOT NULL DEFAULT 0,
+			requested_n   INTEGER NOT NULL DEFAULT 0,
+			requested_min REAL,
+			requested_max REAL,
+			requested_sum REAL NOT NULL DEFAULT 0,
+			actual_n      INTEGER NOT NULL DEFAULT 0,
+			actual_min    REAL,
+			actual_max    REAL,
+			actual_sum    REAL NOT NULL DEFAULT 0,
+			first_json    TEXT NOT NULL DEFAULT '{}',
+			last_json     TEXT NOT NULL DEFAULT '{}'
+		) STRICT`,
+		`CREATE INDEX IF NOT EXISTS idx_control_journal_start ON control_journal(start_ms DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_control_journal_open ON control_journal(end_ms) WHERE end_ms IS NULL`,
 
 		// Independently installed Lua drivers. Content lives on disk; SQLite
 		// records activation history and the exact previous artifact used for

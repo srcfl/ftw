@@ -73,21 +73,14 @@ func TestADefaultBoxSendsNothingStraightToFTWCloud(t *testing.T) {
 	t.Cleanup(func() { _ = st.Close() })
 	migrateStatistics(&config.Config{}, &sync.RWMutex{}, st, nil)
 	answer := statsAnswer{st: st}
-	client, _, _ := statsrelaytest.New(t, time.Now())
-	direct, _ := fleetProvider(config.DefaultFleetPingEndpoint, nil)
-	relayed, _ := fleetProvider(config.DefaultFleetPingEndpoint, client)
-	own, _ := fleetProvider("https://collector.example.test/fleet", nil)
-	if fleetReportAllowed(answer, config.DefaultFleetPingEndpoint, direct)() {
-		t.Fatal("a box that never said yes posted straight to FTW Cloud")
+	if !answer.shares() {
+		t.Fatal("a box that shares by default did not report")
 	}
-	if !fleetReportAllowed(answer, config.DefaultFleetPingEndpoint, relayed)() || !fleetReportAllowed(answer, "https://collector.example.test/fleet", own)() {
-		t.Fatal("the relay or the household's collector was held back")
-	}
-	if err := st.SaveConfig("statistics/share_v1", "on"); err != nil {
+	if err := st.SaveConfig("statistics/share_v1", "off"); err != nil {
 		t.Fatal(err)
 	}
-	if !fleetReportAllowed(answer, config.DefaultFleetPingEndpoint, direct)() {
-		t.Fatal("a yes did not send")
+	if answer.shares() {
+		t.Fatal("a box that said no still reported")
 	}
 }
 

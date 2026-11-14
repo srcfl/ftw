@@ -294,12 +294,11 @@
       });
   }
 
-  // DRIVER.verification_status, in words an operator can act on.
-  function verificationLabel(status) {
-    if (status === 'production') return 'verified on hardware';
-    if (status === 'beta') return 'in testing';
-    if (status === 'experimental') return 'untested';
-    return '';
+  // How many boxes ran exactly this version the last closed day, in the same
+  // words Settings uses. Nothing when the counts are not known.
+  function usageLabel(count) {
+    if (typeof count !== 'number') return '';
+    return count === 1 ? '1 home runs this version' : count + ' homes run this version';
   }
 
   function populateDriverDropdown() {
@@ -333,12 +332,9 @@
         }
         label += ')';
       }
-      // Say how well tested it is. The signed channel carries drivers that
-      // have run on customer sites for months alongside ones nobody has ever
-      // put on hardware, and an operator choosing between them should not have
-      // to guess which is which.
-      var verdict = verificationLabel(entry.verification_status);
-      if (verdict) label += ' — ' + verdict;
+      // How many run it: that is all FTW says about a driver.
+      var usage = usageLabel(entry.run_by);
+      if (usage) label += ' — ' + usage;
 
       var opt = document.createElement('option');
       opt.value = String(idx);
@@ -418,11 +414,8 @@
     else if (selectedCatalog.source === 'bundled') provenance.push('bundled with this build');
     if (provenance.length) lines.push(provenance.join(' · '));
 
-    var verdict = verificationLabel(selectedCatalog.verification_status);
-    if (verdict) {
-      var note = selectedCatalog.verification_notes;
-      lines.push(note ? verdict + ' — ' + note : verdict);
-    }
+    var usage = usageLabel(selectedCatalog.run_by);
+    if (usage) lines.push(usage);
 
     if (lines.length) {
       descEl.textContent = '';
@@ -889,6 +882,8 @@
         esc(document.getElementById('fuse-voltage').value) + ' V per phase';
     }
     html += ' · ' + esc(zone);
+    var clock = browserTimeZone();
+    if (clock) html += ' · clock ' + esc(clock);
     html += '</div></div>';
 
     // Devices
@@ -1001,12 +996,25 @@
       });
   };
 
+  // The household clock car goals and daily history read. A Docker box runs
+  // on UTC, so the zone comes from the browser that sets the home up. A
+  // browser on UTC says nothing about the home; the box then keeps its own.
+  function browserTimeZone() {
+    try {
+      var tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+      return /^(Etc\/)?(UTC|UCT|GMT|Universal|Zulu)$/.test(tz) ? '' : tz;
+    } catch (e) {
+      return '';
+    }
+  }
+
   function buildConfig() {
     var zone = document.getElementById('price-zone').value;
 
     var cfg = {
       site: {
         name: document.getElementById('site-name').value.trim() || 'My Home',
+        time_zone: browserTimeZone() || undefined,
         control_interval_s: 5,
         grid_target_w: 0,
         grid_tolerance_w: 42,

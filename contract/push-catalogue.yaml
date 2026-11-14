@@ -1,11 +1,12 @@
-# The push notification catalogue — every sentence a phone's lock screen
-# may carry, and the one place they are written.
+# The shared push notification catalogue.
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Sourceful Labs AB.
 #
-# The app owns all prose; the box sends codes. Push is the sole exception,
-# stated in CLAUDE.md since the beginning: a push must render text when the
-# app is not running, so the box renders it — FROM THIS FILE, never from
-# words of its own. The box's copy is byte-identical and CI on both sides
-# compares them, exactly as contract/registry.yaml is paired.
+# Canonical source: srcfl/ftw contract/push-catalogue.yaml on master.
+# Edit here, then copy byte for byte to ftw-webapp/contract/ and
+# ftw-app/protocol/ in paired PRs. Clients check against public Core.
+# Core renders these templates when a phone is not running; it never invents
+# notification text outside this catalogue.
 #
 # `{arg}` placeholders are filled by the box from the event's own facts.
 # Every event here must be sparse by design: a notification is an
@@ -44,6 +45,13 @@ events:
     # kettle must not page anyone.
     title: The house is drawing too much
     body: "{phase} is over the fuse rating."
+  - kind: control.not_following
+    # After the box's own threshold: ten minutes in which the box's answer
+    # to "Are we in control?" said a device does not do what FTW asked, as
+    # a battery that charges when told to discharge. A slow battery must not
+    # page anyone. Once until the device follows again.
+    title: A device is not following FTW
+    body: "{name} does not do what FTW asks. Open FTW to see why."
   - kind: box.unreachable
     # The one sentence the box cannot send about itself. The relay holds
     # this pre-encrypted and posts it only when the box has missed its

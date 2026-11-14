@@ -1,4 +1,6 @@
 """Exercise artifact corruption and accidental source disclosure boundaries."""
+import contextlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -6,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import verify
 from verify import HERE, verify_bundle, host_key
 
 
@@ -46,6 +49,25 @@ class BundleBoundaryTest(unittest.TestCase):
         data["files"].pop("ftw-solver-darwin-arm64", None)
         manifest.write_text(json.dumps(data))
         self.assertEqual(verify_bundle(self.root)["product"], "energyplan")
+
+    def test_linux_only_bundle_skips_execution_on_darwin_host(self):
+        self.test_linux_only_bundle()
+        out = io.StringIO()
+        with patch("verify.platform.system", return_value="Darwin"), \
+                patch("verify.platform.machine", return_value="arm64"), \
+                patch("verify.HERE", self.root.parent), patch("verify.check_public_tree"), \
+                patch("verify.subprocess.run") as run, patch("sys.argv", ["verify.py"]), \
+                contextlib.redirect_stdout(out):
+            verify.main()
+        run.assert_not_called()
+        self.assertIn("execution skipped", out.getvalue())
+        out = io.StringIO()
+        with patch("verify.platform.system", return_value="Darwin"), \
+                patch("verify.platform.machine", return_value="arm64"), \
+                patch("verify.HERE", self.root.parent), patch("verify.check_public_tree"), \
+                patch("sys.argv", ["verify.py", "--host-binary"]), contextlib.redirect_stdout(out):
+            verify.main()
+        self.assertEqual(out.getvalue(), "")
 
     def test_missing_required_linux_platform(self):
         (self.root / "ftw-solver-linux-amd64").unlink()

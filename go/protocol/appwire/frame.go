@@ -6,8 +6,10 @@
 // no counterpart here, because a relay that can present itself as a box is the
 // one failure this pattern exists to prevent.
 //
-// The protocol is specified in srcfl/ftw-webapp docs/protocol.md, and the
-// reference implementation is that repository's src/lib. Bytes produced by it
+// The protocol is specified in docs/protocol.md in this repository. The
+// reference implementation is srcfl/ftw-webapp's src/lib, private since
+// 10 November 2026 (earlier versions are in srcfl/ftw-webapp-source-archive).
+// Bytes produced by it
 // are frozen in testdata/webapp-vectors.json and replayed by interop_test.go,
 // so drift between the two fails a test here rather than a connection in
 // somebody's house.

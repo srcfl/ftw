@@ -18,7 +18,7 @@ and how they lay back together.
 
 The app protocol, which runs inside Noise between a phone and its box, is
 specified in
-[srcfl/ftw-webapp docs/protocol.md](https://github.com/srcfl/ftw-webapp/blob/main/docs/protocol.md).
+[docs/protocol.md](protocol.md).
 FTW Cloud reuses its frame layout, CBOR rules, field encoding and tile format.
 It adds the `cloud.link` capability and one optional field to the app
 protocol's `hello_ok`, `cloud` (see
@@ -564,13 +564,14 @@ unknown `t`.
 | `slotMs` | uint | Slot length. Where stored slots differ in length, the box repeats a longer slot's price across `slotMs` slots |
 | `spotMinor` | [int or null] | Market price, minor units per kWh |
 | `totalMinor` | [int or null] | What the household pays, tariff and VAT included |
+| `vatPermille` | int | The VAT rate in `totalMinor`, in permille: 250 is 25 %. 0 means no VAT; an older box leaves it out, and the phone reads that as unknown |
 
 `totalMinor` shows the household's tariff, and the privacy notice says so. The
 phone sees how far the slots reach. The window runs from the start of today to
 the end of tomorrow. Because it starts at midnight and not now, its hash moves
-only when new prices land. The box looks at prices once a minute and sends
-`prices` only when a hash of `t0Ms`, `slotMs`, `spotMinor` and `totalMinor`
-changes. A gap between stored slots is `null`.
+only when new prices land or the VAT rate changes. The box looks at prices once a minute and sends
+`prices` only when a hash of `t0Ms`, `slotMs`, `spotMinor`, `totalMinor` and
+`vatPermille` changes. A gap between stored slots is `null`.
 
 ### `plan`: `ftw.plan.read`
 
@@ -1754,11 +1755,9 @@ owner must suspend again.
 
 ## Registry names
 
-These names live in the contract registry. srcfl/ftw-webapp added them there
-first ([#81](https://github.com/srcfl/ftw-webapp/pull/81),
-[#88](https://github.com/srcfl/ftw-webapp/pull/88) and, for agents,
-[#90](https://github.com/srcfl/ftw-webapp/pull/90)), and paired pull requests
-copied them here and to the app.
+These names live in the contract registry, which Core owns. They were first
+added to the webapp's copy (webapp #81, #88 and, for agents, #90), and paired
+pull requests copied them here and to the app.
 
 | Name | Kind | Goes into |
 |---|---|---|

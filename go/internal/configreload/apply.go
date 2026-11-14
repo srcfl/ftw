@@ -85,7 +85,8 @@ func Apply(
 	ctrl.SiteFuseAmps = newCfg.Fuse.MaxAmps
 	ctrl.SiteFuseVoltage = newCfg.Fuse.Voltage
 	ctrl.SiteFusePhases = newCfg.Fuse.Phases
-	// nil → 0.5, explicit 0 → disabled. See EffectiveSafetyMarginA.
+	// nil → 0 (work to the fuse rating), an explicit value wins. See
+	// EffectiveSafetyMarginA.
 	ctrl.SiteFuseSafetyA = newCfg.Fuse.EffectiveSafetyMarginA()
 	ctrl.MaxExportW = newCfg.Site.MaxExportW
 	// Site-meter swap (operator moved `is_site_meter: true` from one

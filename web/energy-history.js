@@ -5,6 +5,7 @@
   var loadedAssets = false;
   var dailyRequest = 0;
   var ledgerRequest = 0;
+  var evCostRequest = 0;
   var lastDays = [];
   var tablePoints = [];
   var tablePage = 0;
@@ -19,23 +20,32 @@
     pv_generation: 'Solar', consumer_use: 'Home use',
     vehicle_charge: 'Vehicle charge', vehicle_discharge: 'Vehicle discharge'
   };
+  // Colour is energy: the home is ink and the grid one hue both ways, so
+  // export hangs below the zero line and the side of zero says sold.
   var dailySeries = [
-    { key: 'load_wh', label: 'Home use', color: '#eab308' },
-    { key: 'pv_wh', label: 'Solar', color: '#22c55e' },
-    { key: 'import_wh', label: 'Grid import', color: '#ef4444' },
-    { key: 'export_wh', label: 'Grid export', color: '#f97316' }
+    { key: 'load_wh', label: 'Home use', role: 'text' },
+    { key: 'pv_wh', label: 'Solar', role: 'solar' },
+    { key: 'import_wh', label: 'Grid import', role: 'grid' },
+    { key: 'export_wh', label: 'Grid export, below the line', role: 'grid', below: true }
   ];
 
   function canvasColors() {
     return window.ftwThemeColors
       ? window.ftwThemeColors.palette()
       : {
-          text: '#e8e8e8',
-          dim: '#a0a0a0',
-          muted: '#858585',
-          line: '#2a2a2a',
-          panel: '#161616',
-          accent: '#f5b942'
+          text: '#eef3ff',
+          dim: '#9aa5b8',
+          muted: '#727d90',
+          line: '#1b2433',
+          panel: '#0b111c',
+          accent: '#eef3ff',
+          solar: '#ffe14d',
+          stores: '#18d9ff',
+          gives: '#ffb000',
+          grid: '#ff5fa8',
+          car: '#b69cff',
+          live: '#83f52c',
+          alarm: '#ff453a'
         };
   }
 
@@ -78,6 +88,7 @@
       tab.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
     loadDaily();
+    loadEVCharging();
     var details = document.getElementById('energy-history-details');
     if (details && details.open) loadLedger();
   }
@@ -100,6 +111,142 @@
         formatKWh(sum(days, card.key)) + '</strong><small>' +
         (days.some(function (day) { return day[card.key] == null; }) ? 'Incomplete period · known days only' : recordingGaps(days) ? 'Recorded periods only' : card.key === 'load_wh' && days.some(function (day) { return day.history_quality === 'estimated'; }) ? 'Includes estimated home use' : card.note) + '</small></article>';
     }).join('');
+  }
+
+  function formatCost(minorUnits, currency) {
+    var code = String(currency || 'SEK').toUpperCase();
+    var amount = Number(minorUnits || 0) / 100;
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency', currency: code, maximumFractionDigits: 2
+      }).format(amount);
+    } catch (_) {
+      return amount.toFixed(2) + ' ' + code;
+    }
+  }
+
+  function calculateEVChargeCost(points, prices, since, until) {
+    var result = { energyWh: 0, costMinor: 0, incomplete: false };
+    var slots = (prices || []).map(function (slot) {
+      var start = Number(slot.slot_ts_ms);
+      var length = Number(slot.slot_len_min) * 60000;
+      var total = Number(slot.total_ore_kwh);
+      return { start: start, end: start + length, total: total };
+    }).filter(function (slot) {
+      return Number.isFinite(slot.start) && slot.end > slot.start && Number.isFinite(slot.total);
+    }).sort(function (a, b) { return a.start - b.start; });
+
+    (points || []).forEach(function (point) {
+      if (point.flow !== 'vehicle_charge') return;
+      var bucketStart = Number(point.bucket_start_ms);
+      var bucketEnd = bucketStart + Number(point.bucket_len_ms || 0);
+      var start = Math.max(since, bucketStart);
+      var end = Math.min(until, bucketEnd);
+      // Monthly readings outside this day/week are not missing data.
+      if (Number.isFinite(start) && Number.isFinite(end) && end <= start) return;
+      var bucketEnergyWh = Number(point.energy_wh || 0);
+      if (!Number.isFinite(bucketEnergyWh) || bucketEnergyWh < 0 || !Number.isFinite(start) || end <= start || bucketEnd <= bucketStart) {
+        result.incomplete = true;
+        return;
+      }
+      var energyWh = bucketEnergyWh * (end - start) / (bucketEnd - bucketStart);
+      result.energyWh += energyWh;
+      // A rejected counter reading holds 0 Wh whatever the charger did, so
+      // that zero is missing energy. A reset's energy comes back as its own
+      // integrated row. A gap at 0 Wh stays complete: mostly the charger did
+      // not run, and this cannot tell the rest apart.
+      if (point.quality === 'invalid') result.incomplete = true;
+      if (energyWh <= 0) return;
+      if (['measured', 'integrated'].indexOf(point.quality) < 0) result.incomplete = true;
+
+      var duration = end - start;
+      var coveredUntil = start;
+      slots.forEach(function (slot) {
+        // Price slots can overlap in malformed or duplicated responses.
+        // Count each millisecond only once, preferring the earliest slot.
+        var overlapStart = Math.max(start, slot.start, coveredUntil);
+        var overlapEnd = Math.min(end, slot.end);
+        if (overlapEnd <= overlapStart) return;
+        if (overlapStart > coveredUntil) result.incomplete = true;
+        var shareWh = energyWh * (overlapEnd - overlapStart) / duration;
+        result.costMinor += shareWh * slot.total / 1000;
+        coveredUntil = overlapEnd;
+      });
+      if (coveredUntil < end) result.incomplete = true;
+    });
+    return result;
+  }
+
+  function renderEVCharging(result, currency, enabled) {
+    var target = document.getElementById('energy-history-ev-cost');
+    if (!target) return;
+    if (!enabled) {
+      target.innerHTML = '<article><span>EV charging</span><strong>' +
+        formatKWh(result.day.energyWh) + ' · cost unavailable</strong><small>Enable price data to calculate charging cost.</small></article>';
+      return;
+    }
+    var labels = [
+      { key: 'day', label: 'Today' },
+      { key: 'week', label: 'This week' },
+      { key: 'month', label: 'This month' }
+    ];
+    target.innerHTML = labels.map(function (period) {
+      var value = result[period.key];
+      var detail = value.incomplete
+        ? '<small class="incomplete">Partial cost: charger or price data has gaps.</small>'
+        : '';
+      return '<article><span>' + period.label + '</span><strong>' + formatKWh(value.energyWh) +
+        ' · ' + formatCost(value.costMinor, currency) + '</strong>' + detail + '</article>';
+    }).join('');
+  }
+
+  function loadEVCharging() {
+    var request = ++evCostRequest;
+    var target = document.getElementById('energy-history-ev-cost');
+    if (target) target.innerHTML = '<article><span>EV charging</span><strong>Loading charging history…</strong></article>';
+    // Charge totals use local calendar boundaries. Half-hour history stays
+    // under the API's 2,000 bucket limit for a 31-day month; costs are split
+    // across the configured price slots by overlap.
+    var until = Math.floor(Date.now() / 900000) * 900000;
+    var now = new Date();
+    var dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    var weekStartDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    weekStartDate.setDate(weekStartDate.getDate() - ((weekStartDate.getDay() + 6) % 7));
+    var weekStart = weekStartDate.getTime();
+    var monthStart = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    var periods = { day: dayStart, week: weekStart, month: monthStart };
+    var since = Math.min(dayStart, weekStart, monthStart);
+    var historyParams = new URLSearchParams({
+      scope: 'system', since: String(since), until: String(until), bucket: '30m', limit: '5000'
+    });
+    var priceParams = new URLSearchParams({
+      since_ms: String(since - 86400000), until_ms: String(until)
+    });
+    return Promise.all([
+      fetch('/api/energy/history?' + historyParams.toString()).then(function (response) {
+        if (!response.ok) throw new Error('charging history unavailable');
+        return response.json();
+      }),
+      fetch('/api/prices?' + priceParams.toString()).then(function (response) {
+        if (!response.ok) throw new Error('prices unavailable');
+        return response.json();
+      })
+    ]).then(function (responses) {
+      if (request !== evCostRequest) return;
+      var data = responses[0] || {};
+      var priceData = responses[1] || {};
+      var result = {};
+      Object.keys(periods).forEach(function (period) {
+        result[period] = calculateEVChargeCost(data.points || [], priceData.items || [], periods[period], until);
+        if (data.truncated) result[period].incomplete = true;
+      });
+      renderEVCharging(result, priceData.currency, priceData.enabled !== false);
+    }).catch(function () {
+      if (request === evCostRequest && target) {
+        target.innerHTML = '<article><span>EV charging</span><strong>Charging cost unavailable</strong>' +
+          '<small>Could not load the charger energy and price history.</small></article>';
+      }
+    });
   }
 
   function renderInsights(days) {
@@ -152,7 +299,7 @@
     var legend = document.getElementById('energy-history-legend');
     if (legend) {
       legend.innerHTML = dailySeries.map(function (series) {
-        return '<span><i style="background:' + series.color + '"></i>' + series.label + '</span>';
+        return '<span><i style="background:' + C[series.role] + '"></i>' + series.label + '</span>';
       }).join('') + (days.some(function (day) { return day.history_quality === 'estimated'; }) ? '<span>Home use includes estimates</span>' : '') + (days.some(function (day) { return dailySeries.some(function (series) { return day[series.key] == null; }); }) ? '<span>? Unknown</span>' : '');
     }
     if (!days.length) {
@@ -165,24 +312,46 @@
     var pad = { left: 52, right: 12, top: 14, bottom: 42 };
     var plotW = Math.max(1, width - pad.left - pad.right);
     var plotH = Math.max(1, height - pad.top - pad.bottom);
-    var maxWh = Math.max.apply(null, days.flatMap(function (day) {
-      return dailySeries.map(function (series) { return Math.max(0, Number(day[series.key]) || 0); });
-    }));
-    maxWh = Math.max(1000, maxWh);
+    var upWh = 0;
+    var downWh = 0;
+    days.forEach(function (day) {
+      dailySeries.forEach(function (series) {
+        var value = Math.max(0, Number(day[series.key]) || 0);
+        if (series.below) downWh = Math.max(downWh, value);
+        else upWh = Math.max(upWh, value);
+      });
+    });
+    upWh = Math.max(1000, upWh);
+    // One step for both sides, a quarter of the taller one, and whole steps
+    // each way, so the highest bar and the lowest export bar both reach a
+    // gridline with a label.
+    var stepWh = Math.max(upWh, downWh) / 4;
+    var upSteps = Math.ceil(upWh / stepWh - 1e-9);
+    var downSteps = Math.ceil(downWh / stepWh - 1e-9);
+    var whToPx = plotH / ((upSteps + downSteps) * stepWh);
+    var zeroY = pad.top + upSteps * stepWh * whToPx;
     var textColor = C.dim;
     var borderColor = C.line;
     ctx.font = '11px system-ui, sans-serif';
     ctx.fillStyle = textColor;
     ctx.strokeStyle = borderColor;
     ctx.lineWidth = 1;
-    for (var tick = 0; tick <= 4; tick += 1) {
-      var y = pad.top + plotH * tick / 4;
+    for (var tick = upSteps; tick >= -downSteps; tick -= 1) {
+      var y = zeroY - tick * stepWh * whToPx;
       ctx.beginPath();
       ctx.moveTo(pad.left, y);
       ctx.lineTo(width - pad.right, y);
       ctx.stroke();
       ctx.textAlign = 'right';
-      ctx.fillText((maxWh * (1 - tick / 4) / 1000).toFixed(0) + ' kWh', pad.left - 7, y + 4);
+      ctx.fillText((Math.abs(tick) * stepWh / 1000).toFixed(0) + ' kWh', pad.left - 7, y + 4);
+    }
+    // The labels below zero carry no sign; this word says what they count.
+    if (downSteps > 0) {
+      ctx.fillStyle = C.dim;
+      ctx.font = '10px system-ui, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('sold', pad.left + 3, zeroY + 11);
+      ctx.font = '11px system-ui, sans-serif';
     }
 
     var groupW = plotW / days.length;
@@ -194,13 +363,13 @@
       dailySeries.forEach(function (series, seriesIndex) {
         if (day[series.key] == null) {
           ctx.fillStyle = C.muted; ctx.textAlign = 'center';
-          ctx.fillText('?', startX + seriesIndex * (barW + barGap) + barW / 2, pad.top + plotH - 4);
+          ctx.fillText('?', startX + seriesIndex * (barW + barGap) + barW / 2, zeroY - 4);
           return;
         }
         var value = Math.max(0, Number(day[series.key]) || 0);
-        var barH = plotH * value / maxWh;
-        ctx.fillStyle = series.color;
-        ctx.fillRect(startX + seriesIndex * (barW + barGap), pad.top + plotH - barH, barW, barH);
+        var barH = value * whToPx;
+        ctx.fillStyle = C[series.role];
+        ctx.fillRect(startX + seriesIndex * (barW + barGap), series.below ? zeroY : zeroY - barH, barW, barH);
       });
     });
 
@@ -356,6 +525,7 @@
 
   function load() {
     loadDaily();
+    loadEVCharging();
     var details = document.getElementById('energy-history-details');
     if (details && details.open) loadLedger();
   }

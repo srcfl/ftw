@@ -107,6 +107,11 @@ func DefaultRules() []config.NotificationRule {
 		// the sentences come from the catalogue, never from templates.
 		{Type: PushDriverOffline, Enabled: false, ThresholdS: DefaultThresholdS, Priority: 4, CooldownS: DefaultCooldownS},
 		{Type: PushFuseOverLimit, Enabled: false, ThresholdS: 30, Priority: 5, CooldownS: 900},
+		// A device that does not do what FTW asked, for ten minutes. On by
+		// default (Fredrik, 5 Nov 2026): a battery that charged while FTW
+		// asked it to discharge said so on the box's page alone, and the
+		// owner looking at the phone never heard.
+		{Type: PushControlNotFollowing, Enabled: true, ThresholdS: DefaultThresholdS, Priority: 4, CooldownS: DefaultCooldownS},
 		// FTW Cloud on or off. The only rules on by default: each says the
 		// house has started or stopped sending a readable copy of itself to
 		// a Sourceful service, and every owner should hear that without
@@ -138,7 +143,7 @@ func KnownRuleTypes() []string {
 		EventFuseOverLimit, EventConcurrentDriversOffline,
 		PushChargingConnected, PushChargingSessionComplete, PushChargingInterrupted,
 		PushChargingGoalAtRisk, PushUpdateInstalled, PushDriverOffline, PushFuseOverLimit,
-		PushCloudGranted, PushCloudRevoked, PushAgentAdded, PushAgentRequest,
+		PushControlNotFollowing, PushCloudGranted, PushCloudRevoked, PushAgentAdded, PushAgentRequest,
 		PushAgentExpiring, PushApprovalKeySet, PushOwnerAdded, PushCarWhich,
 	}
 }
@@ -282,9 +287,14 @@ type Service struct {
 	// Used by the fuse_over_limit rule to enforce the threshold_s
 	// sustained-over check, analogous to driver_offline's threshold.
 	fuseFirstOverAt map[string]time.Time
-	sent            uint64
-	failed          uint64
-	now             func() time.Time
+	// controlFirstAt[driver|kind] is when the control rule first saw a
+	// device function not following; controlCheckedAt when it last asked.
+	controlReader    ControlReader
+	controlFirstAt   map[string]time.Time
+	controlCheckedAt time.Time
+	sent             uint64
+	failed           uint64
+	now              func() time.Time
 	// charging answers what the plug-in rule needs to know about a
 	// loadpoint; connectedSettle is how long it waits before asking.
 	charging        func(loadpointID string) (ChargingFacts, bool)
@@ -301,6 +311,7 @@ func New(cfg *config.Notifications, pub Publisher, lookup DeviceLookup) *Service
 		alreadyFired:    map[string]bool{},
 		activeAlert:     map[string]bool{},
 		fuseFirstOverAt: map[string]time.Time{},
+		controlFirstAt:  map[string]time.Time{},
 		now:             time.Now,
 		connectedSettle: ConnectedSettle,
 	}
@@ -398,6 +409,9 @@ func (s *Service) Subscribe(bus *events.Bus) {
 		// Fuse rule runs off the same HealthTick cadence so brief
 		// inrush currents don't fire without the threshold sustaining.
 		go s.evaluateFuse(ev.Now)
+		// The control rule asks the box's own answer to "Are we in
+		// control?" on the same cadence, at most every 30 s.
+		go s.evaluateControl(ev.Now)
 	})
 	bus.Subscribe(events.KindNotificationTest, func(e events.Event) {
 		ev, ok := e.(events.NotificationTest)
@@ -1073,15 +1087,24 @@ func (s *Service) dispatch(cfg *config.Notifications, rule config.NotificationRu
 
 // deliver fans one rendered message out to every installed transport and
 // settles the counters and the history trail once for the lot.
+func (s *Service) deliver(eventType, device string, msg Message) {
+	s.deliverTo(eventType, device, msg, false)
+}
+
+// deliverTo is deliver for a message FTW Cloud may also hold: queued says
+// its uplink waits to send it.
 //
 // One delivery anywhere counts as sent — the operator was told. A transport
 // answering ErrNothingToSend was absent, not failing: web push with no
-// stored subscription has not had a push fail. No transport at all is the
-// old nil-publisher case — cold-start / reload can leave notifications
-// enabled with no provider installed — and stays a truthful failure in the
+// stored subscription has not had a push fail. A message only FTW Cloud
+// holds is queued, neither sent nor failed: the uplink sends it when it
+// can, and may drop it. When every transport was absent, or none is
+// installed — cold-start / reload can leave notifications enabled with no
+// provider — nobody was told, and that stays a truthful failure in the
 // history rather than a panic or a silence.
-func (s *Service) deliver(eventType, device string, msg Message) {
-	sent, errs := publishAll(s.publishers(), msg)
+func (s *Service) deliverTo(eventType, device string, msg Message, queued bool) {
+	pubs := s.publishers()
+	sent, errs := publishAll(pubs, msg)
 	switch {
 	case sent > 0:
 		if len(errs) > 0 {
@@ -1090,11 +1113,21 @@ func (s *Service) deliver(eventType, device string, msg Message) {
 		slog.Info("notifications: sent", "event", eventType, "driver", device)
 		s.bumpSent()
 		s.emitDispatched(eventType, device, msg, "sent", "")
+	case queued:
+		if len(errs) > 0 {
+			slog.Warn("notifications: some transports failed", "event", eventType, "err", errors.Join(errs...))
+		}
+		slog.Info("notifications: queued for FTW Cloud", "event", eventType, "driver", device)
+		s.emitDispatched(eventType, device, msg, "queued", "")
 	case len(errs) > 0:
 		err := errors.Join(errs...)
 		slog.Warn("notifications: publish failed", "event", eventType, "driver", device, "err", err)
 		s.bumpFailed()
 		s.emitDispatched(eventType, device, msg, "failed", err.Error())
+	case len(pubs) > 0:
+		slog.Warn("notifications: no phone or service to send to", "event", eventType, "driver", device)
+		s.bumpFailed()
+		s.emitDispatched(eventType, device, msg, "failed", "no phone or service to send to")
 	default:
 		slog.Warn("notifications: no publisher installed — skipping", "event", eventType, "driver", device)
 		s.bumpFailed()

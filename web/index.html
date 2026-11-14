@@ -443,11 +443,11 @@
           <p id="chart-history-quality" class="history-data-warning" role="status" hidden></p>
         </div>
         <div class="chart-legend" id="chart-legend">
-          <span class="legend-item" data-toggle="grid"><span class="legend-color" style="background:#ef4444"></span> Grid</span>
-          <span class="legend-item" data-toggle="pv"><span class="legend-color" style="background:#22c55e"></span> PV</span>
-          <span class="legend-item" data-toggle="pv_fc"><span class="legend-color legend-dash" style="border-color:#86efac"></span> PV fc</span>
+          <span class="legend-item" data-toggle="grid"><span class="legend-color" style="background:var(--red-e)"></span> Grid</span>
+          <span class="legend-item" data-toggle="pv"><span class="legend-color" style="background:var(--amber)"></span> PV</span>
+          <span class="legend-item" data-toggle="pv_fc"><span class="legend-color legend-dash" style="border-color:var(--amber)"></span> PV fc</span>
           <span class="legend-item" data-toggle="load"><span class="legend-color" style="background:var(--white-s)"></span> Load</span>
-          <span class="legend-item" data-toggle="load_fc"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load fc</span>
+          <span class="legend-item" data-toggle="load_fc"><span class="legend-color legend-dash" style="border-color:var(--fg)"></span> Load fc</span>
           <!-- Battery driver legend items are appended dynamically by app.js
                as each battery-capable driver appears in /api/status. -->
         </div>
@@ -503,7 +503,7 @@
           <div class="plan-now-primary">
             <span id="plan-state-badge" class="plan-state-badge">Checking plan…</span>
             <div class="plan-now-action">
-              <span class="plan-now-label">Next</span>
+              <span class="plan-now-label" id="plan-next-label">Next</span>
               <strong id="plan-next-action">Waiting for a plan</strong>
               <small id="plan-next-time">—</small>
             </div>
@@ -622,16 +622,16 @@
           <canvas id="plan-chart" width="800" height="260"></canvas>
         </div>
         <div class="chart-legend">
-          <span class="legend-item" title="Raw Nord Pool wholesale price — bottom segment of each stacked bar, colour shifts green→red with the horizon's price tercile"><span class="legend-color" style="background:rgba(34,197,94,0.72)"></span> Spot (cheap)</span>
-          <span class="legend-item" title="Raw Nord Pool wholesale price in the most expensive third of the horizon"><span class="legend-color" style="background:rgba(239,68,68,0.72)"></span> Spot (expensive)</span>
-          <span class="legend-item" title="Fixed transport / network fee from the grid operator — stacked on top of spot, doesn't change hour to hour"><span class="legend-color" style="background:rgba(100,116,139,0.45)"></span> Grid tariff</span>
-          <span class="legend-item" title="Value-added tax (moms) on spot + grid tariff — top segment of each stacked bar"><span class="legend-color" style="background:rgba(100,116,139,0.25)"></span> VAT</span>
-          <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:#22c55e"></span> PV forecast</span>
-          <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:#fde68a"></span> Load forecast</span>
-          <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:#22d3ee"></span> Car charging</span>
-          <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:#f59e0b"></span> Charge</span>
-          <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:#8b5cf6"></span> Discharge</span>
-          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:#60a5fa"></span> SoC</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price — bottom segment of each stacked bar, ink by the horizon's price tercile: the dearer, the stronger"><span class="legend-color" style="background:color-mix(in srgb, var(--fg) 32%, transparent)"></span> Spot (cheap)</span>
+          <span class="legend-item" title="Raw Nord Pool wholesale price in the most expensive third of the horizon"><span class="legend-color" style="background:color-mix(in srgb, var(--fg) 80%, transparent)"></span> Spot (expensive)</span>
+          <span class="legend-item" title="Fixed transport / network fee from the grid operator — stacked on top of spot, doesn't change hour to hour"><span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 35%, transparent)"></span> Grid tariff</span>
+          <span class="legend-item" title="Value-added tax (moms) on spot + grid tariff — top segment of each stacked bar"><span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 20%, transparent)"></span> VAT</span>
+          <span class="legend-item" title="PV generation the plan expects (solar forecast, site-signed)"><span class="legend-color" style="background:var(--amber)"></span> PV forecast</span>
+          <span class="legend-item" title="Household load the plan expects (load twin)"><span class="legend-color legend-dash" style="border-color:var(--fg)"></span> Load forecast</span>
+          <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:var(--violet)"></span> Car charging</span>
+          <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:var(--cyan)"></span> Charge</span>
+          <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:var(--energy-gives)"></span> Discharge</span>
+          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:var(--cyan)"></span> SoC</span>
         </div>
         <!-- The escape hatch for "why is it doing that?". Downloads one
              Markdown file holding the live state, the active plan slot,
@@ -729,6 +729,17 @@
       </div>
     </section>
     <section id="energy-history-summary" class="energy-history-summary" aria-live="polite"></section>
+    <section class="energy-history-ev" aria-labelledby="energy-history-ev-title">
+      <div class="energy-history-card-heading">
+        <div>
+          <h2 id="energy-history-ev-title">EV charging — energy and cost</h2>
+          <p>Based on FTW’s configured spot price, network tariff and VAT.</p>
+        </div>
+      </div>
+      <div id="energy-history-ev-cost" class="energy-history-ev-cost" aria-live="polite">
+        <article><span>EV charging</span><strong>Loading charging history…</strong></article>
+      </div>
+    </section>
     <section class="energy-history-story">
       <article class="energy-history-chart-wrap">
         <div class="energy-history-card-heading">
@@ -775,6 +786,32 @@
           <button id="energy-history-next" class="btn-send" type="button" disabled>Next</button>
         </nav>
         <p class="energy-history-note">CSV contains the complete selected range.</p>
+      </div>
+    </details>
+
+    <details id="battery-return-details" class="history-disclosure">
+      <summary>
+        <span>
+          <strong>Energy tax refund for battery storage</strong>
+          <small>Sweden: the figure to give Skatteverket for one calendar year</small>
+        </span>
+        <span id="battery-return-meta" class="history-disclosure-meta">Open</span>
+      </summary>
+      <div class="history-disclosure-body">
+        <div class="energy-history-controls">
+          <label>Year
+            <select id="battery-return-year"></select>
+          </label>
+          <a id="battery-return-csv" class="btn-send" href="/api/energy/battery-return.csv">Download hourly basis (CSV)</a>
+        </div>
+        <p id="battery-return-result" class="energy-history-quality-note" aria-live="polite">Open this section to work out the year.</p>
+        <section class="energy-history-table-wrap">
+          <table class="energy-history-table">
+            <thead><tr><th>Month</th><th>Returned</th><th>Complete hours</th></tr></thead>
+            <tbody id="battery-return-rows"></tbody>
+          </table>
+        </section>
+        <p class="energy-history-note">The figure is grid electricity that a battery stored and later sent back to the grid. Where the readings cannot tell where energy went, FTW counts low: solar, a car and the other batteries count first in every hour, each battery keeps its own account, what the house takes from a battery counts as grid energy first and what goes to the grid as other energy first, losses count as other energy, and an hour counts only when every meter read all of it. The figure assumes FTW reads every solar inverter, battery and car charger on the site, and it uses the battery sizes set today. You can apply within three years after the year ends, and FTW keeps the hourly readings that long. Keep the CSV, one row per battery and hour, with your application. <a href="https://www.skatteverket.se/privat/skatter/skattpabransleochel/aterbetalningavskattpaelefterbatterilagring.4.5fb2fa71a0b0adb74a23d8.html" target="_blank" rel="noopener">Skatteverket's rules</a></p>
       </div>
     </details>
 
@@ -839,7 +876,7 @@
       </a>
       <button id="more-update-btn" class="more-action" type="button">
         <span class="more-action-icon" aria-hidden="true">↻</span>
-        <span><strong>Version</strong><small>Running version and published releases</small></span>
+        <span><strong>Version</strong><small>Running version and updates</small></span>
       </button>
     </section>
   </main>
@@ -916,15 +953,15 @@
       <p>Each bar is one 15-minute slot, stacked as the three pieces of your real consumer price:</p>
       <ul>
         <li>
-          <span class="legend-color" style="background:rgba(148,163,184,0.72);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
-          <b>spot</b> — raw Nord Pool wholesale price. Colours green / slate / red by tercile across the horizon (cheap / mid / expensive). This is the part the planner actually optimises against.
+          <span class="legend-color" style="background:color-mix(in srgb, var(--fg) 50%, transparent);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <b>spot</b> — raw Nord Pool wholesale price, in ink by tercile across the horizon: the dearer the slot, the stronger the bar. This is the part the planner actually optimises against.
         </li>
         <li>
-          <span class="legend-color" style="background:rgba(100,116,139,0.45);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 35%, transparent);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
           <b>grid tariff</b> — fixed transport / network fee from the grid operator (öre/kWh). Same value every slot.
         </li>
         <li>
-          <span class="legend-color" style="background:rgba(100,116,139,0.25);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
+          <span class="legend-color" style="background:color-mix(in srgb, var(--fg-muted) 20%, transparent);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
           <b>VAT</b> — moms applied to spot + grid tariff. Set in <em>Settings → Price</em>.
         </li>
       </ul>
@@ -1021,28 +1058,22 @@
   <script src="/heating.js?v=heat13"></script>
   <script src="/loadpoints.js?v=zones2"></script>
   <script src="/energy-history.js?v=story1"></script>
+  <script src="/battery-return.js?v=3"></script>
   <script src="/diagnose.js?v=zones1"></script>
   <script type="module" src="/mobile-navigation.js?v=scroll1"></script>
-  <script src="/update-badge.js?v=native1" defer></script>
+  <script src="/update-badge.js?v=host1" defer></script>
   <script>
-    // Bridge: clicking the plain-text version span opens the update modal
+    // Bridge: clicking the plain-text version span opens the version dialog
     // (the <ftw-update-badge> dot is tiny and easy to miss). Kept inline so
-    // The dashboard controller stays untouched by the self-update feature. When the backend
-    // reports the feature disabled (503 on /api/version/check — e.g. Docker
-    // or the Home Assistant app, which update outside Core), the badge fires
-    // `ftw-selfupdate-disabled` and we strip the pointer affordance here.
+    // the dashboard controller stays untouched by the self-update feature.
+    // Where the host updates FTW (Docker, the Home Assistant app), the
+    // dialog says so instead of offering an update.
     document.addEventListener("DOMContentLoaded", function () {
       var v = document.getElementById("version");
       if (!v) return;
-      function onClick() {
+      v.addEventListener("click", function () {
         var badge = document.querySelector("ftw-update-badge");
         if (badge && typeof badge.open === "function") badge.open();
-      }
-      v.addEventListener("click", onClick);
-      document.addEventListener("ftw-selfupdate-disabled", function () {
-        v.removeEventListener("click", onClick);
-        v.style.cursor = "default";
-        v.removeAttribute("title");
       });
     });
   </script>

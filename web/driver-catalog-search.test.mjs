@@ -2,8 +2,7 @@
 //
 // The catalog was a dropdown of 37 entries in alphabetical order, and it made
 // the operator translate: you know you have an SH10RT, not that you need
-// "Sungrow SH Hybrid Inverter". Four of those 37 have run on customer
-// hardware; the other 33 sat mixed in among them.
+// "Sungrow SH Hybrid Inverter".
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -28,24 +27,24 @@ const CATALOG = [
   {
     id: "ambibox_v2x", name: "Ambibox V2X", manufacturer: "Ambibox",
     protocols: ["mqtt"], capabilities: ["v2x_charger"],
-    verification_status: "experimental", version: "1.0.0",
+    run_by: 0, version: "1.0.0",
   },
   {
     id: "sungrow", name: "Sungrow SH Hybrid Inverter", manufacturer: "Sungrow",
     protocols: ["modbus"], capabilities: ["meter", "pv", "battery"],
-    verification_status: "production", version: "1.4.0",
+    run_by: 9, version: "1.4.0",
     tested_models: ["SH5.0RT", "SH6.0RT", "SH8.0RT", "SH10RT"],
   },
   {
     id: "ctek-chargestorm", name: "CTEK Chargestorm (API v1)", manufacturer: "CTEK",
     protocols: ["modbus"], capabilities: ["ev"],
-    verification_status: "beta", version: "0.2.0",
+    run_by: 1, version: "0.2.0",
     tested_models: ["Chargestorm Connected 2", "Chargestorm Connected 3"],
   },
   {
     id: "ferroamp", name: "Ferroamp EnergyHub", manufacturer: "Ferroamp",
     protocols: ["mqtt"], capabilities: ["meter", "pv", "battery"],
-    verification_status: "production", version: "1.0.0",
+    run_by: 14, version: "1.0.0",
     tested_models: ["EnergyHub XL"],
   },
 ];
@@ -75,12 +74,17 @@ test("every word has to match, so more typing narrows", () => {
   assert.equal(api.searchCatalog(CATALOG, "sungrow ferroamp").length, 0);
 });
 
-test("drivers proven on hardware come first", () => {
+test("the drivers most homes run come first", () => {
   const api = load();
-  // Alphabetically Ambibox leads and the two proven drivers are buried. That
-  // ordering is what made the old list actively misleading.
   assert.equal(names(api.searchCatalog(CATALOG, "")),
     "ferroamp sungrow ctek-chargestorm ambibox_v2x");
+});
+
+test("with no counts the list is alphabetical", () => {
+  const api = load();
+  const bare = CATALOG.map(({ run_by, ...entry }) => entry);
+  assert.equal(names(api.searchCatalog(bare, "")),
+    "ambibox_v2x ctek-chargestorm ferroamp sungrow");
 });
 
 test("a driver whose name already starts with its maker is not repeated", () => {

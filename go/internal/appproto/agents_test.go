@@ -60,7 +60,7 @@ func (a *testAccess) EndHolds(agentID string) {
 func (a *testAccess) SetApprovalKey(d string, m protocol.ApprovalKeySet) (int64, error) {
 	return a.id.SetApprovalKey(d, m)
 }
-func (a *testAccess) Wall() (int64, bool) { return a.wall() }
+func (a *testAccess) Wall() (int64, bool)   { return a.wall() }
 func (a *testAccess) Notify(kind, _ string) { a.notified = append(a.notified, kind) }
 
 // enrolGrants reads one row the way appuplink's liveGrant does.
@@ -133,6 +133,8 @@ type agentRig struct {
 	owner  appenroll.Grant
 	signer *approvaltest.Signer
 	logs   []redact.Line
+	// journal, when a test sets it, serves events.get.
+	journal JournalSource
 	// cars and chargers, when a test sets them, are the box's car store
 	// and the plan's chargers.
 	cars     *fakeCars
@@ -214,7 +216,7 @@ func (r *agentRig) handler(kind, dev, role string) (*Handler, *recorder) {
 		Clock: r.clock, Site: r.box, Info: r.box, Modes: r.box, Plans: r.box,
 		Codec: testCodec{}, Sender: rec, Caller: caller, Grants: grants, Commands: NewCmdLog(),
 		Loadpoints: r.lp, Access: r.access, Agents: r.agents, Audit: r.audit,
-		Logs: r, Redactor: func() *redact.Redactor { return redact.New(testAgentKey, []string{"Easee carport"}) },
+		Logs: r, Journal: r.journal, Redactor: func() *redact.Redactor { return redact.New(testAgentKey, []string{"Easee carport"}) },
 		Views: testViews{}, AgentKey: testAgentKey,
 		SrcGrid: "meter.p1", SrcPV: "inverter.sungrow", SrcBattery: "battery.sungrow",
 		NewLeaseID: func() string { return "lease-test" },

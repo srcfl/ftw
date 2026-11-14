@@ -83,8 +83,8 @@ func TestOnePhaseCarMarkedFromTheMeter(t *testing.T) {
 		return threePhase(16)(d)
 	}
 	run(125*time.Second, 200*time.Second, allThree, 11040)
-	if st := state(); st.CarPhases != 0 {
-		t.Fatalf("a rise on all three phases left the mark on L%d", st.CarPhase)
+	if st := state(); st.CarPhases != 3 || st.CarPhase != 0 {
+		t.Fatalf("a rise on all three phases: car phases %d on L%d, want 3", st.CarPhases, st.CarPhase)
 	}
 	order(4830)
 	run(205*time.Second, 210*time.Second, still, 0)

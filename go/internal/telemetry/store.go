@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -688,6 +689,35 @@ func (s *Store) SumOnlineV2XW() float64 {
 	return sum
 }
 
+// OnlineLowerW returns the lower of a driver's raw and smoothed power of
+// one type, while the driver is still reporting and its latest poll
+// succeeded. A held reading after a failed poll returns false.
+func (s *Store) OnlineLowerW(driver string, t DerType) (float64, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, found := s.readings[key(driver, t)]
+	h, known := s.health[driver]
+	if !found || !known || !h.TelemetryLive() || h.LastReadFailed() {
+		return 0, false
+	}
+	w := math.Min(r.RawW, r.SmoothedW)
+	return w, !math.IsNaN(w) && !math.IsInf(w, 0)
+}
+
+// SumOnlineHigherW sums the higher of raw and smoothed power over the
+// readings of these types whose drivers are still reporting.
+func (s *Store) SumOnlineHigherW(types ...DerType) float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var sum float64
+	for _, r := range s.readings {
+		if h, ok := s.health[r.Driver]; ok && h.TelemetryLive() && slices.Contains(types, r.DerType) {
+			sum += math.Max(r.RawW, r.SmoothedW)
+		}
+	}
+	return sum
+}
+
 // OnlineMeterW returns a site meter's latest power and when it arrived,
 // while its driver is still reporting. A watchdog-offline meter returns
 // false, so its last value never counts as a new reading.
@@ -709,6 +739,38 @@ func (s *Store) OnlineRawW(driver string, t DerType) (w float64, at time.Time, o
 		return 0, time.Time{}, false
 	}
 	return r.RawW, r.UpdatedAt, true
+}
+
+// OnlineMeterSample is OnlineMeterW with the reading's data, which holds
+// the phase values.
+func (s *Store) OnlineMeterSample(driver string) (w float64, data json.RawMessage, at time.Time, ok bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, found := s.readings[key(driver, DerMeter)]
+	if !found || math.IsNaN(r.RawW) || math.IsInf(r.RawW, 0) {
+		return 0, nil, time.Time{}, false
+	}
+	if h, known := s.health[driver]; !known || !h.TelemetryLive() {
+		return 0, nil, time.Time{}, false
+	}
+	return r.RawW, r.Data, r.UpdatedAt, true
+}
+
+// OnlineRawWByType returns the latest raw power of every driver of one type
+// that is still reporting. A watchdog-offline driver is left out.
+func (s *Store) OnlineRawWByType(t DerType) map[string]float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]float64)
+	for _, r := range s.readings {
+		if r.DerType != t || math.IsNaN(r.RawW) || math.IsInf(r.RawW, 0) {
+			continue
+		}
+		if h, known := s.health[r.Driver]; known && h.TelemetryLive() {
+			out[r.Driver] = r.RawW
+		}
+	}
+	return out
 }
 
 // ReadingsByDriver returns all readings from one driver.

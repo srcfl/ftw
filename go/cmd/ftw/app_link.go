@@ -405,6 +405,11 @@ const maxPriceSlotMin = 120
 func (a *appPrices) Zone() string     { return a.svc.Zone }
 func (a *appPrices) Currency() string { return a.svc.Currency }
 
+// VATPercent is the rate the service's Applier holds, the one the stored
+// totals were taxed at, and not the config's own field: the service has
+// already turned an unset rate into its default.
+func (a *appPrices) VATPercent() float64 { return a.svc.VATPercent() }
+
 func (a *appPrices) Slots(_ context.Context, fromMs, toMs int64) ([]appproto.PricePoint, error) {
 	// The store selects on slot start, inclusive at both ends. Widening the
 	// lower bound by one slot catches the slot in progress at fromMs — the
@@ -797,8 +802,10 @@ func startAppLink(
 	agents.access = &appuplink.AgentAccess{Enroll: enroll, Clock: agentClock, Push: agents.push,
 		Holds: endAgentHolds(loadpoints)}
 	agents.state = appproto.NewAgentState()
+	var journalSrc appproto.JournalSource
 	if st != nil {
 		agents.audit = newStateAudit(ctx, st)
+		journalSrc = stateJournal{st: st}
 	}
 	caps = append(caps, appproto.CapAccessAgents, appproto.CapAccessInvites)
 	// One view for every agent session, so a charger's plug-in count is
@@ -822,6 +829,7 @@ func startAppLink(
 				Modes:        modes,
 				Plans:        plans,
 				PlannerPrefs: gateway,
+				TimeZones:    gateway,
 				History:      history,
 				Prices:       priceReader,
 				Loadpoints:   loadpoints,
@@ -837,6 +845,7 @@ func startAppLink(
 				Agents:       agents.state,
 				Audit:        agents.audit,
 				Logs:         ringLogs{ring: agents.logs},
+				Journal:      journalSrc,
 				Redactor:     agents.redactor,
 				Views:        views,
 				AgentKey:     agents.key,
@@ -934,6 +943,16 @@ func (l *lateAPI) Apply(safetyK *float64, export *string) (appproto.PlannerPrefs
 		return appproto.PlannerPrefsSnapshot{}, errors.New("the box is still starting")
 	}
 	return srv.ApplyPlannerPrefs(safetyK, export)
+}
+
+// ProposeTimeZone stores a client's time zone through the API server, once it
+// exists, for the reason Apply waits.
+func (l *lateAPI) ProposeTimeZone(zone string) (appproto.TimeZoneAnswer, error) {
+	srv := l.srv.Load()
+	if srv == nil {
+		return appproto.TimeZoneAnswer{}, errors.New("the box is still starting")
+	}
+	return srv.ProposeTimeZone(zone)
 }
 
 func (l *lateAPI) Route(r *http.Request) apiauth.RouteFacts {

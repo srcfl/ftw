@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"math"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -363,3 +365,68 @@ func testEnergyIdentity(st *state.Store) energyIdentityLookup {
 		return state.Device{}
 	}
 }
+
+func TestChargerEnergyCounter(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		raw  string
+		want *float64
+	}{
+		{"a session counter", `{"session_wh":800}`, ptrFloat(800)},
+		{"a lifetime counter", `{"total_charge_wh":5000}`, ptrFloat(5000)},
+		{"a coarse session counter is left out", `{"session_wh":800,"session_wh_coarse":true}`, nil},
+		{"a real counter beside a coarse one stays", `{"session_wh":800,"session_wh_coarse":true,"total_charge_wh":5000}`, ptrFloat(5000)},
+		{"the flag off changes nothing", `{"session_wh":800,"session_wh_coarse":false}`, ptrFloat(800)},
+		{"no counter", `{}`, nil},
+	} {
+		raw := json.RawMessage(c.raw)
+		got := chargerEnergyCounter(raw, energyNumbers(raw))
+		if (got == nil) != (c.want == nil) || (got != nil && *got != *c.want) {
+			t.Errorf("%s: got %v", c.name, got)
+		}
+	}
+}
+
+// 8 November 2026: a charger whose session counter moves in 1 kWh steps
+// delivered 24 kWh, and readings seconds apart made the record reject most of
+// the steps. With the counter left out it books the power.
+func TestCoarseChargerIsBookedFromPower(t *testing.T) {
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	base := time.Date(2026, 11, 8, 2, 0, 0, 0, time.UTC).UnixMilli()
+	const stepMS, hourMS, chargeW = int64(2_000), int64(3_600_000), 10_000.0
+	for at := int64(0); at <= hourMS; at += stepMS {
+		power := chargeW
+		counter := float64(at) / float64(hourMS) * chargeW
+		counter -= math.Mod(counter, 1000) // whole kWh, as Easee reports it
+		raw := json.RawMessage(fmt.Sprintf(`{"session_wh":%f,"session_wh_coarse":true}`, counter))
+		if err := st.RecordTickWithEnergy(state.HistoryPoint{TsMs: base + at}, nil, []state.EnergyObservation{{
+			AssetID: "charger", DeviceID: "charger", AssetKind: state.AssetVehicleCharger, Label: "charger",
+			Flow: state.FlowVehicleCharge, AtMs: base + at, PowerW: &power,
+			CounterWh: chargerEnergyCounter(raw, energyNumbers(raw)),
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	points, _, err := st.LoadEnergyHistory(state.EnergyHistoryQuery{
+		AssetID: "charger", SinceMS: base, UntilMS: base + hourMS + 60_000, BucketMS: 30 * 60_000, Limit: 1000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0.0
+	for _, p := range points {
+		if p.Quality == "invalid" || p.Quality == "reset" {
+			t.Fatalf("a rejected reading: %+v", p)
+		}
+		total += p.EnergyWh
+	}
+	if math.Abs(total-10_000) > 1 {
+		t.Fatalf("booked %.0f Wh, want 10000", total)
+	}
+}
+
+func ptrFloat(v float64) *float64 { return &v }

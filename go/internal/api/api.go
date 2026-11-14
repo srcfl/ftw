@@ -116,6 +116,10 @@ type Deps struct {
 	// embeddings; GET /api/fleet-ping then says so.
 	FleetPing *fleetping.Pinger
 
+	// DriverUsage says how many boxes run each driver version, for the lists
+	// of drivers. Nil leaves the numbers off.
+	DriverUsage *fleetping.Usage
+
 	// EnergyReport is the anonymous daily energy report, held for the same
 	// reason: Settings shows the report it would send. Nil leaves it out.
 	EnergyReport *energyreport.Sender
@@ -275,6 +279,8 @@ type Server struct {
 	mux                  *http.ServeMux
 	setup                *onboarding.Service
 	setupRestartRevision int64 // Protected by configWriteMu; a lost reply must not queue another restart.
+
+	planNowState planNowTracker
 
 	// dailyCache memoizes per-local-day energy totals keyed by "YYYY-MM-DD".
 	// Past days are immutable once the day ends, so we only ever recompute
@@ -506,6 +512,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/notifications/status", Read, s.handleNotificationsStatus)
 	s.handle("GET  /api/notifications/defaults", Read, s.handleNotificationsDefaults)
 	s.handle("GET  /api/notifications/history", Read, s.handleNotificationsHistory)
+	s.handle("GET  /api/control/journal", Read, s.handleControlJournal)
 	s.handle("POST /api/notifications/test", Configure, s.handleNotificationsTest)
 	s.handle("GET  /api/notifications/vapid", Read, s.handleNotificationsVAPID)
 	s.handle("POST   /api/notifications/subscriptions", Configure, s.handlePushSubscribe)
@@ -522,6 +529,8 @@ func (s *Server) routes() {
 	s.handle("GET  /api/energy/assets", Read, s.handleEnergyAssets)
 	s.handle("GET  /api/energy/history", Read, s.handleEnergyHistory)
 	s.handle("GET  /api/energy/history.csv", Read, s.handleEnergyHistoryCSV)
+	s.handle("GET  /api/energy/battery-return", Read, s.handleBatteryReturn)
+	s.handle("GET  /api/energy/battery-return.csv", Read, s.handleBatteryReturnCSV)
 	s.handle("GET  /api/savings/daily", Read, s.handleSavingsDaily)
 	s.handle("GET  /api/prices", Read, s.handlePrices)
 	s.handle("GET  /api/prices/zones", Read, s.handlePriceZones)
@@ -1245,6 +1254,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	trust, export, safetyK, mappedMode := s.plannerPrefsSnapshot()
 
+	controlAt := time.Now()
+	controlRows := s.controlFeedback(controlAt)
+	planNow := s.planNow(controlAt, controlRows)
+	markOnPlan(controlRows, planNow)
+
 	resp := map[string]any{
 		"version":               s.deps.Version,
 		"mode":                  ctrl.Mode,
@@ -1287,7 +1301,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// diagnostic — incremented when actual fleet delivery diverges
 		// from the plan's BatteryEnergyWh by > 50 % (over) or < 50 %
 		// (under). Idle slots (|planned| ≤ 50 Wh) are ignored.
-		"control_feedback":    s.controlFeedback(time.Now()),
+		"control_feedback":    controlRows,
+		"plan_now":            planNow,
 		"slot_delivery_stats": ctrl.SlotDeliveryStats,
 	}
 	// The ceiling that switching on applies, so a client shows the box's
@@ -2082,7 +2097,19 @@ func (s *Server) driverCatalogReply() map[string]any {
 			entries[i].Chosen = s.deps.DriverRepository.Chosen(entries[i].Path, entries[i].Version)
 		}
 	}
-	return map[string]any{"path": dir, "entries": entries}
+	// How many run each version, from one and up. A driver is a driver: the
+	// count is all this says about it. An operator's own file is not in it.
+	counts := s.deps.DriverUsage.Counts(context.Background())
+	if counts != nil {
+		for i := range entries {
+			if entries[i].Source == "local" {
+				continue
+			}
+			n := counts[strings.TrimSuffix(entries[i].Filename, ".lua")+"@"+entries[i].Version]
+			entries[i].RunBy = &n
+		}
+	}
+	return map[string]any{"path": dir, "entries": entries, "run_by": counts}
 }
 
 // POST /api/drivers/{name}/restart — stop + re-add the driver so it

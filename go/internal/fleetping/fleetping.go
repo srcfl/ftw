@@ -18,8 +18,9 @@
 //     value, and a salted one still matches itself tomorrow;
 //   - no counter, no sequence number and no "last sent" time, because any of
 //     them would let two pings be ordered into one box's series;
-//   - buckets, not values. 12.4 kWh of battery and 197 days since install are
-//     close to unique across a fleet this size; "5-15" and "6-12m" are not;
+//   - no raw detail: a driver is its catalogue name and version, a battery
+//     its nearest kWh, and the time since install a range (Fredrik, 8
+//     November 2026: none of this is sensitive, and the counts start at one);
 //   - a send time that moves. A box that pings at 03:17 every night has told
 //     the endpoint its name in a field nobody thought to look at.
 //
@@ -37,10 +38,10 @@
 // and until then one box's arrival times are still loosely related.
 //
 // The residual risk worth naming: the payload is still a quasi-identifier. A
-// beta box in DK2 with 30+ kWh and an unusual driver pair may be the only one
-// like it, and two such pings could be guessed to be the same box. Coarse
-// buckets, a capped driver list and a small field set are what keep that
-// population large; nothing here pretends it is a proof.
+// beta box in DK2 with a 31 kWh battery and an unusual driver pair may be the
+// only one like it, and two such pings could be guessed to be the same box.
+// The service keeps only each day's totals per field, so no report survives
+// to be compared; nothing here pretends it is a proof.
 package fleetping
 
 import (
@@ -52,10 +53,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -124,6 +127,12 @@ type Facts struct {
 	// what belongs in this list lives.
 	Catalogue []string
 
+	// Running is the drivers that delivered a reading in the last day, by
+	// type, with the version each runs. A driver counts only if it did: a
+	// configured one that never answers says nothing about the driver. Empty,
+	// as just after a start, counts every configured driver without a version.
+	Running map[string]string
+
 	// BatteryWh is the installed battery capacity across the site.
 	BatteryWh float64
 
@@ -174,8 +183,8 @@ func Build(f Facts, now time.Time) Payload {
 		Schema:    Schema,
 		Version:   version,
 		Channel:   channel,
-		Drivers:   driverTypes(f.Drivers, f.Catalogue),
-		Battery:   batteryBucket(f.BatteryWh),
+		Drivers:   driverTypes(f.Drivers, f.Catalogue, f.Running),
+		Battery:   batteryKWh(f.BatteryWh),
 		Zone:      knownZone(f.PriceZone),
 		Age:       ageBucket(f.InstalledAt, now),
 		Solve:     solveBucket(f.Health),
@@ -280,12 +289,14 @@ func releaseVersion(v string) (version, channel string) {
 }
 
 // driverTypes returns the sorted, deduplicated set of driver types, with
-// anything the catalogue does not name collapsed into one "other".
+// anything the catalogue does not name collapsed into one "other". A type the
+// catalogue names carries its version, as "pixii@2.1.9", so the fleet can say
+// how many run exactly that version.
 //
 // Sorted because the order drivers appear in a config is itself a detail of
 // that config; deduplicated because two Sungrow inverters are one answer to
 // "which drivers are in use" and the count would narrow the household.
-func driverTypes(configured, catalogue []string) []string {
+func driverTypes(configured, catalogue []string, running map[string]string) []string {
 	known := make(map[string]bool, len(catalogue))
 	for _, name := range catalogue {
 		known[name] = true
@@ -298,14 +309,21 @@ func driverTypes(configured, catalogue []string) []string {
 		if name == "" {
 			continue
 		}
-		if !known[name] {
-			name = "other"
-		}
-		if seen[name] {
+		version, ran := running[name]
+		if len(running) > 0 && !ran {
 			continue
 		}
-		seen[name] = true
-		out = append(out, name)
+		label := name
+		if !known[name] {
+			label = "other"
+		} else if driverVersion.MatchString(version) {
+			label = name + "@" + version
+		}
+		if seen[label] {
+			continue
+		}
+		seen[label] = true
+		out = append(out, label)
 	}
 	sort.Strings(out)
 	if len(out) > maxDrivers {
@@ -314,23 +332,18 @@ func driverTypes(configured, catalogue []string) []string {
 	return out
 }
 
-// batteryBucket answers "roughly how much storage", which is what sizing an
-// engineering bet needs. The edges are the ones the residential market lands
-// on: nothing, one module, a normal install, a big one, and everything above.
-func batteryBucket(wh float64) string {
-	kwh := wh / 1000
-	switch {
-	case !(kwh > 0):
+// driverVersion is the only shape of version a report may carry. Anything
+// else stays home and the driver counts without one.
+var driverVersion = regexp.MustCompile(`^[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}$`)
+
+// batteryKWh is the storage to the nearest kWh, and "none" without any
+// (Fredrik, 8 November 2026). A battery under half a kWh still reads as 1, so
+// it is not mistaken for no battery.
+func batteryKWh(wh float64) string {
+	if !(wh > 0) {
 		return "none"
-	case kwh < 5:
-		return "0-5"
-	case kwh < 15:
-		return "5-15"
-	case kwh < 30:
-		return "15-30"
-	default:
-		return "30+"
 	}
+	return strconv.Itoa(max(1, min(9999, int(math.Round(wh/1000)))))
 }
 
 // ageBucket answers "how long has this site been running", coarsely enough

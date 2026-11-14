@@ -85,3 +85,21 @@ func TestEVObservationKeepsUnknownPowerSeparateFromZero(t *testing.T) {
 		}
 	}
 }
+
+func TestEVObservationDistinguishesExplicitVehicleStopFromMissingRequest(t *testing.T) {
+	now := time.Now()
+	h := &telemetry.DriverHealth{Status: telemetry.StatusOk}
+	for _, tc := range []struct {
+		body          string
+		known, active bool
+	}{
+		{`{"connected":true,"request_active":false}`, true, false},
+		{`{"connected":true,"request_active":true}`, true, true},
+		{`{"connected":true}`, false, true},
+	} {
+		s, ok := currentEVSample(&telemetry.DerReading{UpdatedAt: now, Data: json.RawMessage(tc.body)}, h, time.Minute, now, false, "box")
+		if !ok || s.RequestKnown != tc.known || s.RequestActive != tc.active {
+			t.Fatalf("%s: %+v", tc.body, s)
+		}
+	}
+}

@@ -53,10 +53,12 @@ import (
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/events"
+	"github.com/srcfl/ftw/go/internal/fleetping"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ftwcli"
 	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/ha"
+	"github.com/srcfl/ftw/go/internal/journal"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/localzone"
@@ -425,6 +427,9 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("config loaded", "site", cfg.Site.Name, "drivers", len(cfg.Drivers))
+	// The household clock is set before anything else reads it: every
+	// goroutine from here on reads time.Local.
+	useHouseholdClock(cfg.Site.TimeZone)
 	// Repaired-but-wrong config: ERROR so it reaches the log ring and the
 	// support report, without stopping a boot the repair made safe.
 	for _, w := range cfg.LoadWarnings {
@@ -526,6 +531,11 @@ func main() {
 		slog.Error("absorb cold history", "err", err)
 		os.Exit(1)
 	}
+	if cleared, err := st.KeepDailyZone(context.Background(), localzone.Name()); err != nil {
+		slog.Warn("could not check the zone of cached daily energy", "err", err)
+	} else if cleared {
+		slog.Info("household zone changed; daily energy is computed again on the new clock", "zone", localzone.Name())
+	}
 	defer func() {
 		if err := st.Close(); err != nil {
 			slog.Error("state shutdown failed", "err", err)
@@ -610,6 +620,11 @@ func main() {
 	// Restore durable modes and targets. Forced Charge ends at restart;
 	// the planner makes a fresh plan instead of resuming that override.
 	restoreStoredMode(ctrl, st, cfg)
+	// The control journal keeps each change in the box's answer to "Are we
+	// in control?", and each scored plan slot, so a warning can be explained
+	// after it has passed (GET /api/control/journal, events.get).
+	ctrlJournal := newControlJournal(st)
+	ctrl.SlotScored = func(d control.SlotDelivery) { ctrlJournal.rec.Record(journal.SlotSpan(d)) }
 	storedTrust, _ := st.LoadConfig(config.StateKeyForecastTrust)
 	storedExport, _ := st.LoadConfig(config.StateKeyBatteryExport)
 	storedSafetyK, _ := st.LoadConfig(config.StateKeySafetyK)
@@ -1303,6 +1318,7 @@ func main() {
 		// and one whose entry was removed goes back to pending.
 		if ocppSrv != nil {
 			ocppSrv.Handler().SetApprovedIDs(ocppApprovedIDs(newCfg))
+			ocppSrv.Handler().SetManagedIDs(ocppStartLimitIDs(newCfg, setupMeasurementAtBoot))
 			// A charger adopted by this save booted long ago and will not
 			// boot again just because we changed our mind, so its device
 			// row has to be written here rather than waiting for one.
@@ -1473,6 +1489,7 @@ func main() {
 			HeartbeatIntervalS: cfg.OCPP.HeartbeatIntervalS,
 			ChargerSecrets:     cfg.OCPP.ChargerSecrets(),
 			ApprovedIDs:        approved,
+			ManagedIDs:         ocppStartLimitIDs(cfg, setupMeasurementAtBoot),
 		}
 		if t := cfg.OCPP.TLS; t != nil {
 			ocppCfg.TLS = &ocpp.TLSConfig{
@@ -1681,6 +1698,13 @@ func main() {
 			ctrlMu.Lock()
 			defer ctrlMu.Unlock()
 			return control.PlanningImportCeiling(ctrl)
+		}
+		// The demand charges' hour in progress counts what the site meter
+		// measured, the same counter the import ceiling uses.
+		mpcSvc.HourImport = func() mpc.HourImport {
+			ctrlMu.Lock()
+			defer ctrlMu.Unlock()
+			return control.MeasuredHourImport(ctrl)
 		}
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
@@ -2050,7 +2074,6 @@ func main() {
 		lpController.SetBatteryBoostSafety(func(id string, lease loadpoint.BatteryBoostLease) loadpoint.BatteryBoostStopReason {
 			ctrlMu.Lock()
 			mode := ctrl.Mode
-			fuseBlocked, importBlocked := ctrl.FuseSaturated, ctrl.FuseSaturatedByImport
 			_, batteryHeld := ctrl.GetBatteryManualHold(time.Now())
 			siteMeter := ctrl.SiteMeterDriver
 			ctrlMu.Unlock()
@@ -2060,12 +2083,9 @@ func main() {
 			if batteryHeld {
 				return loadpoint.BatteryBoostStoppedBatteryHold
 			}
-			if fuseBlocked && importBlocked {
-				return loadpoint.BatteryBoostStoppedImportLimit
-			}
-			if fuseBlocked {
-				return loadpoint.BatteryBoostStoppedFuseSafety
-			}
+			// A binding fuse or import limit is no reason to stop: the car's
+			// limit comes from the measured meter either way, and the battery's
+			// discharge is what makes room under it.
 			cfgMu.RLock()
 			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
 			staticFloor := make(map[string]float64, len(cfg.Batteries))
@@ -2367,8 +2387,8 @@ func main() {
 	// install, started by the launcher from its release slots, updates
 	// itself (ADR 0007). Docker changes FTW_VERSION and rebuilds, and the
 	// Home Assistant app follows Supervisor. Deps.SelfUpdate stays nil there,
-	// which makes every /api/version/* handler return 503 and the UI hide
-	// the badge.
+	// which makes every /api/version/* handler return 503; the UI then says
+	// who updates FTW instead of offering an update.
 	var selfUpdater *selfupdate.Checker
 	if nativeRoot != "" {
 		// FTW_SELFUPDATE_CURRENT_VERSION overrides what the checker thinks
@@ -2549,6 +2569,7 @@ func main() {
 		AppEnroll:       appEnrollForAPI(appEnroll, appUplink, st, appLinkEnabled, agents),
 		Agents:          agentsForAPI(agents),
 		FleetPing:       fleetPinger,
+		DriverUsage:     fleetping.NewUsage(cfg.FleetPing.Resolved(), answer.shares),
 		EnergyReport:    energyReport,
 		Cloud:           cloudForAPI(cloudLink),
 		CfgMu:           cfgMu, Cfg: cfg, ConfigPath: *configPath,
@@ -2610,7 +2631,10 @@ func main() {
 			if timeout <= 0 {
 				timeout = 60 * time.Second
 			}
-			if gate := evaluateSiteDispatchFreshnessAt(tel, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now()); !gate.Allowed() {
+			ctrlMu.Lock()
+			gate := siteMeterGateLocked(tel, ctrl, meter, candidate.Fuse.MaxAmps, candidate.Fuse.Phases, timeout, time.Now())
+			ctrlMu.Unlock()
+			if !gate.Allowed() {
 				return fmt.Errorf("measure before enabling control: %s", gate.Reason)
 			}
 			return nil
@@ -2702,6 +2726,10 @@ func main() {
 		}
 		return dev.DeviceID, dev.Make, dev.Serial, true
 	})
+	// The control.not_following rule reads the box's own answer to "Are we
+	// in control?", the one GET /api/status serves.
+	notifSvc.SetControlReader(srv.ControlStates)
+	ctrlJournal.start(ctx, srv.JournalVerdicts, st)
 	// FuseReader: on each HealthTick the fuse_over_limit rule reads
 	// the site meter's live per-phase currents from telemetry and
 	// compares against cfg.Fuse.MaxAmps. Closes over cfg + cfgMu so
@@ -2736,7 +2764,7 @@ func main() {
 		if !ok {
 			return
 		}
-		if err := st.RecordNotification(state.NotificationEntry{
+		entry := state.NotificationEntry{
 			TsMs:      ev.Time.UnixMilli(),
 			EventType: ev.EventType,
 			Driver:    ev.Driver,
@@ -2745,9 +2773,8 @@ func main() {
 			Priority:  ev.Priority,
 			Status:    ev.Status,
 			Error:     ev.Error,
-		}); err != nil {
-			slog.Warn("notification_log: record failed", "err", err)
 		}
+		recordWithRetry("notification_log", func() error { return st.RecordNotification(entry) })
 	})
 	// Web push runs beside whatever provider the config names. The provider
 	// itself was built before the uplink (the dead man's rows carry its
@@ -2910,6 +2937,7 @@ func main() {
 			slog.Info("shutting down")
 			cloudLink.Bye(cloudwire.ByeShutdown, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
+			ctrlJournal.shutdown()
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
@@ -2925,6 +2953,7 @@ func main() {
 			// back "box out of reach" until the box is back.
 			cloudLink.Bye(cloudwire.ByeUpdate, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
+			ctrlJournal.shutdown()
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)
@@ -3048,15 +3077,11 @@ func main() {
 			// standdown/default commands remain permitted.
 			ctrlMu.Lock()
 			ctrl.ObserveSiteImport(tel)
+			freshness := siteDispatchGateLocked(tel, ctrl, watchdogTimeout, tickNow)
 			siteMeterDriver := ctrl.SiteMeterDriver
-			siteFuseAmps := ctrl.SiteFuseAmps
-			siteFusePhases := ctrl.SiteFusePhases
 			forecastIntent := forecastCurtailmentActive(ctrl, tickNow)
 			ctrlMu.Unlock()
 			forecastCurtail.ObserveIntent(forecastIntent)
-			freshness := evaluateSiteDispatchFreshnessAt(
-				tel, siteMeterDriver, siteFuseAmps, siteFusePhases, watchdogTimeout, tickNow,
-			)
 			if reason := setupRuntimeBlockReason(); reason != "" {
 				freshness.Reason = reason
 			}
@@ -3474,6 +3499,15 @@ func rolloffLoop(ctx context.Context, st *state.Store, coldDir string, dataMaint
 
 // seedImportHour gives the import ceiling the clock hour's import that
 // state.db recorded before this start, so a restart keeps it.
+// useHouseholdClock runs Core on the site's stored zone, or the host's when
+// none is stored.
+func useHouseholdClock(stored string) {
+	if err := localzone.Use(stored); err != nil {
+		slog.Error("site.time_zone does not load; the box keeps the host's zone", "err", err)
+	}
+	slog.Info("household clock", "zone", localzone.Name(), "stored", localzone.Stored() != "")
+}
+
 func seedImportHour(st *state.Store, ctrl *control.State, now time.Time) {
 	start := control.ImportHourStart(now)
 	wh, covered, err := st.ImportWhIntervals(context.Background(), [][2]int64{{start.UnixMilli(), now.UnixMilli()}})
@@ -3663,10 +3697,19 @@ func driverCapacitiesFrom(drvList []config.Driver, loadpoints []config.Loadpoint
 
 // driverLimitsFrom gives dispatch the same per-driver power limits and charge
 // ceilings as the planner. Each battery's soc_max overrides the planner's.
+// The SoC floor is the higher of the battery's and the running planner's
+// soc_min, with the planner's 10 % default.
 func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Battery, planner *config.Planner) map[string]control.PowerLimits {
 	ceiling := 1.0
 	if planner != nil && planner.SoCMax > 0 {
 		ceiling = planner.SoCMax
+	}
+	floor := 0.0
+	if planner != nil && planner.Enabled {
+		floor = planner.SoCMin
+		if floor <= 0 {
+			floor = 0.10
+		}
 	}
 	out := map[string]control.PowerLimits{}
 	for _, d := range drivers {
@@ -3676,6 +3719,10 @@ func driverLimitsFrom(drivers []config.Driver, batteries map[string]config.Batte
 			if b := batteries[d.Name]; b.SoCMax != nil {
 				limits.SoCMax = *b.SoCMax
 				limits.SoCMaxSet = true
+			}
+			limits.SoCMin = floor
+			if b := batteries[d.Name]; b.SoCMin != nil && *b.SoCMin > floor {
+				limits.SoCMin = *b.SoCMin
 			}
 			out[d.Name] = limits
 		}

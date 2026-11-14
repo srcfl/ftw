@@ -132,6 +132,64 @@ func TestForecastSnapshotFreezesHorizonAndRecord(t *testing.T) {
 	}
 }
 
+func TestForecastSnapshotNowcastNeedsValidMeasuredPV(t *testing.T) {
+	origin := time.Date(2026, 1, 5, 11, 59, 0, 0, time.UTC)
+	window := pvmodel.NowcastWindow.Milliseconds()
+	addSamples := func(f *forecastTracker, n int) {
+		for i := n - 1; i >= 0; i-- {
+			f.pv.Residuals.Add(origin.Add(-time.Duration(i)*time.Minute), 3000, 1400)
+		}
+	}
+	tests := []struct {
+		name         string
+		samples      int
+		validSinceMS int64
+		checkedMS    int64
+		wantNowcast  bool
+	}{
+		{"valid for the whole window", 5, origin.UnixMilli() - window, origin.UnixMilli(), true},
+		{"valid for less than the window", 5, origin.UnixMilli() - window + 1, origin.UnixMilli(), false},
+		{"PV invalid or curtailed", 5, 0, origin.UnixMilli(), false},
+		{"validity check too old", 5, origin.UnixMilli() - window, origin.UnixMilli() - pvNowcastMaxObservationAge.Milliseconds() - 1, false},
+		{"too few samples", 2, origin.UnixMilli() - window, origin.UnixMilli(), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := trackerFixture(origin)
+			addSamples(f, tc.samples)
+			f.mu.Lock()
+			f.pvValidSinceMS, f.observationCheckedMS = tc.validSinceMS, tc.checkedMS
+			f.mu.Unlock()
+			in := f.Snapshot(origin, trackerWeather(origin, origin))
+			if (in.PVNowcast != nil) != tc.wantNowcast {
+				t.Fatalf("nowcast present=%v, want %v", in.PVNowcast != nil, tc.wantNowcast)
+			}
+			if tc.wantNowcast {
+				if got := in.PVNowcast(3800, 3900, 10*time.Minute); math.Abs(got-1500) > 1e-9 {
+					t.Fatalf("nowcast %v, want 1500", got)
+				}
+			}
+		})
+	}
+}
+
+func TestNotePVValidTracksTheStartOfAValidRun(t *testing.T) {
+	f := &forecastTracker{}
+	f.notePVValidLocked(true, 1000)
+	f.notePVValidLocked(true, 2000)
+	if f.pvValidSinceMS != 1000 {
+		t.Fatalf("a valid run started at %d, want 1000", f.pvValidSinceMS)
+	}
+	f.notePVValidLocked(false, 3000)
+	if f.pvValidSinceMS != 0 {
+		t.Fatalf("invalid PV left since=%d", f.pvValidSinceMS)
+	}
+	f.notePVValidLocked(true, 4000)
+	if f.pvValidSinceMS != 4000 {
+		t.Fatalf("a new valid run started at %d, want 4000", f.pvValidSinceMS)
+	}
+}
+
 func TestForecastSnapshotRejectsWeatherFromPreviousLocation(t *testing.T) {
 	origin := time.Date(2026, 6, 15, 11, 59, 0, 0, time.UTC)
 	target := origin.Add(time.Minute)

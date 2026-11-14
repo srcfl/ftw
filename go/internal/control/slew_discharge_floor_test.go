@@ -147,6 +147,12 @@ func TestSelfTuneDoesNotDischargeBlockedPack(t *testing.T) {
 	}
 }
 
+// stopReliefW is the import relief for the phases as the stop leaves them.
+func stopReliefW(store *telemetry.Store, stop []DispatchTarget, readings map[string]*telemetry.DerReading, meter *telemetry.DerReading, st *State) float64 {
+	importW, _ := phaseReliefForTargets(livePhaseSample(store, st.SiteMeterDriver, meter), st, stop, readings)
+	return importW
+}
+
 // The phase relief uses only live readings from the same sample as the rest
 // of the decision. A battery or meter that went offline, or a meter that
 // moved on to a newer reading, gives no phase relief.
@@ -166,24 +172,24 @@ func TestStopPhaseReliefNeedsLiveReadings(t *testing.T) {
 
 	store, readings, meter := seed()
 	// Stopping 3000 W puts L1 at 15 + 4.35 A; 3.35 A over 16 A is 2310 W.
-	if got := stopPhaseReliefW(store, stop, readings, meter, st); math.Abs(got-2310) > 1 {
+	if got := stopReliefW(store, stop, readings, meter, st); math.Abs(got-2310) > 1 {
 		t.Fatalf("live readings: relief %.0f W, want 2310 W", got)
 	}
 	store.DriverHealthMut("blk").SetOffline()
-	if got := stopPhaseReliefW(store, stop, readings, meter, st); got != 0 {
+	if got := stopReliefW(store, stop, readings, meter, st); got != 0 {
 		t.Errorf("offline battery: relief %.0f W, want 0", got)
 	}
 
 	store, readings, meter = seed()
 	store.DriverHealthMut("meter").SetOffline()
-	if got := stopPhaseReliefW(store, stop, readings, meter, st); got != 0 {
+	if got := stopReliefW(store, stop, readings, meter, st); got != 0 {
 		t.Errorf("offline meter: relief %.0f W, want 0", got)
 	}
 
 	store, readings, meter = seed()
 	time.Sleep(time.Millisecond)
 	store.Update("meter", telemetry.DerMeter, 6000, nil, data)
-	if got := stopPhaseReliefW(store, stop, readings, meter, st); got != 0 {
+	if got := stopReliefW(store, stop, readings, meter, st); got != 0 {
 		t.Errorf("newer meter reading: relief %.0f W, want 0", got)
 	}
 }

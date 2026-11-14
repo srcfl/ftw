@@ -204,3 +204,26 @@ func TestWholeCloudOffStopsImmediatelyWhenLaterStorageFails(t *testing.T) {
 		})
 	}
 }
+
+// FTW Cloud turned off takes no notice, even with a link up: a grant that
+// could not clear the off choice leaves the link it made. The box's
+// notification history reads a taken notice as queued for the owners'
+// phones (#1785).
+func TestNoNoticeIsTakenWhileCloudIsOff(t *testing.T) {
+	var armed atomic.Bool
+	svc := newFakeService(t)
+	h := newHarnessWith(t, svc, []*ecdsa.PublicKey{&svc.key.PublicKey}, nil, func(o *Options) { o.KV = failingChoiceKV{KV: o.KV, armed: &armed, key: disabledKey} })
+	if err := h.link.End("owner"); err != nil {
+		t.Fatal(err)
+	}
+	armed.Store(true)
+	if err := h.link.Grant(GrantRequest{Scopes: []string{protocol.ScopeLiveRead}, Policy: cloudwire.CloudTermsPolicy, By: "owner"}); err == nil {
+		t.Fatal("storage failure was not returned")
+	}
+	if snap := h.link.current(); snap.link == nil || snap.link.Ending {
+		t.Fatal("the failed grant left no live link to test against")
+	}
+	if h.link.Notice(protocol.PushOwnerAdded, "") {
+		t.Fatal("FTW Cloud turned off took a notice")
+	}
+}

@@ -78,3 +78,34 @@ func TestPlanningImportCeilingAfterARestart(t *testing.T) {
 		t.Fatalf("new ceiling: %.1f Wh used, want 50 minutes at 3 kW", got.ElapsedWh)
 	}
 }
+
+// The demand charges' hour in progress counts what the site meter measured,
+// with or without an import ceiling, and only the time its readings cover:
+// the planner fills the rest itself.
+func TestMeasuredHourImportCountsTheMeteredHour(t *testing.T) {
+	var now time.Time
+	st, store := newImportHourState(&now)
+	st.PeakImportCeilingW = 0
+	hour := time.Date(2026, 9, 9, 17, 0, 0, 0, hourTestZone)
+	if got := MeasuredHourImport(st); got != (mpc.HourImport{}) {
+		t.Fatalf("before a reading %+v", got)
+	}
+	for at := hour.Add(5 * time.Minute); !at.After(hour.Add(20 * time.Minute)); at = at.Add(2 * time.Second) {
+		feedMeter(st, store, &now, at, 3000)
+	}
+	got := MeasuredHourImport(st)
+	if !got.Start.Equal(hour) || got.Covered != 15*time.Minute || math.Abs(got.ImportedWh-3000*15/60.) > 1 {
+		t.Fatalf("got %+v; want 750 Wh over the 15 minutes from 17:05", got)
+	}
+	// After a restart the record restores the hour; what it misses is not covered.
+	seeded, _ := newImportHourState(&now)
+	seeded.SeedHourImport(now, 600, 12*time.Minute)
+	if got := MeasuredHourImport(seeded); !got.Start.Equal(hour) || got.Covered != 12*time.Minute || got.ImportedWh != 600 {
+		t.Fatalf("seeded %+v", got)
+	}
+	// In the next hour, before its first reading, the last hour's import is gone.
+	now = hour.Add(time.Hour + time.Minute)
+	if got := MeasuredHourImport(st); got != (mpc.HourImport{}) {
+		t.Fatalf("next hour %+v", got)
+	}
+}

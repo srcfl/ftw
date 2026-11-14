@@ -11,13 +11,20 @@ import (
 
 func TestHistoryMaintenanceBudgetStaysPending(t *testing.T) {
 	previousBudget := historyStageBudget
-	historyStageBudget = 30 * time.Millisecond
+	// Only "stage deadline" is about the budget running out. The other cases
+	// need every real stage before theirs to finish inside it, and under the
+	// race detector a 30 ms budget does not always cover that: the earlier
+	// stage times out, the turn stops as pending, and the case under test
+	// never runs. They get a roomy budget; "stage deadline" shrinks it.
+	historyStageBudget = 10 * time.Second
 	t.Cleanup(func() {
 		historyStageBudget = previousBudget
 		historyStageForTest = nil
 	})
 
 	t.Run("stage deadline", func(t *testing.T) {
+		historyStageBudget = 30 * time.Millisecond
+		t.Cleanup(func() { historyStageBudget = 10 * time.Second })
 		s := openBudgetStore(t)
 		var seen []string
 		historyStageForTest = func(name string, ctx context.Context) (bool, error) {

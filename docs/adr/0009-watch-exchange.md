@@ -18,7 +18,7 @@
   same day, after the timing test showed the gap, he set decision F's floor
   at 400 ms ("ja kör på ditt förslag ovan med tider").
 - Pair: the exchange's wire, the relay route and the client changes are in
-  [ftw-webapp `docs/watch-exchange.md`](https://github.com/srcfl/ftw-webapp/blob/main/docs/watch-exchange.md).
+  [ftw-webapp `docs/watch-exchange.md`](https://github.com/srcfl/ftw-webapp-source-archive/blob/main/docs/watch-exchange.md).
   Neither side works without the other.
 - Builds on: [ADR 0006](0006-app-uplink.md), the relay as the only path that
   carries commands, and [ADR 0008](0008-ftw-cloud.md), FTW Cloud, which still
@@ -39,7 +39,7 @@ Five facts shape the answer:
   would push a phone out.
 - The command log lives in the handler (`cmds: newCmdLog()` in
   `appproto/handler.go`), and a handler lives as long as its session.
-  ftw-webapp's `docs/protocol.md` and the comment on `CmdRetentionMs` say the
+  [`docs/protocol.md`](../protocol.md) and the comment on `CmdRetentionMs` say the
   box keeps a `cmdId` for 24 h. Today it keeps it for one session, so a retry
   in a new session would act again.
 - `notValidAfterMs` counts in box uptime. A client learns the uptime from

@@ -122,7 +122,7 @@ control the equipment, including after reboot.
 
 Give the FTW host a DHCP reservation in the router so device connections keep
 working. Open `http://<host>:8080/setup` after installation. The optional
-[FTW webapp](https://github.com/srcfl/ftw-webapp) connects through an encrypted
+[FTW webapp](https://app.ftw.energy) connects through an encrypted
 session and blind relay; relay loss does not stop local control.
 
 ## Install on Home Assistant
@@ -245,6 +245,24 @@ metadata are the detailed reference.
 
 Other files under [`docs/`](docs/) are focused installation or
 external-integration guides.
+
+## Related repositories
+
+FTW spans several repositories. This one is Core; the others are:
+
+| Repository | Role |
+|---|---|
+| [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) | Lua driver source, contracts, tests and the signed driver bundle Core pins. Change drivers there. |
+| [`srcfl/device-simulator`](https://github.com/srcfl/device-simulator) | Simulated house: inverters, batteries, chargers and meters over Modbus TCP, MQTT and OCPP. |
+| `srcfl/ftw-webapp` (private) | Installable everyday client at [app.ftw.energy](https://app.ftw.energy), closed source since 10 November 2026. Earlier open versions are in [`srcfl/ftw-webapp-source-archive`](https://github.com/srcfl/ftw-webapp-source-archive). |
+| `srcfl/ftw-app` (private) | Native iOS and Android app, closed source since 10 November 2026. Earlier open versions are in [`srcfl/ftw-app-source-archive`](https://github.com/srcfl/ftw-app-source-archive). |
+| `srcfl/ftw-cloud` (private) | Opt-in, box-signed, read-only copy of each home's state for the apps, closed source since 10 November 2026. |
+| [`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons) | Home Assistant app packaging of each FTW release. |
+| [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web) | The project website. |
+| [`srcfl/energyplan-demo`](https://github.com/srcfl/energyplan-demo) | Browser demo running the Energyplan worker in WebAssembly against a simulated home. |
+
+The Energyplan solver source is private; Core receives only its compiled
+worker and public integration metadata.
 
 ## Contributing
 

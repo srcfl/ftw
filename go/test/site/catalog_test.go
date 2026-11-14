@@ -52,6 +52,14 @@ var provenance = map[string]struct {
 	"s15p-25":   {nil, []string{"https://github.com/srcfl/ftw/pull/1804", "release blocker 22 Oct 2026: a one-phase charger, planned charging"}},
 	"s16-25":    {nil, []string{"https://github.com/srcfl/ftw/pull/1828", "help report 25 Oct 2026: an idle car held at 0 W for an hour under a 4.5 kW import ceiling"}},
 	"s17-25":    {nil, []string{"https://github.com/srcfl/ftw/pull/1814", "field report 23 Oct 2026, v0.155.1-beta.1: two equal Pixii batteries take turns"}},
+	"r1-25":     {[]string{"tel-001", "tel-006", "tel-007", "bat-074"}, []string{"stable plan 27 Oct 2026, R1"}},
+	"r2-25":     {[]string{"tel-007", "tel-022", "ev-090", "ev-075"}, []string{"stable plan 27 Oct 2026, R2"}},
+	"r2-60-25":  {[]string{"tel-007", "tel-022", "ev-090", "ev-075"}, []string{"stable plan 27 Oct 2026, R2"}},
+	"r3-25":     {[]string{"ev-099", "ev-090"}, []string{"stable plan 27 Oct 2026, R3"}},
+	"r4-25":     {[]string{"ev-085", "ev-091", "home-061", "home-074", "ocpp-008", "upd-051"}, []string{"stable plan 27 Oct 2026, R4", "https://github.com/srcfl/ftw/pull/1787"}},
+	"r5a-25":    {[]string{"ev-076", "dev-100"}, []string{"stable plan 27 Oct 2026, R5"}},
+	"r5b-25":    {[]string{"ev-076"}, []string{"stable plan 27 Oct 2026, R5", "https://github.com/srcfl/ftw/issues/1718"}},
+	"r5c-25":    {[]string{"ev-088"}, []string{"stable plan 27 Oct 2026, R5"}},
 }
 
 func TestEveryScenarioSaysWhereItComesFrom(t *testing.T) {

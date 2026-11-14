@@ -112,7 +112,6 @@ const PAYLOAD = {
       driver: {
         version: "1.1.1",
         sha256: "f825…",
-        metadata: { verification_status: "experimental" },
       },
     },
     {
@@ -120,7 +119,6 @@ const PAYLOAD = {
       driver: {
         version: "1.0.0",
         sha256: "aa11…",
-        metadata: { verification_status: "production" },
       },
       installed: { version: "1.0.0", sha256: "aa11…", active: true },
     },
@@ -146,14 +144,20 @@ test("a candidate already on disk is marked from .installed, not by matching str
   assert.equal(running.active, true, "and it is the one running");
 });
 
-test("each row carries how well tested that version is", () => {
+test("each row says how many homes run that version", () => {
   const { api } = load();
+  api.rememberRunBy({ run_by: { "ferroamp@1.1.1": 1, "ferroamp@1.0.0": 14 } });
   const [newer, running] = api.versionRows(PAYLOAD);
 
-  // Upgrading onto an untested driver is a decision, so it has to be visible
-  // at the moment of choosing rather than only in the setup wizard.
-  assert.equal(newer.verification, "untested");
-  assert.equal(running.verification, "verified on hardware");
+  assert.equal(newer.verification, "1 home runs this version");
+  assert.equal(running.verification, "14 homes run this version");
+});
+
+test("a version nobody runs yet says so, and no counts say nothing", () => {
+  const { api } = load();
+  assert.equal(api.versionRows(PAYLOAD)[0].verification, "", "no counts yet");
+  api.rememberRunBy({ run_by: { "ferroamp@1.0.0": 14 } });
+  assert.equal(api.versionRows(PAYLOAD)[0].verification, "0 homes run this version");
 });
 
 test("a version on disk the channel no longer lists is still offered", () => {
@@ -182,13 +186,14 @@ test("the same version is not listed twice when it is both installed and offered
 test("the panel says what is running and what can be switched to", () => {
   const { api } = load();
   const panel = element("div");
+  api.rememberRunBy({ run_by: { "ferroamp@1.1.1": 1, "ferroamp@1.0.0": 14 } });
   api.render(panel, "ferroamp", PAYLOAD, { runningVersion: "1.0.0" });
 
   const text = textOf(panel);
   assert.match(text, /v1\.1\.1/);
-  assert.match(text, /untested/);
+  assert.match(text, /1 home runs this version/);
   assert.match(text, /selected/);
-  assert.match(text, /verified on hardware/);
+  assert.match(text, /14 homes run this version/);
 });
 
 test("switching to a version that is not downloaded fetches it first", async () => {
@@ -288,13 +293,13 @@ test("switching rewrites the summary line from the catalog, not from the old tex
   const readOnlyEl = element("span");
   readOnlyEl.style.display = "none";
   headlineEl.textContent = "v1.0.0";
-  detailEl.textContent = "official, shipped with this build · verified on hardware";
+  detailEl.textContent = "official, shipped with this build · 14 homes run this version";
 
   // 1.1.1 is telemetry-only where 1.0.0 was not. Editing the old line in place
   // would carry the wrong answer to "may this driver control anything".
   catalogEntry = {
     path: "drivers/ferroamp.lua", source: "managed", installed_version: "1.1.1",
-    verification_status: "experimental", read_only: true,
+    run_by: 3, read_only: true,
   };
 
   api.render(panel, "ferroamp", PAYLOAD, {
@@ -306,7 +311,7 @@ test("switching rewrites the summary line from the catalog, not from the old tex
   await settle();
 
   assert.equal(headlineEl.textContent, "v1.1.1");
-  assert.equal(detailEl.textContent, "from the driver channel · untested");
+  assert.equal(detailEl.textContent, "from the driver channel · 3 homes run this version");
   assert.equal(readOnlyEl.style.display, "", "1.1.1 may only read");
 });
 
@@ -319,7 +324,7 @@ test("undo rewrites the line back to what is running again", async () => {
 
   catalogEntry = {
     path: "drivers/ferroamp.lua", source: "managed", installed_version: "1.1.1",
-    verification_status: "experimental", read_only: true,
+    run_by: 3, read_only: true,
   };
   api.render(panel, "ferroamp", PAYLOAD, {
     runningVersion: "1.0.0", runningSource: "bundled",
@@ -331,7 +336,7 @@ test("undo rewrites the line back to what is running again", async () => {
   // The server is back on the bundled copy, and the line follows it.
   catalogEntry = {
     path: "drivers/ferroamp.lua", source: "bundled", version: "1.0.0",
-    verification_status: "production", read_only: false,
+    run_by: 14, read_only: false,
   };
   buttonsOf(panel).find((b) => b.textContent.startsWith("Undo")).click();
   await settle();
@@ -425,11 +430,11 @@ test("switching to the bundled copy corrects the line above the panel", async ()
   const headlineEl = element("span");
   const detailEl = element("span");
   headlineEl.textContent = "v1.1.1";
-  detailEl.textContent = "official · untested";
+  detailEl.textContent = "official · 0 homes run this version";
 
   catalogEntry = {
     path: "drivers/ferroamp.lua", source: "bundled", version: "1.0.0",
-    verification_status: "production",
+    run_by: 14,
   };
   api.render(panel, "ferroamp", { ...PAYLOAD, release_version: "1.0.0" }, {
     runningVersion: "1.1.1", runningSource: "managed",
@@ -476,16 +481,16 @@ test("what is running reads as words, not as an enum", () => {
   const { api } = load();
 
   const managed = api.runningSummary({
-    source: "managed", installed_version: "1.1.1", verification_status: "production",
+    source: "managed", installed_version: "1.1.1", run_by: 14,
   });
   assert.equal(managed.headline, "v1.1.1");
-  assert.equal(managed.detail, "from the driver channel · verified on hardware");
+  assert.equal(managed.detail, "from the driver channel · 14 homes run this version");
 
   const bundled = api.runningSummary({
-    source: "bundled", version: "1.0.0", verification_status: "experimental",
+    source: "bundled", version: "1.0.0", run_by: 0,
   });
   assert.equal(bundled.headline, "v1.0.0");
-  assert.equal(bundled.detail, "this release · untested");
+  assert.equal(bundled.detail, "this release · 0 homes run this version");
 
   // Whether an override stays across a Core update is part of what it is.
   const chosen = api.runningSummary({ source: "managed", version: "1.3.2", chosen: true, release_version: "1.3.3" });

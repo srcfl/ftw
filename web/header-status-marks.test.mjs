@@ -69,7 +69,10 @@ function renderBadge({ update = false, degraded = false, connected = true, lates
 }
 
 describe("header status marks", () => {
-  it("stays disabled when slower component requests finish after the explicit feature gate", async () => {
+  // With self-update off (the Home Assistant app, Docker) the slot still
+  // carries the connection light and the optimizer warning; only the update
+  // mark has nothing to say (#1784).
+  it("keeps the connection light and the optimizer warning when the host updates FTW", async () => {
     const delayed = new Map();
     const fetchImpl = (url) => {
       if (url === "/api/version/check") {
@@ -85,9 +88,11 @@ describe("header status marks", () => {
 
     badge.connectedCallback();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(badge._disabled, true);
-    assert.equal(badge.hidden, true);
-    assert.equal(badge._shadow.innerHTML, "");
+    assert.equal(badge._hostManaged, true);
+    assert.notEqual(badge.hidden, true);
+    // The box cannot know what the host has pending, so the light says
+    // only that it is connected.
+    assert.match(badge._shadow.innerHTML, /class="mark ok" role="img" title="Connected" aria-label="Connected"/);
 
     delayed.get("/api/components")({
       ok: true,
@@ -99,8 +104,16 @@ describe("header status marks", () => {
     // Driver versions are chosen under Settings › Devices; the badge asks
     // nothing about drivers.
     assert.deepEqual([...delayed.keys()].sort(), ["/api/components"]);
-    assert.equal(badge._shadow.innerHTML, "");
-    assert.equal(badge.hidden, true);
+    assert.match(badge._shadow.innerHTML, /class="mark warning"/);
+    assert.doesNotMatch(badge._shadow.innerHTML, /class="mark update"/);
+
+    badge.setConnected(false);
+    assert.match(badge._shadow.innerHTML, /class="mark offline"/);
+  });
+
+  it("leaves the header version clickable whatever the install", () => {
+    assert.doesNotMatch(indexHtml, /ftw-selfupdate-disabled/);
+    assert.doesNotMatch(indexHtml, /removeEventListener\("click"/);
   });
 
   it("shows a lone green dot when connected with nothing pending", () => {

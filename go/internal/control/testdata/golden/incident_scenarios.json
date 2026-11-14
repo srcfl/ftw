@@ -1,7 +1,7 @@
 {
   "family": "incident_scenarios",
   "generated_by": "FTW_GOLDEN_DUMP=1 go test ./internal/control/ -run TestGoldenDump",
-  "ftw_commit": "15f9edc3b973d7b9151e88d63575a9b7d615a0b3",
+  "ftw_commit": "74d77a20d58cb902f5f62325520498143e2a2d19",
   "record_count": 27,
   "records": [
     {
@@ -428,7 +428,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -360,
+          "target_w": -324,
           "clamped": false
         }
       ],
@@ -451,9 +451,9 @@
       },
       "site_totals": {
         "battery_current_w": 0,
-        "battery_target_sum_w": -360,
+        "battery_target_sum_w": -324,
         "raw_grid_w": 600,
-        "projected_grid_w": 240
+        "projected_grid_w": 276
       }
     },
     {
@@ -517,13 +517,7 @@
           "remaining_s": 450
         }
       },
-      "per_driver_targets": [
-        {
-          "driver": "ferroamp",
-          "target_w": -60,
-          "clamped": false
-        }
-      ],
+      "per_driver_targets": [],
       "clamp_attributions": {
         "clamped_drivers": [],
         "all_targets_zero_clamped": false,
@@ -543,9 +537,9 @@
       },
       "site_totals": {
         "battery_current_w": 0,
-        "battery_target_sum_w": -60,
+        "battery_target_sum_w": 0,
         "raw_grid_w": 100,
-        "projected_grid_w": 40
+        "projected_grid_w": 100
       }
     },
     {
@@ -1592,7 +1586,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": 4000.0000033333336,
+          "target_w": 4000,
           "clamped": false
         }
       ],
@@ -1615,9 +1609,9 @@
       },
       "site_totals": {
         "battery_current_w": 0,
-        "battery_target_sum_w": 4000.0000033333336,
+        "battery_target_sum_w": 4000,
         "raw_grid_w": -2000,
-        "projected_grid_w": 2000.0000033333336
+        "projected_grid_w": 2000
       }
     },
     {
@@ -2015,7 +2009,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -420,
+          "target_w": -384,
           "clamped": false
         }
       ],
@@ -2038,9 +2032,9 @@
       },
       "site_totals": {
         "battery_current_w": 0,
-        "battery_target_sum_w": -420,
+        "battery_target_sum_w": -384,
         "raw_grid_w": 700,
-        "projected_grid_w": 280
+        "projected_grid_w": 316
       }
     },
     {
@@ -2101,7 +2095,7 @@
       "per_driver_targets": [
         {
           "driver": "ferroamp",
-          "target_w": -420,
+          "target_w": -384,
           "clamped": false
         }
       ],
@@ -2124,9 +2118,9 @@
       },
       "site_totals": {
         "battery_current_w": 0,
-        "battery_target_sum_w": -420,
+        "battery_target_sum_w": -384,
         "raw_grid_w": 700,
-        "projected_grid_w": 280
+        "projected_grid_w": 316
       }
     },
     {

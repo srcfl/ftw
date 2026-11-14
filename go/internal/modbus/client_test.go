@@ -474,10 +474,10 @@ func TestReconnectBackoffSchedule(t *testing.T) {
 		2: 2 * time.Second,
 		3: 4 * time.Second,
 		4: 8 * time.Second,
-		5: 16 * time.Second,
-		6: 32 * time.Second,
-		7: 60 * time.Second,
-		8: 60 * time.Second,
+		5: 10 * time.Second,
+		6: 10 * time.Second,
+		7: 10 * time.Second,
+		8: 10 * time.Second,
 	}
 	for failures, delay := range want {
 		c.consecutiveTransportFailures = failures

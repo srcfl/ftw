@@ -272,6 +272,8 @@ var RegistryOps = map[string]string{
 	"site.mode.set": "ftw.mode.write",
 	// planner.prefs.set — Set household planner preferences.
 	"planner.prefs.set": "ftw.mode.write",
+	// site.time_zone.propose — Offer the phone's time zone to a box that keeps none.
+	"site.time_zone.propose": "ftw.setup.write",
 	// battery.hold — Hold the battery at a fixed setpoint.
 	"battery.hold": "ftw.dispatch.write",
 	// loadpoint.hold — Charge the car now at a fixed current.

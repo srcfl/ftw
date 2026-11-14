@@ -142,6 +142,11 @@ func (s *Server) Command(ctx context.Context, id string, payload []byte) (result
 	}
 
 	switch c.Action {
+	case "ev_set_current", "ev_pause", "ev_start", "ev_resume":
+		s.handler.cancelBootLimit(id)
+	}
+
+	switch c.Action {
 	case "init", "deinit":
 		// Lifecycle hooks that only mean something to a Lua VM.
 		return nil

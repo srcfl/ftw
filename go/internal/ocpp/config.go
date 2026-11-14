@@ -55,6 +55,12 @@ type Config struct {
 	// UI so an operator can adopt it, withheld from telemetry so it cannot
 	// influence dispatch. Empty means every charger is pending.
 	ApprovedIDs []string `yaml:"-"`
+
+	// ManagedIDs is the part of ApprovedIDs a loadpoint names: the chargers
+	// FTW orders. Each starts at 0 A on boot (see boot_limit.go). Derived by
+	// the caller, never read from YAML, and empty while Core blocks every
+	// charger write (setup measurement mode).
+	ManagedIDs []string `yaml:"-"`
 }
 
 // TLSConfig points at the certificate this server presents, and optionally at

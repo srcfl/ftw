@@ -269,7 +269,7 @@ run with cwd `/agent`, so `cd` into the repo you mean before `make`.
 | [`srcfl/ftw`](https://github.com/srcfl/ftw) | Core. `make test`, `make e2e`, `make verify`. |
 | [`srcfl/device-drivers`](https://github.com/srcfl/device-drivers) | Editable driver source. Change Lua there, never in `ftw/drivers/*.lua`. |
 | [`srcfl/device-simulator`](https://github.com/srcfl/device-simulator) | Simulated site FTW talks to over real protocols. |
-| [`srcfl/ftw-webapp`](https://github.com/srcfl/ftw-webapp) | Installable client. |
+| `srcfl/ftw-webapp` (private) | Installable client. |
 | [`srcfl/ftwdb`](https://github.com/srcfl/ftwdb) | Archived storage experiment; new storage work belongs in Core. |
 
 `make e2e` and `make dev` still use the in-tree Go simulators

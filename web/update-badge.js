@@ -53,7 +53,7 @@
       this._errorRetries = 0;
       this._statusTimer = null;
       this._elapsedTimer = null;
-      this._disabled = false;         // set true on 503 (feature gated off)
+      this._hostManaged = false;      // self-update is off: the host updates FTW
       this._components = null;        // last /api/components payload
       this._connected = true;         // header liveness light; see setConnected()
       this._bootHealth = null;
@@ -171,10 +171,9 @@
     }
 
     // Public: called by the header #version click handler in index.html so
-    // the operator can open the modal without aiming at the tiny dot. No-op
-    // when the backend has told us the feature is gated off.
+    // the operator can open the modal without aiming at the tiny dot. Where
+    // the host updates FTW, the dialog says what runs and who updates it.
     open() {
-      if (this._disabled) return;
       if (this._phase === "updating" || this._bootHealth) {
         this._phase = "updating";
         this._render();
@@ -183,6 +182,10 @@
       }
       this._phase = "dialog";
       this._render();
+      if (this._hostManaged) {
+        this._refreshComponents(false);
+        return;
+      }
       // Shows the last run's result, or follows one started by ftw.
       this._resumeUpdateStatus().finally(() => this._render());
       this._refresh(false); // surface the freshest info when opened
@@ -190,7 +193,6 @@
     }
 
     _refreshComponents(force) {
-      if (this._disabled) return;
       apiFetch("/api/components" + (force ? "?force=1" : ""))
         .then((r) => (r.ok ? r.json() : null))
         .then((body) => {
@@ -201,25 +203,24 @@
         .catch(() => { /* diagnostics stay optional */ });
     }
 
-    // Permanently shut the element down: stop polling, clear shadow DOM, hide
-    // from layout, and fire an event so the #version bridge can drop its
-    // cursor/pointer affordance. Only an explicit feature-disabled response
-    // does this; the same 503 status also occurs during normal startup.
-    _disable() {
-      if (this._disabled) return;
-      this._disabled = true;
-      clearInterval(this._checkTimer);
+    // Self-update is off on this install: the Home Assistant app follows
+    // Supervisor and Docker rebuilds the container. Stop asking about
+    // versions; the header marks and the version dialog keep working. Only
+    // an explicit feature-off response does this; the same 503 status also
+    // occurs during normal startup.
+    _manageByHost() {
+      if (this._hostManaged) return;
+      this._hostManaged = true;
+      this._info = null;
+      clearTimeout(this._errorRetryTimer);
       clearInterval(this._statusTimer);
       clearInterval(this._elapsedTimer);
-      this._shadow.innerHTML = "";
-      this._removeDialog();
-      this.hidden = true;
-      this.dispatchEvent(new CustomEvent("ftw-selfupdate-disabled", { bubbles: true }));
+      this._render();
     }
 
     // ---- data ----
     _refresh(force) {
-      if (this._disabled) return;
+      if (this._hostManaged) return;
       const url = force ? "/api/version/check?force=1" : "/api/version/check";
       apiFetch(url)
         .then(async (r) => {
@@ -229,13 +230,13 @@
             return null;
           }
           if (r.status === 503 && body?.error === "self-update disabled") {
-            this._disable();
+            this._manageByHost();
             return null;
           }
           return { ok: r.ok, body };
         })
         .then((result) => {
-          if (!result) return; // disabled, nothing to render
+          if (!result) return; // starting or host-managed, already rendered
           // The handler returns the full Info schema on both success and the
           // force=1 error path, so we render either way. When ok=false,
           // body.err carries the reason and the UI shows "Last check failed".
@@ -286,7 +287,7 @@
     }
 
     async _startUpdate(retry = false) {
-      if (this._disabled || this._phase === "updating" || this._updateBlockedReason()) return;
+      if (this._hostManaged || this._phase === "updating" || this._updateBlockedReason()) return;
       const info = this._info;
       if (retry !== (info.last_failed === info.latest)) return;
       this._actionError = "";
@@ -350,7 +351,7 @@
         clearTimeout(timeout);
         this._requestPending = false;
       }
-      if (this._disabled || !this.isConnected) return;
+      if (this._hostManaged || !this.isConnected) return;
       this._render();
       this._startStatusPolling();
     }
@@ -526,16 +527,6 @@
     }
 
     _render() {
-      // A 503 from /api/version/check permanently disables this component.
-      // Component requests start alongside that check, so their
-      // responses can arrive later. Never let one of those responses rebuild
-      // controls that open() will refuse to use.
-      if (this._disabled) {
-        this._shadow.innerHTML = "";
-        this._removeDialog();
-        this.hidden = true;
-        return;
-      }
       const info = this._info || {};
       const optimizer = this._components && this._components.optimizer;
       const pending = this._pendingUpdates();
@@ -574,7 +565,9 @@
           marks.push(`<button part="badge" class="mark warning" title="${escapeHTML(warningTitle)}" aria-label="${escapeHTML(warningTitle)}">${ICON_WARNING}</button>`);
         }
         if (!showBadge) {
-          marks.push(`<span part="badge" class="mark ok" role="img" title="Connected, nothing pending" aria-label="Connected, nothing pending">${ICON_DOT}</span>`);
+          // Where the host updates FTW, the box cannot know what is pending.
+          const okTitle = this._hostManaged ? "Connected" : "Connected, nothing pending";
+          marks.push(`<span part="badge" class="mark ok" role="img" title="${okTitle}" aria-label="${okTitle}">${ICON_DOT}</span>`);
         }
       }
 
@@ -625,6 +618,7 @@
     _modalHTML() {
       const info = this._info || {};
       if (this._phase === "updating") return this._updatingModalHTML();
+      if (this._hostManaged) return this._hostManagedHTML();
       if (!this._info) return this._versionLoadingHTML();
       return this._versionHTML(info);
     }
@@ -687,6 +681,39 @@
             <button class="btn" data-action="check">Check again</button>
             ${updateButton}
           </footer>
+        </div>`;
+    }
+
+    // Home Assistant or a container updates this install, so the dialog says
+    // what runs and who updates it, and offers nothing FTW cannot do here.
+    _hostManagedHTML() {
+      const components = this._components;
+      const version = ((components || {}).core || {}).version;
+      const bundle = (components || {}).bundle || {};
+      const running = version
+        ? `<p><strong>${escapeHTML(version)}</strong>${this._connected ? " is running." : " was last reported by the box."}</p>`
+        : '<p class="dim" role="status">Reading the running version…</p>';
+      // Until the box says how it was installed, say only what is true of
+      // every install that lands here.
+      let host = "<p>FTW does not update itself here.</p>";
+      if (bundle.kind === "home_assistant_addon") {
+        host = `<p>Home Assistant installs updates and rollbacks for this app.</p>
+           ${bundle.version ? `<p class="dim">Home Assistant app ${escapeHTML(bundle.version)}</p>` : ""}`;
+      } else if (components) {
+        host = "<p>FTW does not update itself here. Update it the way it was installed, for example with Docker.</p>";
+      }
+      return `
+        <div class="backdrop" data-action="close"></div>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="ftw-upd-title">
+          <header>
+            <h3 id="ftw-upd-title">Version</h3>
+            <button class="x" data-action="close" aria-label="Close">×</button>
+          </header>
+          <div class="body">
+            ${running}
+            ${host}
+          </div>
+          <footer><button class="btn" data-action="close">Close</button></footer>
         </div>`;
     }
 
