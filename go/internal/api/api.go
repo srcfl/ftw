@@ -39,6 +39,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/configreload"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/coverage"
+	"github.com/srcfl/ftw/go/internal/drivercontrol"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/energyreport"
@@ -61,6 +62,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/thermaltwin"
 	"github.com/srcfl/ftw/go/internal/units"
 	v2xpolicy "github.com/srcfl/ftw/go/internal/v2x"
 	"github.com/srcfl/ftw/go/protocol"
@@ -174,7 +176,9 @@ type Deps struct {
 	PVModel *pvmodel.Service
 
 	// Optional: load digital-twin self-learner.
-	LoadModel        *loadmodel.Service
+	LoadModel *loadmodel.Service
+	// Optional: shadow thermal twins of declared room sensors.
+	ThermalTwin      *thermaltwin.Service
 	ForecastLearning ForecastLearning
 
 	// Optional: EV loadpoint state consumed by the API and MPC.
@@ -296,11 +300,9 @@ type Server struct {
 	savingsCacheMu sync.Mutex
 	savingsCache   map[string]daySavings
 
-	// controlStates serializes command dispatch, default dispatch, and hold
-	// transitions per driver. Process-lifetime only, deliberately: a restart
-	// should leave no device held by a setting nobody remembers making.
-	controlStateMu sync.Mutex
-	controlStates  map[string]*controlDriverState
+	// controlHolds serializes command dispatch, default dispatch, and hold
+	// transitions per driver. Process-lifetime only; see drivercontrol.
+	controlHolds *drivercontrol.Holds
 
 	// beforeDriverControlSend is a package-test seam for reproducing a
 	// lifecycle change between request validation and registry dispatch. It is
@@ -340,13 +342,13 @@ func New(deps *Deps) *Server {
 		deps.WebDir = "web"
 	}
 	s := &Server{
-		deps:          deps,
-		mux:           http.NewServeMux(),
-		dailyCache:    make(map[string]state.DayEnergy),
-		controlStates: make(map[string]*controlDriverState),
-		drafts:        newDriverDrafts(),
-		marks:         make(map[string]routeMark),
+		deps:       deps,
+		mux:        http.NewServeMux(),
+		dailyCache: make(map[string]state.DayEnergy),
+		drafts:     newDriverDrafts(),
+		marks:      make(map[string]routeMark),
 	}
+	s.controlHolds = drivercontrol.New(s.controlRegistry)
 	s.setup = onboarding.NewWithSecrets(deps.State, s.preserveSetupSecrets, filepath.Dir(deps.ConfigPath))
 	if deps.SaveConfigWithValues == nil && deps.State != nil {
 		deps.SaveConfigWithValues = func(path string, cfg *config.Config, values map[string]string, reviewedJSON []byte, beforeSave func() error) error {
@@ -356,7 +358,7 @@ func New(deps *Deps) *Server {
 	if deps.Registry != nil {
 		// Registry removal is the lifecycle boundary for a driver generation.
 		// Clear the API hold before a replacement instance can be added.
-		deps.Registry.SetLifecycleHook(s.clearDriverControl)
+		deps.Registry.SetLifecycleHook(s.controlHolds.Clear)
 	}
 	s.routes()
 	// A draft's timer died with the previous process, so anything left behind
@@ -544,6 +546,7 @@ func (s *Server) routes() {
 	s.handle("GET  /api/pvmodel", Read, s.handlePVModel)
 	s.handle("POST /api/pvmodel/reset", Configure, s.handlePVModelReset)
 	s.handle("GET  /api/loadmodel", Read, s.handleLoadModel)
+	s.handle("GET  /api/thermal/twins", Read, s.handleThermalTwins)
 	s.handle("POST /api/loadmodel/profile", Configure, s.handleLoadModelProfile)
 	s.handle("POST /api/loadmodel/reset", Configure, s.handleLoadModelReset)
 	s.handle("GET  /api/research/load/dump", Read, s.handleLoadResearchDump)

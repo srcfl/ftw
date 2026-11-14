@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivercontrol"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -42,8 +43,11 @@ type driverDetailResp struct {
 	// Controls are what this driver says an operator may command. Absent
 	// for every driver that only reports.
 	Controls []drivers.CatalogControl `json:"controls,omitempty"`
+	// Sensors are the metrics this driver says are a heat store's
+	// temperature. Absent for every driver that declares none.
+	Sensors []drivers.CatalogSensor `json:"sensors,omitempty"`
 	// Hold is the operator setting in force, if any, and when it ends.
-	Hold *controlHold `json:"hold,omitempty"`
+	Hold *drivercontrol.Hold `json:"hold,omitempty"`
 	// ControlState says whether Core has confirmed autonomous default mode.
 	// It must not call a failed default safe or settled.
 	ControlState driverControlStateResp `json:"control_state"`
@@ -121,13 +125,16 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 			resp.Identity = driverIdentityDTO{Make: make, SN: sn, MAC: mac, Endpoint: ep}
 		}
 	}
-	resp.Controls = s.driverControls(name)
-	resp.Hold = s.activeControlHold(name)
+	if entry := s.driverCatalogEntry(name); entry != nil {
+		resp.Controls = entry.Controls
+		resp.Sensors = entry.Sensors
+	}
+	resp.Hold = s.controlHolds.Active(name)
 	resp.ControlState = s.driverControlState(name, resp.Hold)
 	writeJSON(w, 200, resp)
 }
 
-func (s *Server) driverControlState(name string, hold *controlHold) driverControlStateResp {
+func (s *Server) driverControlState(name string, hold *drivercontrol.Hold) driverControlStateResp {
 	if s.deps == nil || s.deps.Registry == nil {
 		return driverControlStateResp{State: "unknown"}
 	}
@@ -160,6 +167,15 @@ func (s *Server) driverControlState(name string, hold *controlHold) driverContro
 // failure belongs in the catalog endpoint, where an operator is looking at
 // driver files, not here.
 func (s *Server) driverControls(name string) []drivers.CatalogControl {
+	if entry := s.driverCatalogEntry(name); entry != nil {
+		return entry.Controls
+	}
+	return nil
+}
+
+// driverCatalogEntry is the catalog entry for the configured driver `name`,
+// or nil. See driverControls for why a parse failure is nil too.
+func (s *Server) driverCatalogEntry(name string) *drivers.CatalogEntry {
 	cfg, ok := s.configuredDriver(name)
 	if !ok || cfg.Lua == "" {
 		return nil
@@ -173,7 +189,7 @@ func (s *Server) driverControls(name string) []drivers.CatalogControl {
 		if err != nil {
 			return nil
 		}
-		return entry.Controls
+		return &entry
 	}
 
 	dir := s.deps.DriverDir
@@ -184,7 +200,7 @@ func (s *Server) driverControls(name string) []drivers.CatalogControl {
 	if err != nil {
 		return nil
 	}
-	return drivers.ControlsForDriver(entries, lua)
+	return drivers.EntryForDriver(entries, lua)
 }
 
 func (s *Server) configuredDriver(name string) (config.Driver, bool) {
