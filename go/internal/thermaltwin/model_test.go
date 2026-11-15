@@ -215,3 +215,74 @@ func deref(v *float64) any {
 	}
 	return *v
 }
+
+// held runs a house whose thermostat holds the room still: heat input
+// follows the cold exactly, and the sensor reads the setpoint with noise.
+// This is the reviewer's probe on #1996. Nothing in it can teach inertia or
+// capacity, however small the prediction error gets.
+func held(tw *Twin, n int) {
+	const setpoint = 21.0
+	a, b := 1.0/40, 1.0/15
+	seed := uint32(7)
+	read := func() float64 {
+		seed = seed*1664525 + 1013904223
+		noise := 0.3 * (float64(seed>>8)/float64(1<<24) - 0.5) // ±0.15 K
+		return math.Round((setpoint+noise)*10) / 10
+	}
+	tIn := read()
+	for i := 0; i < n; i++ {
+		hour := float64(i) * windowH
+		tOut := -2 + 6*math.Sin(2*math.Pi*hour/24)
+		power := a * (setpoint - tOut) / b
+		next := read()
+		tw.Observe(Sample{TInStartC: tIn, TInEndC: next, TOutC: tOut, PowerKW: power, Contiguous: true})
+		tIn = next
+	}
+}
+
+// A small error in a room that never moves is not skill: "no change" does
+// as well, and heat input never varied apart from the weather.
+func TestTwinDoesNotTrustAThermostatHeldHouse(t *testing.T) {
+	tw := New()
+	held(tw, 21*48)
+	if tw.MAE3hK > trustMAEK {
+		t.Fatalf("precondition: 3 h error = %.2f K, want within the old limit %.1f", tw.MAE3hK, trustMAEK)
+	}
+	if got := tw.Status(); got != StatusUnproven || tw.WasTrusted {
+		t.Errorf("status = %s (was trusted %v), want unproven, with 3 h error %.2f K against %.2f K for no change, heat varied in %.0f%% of stretches",
+			got, tw.WasTrusted, tw.MAE3hK, tw.PersistenceMAE3hK, 100*tw.HeatVariedShare)
+	}
+}
+
+// The two conditions stand apart: beating "no change" is not enough where
+// heat input never varied, and varied heat input is not enough for a twin
+// that does no better than "no change".
+func TestTwinTrustNeedsSkillAndVariedHeat(t *testing.T) {
+	accurate := func() *Twin {
+		tw := New()
+		tw.Theta = [3]float64{1.0 / 40, 1.0 / 15, 0}
+		tw.Samples, tw.PowerSamples, tw.Evaluations = minSamplesForTrust, minSamplesForTrust, skillMemory
+		tw.MAE3hK, tw.SkillMAE3hK, tw.PersistenceMAE3hK, tw.HeatVariedShare = 0.1, 0.1, 0.4, 0.5
+		return tw
+	}
+	if got := accurate().Status(); got != StatusTrusted {
+		t.Fatalf("precondition: status = %s, want trusted", got)
+	}
+	still := accurate()
+	still.PersistenceMAE3hK = 0.1
+	if got := still.Status(); got != StatusUnproven {
+		t.Errorf("no better than no change: status = %s, want unproven", got)
+	}
+	steady := accurate()
+	steady.HeatVariedShare = 0.05
+	if got := steady.Status(); got != StatusUnproven {
+		t.Errorf("heat input never varied: status = %s, want unproven", got)
+	}
+	// A twin that was trusted and then loses its footing says unproven, not
+	// drifting: its error is still small, it has only stopped being tested.
+	was := accurate()
+	was.WasTrusted, was.HeatVariedShare = true, 0.05
+	if got := was.Status(); got != StatusUnproven {
+		t.Errorf("trusted twin in a house that went still: status = %s, want unproven", got)
+	}
+}

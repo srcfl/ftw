@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,12 @@ import (
 
 // HeatPowerMetric is the canonical electrical input of a heat pump, the same
 // metric the Heating view discovers pumps by (docs/nibe-local.md).
+//
+// It is the pump's whole electrical power, so it includes hot-water charging
+// and defrost, which put no heat in the room. That biases b low (the
+// capacity reads high) by the share of power spent on them. A space-heat
+// power metric declared by the driver would remove the bias; none exists
+// yet.
 const HeatPowerMetric = "hp_power_w"
 
 const (
@@ -44,6 +51,8 @@ type MetricReader interface {
 type ConfigStore interface {
 	LoadConfig(key string) (string, bool)
 	SaveConfig(key, value string) error
+	LoadConfigByPrefix(prefix string) (map[string]string, error)
+	DeleteConfig(key string) error
 }
 
 // Service samples every declared zone once a minute and feeds closed windows
@@ -54,15 +63,14 @@ type Service struct {
 	// Temp is outdoor temperature at a time, the same source the load model
 	// learns its heating coefficient from.
 	Temp func(time.Time) (float64, bool)
-	// Zones lists the declared sensors to learn. Called at start and at each
-	// window boundary, so a config change is picked up within a window.
-	Zones func() []Zone
 	// PowerDrivers lists configured drivers that may report HeatPowerMetric.
 	PowerDrivers func() []string
 
-	mu        sync.Mutex
-	zones     map[string]*zoneState
-	refreshed time.Time
+	mu    sync.Mutex
+	zones map[string]*zoneState
+	// swept is set once stored twins of zones that went away while the
+	// process was down have been deleted.
+	swept bool
 
 	stop chan struct{}
 	done chan struct{}
@@ -128,10 +136,6 @@ func (s *Service) Tick(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	windowStart := now.Truncate(Window)
-	if !s.refreshed.Equal(windowStart) {
-		s.refreshZonesLocked()
-		s.refreshed = windowStart
-	}
 	for _, zs := range s.zones {
 		if !zs.start.Equal(windowStart) {
 			if !zs.start.IsZero() {
@@ -143,19 +147,22 @@ func (s *Service) Tick(now time.Time) {
 	}
 }
 
-func (s *Service) refreshZonesLocked() {
-	if s.Zones == nil {
-		return
-	}
+// SetZones declares the sensors to learn, replacing the previous list. The
+// caller computes it when the configuration or the driver catalog changes,
+// so the service never reads either.
+//
+// A zone that left the list is forgotten, its stored twin with it: learned
+// state must not outlive the declaration it was learned for. complete is
+// false when the list may be missing zones, as when a driver's catalog
+// entry could not be read. Then zones are added and nothing is forgotten,
+// since weeks of learning should not be lost to an unreadable file.
+func (s *Service) SetZones(zones []Zone, complete bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	want := map[string]Zone{}
-	for _, z := range s.Zones() {
+	for _, z := range zones {
 		if z.Key != "" {
 			want[z.Key] = z
-		}
-	}
-	for key := range s.zones {
-		if _, ok := want[key]; !ok {
-			delete(s.zones, key)
 		}
 	}
 	for key, z := range want {
@@ -165,6 +172,40 @@ func (s *Service) refreshZonesLocked() {
 		}
 		s.zones[key] = &zoneState{zone: z, twin: s.restore(key)}
 	}
+	if !complete {
+		return
+	}
+	for key := range s.zones {
+		if _, ok := want[key]; !ok {
+			delete(s.zones, key)
+			s.forget(key)
+		}
+	}
+	if s.swept || s.Store == nil {
+		return
+	}
+	stored, err := s.Store.LoadConfigByPrefix(stateKeyRoot)
+	if err != nil {
+		slog.Warn("thermal twin: stored twins unreadable", "err", err)
+		return
+	}
+	s.swept = true
+	for storeKey := range stored {
+		if _, ok := want[strings.TrimPrefix(storeKey, stateKeyRoot)]; !ok {
+			s.forget(strings.TrimPrefix(storeKey, stateKeyRoot))
+		}
+	}
+}
+
+func (s *Service) forget(key string) {
+	if s.Store == nil {
+		return
+	}
+	if err := s.Store.DeleteConfig(stateKeyRoot + key); err != nil {
+		slog.Warn("thermal twin: stored twin not deleted", "zone", key, "err", err)
+		return
+	}
+	slog.Info("thermal twin forgotten: zone no longer declared", "zone", key)
 }
 
 func (s *Service) sampleLocked(zs *zoneState, now time.Time) {
@@ -320,6 +361,12 @@ type ZoneStatus struct {
 	Rejected    int64   `json:"rejected"`
 	Evaluations int64   `json:"evaluations"`
 	MAE3hK      float64 `json:"mae_3h_k"`
+	// What trust is judged on beside MAE3hK: the twin's error and the
+	// error of assuming no change, both over a week, and the share of
+	// judged stretches in which heat input varied.
+	SkillMAE3hK       float64 `json:"skill_mae_3h_k"`
+	PersistenceMAE3hK float64 `json:"persistence_mae_3h_k"`
+	HeatVariedShare   float64 `json:"heat_varied_share"`
 }
 
 // Snapshot returns every zone's twin, sorted by key.
@@ -337,6 +384,10 @@ func (s *Service) Snapshot() []ZoneStatus {
 			Rejected:    zs.twin.Rejected,
 			Evaluations: zs.twin.Evaluations,
 			MAE3hK:      zs.twin.MAE3hK,
+
+			SkillMAE3hK:       zs.twin.SkillMAE3hK,
+			PersistenceMAE3hK: zs.twin.PersistenceMAE3hK,
+			HeatVariedShare:   zs.twin.HeatVariedShare,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })

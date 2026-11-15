@@ -37,9 +37,7 @@ func TestThermalTwinsAreAlwaysMarkedShadow(t *testing.T) {
 	}
 
 	svc := thermaltwin.NewService(nil, twinTele{})
-	svc.Zones = func() []thermaltwin.Zone {
-		return []thermaltwin.Zone{{Key: "wiser/room_temp_c", SensorDriver: "wiser", SensorMetric: "room_temp_c"}}
-	}
+	svc.SetZones([]thermaltwin.Zone{{Key: "wiser/room_temp_c", SensorDriver: "wiser", SensorMetric: "room_temp_c"}}, true)
 	svc.Tick(time.Now())
 	got = getThermalTwins(t, New(&Deps{ThermalTwin: svc}))
 	if string(got["shadow"]) != "true" || string(got["enabled"]) != "true" {

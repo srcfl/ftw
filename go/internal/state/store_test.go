@@ -150,6 +150,28 @@ func TestTimeSeriesInternCacheIsPerStore(t *testing.T) {
 	}
 }
 
+func TestDeleteConfig(t *testing.T) {
+	s := freshStore(t)
+	if err := s.SaveConfig("thermaltwin/a", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveConfig("thermaltwin/b", "2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteConfig("thermaltwin/a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.LoadConfig("thermaltwin/a"); ok {
+		t.Error("deleted key still loads")
+	}
+	if v, ok := s.LoadConfig("thermaltwin/b"); !ok || v != "2" {
+		t.Errorf("other key = %q ok=%v, want kept", v, ok)
+	}
+	if err := s.DeleteConfig("missing"); err != nil {
+		t.Errorf("deleting a missing key: %v", err)
+	}
+}
+
 func TestConfigRoundtrip(t *testing.T) {
 	s := freshStore(t)
 	if err := s.SaveConfig("mode", "self_consumption"); err != nil {

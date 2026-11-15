@@ -14,6 +14,13 @@
 // simulating each three-hour stretch from the parameters it had at the
 // start, fed the inputs that really happened. A prediction never verifies
 // itself.
+//
+// A small error is not yet skill. In a house a thermostat holds still, "the
+// temperature stays as it is" is as accurate as any model, and τ and the
+// capacity cannot be learned there: outdoor temperature and heat input move
+// together and the room does not move at all. So a twin is trusted only
+// when it also beats that guess over the same stretches, and when the heat
+// input varied within enough of them to tell the two terms apart.
 package thermaltwin
 
 import (
@@ -46,6 +53,23 @@ const (
 	trustMAEK              = 0.3
 	driftMAEK              = 0.5
 	maeMemory              = 24 // evaluations, one per window
+
+	// Skill is judged over a week of evaluations, the span the twin needs
+	// to learn at all: one still day must not cost a twin its standing, and
+	// one lively day must not earn it.
+	skillMemory = 7 * 48
+	// The twin's three-hour error must be at most this share of the error
+	// of assuming no change. At 1.0 a twin that predicts "no change" would
+	// pass by a rounding step.
+	skillVsPersistence = 0.8
+	// Heat input varied within a stretch when its lowest window is at most
+	// this share of its highest, and the highest is real heat rather than
+	// standby. A pump that follows the cold moves a few per cent in three
+	// hours; one that cycles, or is set back, moves far more.
+	heatVariedRatio = 0.7
+	heatVariedMinKW = 0.1
+	// The share of judged stretches in which heat input must have varied.
+	minHeatVariedShare = 0.2
 )
 
 // Status is what a twin can honestly say about itself.
@@ -54,8 +78,12 @@ type Status string
 const (
 	StatusNoHeatInput Status = "no_heat_input"
 	StatusLearning    Status = "learning"
-	StatusTrusted     Status = "trusted"
-	StatusDrifting    Status = "drifting"
+	// StatusUnproven is a twin whose error is within the limit but which
+	// has not shown skill: it does not beat "no change", or heat input
+	// varied too little to learn from. Nothing may plan from it.
+	StatusUnproven Status = "unproven"
+	StatusTrusted  Status = "trusted"
+	StatusDrifting Status = "drifting"
 )
 
 // Sample is one closed window, as the service measured it.
@@ -100,6 +128,13 @@ type Twin struct {
 	MAE3hK      float64 `json:"mae_3h_k"`
 	Evaluations int64   `json:"evaluations"`
 	WasTrusted  bool    `json:"was_trusted"`
+
+	// The same three-hour error over a week, beside the error of assuming
+	// the temperature stays where the stretch began, and the share of those
+	// stretches in which heat input varied.
+	SkillMAE3hK       float64 `json:"skill_mae_3h_k"`
+	PersistenceMAE3hK float64 `json:"persistence_mae_3h_k"`
+	HeatVariedShare   float64 `json:"heat_varied_share"`
 
 	// PowerSource names where heat input came from. A twin fitted to one
 	// source means nothing against another, so a change starts it over.
@@ -240,11 +275,25 @@ func (t *Twin) evaluate() {
 		}
 		temp += w.DurationH * dot(first.Theta, regressor(temp, w.TOutC, w.PowerKW))
 	}
-	errK := math.Abs(temp - t.Pending[len(t.Pending)-1].TInEndC)
+	measured := t.Pending[len(t.Pending)-1].TInEndC
+	errK := math.Abs(temp - measured)
 	if math.IsNaN(errK) || math.IsInf(errK, 0) {
 		return
 	}
+	persistenceK := math.Abs(first.TInStartC - measured)
+	minKW, maxKW := first.PowerKW, first.PowerKW
+	for _, w := range t.Pending {
+		minKW, maxKW = math.Min(minKW, w.PowerKW), math.Max(maxKW, w.PowerKW)
+	}
+	varied := 0.0
+	if maxKW >= heatVariedMinKW && minKW <= heatVariedRatio*maxKW {
+		varied = 1
+	}
 	t.Evaluations++
+	week := math.Min(float64(t.Evaluations), skillMemory)
+	t.SkillMAE3hK += (errK - t.SkillMAE3hK) / week
+	t.PersistenceMAE3hK += (persistenceK - t.PersistenceMAE3hK) / week
+	t.HeatVariedShare += (varied - t.HeatVariedShare) / week
 	// A running mean at first, then about half a day of memory: long
 	// enough that one odd evening does not cost trust, short enough that a
 	// house that changed shows as drifting the same day.
@@ -289,6 +338,13 @@ func (t *Twin) physical() bool {
 		p.CapacityKWhPerK != nil && *p.CapacityKWhPerK >= 1 && *p.CapacityKWhPerK <= 500
 }
 
+// skilled is whether the twin has shown it knows something: over the last
+// week it beat "no change", in stretches where heat input varied.
+func (t *Twin) skilled() bool {
+	return t.SkillMAE3hK <= skillVsPersistence*t.PersistenceMAE3hK &&
+		t.HeatVariedShare >= minHeatVariedShare
+}
+
 // Status reports the twin's standing and records a first trust, so later
 // error above the drift limit reads as drifting rather than as learning.
 func (t *Twin) Status() Status {
@@ -301,16 +357,20 @@ func (t *Twin) Status() Status {
 		}
 		return StatusLearning
 	}
-	switch {
-	case t.MAE3hK <= trustMAEK:
-		t.WasTrusted = true
-		return StatusTrusted
-	case t.WasTrusted && t.MAE3hK <= driftMAEK:
-		return StatusTrusted
-	case t.WasTrusted:
-		return StatusDrifting
+	limit := trustMAEK
+	if t.WasTrusted {
+		limit = driftMAEK
 	}
-	return StatusLearning
+	switch {
+	case t.MAE3hK > limit && t.WasTrusted:
+		return StatusDrifting
+	case t.MAE3hK > limit:
+		return StatusLearning
+	case !t.skilled():
+		return StatusUnproven
+	}
+	t.WasTrusted = true
+	return StatusTrusted
 }
 
 // FeatureHash fingerprints the model's form, so stored state from a
@@ -321,8 +381,8 @@ func FeatureHash() string {
 		x := regressor(v[0], v[1], v[2])
 		probe = append(probe, x[:]...)
 	}
-	probe = append(probe, windowH, lambda, EvalHorizonWindows)
-	return modelstate.Fingerprint("thermaltwin: dT/dt K/h = a(Tout-Tin) + b*P_kW + c; heat input hp_power_w", probe)
+	probe = append(probe, windowH, lambda, EvalHorizonWindows, skillMemory)
+	return modelstate.Fingerprint("thermaltwin: dT/dt K/h = a(Tout-Tin) + b*P_kW + c; heat input hp_power_w; judged against persistence", probe)
 }
 
 func dot(a, b [3]float64) float64 { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2] }

@@ -22,6 +22,16 @@ type fakeStore map[string]string
 
 func (f fakeStore) LoadConfig(key string) (string, bool) { v, ok := f[key]; return v, ok }
 func (f fakeStore) SaveConfig(key, value string) error   { f[key] = value; return nil }
+func (f fakeStore) DeleteConfig(key string) error        { delete(f, key); return nil }
+func (f fakeStore) LoadConfigByPrefix(prefix string) (map[string]string, error) {
+	out := map[string]string{}
+	for k, v := range f {
+		if strings.HasPrefix(k, prefix) {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
 
 var t0 = time.Date(2026, 11, 10, 6, 0, 0, 0, time.UTC)
 
@@ -30,7 +40,7 @@ var livingRoom = Zone{Key: "wiser/room_temp_c", SensorDriver: "wiser", SensorMet
 func newTestService(tele fakeTele, store fakeStore, zones ...Zone) *Service {
 	s := NewService(store, tele)
 	s.Temp = func(time.Time) (float64, bool) { return 0, true }
-	s.Zones = func() []Zone { return zones }
+	s.SetZones(zones, true)
 	s.PowerDrivers = func() []string { return []string{"wiser", "heishamon", "nibe"} }
 	return s
 }
@@ -153,20 +163,47 @@ func TestServicePrefersTheSensorsOwnPower(t *testing.T) {
 	}
 }
 
-func TestServiceDropsARemovedZone(t *testing.T) {
+// A zone that is no longer declared is forgotten, its stored twin with it;
+// so is a twin stored for a zone that went away while FTW was not running.
+func TestServiceForgetsARemovedZone(t *testing.T) {
+	store := fakeStore{stateKeyRoot + "old/room_temp_c": "{}", "unrelated": "kept"}
 	tele := fakeTele{}
-	zones := []Zone{livingRoom}
-	s := NewService(fakeStore{}, tele)
-	s.Temp = func(time.Time) (float64, bool) { return 0, true }
-	s.Zones = func() []Zone { return zones }
-	s.Tick(t0)
-	if len(s.Snapshot()) != 1 {
-		t.Fatalf("snapshot = %+v", s.Snapshot())
+	s := newTestService(tele, store, livingRoom)
+	if _, ok := store[stateKeyRoot+"old/room_temp_c"]; ok {
+		t.Error("the stored twin of a zone gone before start was kept")
 	}
-	zones = nil
-	s.Tick(t0.Add(Window))
+	run(s, t0, 31, func(now time.Time) {
+		tele["wiser/room_temp_c"] = metric{20, now}
+		tele["heishamon/hp_power_w"] = metric{1500, now}
+	})
+	if _, ok := store[stateKeyRoot+livingRoom.Key]; !ok {
+		t.Fatal("precondition: the zone's twin was not stored")
+	}
+	s.SetZones(nil, true)
 	if got := s.Snapshot(); len(got) != 0 {
 		t.Errorf("snapshot = %+v after the zone was removed", got)
+	}
+	if _, ok := store[stateKeyRoot+livingRoom.Key]; ok {
+		t.Error("the removed zone's stored twin was kept")
+	}
+	if store["unrelated"] != "kept" {
+		t.Error("a row outside the twins' prefix was deleted")
+	}
+}
+
+// An incomplete list says some zones could not be read, not that they are
+// gone. Weeks of learning are not dropped on that.
+func TestServiceKeepsZonesWhenTheListIsIncomplete(t *testing.T) {
+	store := fakeStore{stateKeyRoot + "old/room_temp_c": "{}"}
+	bedroom := Zone{Key: "wiser/bed_temp_c", SensorDriver: "wiser", SensorMetric: "bed_temp_c"}
+	s := NewService(store, fakeTele{})
+	s.SetZones([]Zone{livingRoom}, false)
+	s.SetZones([]Zone{bedroom}, false)
+	if got := s.Snapshot(); len(got) != 2 {
+		t.Errorf("snapshot = %+v, want both zones kept", got)
+	}
+	if _, ok := store[stateKeyRoot+"old/room_temp_c"]; !ok {
+		t.Error("a stored twin was deleted on an incomplete list")
 	}
 }
 

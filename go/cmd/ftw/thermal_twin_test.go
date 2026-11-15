@@ -39,13 +39,25 @@ func TestThermalTwinZonesFromDeclaredSensors(t *testing.T) {
 		{Name: "grid", Lua: filepath.Join(dir, "meter.lua")},
 	}
 
-	got := thermalTwinZones(cfg, catalog)
+	got, complete := thermalTwinZones(cfg, catalog)
+	if !complete {
+		t.Error("complete = false with every enabled driver in the catalog")
+	}
 	want := []thermaltwin.Zone{
 		{Key: "wiser/room_bed_temp_c", SensorDriver: "wiser", SensorMetric: "room_bed_temp_c"},
 		{Key: "wiser/room_living_temp_c", SensorDriver: "wiser", SensorMetric: "room_living_temp_c"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("zones = %+v, want %+v (no tank, no disabled driver)", got, want)
+	}
+	// A driver the catalog cannot describe has unknown sensors, not none:
+	// the list is incomplete and no twin may be forgotten on its strength.
+	missing := append(cfg, config.Driver{Name: "gone", Lua: filepath.Join(dir, "gone.lua")})
+	if got, complete := thermalTwinZones(missing, catalog); complete || !reflect.DeepEqual(got, want) {
+		t.Errorf("with an unreadable driver: zones = %+v, complete = %v; want the same zones, incomplete", got, complete)
+	}
+	if got, complete := thermalTwinZones(cfg, nil); complete || len(got) != 0 {
+		t.Errorf("without a catalog: zones = %+v, complete = %v; want none, incomplete", got, complete)
 	}
 	if p := thermalTwinPowerDrivers(cfg); !reflect.DeepEqual(p, []string{"wiser", "grid"}) {
 		t.Errorf("power drivers = %v", p)
