@@ -67,15 +67,85 @@ func TestPlanNowTrackerHoldsAMinute(t *testing.T) {
 	if status != planNowOffPlan || !since.Equal(at(40)) || !settles.IsZero() {
 		t.Fatalf("after a minute: %q since %v, settles %v", status, since, settles)
 	}
-	// Coming back holds a minute too.
+	// Coming back holds 15 s, dated from when it began.
 	if got := feed(105, false); got != planNowOffPlan {
 		t.Fatalf("back on plan at once: %q", got)
 	}
-	for s := 110; s <= 160; s += 5 {
-		feed(s, false)
+	_, _, settles, _ = tr.observe(planNowSample{at: at(110)}, false)
+	if !settles.Equal(at(120)) {
+		t.Fatalf("back settles at %v, want %v", settles, at(120))
 	}
-	if got := feed(165, false); got != planNowAsPlanned {
-		t.Fatalf("after a minute back: %q", got)
+	status, since, settles, _ = tr.observe(planNowSample{at: at(120)}, false)
+	if status != planNowAsPlanned || !since.Equal(at(105)) || !settles.IsZero() {
+		t.Fatalf("after 15 s back: %q since %v, settles %v", status, since, settles)
+	}
+}
+
+// 15 November 2026, xorath: at 11:45 the app said "Charging 1.2 kW. The plan
+// said: charge 4.2 kW." while the battery charged 4.3 kW. The battery had
+// charged 1.2 kW against a plan to rest; the new quarter planned 4.2 kW and
+// the battery followed at once, but the answer kept the old quarter's verdict
+// and mean for a minute.
+func TestPlanNowTrackerStartsOverWhenThePlanMoves(t *testing.T) {
+	q := time.Date(2026, 11, 15, 11, 45, 0, 0, time.Local)
+	at := func(s int) time.Time { return q.Add(time.Duration(s) * time.Second) }
+	var tr planNowTracker
+	read := func(s int, planned, battery float64) (string, time.Time, time.Time, planNowSample) {
+		return tr.observe(planNowSample{at: at(s), battery: battery, planned: planned}, planOff(planned, battery))
+	}
+	for s := -180; s < 0; s += 5 {
+		read(s, 0, 1200)
+	}
+	if status, _, _, _ := read(-1, 0, 1200); status != planNowOffPlan {
+		t.Fatalf("the old quarter: %q", status)
+	}
+	status, since, settles, m := read(1, 4200, 4300)
+	if status != planNowAsPlanned || !since.Equal(at(1)) || !settles.IsZero() || m.battery != 4300 {
+		t.Fatalf("new quarter: %q since %v, settles %v, mean %v W", status, since, settles, m.battery)
+	}
+}
+
+// A battery that has not reached a new target gets the minute any change
+// gets, and is off plan if it still has not.
+func TestPlanNowTrackerGivesANewTargetAMinute(t *testing.T) {
+	q := time.Date(2026, 11, 15, 11, 45, 0, 0, time.Local)
+	at := func(s int) time.Time { return q.Add(time.Duration(s) * time.Second) }
+	var tr planNowTracker
+	read := func(s int, planned, battery float64) (string, time.Time, time.Time) {
+		status, since, settles, _ := tr.observe(planNowSample{at: at(s), battery: battery, planned: planned}, planOff(planned, battery))
+		return status, since, settles
+	}
+	for s := -120; s < 0; s += 5 {
+		read(s, 0, 0)
+	}
+	status, _, settles := read(0, 4200, 0)
+	if status != planNowAsPlanned || !settles.Equal(at(60)) {
+		t.Fatalf("new target: %q, settles %v", status, settles)
+	}
+	for s := 5; s < 60; s += 5 {
+		read(s, 4200, 0)
+	}
+	status, since, _ := read(60, 4200, 0)
+	if status != planNowOffPlan || !since.Equal(at(0)) {
+		t.Fatalf("a minute short: %q since %v", status, since)
+	}
+}
+
+// A battery off plan stays off plan into a quarter with much the same target.
+func TestPlanNowTrackerKeepsTheVerdictWhileTheTargetHolds(t *testing.T) {
+	q := time.Date(2026, 11, 15, 11, 45, 0, 0, time.Local)
+	at := func(s int) time.Time { return q.Add(time.Duration(s) * time.Second) }
+	var tr planNowTracker
+	read := func(s int, planned float64) (string, time.Time) {
+		status, since, _, _ := tr.observe(planNowSample{at: at(s), planned: planned}, planOff(planned, 0))
+		return status, since
+	}
+	for s := -120; s < 0; s += 5 {
+		read(s, 4200)
+	}
+	status, since := read(0, 4000)
+	if status != planNowOffPlan || !since.Equal(at(-120)) {
+		t.Fatalf("same target: %q since %v", status, since)
 	}
 }
 

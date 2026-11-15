@@ -313,14 +313,19 @@ func TestDelayedStatusAfterDisconnectStaysUnknown(t *testing.T) {
 	h.OnDisconnect("garage")
 	h.OnStatusNotification("garage", &core.StatusNotificationRequest{ConnectorId: 1, Status: core.ChargePointStatusAvailable, ErrorCode: core.NoError})
 	var data struct {
-		Connected *bool `json:"connected"`
-		Unknown   bool  `json:"connection_unknown"`
-		Online    *bool `json:"is_online"`
+		Connected *bool  `json:"connected"`
+		Unknown   bool   `json:"connection_unknown"`
+		Online    *bool  `json:"is_online"`
+		State     string `json:"state_label"`
+		Reason    string `json:"reason_no_current_label"`
 	}
 	if err := json.Unmarshal(tel.Get("garage", telemetry.DerEV).Data, &data); err != nil {
 		t.Fatal(err)
 	}
 	if data.Connected != nil || !data.Unknown || data.Online == nil || *data.Online {
 		t.Fatalf("late status looked physically unplugged: %+v", data)
+	}
+	if data.State != "Waiting for charger connection status" || data.Reason != "" {
+		t.Fatalf("connection wait must be a state, got %+v", data)
 	}
 }

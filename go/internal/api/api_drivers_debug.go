@@ -8,10 +8,12 @@ package api
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +29,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/config"
+	"github.com/srcfl/ftw/go/internal/drivercontrol"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -46,7 +50,7 @@ type driverDetailResp struct {
 	// temperature. Absent for every driver that declares none.
 	Sensors []drivers.CatalogSensor `json:"sensors,omitempty"`
 	// Hold is the operator setting in force, if any, and when it ends.
-	Hold *controlHold `json:"hold,omitempty"`
+	Hold *drivercontrol.Hold `json:"hold,omitempty"`
 	// ControlState says whether Core has confirmed autonomous default mode.
 	// It must not call a failed default safe or settled.
 	ControlState driverControlStateResp `json:"control_state"`
@@ -128,12 +132,12 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 		resp.Controls = entry.Controls
 		resp.Sensors = entry.Sensors
 	}
-	resp.Hold = s.activeControlHold(name)
+	resp.Hold = s.controlHolds.Active(name)
 	resp.ControlState = s.driverControlState(name, resp.Hold)
 	writeJSON(w, 200, resp)
 }
 
-func (s *Server) driverControlState(name string, hold *controlHold) driverControlStateResp {
+func (s *Server) driverControlState(name string, hold *drivercontrol.Hold) driverControlStateResp {
 	if s.deps == nil || s.deps.Registry == nil {
 		return driverControlStateResp{State: "unknown"}
 	}
@@ -738,12 +742,14 @@ func (s *Server) handleGlobalLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/support/dump — zip archive with everything a developer needs
-// to triage a support incident: redacted config, full driver health JSON,
-// recent global + per-driver logs (secrets and IPv4 addresses stripped),
-// last 1 h of TS samples per (driver, metric), and a
-// manifest. SQLite is NOT included; the dump is intended to be small
-// enough to attach to a chat message — measured at ~6 kB on a two-driver
-// install.
+// to triage a support incident: the help report, redacted config, driver
+// health, the log ring (secrets and IPv4 addresses stripped), the last hour
+// of samples at stored resolution, and seven days from the box's own
+// storage in week/: every series in five-minute buckets, the control
+// journal, plan snapshots, notifications, start and stop events and the
+// hourly warning counts. SQLite is NOT included. A seeded week with five
+// drivers, 113 series, 6,000 journal spans and 1,050 plans gave a 2.8 MB
+// archive, small enough to mail; week/series/ is three quarters of it.
 //
 // Zip rather than tar.gz because this file's whole purpose is to be
 // handed to somebody else. Windows and every chat client open a zip
@@ -763,7 +769,9 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
+	topic := s.ntfyTopic()
 	addFile := func(name string, body []byte) {
+		body = hideNtfyTopic(body, topic)
 		hdr := &zip.FileHeader{
 			Name:     "ftw-support-" + stamp + "/" + name,
 			Method:   zip.Deflate,
@@ -782,7 +790,8 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// below it is what you reach for when the report does not settle the
 	// question. Shipping them together means the person asking for help
 	// sends one file and never has to pick the right one.
-	addFile("00-help-report.md", []byte(redactDumpLog(s.buildSupportReport(r.Context(), now))))
+	week := s.loadSupportWeek(r.Context(), now, true)
+	addFile("00-help-report.md", []byte(redactDumpLog(s.buildSupportReportWith(r.Context(), now, week))))
 
 	manifest := map[string]any{
 		"generated_at": now.Format(time.RFC3339),
@@ -800,7 +809,20 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 			"loadpoints.json",
 			"logs/global.log",
 			"logs/<driver>.log",
+			"logs/warnings-week.log",
 			"telemetry/<driver>__<metric>.csv",
+			"week/summary.json",
+			"week/series/<driver>__<metric>.csv",
+			"week/control-journal.json",
+			"week/plans.json",
+			"week/notifications.json",
+			"week/events.json",
+		},
+		"covers": map[string]string{
+			"logs/*.log except warnings-week.log": "the in-memory log ring: the latest lines, often under an hour",
+			"logs/warnings-week.log":              "seven days of warnings and errors, one line per message pattern and hour",
+			"telemetry/":                          "the last hour of samples at stored resolution",
+			"week/":                               "seven days from the box's storage; series in five-minute buckets with min, max and sample count",
 		},
 	}
 	manifestBody, _ := json.MarshalIndent(manifest, "", "  ")
@@ -831,9 +853,11 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 		addFile("logs/"+sanitizeName(d)+".log", []byte(formatLogs(entries)))
 	}
 
-	// Last 1 h of TS samples per (driver, metric) — small enough to
-	// keep the bundle email-able. Only metrics the operator actually
-	// emitted in this window appear.
+	addWeekFiles(addFile, week)
+
+	// Last 1 h of TS samples per (driver, metric) at stored resolution,
+	// next to week/'s five-minute buckets. Only metrics the operator
+	// actually emitted in this window appear.
 	if s.deps.State != nil {
 		untilMs := now.UnixMilli()
 		sinceMs := untilMs - 3600*1000
@@ -919,6 +943,11 @@ func (s *Server) redactedConfig() []byte {
 		return cfgBytes
 	}
 	redactSensitive(asMap)
+	top, _ := asMap.(map[string]any)
+	notifications, _ := top["notifications"].(map[string]any)
+	if ntfy, ok := notifications["ntfy"].(map[string]any); ok && ntfy["topic"] != nil {
+		ntfy["topic"] = "***"
+	}
 	pretty, err := json.MarshalIndent(asMap, "", "  ")
 	if err != nil {
 		return cfgBytes
@@ -927,8 +956,8 @@ func (s *Server) redactedConfig() []byte {
 }
 
 // redactSensitive walks an unmarshalled JSON tree and replaces any value
-// at a key whose lowercased name matches a sensitive substring. Recursive,
-// in-place.
+// at a key whose lowercased name matches a sensitive substring, and any
+// e-mail address wherever it sits. Recursive, in-place.
 func redactSensitive(v any) {
 	switch x := v.(type) {
 	case map[string]any:
@@ -938,10 +967,22 @@ func redactSensitive(v any) {
 				x[k] = "***"
 				continue
 			}
+			if isCoordinateKey(lk) {
+				x[k] = roundCoordinate(val)
+				continue
+			}
+			if str, ok := val.(string); ok {
+				x[k] = dumpEmailRe.ReplaceAllString(str, "[email omitted]")
+				continue
+			}
 			redactSensitive(val)
 		}
 	case []any:
-		for _, e := range x {
+		for i, e := range x {
+			if str, ok := e.(string); ok {
+				x[i] = dumpEmailRe.ReplaceAllString(str, "[email omitted]")
+				continue
+			}
 			redactSensitive(e)
 		}
 	}
@@ -955,12 +996,83 @@ func isSensitiveKey(k string) bool {
 	for _, s := range []string{
 		"password", "passwd", "secret", "token", "api_key", "apikey",
 		"private_key", "client_secret", "authorization", "credential",
+		// Who the owner is, not how they sign in: a cloud account's
+		// username is often their e-mail address.
+		"email", "e-mail", "username", "user_name",
 	} {
 		if strings.Contains(k, s) {
 			return true
 		}
 	}
 	return hasAuthSegment(k)
+}
+
+// coordinateWords name a value that says where something is. The support
+// file keeps whole degrees, about 100 km: enough to show a missing location
+// or a wrong sign, not enough to find the house.
+var coordinateWords = []string{"lat", "lon", "lng", "latitude", "longitude"}
+
+func isCoordinateKey(k string) bool {
+	words := strings.FieldsFunc(strings.ToLower(k), func(r rune) bool { return r == '_' || r == '-' || r == '.' })
+	for _, w := range words {
+		if slices.Contains(coordinateWords, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// roundCoordinate rounds a coordinate to whole degrees and keeps its type.
+// Anything that is not a number goes.
+func roundCoordinate(v any) any {
+	switch x := v.(type) {
+	case nil, bool:
+		return v
+	case float64:
+		return math.Round(x)
+	case json.Number:
+		if f, err := x.Float64(); err == nil {
+			return json.Number(strconv.FormatFloat(math.Round(f), 'f', -1, 64))
+		}
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return x
+		}
+		return roundCoordinateText(x)
+	}
+	return "***"
+}
+
+func roundCoordinateText(s string) string {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return "***"
+	}
+	return strconv.FormatFloat(math.Round(f), 'f', -1, 64)
+}
+
+// ntfyTopic is the configured ntfy topic, or "".
+func (s *Server) ntfyTopic() string {
+	if s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return ""
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if n := s.deps.Cfg.Notifications; n != nil && n.Ntfy != nil {
+		return strings.TrimSpace(n.Ntfy.Topic)
+	}
+	return ""
+}
+
+// hideNtfyTopic removes the ntfy topic from text. On the public server the
+// topic is the key that reads the owner's alerts, and a failed publish
+// quotes it in the URL. A topic under three characters stays: replacing it
+// would scrub ordinary words, and the config hides it anyway.
+func hideNtfyTopic(body []byte, topic string) []byte {
+	if len(topic) < 3 || !bytes.Contains(body, []byte(topic)) {
+		return body
+	}
+	return bytes.ReplaceAll(body, []byte(topic), []byte("[ntfy topic omitted]"))
 }
 
 // hasAuthSegment is true for a bare "auth" path segment so auth,
@@ -985,28 +1097,56 @@ var (
 	dumpJSONSecretRe = regexp.MustCompile(`(?i)("([^"\\]+)"\s*:\s*)("(?:\\.|[^"\\])*")`)
 	dumpFormSecretRe = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9_-]*)=([^\s&"]+)`)
 	dumpBasicAuthRe  = regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=_-]+`)
+	dumpEmailRe      = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
+	// dumpJSONCoordRe finds a JSON number under a coordinate key, such as a
+	// car's position in an HTTP body a driver logs.
+	dumpJSONCoordRe = regexp.MustCompile(`(?i)("(?:[a-z0-9]+[_.-])*(?:lat|lon|lng|latitude|longitude)(?:[_.-][a-z0-9]+)*"\s*:\s*)(-?\d+(?:\.\d+)?(?:e[-+]?\d+)?)`)
 )
 
-// redactDumpLog removes IPv4 addresses and credentials, including JSON and
-// form fields whose keys isSensitiveKey would catch. Stricter on OAuth
-// bodies that Lua logs as `HTTP %d: %s`.
+// redactDumpLog removes IPv4 addresses, e-mail addresses and credentials,
+// including JSON and form fields whose keys isSensitiveKey would catch, and
+// rounds coordinates to whole degrees. Stricter on OAuth bodies that Lua
+// logs as `HTTP %d: %s`.
 func redactDumpLog(s string) string {
 	if s == "" {
 		return s
 	}
 	s = dumpIPv4Re.ReplaceAllString(s, "[ip omitted]")
+	s = dumpEmailRe.ReplaceAllString(s, "[email omitted]")
 	s = dumpBearerRe.ReplaceAllString(s, "Bearer [omitted]")
 	s = dumpBasicAuthRe.ReplaceAllString(s, "Basic [omitted]")
 	s = dumpJSONSecretRe.ReplaceAllStringFunc(s, func(m string) string {
 		parts := dumpJSONSecretRe.FindStringSubmatch(m)
-		if len(parts) != 4 || !isSensitiveKey(parts[2]) {
+		if len(parts) != 4 {
+			return m
+		}
+		if isCoordinateKey(parts[2]) {
+			if v, err := strconv.Unquote(parts[3]); err == nil {
+				return parts[1] + strconv.Quote(roundCoordinateText(v))
+			}
+			return parts[1] + `"***"`
+		}
+		if !isSensitiveKey(parts[2]) {
 			return m
 		}
 		return parts[1] + `"***"`
 	})
+	s = dumpJSONCoordRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := dumpJSONCoordRe.FindStringSubmatch(m)
+		if len(parts) != 3 {
+			return m
+		}
+		return parts[1] + roundCoordinateText(parts[2])
+	})
 	s = dumpFormSecretRe.ReplaceAllStringFunc(s, func(m string) string {
 		parts := dumpFormSecretRe.FindStringSubmatch(m)
-		if len(parts) != 3 || !isSensitiveKey(parts[1]) {
+		if len(parts) != 3 {
+			return m
+		}
+		if isCoordinateKey(parts[1]) {
+			return parts[1] + "=" + roundCoordinateText(parts[2])
+		}
+		if !isSensitiveKey(parts[1]) {
 			return m
 		}
 		return parts[1] + "=***"

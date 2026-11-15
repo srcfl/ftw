@@ -788,7 +788,7 @@ func (h *Handler) pushReading(id string, s *chargerState) {
 		// the zero out of manual-command acknowledgements in both clients.
 		data["connection_unknown"] = true
 		data["is_online"] = false
-		data["reason_no_current_label"] = "Waiting for charger connection status"
+		data["state_label"] = "Waiting for charger connection status"
 	}
 	h.mu.Unlock()
 	if !approved {

@@ -178,6 +178,27 @@ export function isGridExport(action) {
   return (Number(action && action.grid_w) || 0) < -SALE_W;
 }
 
+// The watts of a planned discharge that leave through the meter: what the
+// home sells beyond its own use, up to what the battery gives. Zero while
+// the battery charges, waits or only covers the home. The phone's
+// PlanEntry.Slot.soldW.
+export function batterySoldW(action) {
+  const battery = Number(action && action.battery_w) || 0;
+  const grid = Number(action && action.grid_w) || 0;
+  if (!(battery < -SALE_W && grid < -SALE_W)) return 0;
+  return Math.min(-battery, -grid);
+}
+
+// The palette role a plan draws the battery in for one slot, as the phone
+// does: "stores" while it charges, "gives" while it discharges, "grid" when
+// most of what it gives is sold, null while it waits.
+export function batteryHue(action) {
+  const battery = Number(action && action.battery_w) || 0;
+  if (battery > DISCHARGE_W) return "stores";
+  if (battery < -DISCHARGE_W) return batterySoldW(action) * 2 >= -battery ? "grid" : "gives";
+  return null;
+}
+
 function clock(ms) {
   const d = new Date(ms);
   return String(d.getHours()).padStart(2, "0") + ":" +

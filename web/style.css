@@ -2144,6 +2144,8 @@ footer {
 }
 .legend-item:hover { opacity: 0.8; }
 .legend-item.legend-off { opacity: 0.3; text-decoration: line-through; }
+/* inline-flex above would otherwise show an item the chart hides. */
+.legend-item[hidden] { display: none; }
 
 .strategy-hint {
   font-size: 0.78rem;

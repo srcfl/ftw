@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.164.0
+
+### Minor Changes
+
+- bb5e43b: History charts can show this month, last month or a selected calendar month, using local month boundaries.
+- 59173a0: The support file now answers for the last seven days, not the last hour.
+  Its help report gains "What happened over the last week": per day and
+  night, the battery's lowest and highest charge, energy in and out of the
+  battery, to the car and over the grid, how often the plan changed and why,
+  how far the battery strayed from the plan, fuse limits, devices out of
+  contact, plans that fell back to Core and restarts, with the notable ones
+  stated first. The archive carries the week behind it in `week/`: every
+  series in five-minute buckets, the control journal, plan snapshots,
+  notifications, start and stop events, and a week of warnings and errors
+  counted per hour, which the box now stores so they outlast the log buffer
+  and a restart. The redacted config and logs no longer show the owner's
+  e-mail address, account username or ntfy topic, and they round the site's
+  coordinates to whole degrees.
+
+### Patch Changes
+
+- 13b085d: A battery boost keeps running while the main fuse or the hourly import limit
+  holds the car back. FTW used to refuse or stop a boost exactly then, with
+  "fuse protection stopped it", although that is when the home battery helps
+  most. The car's limit still comes from the measured site meter, so the fuse
+  is protected as before.
+- 9c6eda8: Internal: operator driver-control holds moved from the API into their own
+  package so a later planner can share the same lock and expiry, and the unused
+  thermal policy draft (`DecideIntent`) is removed. No behaviour change.
+- fa59212: A charger with no car, which FTW asks for nothing, no longer says FTW lost control when it stops reporting. An idle Easee can go quiet once the car leaves, and the app then showed "Charger · Lost control" while the car was out on the road. Such a charger now says it waits for a car; one that goes quiet with a car on it, or while FTW asks it to charge, still raises the alarm.
+- f1b7c4b: Show requested current, charger pilot current and measured power in EV charging warnings when fresh pilot data is available.
+- 7d2b8af: In the Home Assistant app, the version in the header and the Version button under More now open a dialog. It names the running version and says Home Assistant installs updates and rollbacks for the app. Before, a click did nothing. On a Docker install, the dialog says FTW does not update itself there and to update it the way it was installed. On both, the header also shows the connection light and the optimizer warning again; they were hidden along with the update check.
+- bc75e17: Internal: a heat planner package (`heatplan`) that proposes control values
+  for one zone from prices, weather and the site's energy plan. Nothing calls
+  it yet. No behaviour change.
+- e276a02: Speed up hourly forecast calibration reads with a partial SQLite index. Prepare the index during startup before Core begins writing live data. If the build fails, record the failure so later starts skip the build and reads continue using the existing index.
+- 4824d16: The dashboard's charts now use the phone app's colours too. On the Plan, prices are shades of ink, the battery is cyan when it stores power and orange when it gives power, the car is violet and the home is ink. History draws grid export below the zero line in the grid's one pink. The live chart, the 24-hour battery chart, the heating charts, the car plan and the status marks in device cards and settings follow, and every chart redraws when the theme changes.
+- 7350a3e: A box left on one of the old planner modes, "Planner (self)" or "Planner (cheap)", now starts in Passive arbitrage after a restart and saves it. Passive arbitrage, like both old modes, never sells from the battery. Unlike "Planner (self)", it can charge the battery from the grid in cheap hours. With the planner turned off, the box starts in self-consumption instead. Unknown saved modes still fall back to the default.
+- df94ec8: The plan chart on the box page uses the phone app's colours for the battery
+  in every place. What the battery gives that the home sells is now magenta,
+  the grid's colour, as in the app: in the battery band when most of it is
+  sold, and at the outer end of the power bar for the part that is sold. The
+  SoC line takes the colour of what the battery does in each slot, and grey
+  where it waits. The legend names "Sell" while the plan sells, and an item
+  the chart hides, such as "Car charging" with no car planned, no longer shows.
+- 37ef253: The line that says the battery is not following the plan no longer mixes two
+  quarters. At a new quarter or a new plan, FTW used to hold the battery's last
+  minute against the new target and keep the old verdict for a minute, so it
+  could say "Charging 1.2 kW. The plan said: charge 4.2 kW." while the battery
+  charged 4.3 kW. FTW now starts the comparison over when the target moves.
+  A battery that comes back to the plan clears the line after 15 seconds
+  instead of a minute.
+- b3979bf: The box's price answer to the app, and FTW Cloud's price tile, now carry the VAT rate the box taxes the total at, as `vatPermille` (250 is 25 %). The rate is the one in force after the default, so a box that never set `vat_percent` says 250. With it the iPhone app can show the spot price with VAT at the box's own rate instead of a guess.
+- 91a2f0c: The diagnostic catalog an assistant reads now says that FTW Cloud, the web client and the native apps live in private repositories, points to the public archives of earlier client versions, and no longer sends assistants to a Cloud source page that is gone. The client protocol is now in Core as `docs/protocol.md`.
+- 65656e4: Keep the shared client contracts public in Core without a private-client build dependency.
+- dbca127: Show the charger's reported reason in EV charging shortfall messages when current charger readings include an explanation.
+- 1e525ac: A driver can now say what a control does to heat. A control may declare `asset` (space_heat, dhw, cooling or buffer), `strategy` (curve_offset, setpoint, on_off or discrete_mode), `zone`, `min_interval_s`, `device_hold_max_s` (how long the device keeps a value before it returns to its own regulation), and for on_off `min_on_s` and `min_off_s`. A number input may declare its `default`, the value the device runs at by itself. A driver may also list `sensors`: the metrics that are a heat store's temperature. `/api/drivers/{name}` shows both. Nothing plans for or sends a heat command because of them yet.
+  
+  A string control may declare a closed set of `options`. The control API then refuses any other value instead of passing it to the driver. A control that declares these fields wrongly is left out, as an unrenderable control is today. Drivers that declare none of them are unchanged.
+- 4d704b9: FTW now learns a thermal twin, in shadow, for each room sensor a driver declares (`sensors` with `asset = "space_heat"`). Every 30 minutes it fits the room's inertia, heat capacity, heat loss and other gains from the room temperature, the outdoor temperature and the heat pump's `hp_power_w`, and checks itself by predicting three hours ahead against what the sensor then measured. `GET /api/thermal/twins` shows each twin as learning, unproven, trusted or drifting, or says it has no heat input to learn from. A twin is trusted only when its error is small, it beats assuming the temperature stays as it is, and the heat input varied enough to learn from; a room a thermostat holds still stays unproven. `hp_power_w` is the pump's whole electrical power, so hot-water charging and defrost count as room heat until a driver can report space heat alone. A twin is deleted when its sensor is no longer declared. The twin commands nothing, and nothing plans from it yet.
+- afd4aca: Read the site meter's phase current from its phase power as well. Many P1 meters report phase current in whole amperes, so a phase could carry up to 1 A more than the meter showed, and the car's fuse limit let it stay there. Each phase now counts as at least its power over its measured voltage, when the meter reports both and the phase powers add up to its total. Meters that report no phase voltage read as before.
+
 ## 0.163.0
 
 ### Minor Changes

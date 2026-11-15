@@ -52,11 +52,14 @@ const DEFAULT_ACCENT = {
 // out into four identical 30-day queries and leave tiles painting at
 // different times.
 const DAILY_CACHE_TTL_MS = 15000;
-const dailyFetchCache = new Map(); // days -> { at, data?, promise? }
+const dailyFetchCache = new Map(); // range key -> { at, data?, promise? }
 
-function fetchDailyEnergy(days) {
+function fetchDailyEnergy(range) {
+  const month = range.startsWith("month:") ? range.slice(6) : "";
+  const days = month ? 0 : 7;
+  const key = month || String(days);
   const now = Date.now();
-  const cached = dailyFetchCache.get(days);
+  const cached = dailyFetchCache.get(key);
   if (cached && cached.data && now - cached.at < DAILY_CACHE_TTL_MS) {
     return Promise.resolve(cached.data);
   }
@@ -64,27 +67,29 @@ function fetchDailyEnergy(days) {
     return cached.promise;
   }
 
-  const promise = apiFetch("/api/energy/daily?days=" + days)
+  const promise = apiFetch(month
+    ? "/api/energy/daily?month=" + encodeURIComponent(month)
+    : "/api/energy/daily?days=" + days)
     .then((r) => {
       if (!r.ok) throw new Error("HTTP " + r.status);
       return r.json();
     })
     .then((resp) => {
-      dailyFetchCache.set(days, { at: Date.now(), data: resp });
+      dailyFetchCache.set(key, { at: Date.now(), data: resp });
       return resp;
     })
     .catch((err) => {
-      const cur = dailyFetchCache.get(days);
-      if (cur && cur.promise === promise) dailyFetchCache.delete(days);
+      const cur = dailyFetchCache.get(key);
+      if (cur && cur.promise === promise) dailyFetchCache.delete(key);
       throw err;
     });
-  dailyFetchCache.set(days, { at: now, promise });
+  dailyFetchCache.set(key, { at: now, promise });
   return promise;
 }
 
 class FtwHistoryCard extends FtwElement {
   static styles = `
-    :host { display: block; }
+    :host { display: block; min-width: 0; }
     /* All card chrome lives on .card-inner, NOT :host. The global
        reset "*, *::before, *::after { padding:0; margin:0 }" from
        style.css beats the shadow :host rule in Chromium for the
@@ -94,6 +99,7 @@ class FtwHistoryCard extends FtwElement {
        Use this wrapper pattern for any web component that needs
        visible padding/margin on its outermost surface. */
     .card-inner {
+      min-width: 0;
       display: flex;
       flex-direction: column;
       gap: 8px;
@@ -110,6 +116,11 @@ class FtwHistoryCard extends FtwElement {
     :host([hide-toggle]) .card-inner {
       background: var(--ink-sunken);
     }
+    .chart-scroll { overflow-x: auto; min-width: 0; }
+    .chart-scroll ftw-bar-chart { display: block; }
+    .scroll-hint { margin: 0; text-align: right; color: var(--fg-muted); font: 11px var(--mono); }
+    .scroll-hint[hidden] { display: none; }
+    .chart-scroll:focus-visible { outline: 1px solid var(--accent-e); outline-offset: 2px; border-radius: 4px; }
     .head {
       display: flex;
       align-items: center;
@@ -233,6 +244,7 @@ class FtwHistoryCard extends FtwElement {
     this._syncPolling();
   }
   disconnectedCallback() {
+    if (this._scrollResize) this._scrollResize.disconnect();
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
     if (this._onVisibility) {
       document.removeEventListener("visibilitychange", this._onVisibility);
@@ -248,10 +260,9 @@ class FtwHistoryCard extends FtwElement {
     let rangeChanged = false;
     if (name === "range") {
       const next = this.getAttribute("range");
-      if (next && next !== this._range) {
-        this._range = next;
-        rangeChanged = true;
-      }
+      if (!next || next === this._range) return;
+      this._range = next;
+      rangeChanged = true;
     }
     this.update();
     if (name === "metric" || name === "poll-ms") {
@@ -307,12 +318,31 @@ class FtwHistoryCard extends FtwElement {
           <div class="label">${escapeHtml(label)}</div>${toggleHtml}
         </div>
         <div class="total" data-role="total">— kWh</div>
-        <ftw-bar-chart data-role="chart" loading="true"></ftw-bar-chart>
+        <div class="chart-scroll" tabindex="0" role="region" aria-label="Daily energy chart" aria-describedby="scroll-hint"><ftw-bar-chart data-role="chart" loading="true"></ftw-bar-chart></div>
+        <p id="scroll-hint" class="scroll-hint" hidden></p>
       </div>
     `;
   }
 
+  _syncScrollHint() {
+    const scroll = this.shadowRoot.querySelector(".chart-scroll");
+    const hint = this.shadowRoot.querySelector(".scroll-hint");
+    if (!scroll || !hint) return;
+    const remaining = scroll.scrollWidth - scroll.clientWidth - scroll.scrollLeft;
+    hint.hidden = scroll.scrollWidth <= scroll.clientWidth + 1;
+    hint.textContent = scroll.scrollLeft > 1
+      ? (remaining > 1 ? "← Scroll for more days →" : "← Scroll for earlier days")
+      : "Scroll for more days →";
+  }
+
   afterRender() {
+    if (this._scrollResize) this._scrollResize.disconnect();
+    const scroll = this.shadowRoot.querySelector(".chart-scroll");
+    if (scroll) {
+      scroll.addEventListener("scroll", () => this._syncScrollHint(), { passive: true });
+      this._scrollResize = new ResizeObserver(() => this._syncScrollHint());
+      this._scrollResize.observe(scroll);
+    }
     this._chart   = this.shadowRoot.querySelector('[data-role="chart"]');
     this._totalEl = this.shadowRoot.querySelector('[data-role="total"]');
     this._toggleEl = this.shadowRoot.querySelector('.toggle');
@@ -334,19 +364,10 @@ class FtwHistoryCard extends FtwElement {
     }
   }
 
-  _daysFor(range) {
-    if (range === "month") {
-      const now = new Date();
-      return now.getDate();
-    }
-    return 7;
-  }
-
   _refresh() {
     if (!this._chart || !this._totalEl) return;
     const metric = this.getAttribute("metric") || "import";
     const field  = FIELD_BY_METRIC[metric] || "import_wh";
-    const days   = this._daysFor(this._range);
 
     // Bump the sequence so stale responses arriving after a Week/Month
     // toggle don't overwrite the newer chart. The shared request cache
@@ -355,7 +376,8 @@ class FtwHistoryCard extends FtwElement {
     const seq = ++this._reqSeq;
 
     this._chart.setAttribute("loading", "true");
-    fetchDailyEnergy(days)
+    const range = this._range === "month" ? "month:" + currentMonth() : this._range;
+    fetchDailyEnergy(range)
       .then((resp) => {
         if (seq !== this._reqSeq) return;
         const buckets = (resp && resp.days) || [];
@@ -396,7 +418,9 @@ class FtwHistoryCard extends FtwElement {
           } else {
             this._totalEl.textContent = "Unknown";
           }
+          this._chart.style.minWidth = data.length > 7 ? (data.length * 46) + "px" : "";
           this._chart.data = data;
+          this._syncScrollHint();
         };
         // `?delay=N` — hold in the skeleton state for N ms after the
         // fetch resolves, for inspecting the loading→loaded transition.
@@ -425,6 +449,10 @@ function fmtDayShort(iso) {
   if (parts.length !== 3) return iso || "";
   const d = new Date(+parts[0], +parts[1] - 1, +parts[2]);
   return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric" });
+}
+function currentMonth() {
+  const now = new Date();
+  return now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
 }
 function escapeHtml(s) {
   return String(s).replace(/[<>&"']/g, (c) =>

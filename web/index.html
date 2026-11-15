@@ -326,7 +326,7 @@
       </div>
     </section>
 
-    <!-- History — one wrapper card with a single Week/Month toggle that
+    <!-- History — one wrapper card with shared week/calendar-month controls
          drives all three daily-kWh tiles. Mirrors the fuse-card pattern:
          the outer card owns label + toggle chrome; each inner
          <ftw-history-card hide-toggle range=…> renders as a pure chart
@@ -350,10 +350,13 @@
                   <button type="button" role="tab" data-view="bars"  class="active" aria-selected="true">Bars</button>
                   <button type="button" role="tab" data-view="cakes" aria-selected="false">Pie</button>
                 </div>
-                <div class="history-toggle" id="history-toggle" role="tablist" data-active="week">
-                  <button type="button" role="tab" data-range="week"  class="active" aria-selected="true">Week</button>
-                  <button type="button" role="tab" data-range="month" aria-selected="false">Month</button>
+                <div class="history-toggle" id="history-toggle" role="group" aria-label="History period" data-active="this-month">
+                  <button type="button" data-range="week" aria-pressed="false">Week</button>
+                  <button type="button" data-range="this-month" class="active" aria-pressed="true">This month</button>
+                  <button type="button" data-range="last-month" aria-pressed="false">Last month</button>
                 </div>
+                <label class="history-month-picker-label" for="history-month-picker">Choose month</label>
+                <input id="history-month-picker" class="history-month-picker" type="month" aria-label="Choose history month">
               </div>
             </div>
             <div class="history-tiles" id="history-tiles">
@@ -631,7 +634,8 @@
           <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:var(--violet)"></span> Car charging</span>
           <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:var(--cyan)"></span> Charge</span>
           <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:var(--energy-gives)"></span> Discharge</span>
-          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:var(--cyan)"></span> SoC</span>
+          <span id="plan-sell-legend" class="legend-item bat-only" hidden title="What the battery gives that the home sells to the grid"><span class="legend-color" style="background:var(--red-e)"></span> Sell</span>
+          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100. Its line takes the colour of what the battery does, grey where it waits"><span class="legend-color" style="background:var(--fg-dim)"></span> SoC</span>
         </div>
         <!-- The escape hatch for "why is it doing that?". Downloads one
              Markdown file holding the live state, the active plan slot,

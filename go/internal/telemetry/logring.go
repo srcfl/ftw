@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,14 +32,59 @@ const (
 	ringGlobal = 2000
 )
 
+const (
+	// digestPatternsPerHour caps the distinct warning patterns kept per
+	// hour. A driver that puts a changing word in every warning would
+	// otherwise add a row per line; past the cap they are only counted.
+	digestPatternsPerHour = 200
+	// digestOverflowPattern is the row that counts them.
+	digestOverflowPattern = "(more distinct messages this hour)"
+	// digestTextMax bounds the stored message and attribute text.
+	digestTextMax = 300
+	// digestHeldMax is how long rows wait in memory for TakeDigest.
+	digestHeldMax = 24 * time.Hour
+)
+
 // LogRing is an in-memory ring of recent log entries, split into a
 // global stream and one stream per driver name. Thread-safe.
+//
+// Warnings and errors also go to a digest, one row per pattern and hour,
+// which Core writes to the store (TakeDigest). Lines logged every control
+// tick can push them out of the rings within an hour; the digest keeps a
+// week of them.
 type LogRing struct {
 	mu      sync.RWMutex
 	global  []LogEntry
 	gNext   int
 	gFilled bool
 	drivers map[string]*driverRing
+
+	digest      map[digestKey]*digestRow
+	digestHours map[time.Time]int // distinct patterns per hour
+}
+
+// DigestEntry is the count of one warning or error pattern in one hour
+// since the previous TakeDigest.
+type DigestEntry struct {
+	Hour    time.Time
+	Level   string
+	Driver  string
+	Pattern string
+	Msg     string
+	Attrs   string
+	Count   int
+	First   time.Time
+	Last    time.Time
+}
+
+type digestKey struct {
+	hour                   time.Time
+	level, driver, pattern string
+}
+
+type digestRow struct {
+	DigestEntry
+	sent int // Count already handed out
 }
 
 type driverRing struct {
@@ -50,9 +96,135 @@ type driverRing struct {
 // NewLogRing constructs an empty ring.
 func NewLogRing() *LogRing {
 	return &LogRing{
-		global:  make([]LogEntry, ringGlobal),
-		drivers: make(map[string]*driverRing),
+		global:      make([]LogEntry, ringGlobal),
+		drivers:     make(map[string]*driverRing),
+		digest:      make(map[digestKey]*digestRow),
+		digestHours: make(map[time.Time]int),
 	}
+}
+
+// addDigest counts a warning or error. Caller holds r.mu.
+func (r *LogRing) addDigest(e LogEntry) {
+	level := strings.ToUpper(e.Level)
+	if level == "WARNING" {
+		level = "WARN"
+	}
+	if level != "WARN" && level != "ERROR" {
+		return
+	}
+	ts := e.TS
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	ts = ts.UTC()
+	hour := ts.Truncate(time.Hour)
+	k := digestKey{hour: hour, level: level, driver: e.Driver, pattern: clip(logPattern(e.Msg))}
+	row, ok := r.digest[k]
+	if !ok && r.digestHours[hour] >= digestPatternsPerHour {
+		k.driver, k.pattern = "", digestOverflowPattern
+		row, ok = r.digest[k]
+	}
+	if _, seen := r.digestHours[hour]; !seen {
+		// Nothing has taken the digest for a day: keep memory bounded.
+		for old := range r.digest {
+			if old.hour.Before(hour.Add(-digestHeldMax)) {
+				delete(r.digest, old)
+				delete(r.digestHours, old.hour)
+			}
+		}
+		r.digestHours[hour] = 0
+	}
+	if !ok {
+		row = &digestRow{DigestEntry: DigestEntry{Hour: hour, Level: level, Driver: k.driver, Pattern: k.pattern, First: ts}}
+		r.digest[k] = row
+		if k.pattern != digestOverflowPattern {
+			r.digestHours[hour]++
+		}
+	}
+	row.Count++
+	if ts.Before(row.First) {
+		row.First = ts
+	}
+	if !ts.Before(row.Last) {
+		row.Last = ts
+		if k.pattern == digestOverflowPattern {
+			row.Msg = "warnings and errors past the hourly limit of distinct messages"
+		} else {
+			row.Msg, row.Attrs = clip(e.Msg), clip(e.Attrs)
+		}
+	}
+}
+
+// TakeDigest returns the counts added since the last call, oldest hour
+// first, and forgets every hour before now's once its counts are out. The
+// store adds what it is given, so a row appears again only with new counts.
+func (r *LogRing) TakeDigest(now time.Time) []DigestEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	current := now.UTC().Truncate(time.Hour)
+	var out []DigestEntry
+	for k, row := range r.digest {
+		if delta := row.Count - row.sent; delta > 0 {
+			e := row.DigestEntry
+			e.Count = delta
+			out = append(out, e)
+			row.sent = row.Count
+		}
+		if k.hour.Before(current) {
+			delete(r.digest, k)
+		}
+	}
+	for h := range r.digestHours {
+		if h.Before(current) {
+			delete(r.digestHours, h)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].Hour.Equal(out[j].Hour) {
+			return out[i].Hour.Before(out[j].Hour)
+		}
+		return out[i].First.Before(out[j].First)
+	})
+	return out
+}
+
+// logPattern folds every number in a message to "#", so the same warning
+// with different figures counts as one.
+func logPattern(msg string) string {
+	var b strings.Builder
+	b.Grow(len(msg))
+	for i := 0; i < len(msg); {
+		if !isDigit(msg[i]) {
+			b.WriteByte(msg[i])
+			i++
+			continue
+		}
+		// One number: digits, joined by single . : or , between digits.
+		j := i + 1
+		for j < len(msg) {
+			if isDigit(msg[j]) {
+				j++
+				continue
+			}
+			if (msg[j] == '.' || msg[j] == ':' || msg[j] == ',') && j+1 < len(msg) && isDigit(msg[j+1]) {
+				j += 2
+				continue
+			}
+			break
+		}
+		b.WriteByte('#')
+		i = j
+	}
+	return b.String()
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+func clip(s string) string {
+	if len(s) <= digestTextMax {
+		return s
+	}
+	return s[:digestTextMax]
 }
 
 // Append records one entry. If e.Driver is non-empty it lands in BOTH
@@ -61,6 +233,7 @@ func NewLogRing() *LogRing {
 func (r *LogRing) Append(e LogEntry) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.addDigest(e)
 	r.global[r.gNext] = e
 	r.gNext++
 	if r.gNext == len(r.global) {

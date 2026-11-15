@@ -134,6 +134,10 @@ func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigr
 		m.cancel()
 		return nil, err
 	}
+	// Build the optional forecast index before starting history import or
+	// returning the store to Core's live writers. SQLite holds its writer
+	// lock while building the index.
+	s.prepareForecastHourlyIndex()
 	idle, err := s.legacyHistoryIdle()
 	if err != nil {
 		s.historyMigration = nil
@@ -1019,6 +1023,21 @@ func (s *Store) migrate() error {
 		) STRICT`,
 		`CREATE INDEX IF NOT EXISTS idx_control_journal_start ON control_journal(start_ms DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_control_journal_open ON control_journal(end_ms) WHERE end_ms IS NULL`,
+		// log_digest: warning and error patterns per hour (log_digest.go),
+		// so the support file can show a week of them. At most a few hundred
+		// rows an hour, pruned after eight days; kept in recovery snapshots.
+		`CREATE TABLE IF NOT EXISTS log_digest (
+			hour_ms  INTEGER NOT NULL,
+			level    TEXT NOT NULL,
+			driver   TEXT NOT NULL DEFAULT '',
+			pattern  TEXT NOT NULL,
+			msg      TEXT NOT NULL,
+			attrs    TEXT NOT NULL DEFAULT '',
+			count    INTEGER NOT NULL,
+			first_ms INTEGER NOT NULL,
+			last_ms  INTEGER NOT NULL,
+			PRIMARY KEY (hour_ms, level, driver, pattern)
+		) STRICT`,
 
 		// Independently installed Lua drivers. Content lives on disk; SQLite
 		// records activation history and the exact previous artifact used for
@@ -1289,6 +1308,14 @@ func (s *Store) copyTableToCache(tbl string) error {
 func (s *Store) SaveConfig(key, value string) error {
 	return s.durableConfigWrite(func(tx *sql.Tx) error {
 		_, err := tx.Exec(`INSERT INTO config (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value)
+		return err
+	})
+}
+
+// DeleteConfig removes a config k/v. A missing key is not an error.
+func (s *Store) DeleteConfig(key string) error {
+	return s.durableConfigWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM config WHERE key = ?`, key)
 		return err
 	})
 }
