@@ -221,6 +221,10 @@ func (c *client) copyBackup(ctx context.Context, out io.Writer, dir string, b ba
 	return nil
 }
 
+// supportFileTimeout matches Core's HTTP write timeout. The file reads a
+// week from storage, which takes a Raspberry Pi longer than a status call.
+const supportFileTimeout = 2 * time.Minute
+
 func runSupport(args []string, out io.Writer, e env) error {
 	var output string
 	base, err := parse(args, out, "ftw support [--output FILE] [--url URL]", func(fs *flag.FlagSet) {
@@ -233,7 +237,7 @@ func runSupport(args []string, out io.Writer, e env) error {
 		output = "ftw-support-" + e.now().Format("20060102-150405") + ".zip"
 	}
 	c := newClient(base, e)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*e.requestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), max(2*e.requestTimeout, supportFileTimeout))
 	defer cancel()
 	resp, err := c.open(ctx, "/api/support/dump")
 	if err != nil {

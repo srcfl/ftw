@@ -587,6 +587,8 @@ func TestIsSensitiveKey(t *testing.T) {
 		"refresh_token", "access_token", "api_key", "apikey", "private_key",
 		"authorization", "Authorization", "credential", "credentials",
 		"auth", "AUTH", "auth_header", "x-auth",
+		// Who the owner is: a cloud account's username is often an e-mail.
+		"username", "ev_charger_username", "email", "Email", "user_name",
 	}
 	for _, k := range sensitive {
 		if !isSensitiveKey(k) {
@@ -594,7 +596,7 @@ func TestIsSensitiveKey(t *testing.T) {
 		}
 	}
 	keep := []string{
-		"host", "username", "name", "oauth", "oauth_client_id", "client_id",
+		"host", "user", "name", "oauth", "oauth_client_id", "client_id",
 		"port", "lua",
 	}
 	for _, k := range keep {

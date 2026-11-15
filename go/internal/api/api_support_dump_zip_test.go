@@ -205,3 +205,78 @@ func TestSupportDumpRedactsSecretsInLogsAndConfig(t *testing.T) {
 		t.Error("dump must not include state.db")
 	}
 }
+
+// A support file from a real site carried the owner's e-mail twice: the
+// cloud charger's username and a driver's `email` setting. Neither is a
+// password, so key-based secret redaction let both through. The address
+// identifies the household wherever it sits, so it is removed by key and
+// by shape, in the config and in the logs.
+func TestSupportDumpRemovesTheOwnersEmail(t *testing.T) {
+	const (
+		email    = "bjorn.example@example.se"
+		username = "bjorn-cloud-login"
+		inLog    = "owner.name@example.org"
+	)
+	tel := telemetry.NewStore()
+	ring := telemetry.NewLogRing()
+	ring.Append(telemetry.LogEntry{Level: "WARN", Driver: "easee", Msg: "login failed for " + inLog})
+	cfg := &config.Config{
+		Drivers: []config.Driver{{
+			Name: "easee", Lua: "easee_cloud.lua",
+			Config: map[string]any{"email": email, "site": "home", "note": "contact " + email},
+		}},
+		EVCharger: &config.EVCharger{Provider: "easee", Username: username, Serial: "EH123456"},
+	}
+	srv := New(&Deps{
+		Ctrl: control.NewState(0, 50, "meter"), CtrlMu: &sync.Mutex{},
+		Tel: tel, LogRing: ring, Version: "test",
+		Cfg: cfg, CfgMu: &sync.RWMutex{},
+	})
+	files := readSupportZip(t, srv)
+	for name, body := range files {
+		for _, leak := range []string{email, username, inLog} {
+			if strings.Contains(body, leak) {
+				t.Errorf("%s leaked %q", name, leak)
+			}
+		}
+	}
+	cfgJSON := files["config.redacted.yaml"]
+	if !strings.Contains(cfgJSON, `"site": "home"`) || !strings.Contains(cfgJSON, "EH123456") {
+		t.Errorf("redaction removed settings that are not personal: %s", cfgJSON)
+	}
+}
+
+// readSupportZip fetches /api/support/dump and returns each file by its path
+// inside the archive's top folder.
+func readSupportZip(t *testing.T, srv *Server) map[string]string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/support/dump", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/support/dump = %d, want 200", rec.Code)
+	}
+	body := rec.Body.Bytes()
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		t.Fatalf("archive does not open as a zip: %v", err)
+	}
+	out := map[string]string{}
+	for _, f := range zr.File {
+		rc, err := f.Open()
+		if err != nil {
+			t.Fatalf("open %s: %v", f.Name, err)
+		}
+		raw, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			t.Fatalf("read %s: %v", f.Name, err)
+		}
+		name := f.Name
+		if i := strings.IndexByte(name, '/'); i >= 0 {
+			name = name[i+1:]
+		}
+		out[name] = string(raw)
+	}
+	return out
+}

@@ -738,12 +738,14 @@ func (s *Server) handleGlobalLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/support/dump — zip archive with everything a developer needs
-// to triage a support incident: redacted config, full driver health JSON,
-// recent global + per-driver logs (secrets and IPv4 addresses stripped),
-// last 1 h of TS samples per (driver, metric), and a
-// manifest. SQLite is NOT included; the dump is intended to be small
-// enough to attach to a chat message — measured at ~6 kB on a two-driver
-// install.
+// to triage a support incident: the help report, redacted config, driver
+// health, the log ring (secrets and IPv4 addresses stripped), the last hour
+// of samples at stored resolution, and seven days from the box's own
+// storage in week/: every series in five-minute buckets, the control
+// journal, plan snapshots, notifications, start and stop events and the
+// hourly warning counts. SQLite is NOT included. A seeded week with five
+// drivers, 113 series, 6,000 journal spans and 1,050 plans gave a 2.8 MB
+// archive, small enough to mail; week/series/ is three quarters of it.
 //
 // Zip rather than tar.gz because this file's whole purpose is to be
 // handed to somebody else. Windows and every chat client open a zip
@@ -782,7 +784,8 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// below it is what you reach for when the report does not settle the
 	// question. Shipping them together means the person asking for help
 	// sends one file and never has to pick the right one.
-	addFile("00-help-report.md", []byte(redactDumpLog(s.buildSupportReport(r.Context(), now))))
+	week := s.loadSupportWeek(r.Context(), now, true)
+	addFile("00-help-report.md", []byte(redactDumpLog(s.buildSupportReportWith(r.Context(), now, week))))
 
 	manifest := map[string]any{
 		"generated_at": now.Format(time.RFC3339),
@@ -800,7 +803,20 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 			"loadpoints.json",
 			"logs/global.log",
 			"logs/<driver>.log",
+			"logs/warnings-week.log",
 			"telemetry/<driver>__<metric>.csv",
+			"week/summary.json",
+			"week/series/<driver>__<metric>.csv",
+			"week/control-journal.json",
+			"week/plans.json",
+			"week/notifications.json",
+			"week/events.json",
+		},
+		"covers": map[string]string{
+			"logs/*.log except warnings-week.log": "the in-memory log ring: the latest lines, often under an hour",
+			"logs/warnings-week.log":              "seven days of warnings and errors, one line per message pattern and hour",
+			"telemetry/":                          "the last hour of samples at stored resolution",
+			"week/":                               "seven days from the box's storage; series in five-minute buckets with min, max and sample count",
 		},
 	}
 	manifestBody, _ := json.MarshalIndent(manifest, "", "  ")
@@ -831,9 +847,11 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 		addFile("logs/"+sanitizeName(d)+".log", []byte(formatLogs(entries)))
 	}
 
-	// Last 1 h of TS samples per (driver, metric) — small enough to
-	// keep the bundle email-able. Only metrics the operator actually
-	// emitted in this window appear.
+	addWeekFiles(addFile, week)
+
+	// Last 1 h of TS samples per (driver, metric) at stored resolution,
+	// next to week/'s five-minute buckets. Only metrics the operator
+	// actually emitted in this window appear.
 	if s.deps.State != nil {
 		untilMs := now.UnixMilli()
 		sinceMs := untilMs - 3600*1000
@@ -927,8 +945,8 @@ func (s *Server) redactedConfig() []byte {
 }
 
 // redactSensitive walks an unmarshalled JSON tree and replaces any value
-// at a key whose lowercased name matches a sensitive substring. Recursive,
-// in-place.
+// at a key whose lowercased name matches a sensitive substring, and any
+// e-mail address wherever it sits. Recursive, in-place.
 func redactSensitive(v any) {
 	switch x := v.(type) {
 	case map[string]any:
@@ -938,10 +956,18 @@ func redactSensitive(v any) {
 				x[k] = "***"
 				continue
 			}
+			if str, ok := val.(string); ok {
+				x[k] = dumpEmailRe.ReplaceAllString(str, "[email omitted]")
+				continue
+			}
 			redactSensitive(val)
 		}
 	case []any:
-		for _, e := range x {
+		for i, e := range x {
+			if str, ok := e.(string); ok {
+				x[i] = dumpEmailRe.ReplaceAllString(str, "[email omitted]")
+				continue
+			}
 			redactSensitive(e)
 		}
 	}
@@ -955,6 +981,9 @@ func isSensitiveKey(k string) bool {
 	for _, s := range []string{
 		"password", "passwd", "secret", "token", "api_key", "apikey",
 		"private_key", "client_secret", "authorization", "credential",
+		// Who the owner is, not how they sign in: a cloud account's
+		// username is often their e-mail address.
+		"email", "e-mail", "username", "user_name",
 	} {
 		if strings.Contains(k, s) {
 			return true
@@ -985,9 +1014,10 @@ var (
 	dumpJSONSecretRe = regexp.MustCompile(`(?i)("([^"\\]+)"\s*:\s*)("(?:\\.|[^"\\])*")`)
 	dumpFormSecretRe = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9_-]*)=([^\s&"]+)`)
 	dumpBasicAuthRe  = regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=_-]+`)
+	dumpEmailRe      = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
 )
 
-// redactDumpLog removes IPv4 addresses and credentials, including JSON and
+// redactDumpLog removes IPv4 addresses, e-mail addresses and credentials, including JSON and
 // form fields whose keys isSensitiveKey would catch. Stricter on OAuth
 // bodies that Lua logs as `HTTP %d: %s`.
 func redactDumpLog(s string) string {
@@ -995,6 +1025,7 @@ func redactDumpLog(s string) string {
 		return s
 	}
 	s = dumpIPv4Re.ReplaceAllString(s, "[ip omitted]")
+	s = dumpEmailRe.ReplaceAllString(s, "[email omitted]")
 	s = dumpBearerRe.ReplaceAllString(s, "Bearer [omitted]")
 	s = dumpBasicAuthRe.ReplaceAllString(s, "Basic [omitted]")
 	s = dumpJSONSecretRe.ReplaceAllStringFunc(s, func(m string) string {
