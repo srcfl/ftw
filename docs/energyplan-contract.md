@@ -167,6 +167,13 @@ not establish the greatest reachable energy or the cheapest plan.
   slot's end is not sent. Validation must cover joint on/off pulse states, grid limits, surplus-only
   charging, battery-to-EV rules and the corresponding costs.
 
+`no_storage_to_load` means storage may cover the house but never the car,
+also not by making its room. While such a car is on, battery discharge may
+not exceed `max(0, load_w + pv_w)`, and in a slot with `max_import_w` the
+house and the on-steps of all charging cars must fit that limit with the
+battery idle whenever the battery discharges. `surplus_only` keeps the same
+rules.
+
 For example, 1,000 Wh at efficiency 1 over a remaining 15 minutes requires
 4,000 W mean. With steps `[0, 6000]`, the on-step is 6,000 W for ten minutes.
 A 5,000 W available import margin cannot admit that pulse merely because the
