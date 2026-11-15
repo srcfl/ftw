@@ -2,14 +2,18 @@
 
 - Status: accepted.
 - Implementation: the declaration
-  ([#1995](https://github.com/srcfl/ftw/pull/1995)) and the twin in shadow
-  ([#1996](https://github.com/srcfl/ftw/pull/1996)) are proposed as PRs.
-  Planned control has not shipped.
+  ([#1995](https://github.com/srcfl/ftw/pull/1995)), the twin in shadow
+  ([#1996](https://github.com/srcfl/ftw/pull/1996)) and the planner package
+  (`go/internal/heatplan`, from
+  [#2013](https://github.com/srcfl/ftw/pull/2013) in
+  [#2022](https://github.com/srcfl/ftw/pull/2022)) are merged. Nothing
+  calls the planner yet, and planned control has not shipped.
 - Date: 2026-11-10
 - Decided by: Fredrik on 10 November 2026, in his
   [answers on #1994](https://github.com/srcfl/ftw/pull/1994#issuecomment-6763083595),
   and on the hot-water floor on 12 November 2026
-  ([answer](https://github.com/srcfl/ftw/pull/1994#issuecomment-6832196178)).
+  ([answer](https://github.com/srcfl/ftw/pull/1994#issuecomment-6832196178)),
+  and on comfort that follows the day's price on 15 November 2026.
   See [Decisions](#decisions).
 - Builds on: [#520](https://github.com/srcfl/ftw/issues/520), the
   [`thermal`](../../go/internal/thermal/model.go) contract, driver
@@ -139,6 +143,52 @@ thermal:
   [Decisions](#decisions).
 - Without a comfort sensor, a zone cannot be planned. The roadmap does not
   let Core assume indoor temperature.
+
+#### Comfort follows the day's price
+
+Decided on 15 November 2026; see [Decisions](#decisions), point 9. What a
+degree is worth to the owner depends on
+what the day costs. A warm bathroom floor is cheap comfort on a cheap day,
+and a slightly cooler room is an easy saving on a dear one. That is a choice
+about comfort, not about timing, and it needs no model of the house. The
+rule is in `heatplan.PriceComfort`; the configuration below is the shape it
+will take, and comes with the change that acts on it:
+
+```yaml
+thermal:
+  cheap_day_ore_kwh: 150      # at or below: all of cheap_day_raise_k
+  normal_day_ore_kwh: 260     # the owner's own target
+  dear_day_ore_kwh: 400       # at or above: all of dear_day_lower_k
+  zones:
+    - comfort_sensor: { driver: wiser, metric: bathroom_floor_c }
+      cheap_day_raise_k: 2.5
+    - comfort_sensor: { driver: wiser, metric: bathroom_air_c }
+      dear_day_lower_k: 1.0
+      step_k: 0.5
+```
+
+- The price is the mean total consumer price of the day the comfort is for,
+  once at least 22 hours of it are known. Between the levels the target
+  moves linearly, so a day one öre over a level is not a different day.
+- Each direction is per zone and off at zero. A floor may follow cheap days
+  up while the room air only follows dear days down.
+- The moved target stays inside the zone's hard band.
+- **Nothing has a default.** These numbers depend on the contract, the
+  price area and the household. A site that sets none is unchanged.
+- A shift rounded to the control's step never passes the owner's limit: a
+  raise of 2.5 K in steps of 1 K is 2 K.
+- **The comfort rule comes first.** It moves the target, and the plan and
+  the baseline it is measured against both stand on that target, so the
+  plan is never credited with what the comfort rule saved.
+- **It is the owner's target, not planned control.** It needs no trusted
+  twin. It still sends a value to the device, so decision 2 holds: a
+  device-side timed hold, or a small step from the device's own value.
+- **There is no least saving.** A limit on what the plans must save before
+  they act was proposed and is not taken. In the one house that ran it,
+  with 5 kr a day, the plans saved 0.1–4.9 kr and the limit was never
+  reached, so it only turned the planner off. Instead the planner runs in
+  shadow first and the owner sees what it would have saved per day, then
+  turns planned control on with that number in view.
 
 ### 2. Declaration by the driver
 
@@ -360,8 +410,20 @@ Fredrik answered on the hot-water floor on 12 November 2026:
    wins and Core does not reject it. Core holds the owner's floor and timer,
    with these three numbers as defaults when nothing is set.
 
+Fredrik answered on comfort that follows the day's price on 15 November 2026:
+
+9. **Comfort that follows the day's price** is taken, as section 1
+   describes, as the owner's own rule. It needs no trusted twin, and
+   decision 2 applies to what it sends. **There is no least daily saving.**
+   The planner runs in shadow first, and the box shows the owner what it
+   would have saved before planned control is turned on.
+
 ## Open
 
+- **What makes a day cheap or dear.** Comfort that follows the price uses
+  the day's mean against the owner's fixed levels. Whether a longer
+  reference, such as the month, serves better is open until it has run in
+  more than one house.
 - **Holding off a reheat needs a control.** Many heat pumps start a
   hot-water charge by themselves at their own start temperature. The planner
   can only delay a reheat on a device whose driver declares a control that
@@ -407,8 +469,9 @@ Fredrik answered on the hot-water floor on 12 November 2026:
     learns, as the car's is. This touches the load model and the plan's
     inputs, so it needs the owner's decision.
   - **Zones share the site in the order they are planned.** A zone gets
-    the surplus and headroom the zones before it left. This is less than
-    section 4 asks: zones on a shared source are not yet planned together.
+    the surplus, headroom and battery energy the zones before it left. This
+    is less than section 4 asks: zones on a shared source are not yet
+    planned together.
 
   The battery rule comes from a simulation with synthetic houses and
   prices, not from hardware. A planner that took battery energy for cheap
