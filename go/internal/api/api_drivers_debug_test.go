@@ -581,6 +581,24 @@ func TestRejectUnsafeProbeTargetsAllowsOnlyConfiguredLoopbackException(t *testin
 	}
 }
 
+func TestIsCoordinateKey(t *testing.T) {
+	for _, k := range []string{"lat", "lon", "lng", "latitude", "Longitude", "home_lat", "latitude_deg", "site.lon"} {
+		if !isCoordinateKey(k) {
+			t.Errorf("isCoordinateKey(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{"latest_ms", "latency_ms", "longest", "relative", "plateau", "salon", "flat"} {
+		if isCoordinateKey(k) {
+			t.Errorf("isCoordinateKey(%q) = true, want false", k)
+		}
+	}
+	got := redactDumpLog(`{"lat":"56.7","position":{"latitude":-12.6},"latest_ms":56123} lat=56.7 lon=n/a`)
+	want := `{"lat":"57","position":{"latitude":-13},"latest_ms":56123} lat=57 lon=***`
+	if got != want {
+		t.Errorf("redactDumpLog\n got %s\nwant %s", got, want)
+	}
+}
+
 func TestIsSensitiveKey(t *testing.T) {
 	sensitive := []string{
 		"password", "Password", "mqtt_password", "passwd", "client_secret",

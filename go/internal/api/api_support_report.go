@@ -135,12 +135,12 @@ func comparePlanControlDecision(plan *mpc.Plan, slot control.SlotEnergySnapshot)
 
 func (s *Server) handleSupportReport(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	body := s.buildSupportReport(r.Context(), now)
+	body := hideNtfyTopic([]byte(s.buildSupportReport(r.Context(), now)), s.ntfyTopic())
 	stamp := now.UTC().Format("20060102-150405")
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="ftw-help-`+stamp+`.md"`)
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
+	_, _ = w.Write(body)
 }
 
 // liveSnapshot adds forecast context to the same qualified live power that

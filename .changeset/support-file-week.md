@@ -13,4 +13,5 @@ series in five-minute buckets, the control journal, plan snapshots,
 notifications, start and stop events, and a week of warnings and errors
 counted per hour, which the box now stores so they outlast the log buffer
 and a restart. The redacted config and logs no longer show the owner's
-e-mail address or account username.
+e-mail address, account username or ntfy topic, and they round the site's
+coordinates to whole degrees.

@@ -8,10 +8,12 @@ package api
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -19,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -765,7 +768,9 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	zw := zip.NewWriter(w)
 	defer zw.Close()
 
+	topic := s.ntfyTopic()
 	addFile := func(name string, body []byte) {
+		body = hideNtfyTopic(body, topic)
 		hdr := &zip.FileHeader{
 			Name:     "ftw-support-" + stamp + "/" + name,
 			Method:   zip.Deflate,
@@ -937,6 +942,11 @@ func (s *Server) redactedConfig() []byte {
 		return cfgBytes
 	}
 	redactSensitive(asMap)
+	top, _ := asMap.(map[string]any)
+	notifications, _ := top["notifications"].(map[string]any)
+	if ntfy, ok := notifications["ntfy"].(map[string]any); ok && ntfy["topic"] != nil {
+		ntfy["topic"] = "***"
+	}
 	pretty, err := json.MarshalIndent(asMap, "", "  ")
 	if err != nil {
 		return cfgBytes
@@ -954,6 +964,10 @@ func redactSensitive(v any) {
 			lk := strings.ToLower(k)
 			if isSensitiveKey(lk) {
 				x[k] = "***"
+				continue
+			}
+			if isCoordinateKey(lk) {
+				x[k] = roundCoordinate(val)
 				continue
 			}
 			if str, ok := val.(string); ok {
@@ -992,6 +1006,74 @@ func isSensitiveKey(k string) bool {
 	return hasAuthSegment(k)
 }
 
+// coordinateWords name a value that says where something is. The support
+// file keeps whole degrees, about 100 km: enough to show a missing location
+// or a wrong sign, not enough to find the house.
+var coordinateWords = []string{"lat", "lon", "lng", "latitude", "longitude"}
+
+func isCoordinateKey(k string) bool {
+	words := strings.FieldsFunc(strings.ToLower(k), func(r rune) bool { return r == '_' || r == '-' || r == '.' })
+	for _, w := range words {
+		if slices.Contains(coordinateWords, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// roundCoordinate rounds a coordinate to whole degrees and keeps its type.
+// Anything that is not a number goes.
+func roundCoordinate(v any) any {
+	switch x := v.(type) {
+	case nil, bool:
+		return v
+	case float64:
+		return math.Round(x)
+	case json.Number:
+		if f, err := x.Float64(); err == nil {
+			return json.Number(strconv.FormatFloat(math.Round(f), 'f', -1, 64))
+		}
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return x
+		}
+		return roundCoordinateText(x)
+	}
+	return "***"
+}
+
+func roundCoordinateText(s string) string {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		return "***"
+	}
+	return strconv.FormatFloat(math.Round(f), 'f', -1, 64)
+}
+
+// ntfyTopic is the configured ntfy topic, or "".
+func (s *Server) ntfyTopic() string {
+	if s.deps.Cfg == nil || s.deps.CfgMu == nil {
+		return ""
+	}
+	s.deps.CfgMu.RLock()
+	defer s.deps.CfgMu.RUnlock()
+	if n := s.deps.Cfg.Notifications; n != nil && n.Ntfy != nil {
+		return strings.TrimSpace(n.Ntfy.Topic)
+	}
+	return ""
+}
+
+// hideNtfyTopic removes the ntfy topic from text. On the public server the
+// topic is the key that reads the owner's alerts, and a failed publish
+// quotes it in the URL. A topic under three characters stays: replacing it
+// would scrub ordinary words, and the config hides it anyway.
+func hideNtfyTopic(body []byte, topic string) []byte {
+	if len(topic) < 3 || !bytes.Contains(body, []byte(topic)) {
+		return body
+	}
+	return bytes.ReplaceAll(body, []byte(topic), []byte("[ntfy topic omitted]"))
+}
+
 // hasAuthSegment is true for a bare "auth" path segment so auth,
 // auth_header and x-auth redact, while oauth and oauth_client_id do not.
 func hasAuthSegment(k string) bool {
@@ -1015,11 +1097,15 @@ var (
 	dumpFormSecretRe = regexp.MustCompile(`(?i)\b([A-Za-z][A-Za-z0-9_-]*)=([^\s&"]+)`)
 	dumpBasicAuthRe  = regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=_-]+`)
 	dumpEmailRe      = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}`)
+	// dumpJSONCoordRe finds a JSON number under a coordinate key, such as a
+	// car's position in an HTTP body a driver logs.
+	dumpJSONCoordRe = regexp.MustCompile(`(?i)("(?:[a-z0-9]+[_.-])*(?:lat|lon|lng|latitude|longitude)(?:[_.-][a-z0-9]+)*"\s*:\s*)(-?\d+(?:\.\d+)?(?:e[-+]?\d+)?)`)
 )
 
-// redactDumpLog removes IPv4 addresses, e-mail addresses and credentials, including JSON and
-// form fields whose keys isSensitiveKey would catch. Stricter on OAuth
-// bodies that Lua logs as `HTTP %d: %s`.
+// redactDumpLog removes IPv4 addresses, e-mail addresses and credentials,
+// including JSON and form fields whose keys isSensitiveKey would catch, and
+// rounds coordinates to whole degrees. Stricter on OAuth bodies that Lua
+// logs as `HTTP %d: %s`.
 func redactDumpLog(s string) string {
 	if s == "" {
 		return s
@@ -1030,14 +1116,36 @@ func redactDumpLog(s string) string {
 	s = dumpBasicAuthRe.ReplaceAllString(s, "Basic [omitted]")
 	s = dumpJSONSecretRe.ReplaceAllStringFunc(s, func(m string) string {
 		parts := dumpJSONSecretRe.FindStringSubmatch(m)
-		if len(parts) != 4 || !isSensitiveKey(parts[2]) {
+		if len(parts) != 4 {
+			return m
+		}
+		if isCoordinateKey(parts[2]) {
+			if v, err := strconv.Unquote(parts[3]); err == nil {
+				return parts[1] + strconv.Quote(roundCoordinateText(v))
+			}
+			return parts[1] + `"***"`
+		}
+		if !isSensitiveKey(parts[2]) {
 			return m
 		}
 		return parts[1] + `"***"`
 	})
+	s = dumpJSONCoordRe.ReplaceAllStringFunc(s, func(m string) string {
+		parts := dumpJSONCoordRe.FindStringSubmatch(m)
+		if len(parts) != 3 {
+			return m
+		}
+		return parts[1] + roundCoordinateText(parts[2])
+	})
 	s = dumpFormSecretRe.ReplaceAllStringFunc(s, func(m string) string {
 		parts := dumpFormSecretRe.FindStringSubmatch(m)
-		if len(parts) != 3 || !isSensitiveKey(parts[1]) {
+		if len(parts) != 3 {
+			return m
+		}
+		if isCoordinateKey(parts[1]) {
+			return parts[1] + "=" + roundCoordinateText(parts[2])
+		}
+		if !isSensitiveKey(parts[1]) {
 			return m
 		}
 		return parts[1] + "=***"

@@ -246,6 +246,62 @@ func TestSupportDumpRemovesTheOwnersEmail(t *testing.T) {
 	}
 }
 
+// The site's coordinates say where the house is, and an ntfy topic on the
+// public server is the key that reads its alerts. Neither may leave in the
+// support file, from the config or from a log line that quotes a URL or an
+// HTTP body. Whole degrees stay, so a wrong sign or a missing location shows.
+func TestSupportDumpHidesWhereTheHouseIsAndTheNtfyTopic(t *testing.T) {
+	const topic = "ftw-home-7f3k2q9x"
+	tel := telemetry.NewStore()
+	ring := telemetry.NewLogRing()
+	ring.Append(telemetry.LogEntry{Level: "WARN", Msg: "forecast: fetch failed",
+		Attrs: `err=Get "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=56.1235&lon=13.6543": timeout`})
+	ring.Append(telemetry.LogEntry{Level: "WARN", Msg: "notifications: publish failed",
+		Attrs: `err=ntfy: Post "https://ntfy.sh/` + topic + `": dial tcp: lookup ntfy.sh: no such host`})
+	ring.Append(telemetry.LogEntry{Level: "INFO", Driver: "vw", Msg: `car: {"position":{"latitude":59.334591,"longitude":18.063240},"latest_ms":1763200000000}`})
+	cfg := &config.Config{
+		Weather: &config.Weather{Provider: "met_no", Latitude: 56.123456, Longitude: 13.654321},
+		Notifications: &config.Notifications{Enabled: true, Provider: "ntfy",
+			Ntfy: &config.NtfyConfig{Server: "https://ntfy.sh", Topic: topic}},
+		Drivers: []config.Driver{{
+			Name: "vw", Lua: "vw.lua",
+			Config: map[string]any{"home_lat": "56.123456", "home_lon": 13.654321, "topic_prefix": "ftw/site"},
+		}},
+	}
+	srv := New(&Deps{
+		Ctrl: control.NewState(0, 50, "meter"), CtrlMu: &sync.Mutex{},
+		Tel: tel, LogRing: ring, Version: "test",
+		Cfg: cfg, CfgMu: &sync.RWMutex{},
+	})
+	files := readSupportZip(t, srv)
+	for name, body := range files {
+		for _, leak := range []string{topic, "56.12", "13.65", "59.33", "18.06"} {
+			if strings.Contains(body, leak) {
+				t.Errorf("%s leaked %q", name, leak)
+			}
+		}
+	}
+	cfgJSON := files["config.redacted.yaml"]
+	for _, want := range []string{`"latitude": 56`, `"longitude": 14`, `"home_lat": "56"`, `"home_lon": 14`, `"topic_prefix": "ftw/site"`, `"server": "https://ntfy.sh"`} {
+		if !strings.Contains(cfgJSON, want) {
+			t.Errorf("config.redacted.yaml lacks %s:\n%s", want, cfgJSON)
+		}
+	}
+	if log := files["logs/global.log"]; !strings.Contains(log, "lat=56&lon=14") || !strings.Contains(log, `"latitude":59`) || !strings.Contains(log, `"latest_ms":1763200000000`) {
+		t.Errorf("global.log lost what is not personal:\n%s", log)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/support/report", nil)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /api/support/report = %d, want 200", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), topic) {
+		t.Errorf("help report leaked the ntfy topic:\n%s", rec.Body.String())
+	}
+}
+
 // readSupportZip fetches /api/support/dump and returns each file by its path
 // inside the archive's top folder.
 func readSupportZip(t *testing.T, srv *Server) map[string]string {
