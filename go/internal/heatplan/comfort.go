@@ -90,6 +90,9 @@ func (c PriceComfort) ShiftK(dayMean float64) float64 {
 			shift = -math.Floor(c.LowerK/c.StepK+eps) * c.StepK
 		}
 	}
+	if shift == 0 {
+		return 0 // not −0
+	}
 	return shift
 }
 

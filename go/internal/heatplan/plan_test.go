@@ -709,6 +709,9 @@ func TestBatteryIsOfferedByTheElectricityAPumpDraws(t *testing.T) {
 		if !(draw > 1 && draw < 3) {
 			t.Fatalf("slot %d: a 6 kW pump draws %.2f kW by the model, want about 2", k, draw)
 		}
+		if math.Abs(draw-6/r.Actuator.Source.COP(7, r.Zone.MaxC[k])) > 1e-9 {
+			t.Fatalf("slot %d: bound %.3f kW, want full output at the band's top", k, draw)
+		}
 		if math.Abs(r.SurplusKW[k]-draw) > 1e-9 {
 			t.Fatalf("slot %d: offered %.2f kW from the battery, want the pump's draw %.2f", k, r.SurplusKW[k], draw)
 		}
@@ -742,16 +745,51 @@ func TestAfterOffersBatteryEnergyOnce(t *testing.T) {
 	next := After(site, first, p)
 	second := airToAirHouse(day, nil, flat(day, 0))
 	second.Site(next, 0)
-	if got, want := offeredTotal(second), offeredTotal(first)-used; got > want+1e-6 {
-		t.Fatalf("the second room is offered %.2f kW-slots of battery power, want at most the %.2f the first left", got, want)
+	// The shoulder had 6 kW-slots on offer for heat, half of what it was
+	// to cover, and the first room was offered all of it.
+	if got := offeredTotal(first); math.Abs(got-6) > 1e-9 {
+		t.Fatalf("the first room is offered %.3f kW-slots, want the shoulder's 6", got)
 	}
-	var before, after float64
+	if got, want := offeredTotal(second), offeredTotal(first)-used; math.Abs(got-want) > 1e-6 {
+		t.Fatalf("the second room is offered %.3f kW-slots of battery power, want the %.3f the first left", got, want)
+	}
+	var shoulder float64
 	for k := range site {
-		before += site[k].GridKW*slotH + p.Slots[k].ElecKWh
-		after += next[k].GridKW * slotH
+		h := float64(k) * slotH
+		drawKW := p.Slots[k].ElecKWh / slotH
+		fromBattery := math.Min(drawKW, first.SurplusKW[k])
+		switch {
+		case between(h, 17, 20):
+			// The peak imports only what the battery did not carry.
+			if want := site[k].GridKW + drawKW - fromBattery; math.Abs(next[k].GridKW-want) > 1e-9 {
+				t.Fatalf("slot %d: the meter reads %.3f kW, want %.3f", k, next[k].GridKW, want)
+			}
+		case between(h, 20, 23):
+			shoulder += next[k].GridKW - site[k].GridKW - drawKW
+		}
 	}
-	if math.Abs(before-after) > 1e-6 {
-		t.Fatalf("the meter shows %.3f kWh with the first room, want the %.3f the site and the room draw together", after, before)
+	// The shoulder imports what the battery carried in the peak instead.
+	if math.Abs(shoulder-used) > 1e-9 {
+		t.Fatalf("the shoulder imports %.3f kW-slots more, want the %.3f the battery carried in the peak", shoulder, used)
+	}
+}
+
+// The bound on a slot's draw holds for every plan: no slot draws more than
+// the device's full output at the worst efficiency the plan can run it at.
+func TestNoSlotDrawsMoreThanItsBound(t *testing.T) {
+	outdoor := hours(day, func(h float64) float64 { return -5 + 8*math.Sin(h*math.Pi/24) })
+	price := hours(day, func(h float64) float64 { return 100 + 150*math.Max(0, math.Sin((h-6)*math.Pi/12)) })
+	for name, r := range map[string]Request{
+		"air to air": airToAirHouse(day, price, outdoor),
+		"slab":       slabHouse(day, price, outdoor),
+		"radiators":  radiatorHouse(day, price),
+	} {
+		p := propose(t, r)
+		for k, s := range p.Slots {
+			if got, bound := s.ElecKWh/slotH, r.maxDrawKW(k); got > bound+1e-9 {
+				t.Fatalf("%s, slot %d: draws %.3f kW over its bound %.3f", name, k, got, bound)
+			}
+		}
 	}
 }
 

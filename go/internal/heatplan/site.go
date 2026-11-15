@@ -85,7 +85,9 @@ const batteryShare = 0.5
 
 // maxDrawKW is the most electricity the zone's device can draw in slot k:
 // full output at the worst efficiency the plan could run it at, with the
-// sink at its hottest. A heat pump of 6 kW heat at COP 3 draws 2 kW. Without
+// sink at its hottest: the band's top, the start, or the highest value the
+// control can regulate to, whichever is warmest. A heat pump of 6 kW heat at
+// COP 3 draws 2 kW. Without
 // the outdoor forecast or the band for the slot it is full output at COP 1,
 // which no source draws more than. Zero means no bound.
 func (r *Request) maxDrawKW(k int) float64 {
@@ -97,6 +99,16 @@ func (r *Request) maxDrawKW(k int) float64 {
 		return a.MaxHeatKW
 	}
 	sink := math.Max(r.Zone.MaxC[k], r.Zone.StartC)
+	for _, v := range a.Values {
+		switch a.Strategy {
+		case thermal.InfluenceSetpoint:
+			sink = math.Max(sink, v)
+		case thermal.InfluenceCurveOffset:
+			if k < len(r.Zone.TargetC) {
+				sink = math.Max(sink, r.Zone.TargetC[k]+v*a.ZoneKPerUnit)
+			}
+		}
+	}
 	if c := a.Source.Supply; c != nil {
 		supplyK := 0.0
 		if a.Strategy == thermal.InfluenceCurveOffset {

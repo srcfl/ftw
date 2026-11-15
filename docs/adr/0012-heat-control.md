@@ -5,7 +5,8 @@
   ([#1995](https://github.com/srcfl/ftw/pull/1995)), the twin in shadow
   ([#1996](https://github.com/srcfl/ftw/pull/1996)) and the planner package
   (`go/internal/heatplan`, from
-  [#2013](https://github.com/srcfl/ftw/pull/2013)) are merged. Nothing
+  [#2013](https://github.com/srcfl/ftw/pull/2013) in
+  [#2022](https://github.com/srcfl/ftw/pull/2022)) are merged. Nothing
   calls the planner yet, and planned control has not shipped.
 - Date: 2026-11-10
 - Decided by: Fredrik on 10 November 2026, in his
@@ -149,7 +150,9 @@ Decided on 15 November 2026; see [Decisions](#decisions), point 9. What a
 degree is worth to the owner depends on
 what the day costs. A warm bathroom floor is cheap comfort on a cheap day,
 and a slightly cooler room is an easy saving on a dear one. That is a choice
-about comfort, not about timing, and it needs no model of the house:
+about comfort, not about timing, and it needs no model of the house. The
+rule is in `heatplan.PriceComfort`; the configuration below is the shape it
+will take, and comes with the change that acts on it:
 
 ```yaml
 thermal:
@@ -466,8 +469,9 @@ Fredrik answered on comfort that follows the day's price on 15 November 2026:
     learns, as the car's is. This touches the load model and the plan's
     inputs, so it needs the owner's decision.
   - **Zones share the site in the order they are planned.** A zone gets
-    the surplus and headroom the zones before it left. This is less than
-    section 4 asks: zones on a shared source are not yet planned together.
+    the surplus, headroom and battery energy the zones before it left. This
+    is less than section 4 asks: zones on a shared source are not yet
+    planned together.
 
   The battery rule comes from a simulation with synthetic houses and
   prices, not from hardware. A planner that took battery energy for cheap
