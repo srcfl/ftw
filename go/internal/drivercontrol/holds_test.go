@@ -56,7 +56,7 @@ func send(t *testing.T, h *Holds, value any, d time.Duration) (Hold, error) {
 	t.Helper()
 	var hold Hold
 	var err error
-	h.Send(context.Background(), "heat", "set_offset", value, []byte(`{}`), d, nil, func(got Hold, e error) {
+	h.Send(context.Background(), "heat", "set_offset", value, []byte(`{}`), d, func(got Hold, e error) {
 		hold, err = got, e
 	})
 	return hold, err
@@ -122,12 +122,12 @@ func TestExpiryOfAnOldGenerationSendsNoDefault(t *testing.T) {
 	if _, err := send(t, h, 1.0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	state := h.Peek("heat")
-	fired := state.CurrentHold()
+	state := h.peek("heat")
+	fired := h.Seams().CurrentHold(state)
 	reg.mu.Lock()
 	reg.generation = 2
 	reg.mu.Unlock()
-	if err := h.Expire("heat", state, fired); err != nil {
+	if err := h.expire("heat", state, fired); err != nil {
 		t.Fatal(err)
 	}
 	if _, d := reg.counts(); d != 0 {
@@ -142,12 +142,12 @@ func TestExpiryOfAReplacedHoldIsANoOp(t *testing.T) {
 	if _, err := send(t, h, 1.0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	state := h.Peek("heat")
-	old := state.CurrentHold()
+	state := h.peek("heat")
+	old := h.Seams().CurrentHold(state)
 	if _, err := send(t, h, 2.0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.Expire("heat", state, old); err != nil {
+	if err := h.expire("heat", state, old); err != nil {
 		t.Fatal(err)
 	}
 	if _, d := reg.counts(); d != 0 {
@@ -164,7 +164,7 @@ func TestSendDefaultClearsTheHold(t *testing.T) {
 	if _, err := send(t, h, 1.0, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.SendDefault(context.Background(), "heat", nil); err != nil {
+	if err := h.SendDefault(context.Background(), "heat"); err != nil {
 		t.Fatal(err)
 	}
 	if _, d := reg.counts(); d != 1 {
@@ -177,7 +177,7 @@ func TestSendDefaultClearsTheHold(t *testing.T) {
 
 func TestSendDefaultForAnUnknownDriverFails(t *testing.T) {
 	h := newHolds(&fakeRegistry{})
-	if err := h.SendDefault(context.Background(), "heat", nil); err == nil {
+	if err := h.SendDefault(context.Background(), "heat"); err == nil {
 		t.Fatal("default to a driver that is not running succeeded")
 	}
 }
@@ -189,8 +189,8 @@ func TestClearDropsStateAndTimer(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.Clear("heat")
-	if h.Len() != 0 || h.Peek("heat") != nil {
-		t.Fatalf("Clear left state: len=%d", h.Len())
+	if len(h.states) != 0 || h.peek("heat") != nil {
+		t.Fatalf("Clear left state: len=%d", len(h.states))
 	}
 	time.Sleep(60 * time.Millisecond)
 	if _, d := reg.counts(); d != 0 {
@@ -204,10 +204,45 @@ func TestNoRegistry(t *testing.T) {
 	if _, err := send(t, h, 1.0, time.Hour); err == nil {
 		t.Fatal("send without a registry succeeded")
 	}
-	if err := h.SendDefault(context.Background(), "heat", nil); err == nil {
+	if err := h.SendDefault(context.Background(), "heat"); err == nil {
 		t.Fatal("default without a registry succeeded")
 	}
 	if h.Active("heat") != nil {
 		t.Fatal("hold without a registry")
 	}
+}
+
+// The control tick reads a hold without waiting. While a command or a
+// default holds the driver's lock it is told so, not kept waiting and not
+// told there is no hold.
+func TestTryActiveDoesNotWaitForACommandInFlight(t *testing.T) {
+	reg := &fakeRegistry{generation: 1, running: true}
+	h := newHolds(reg)
+	if hold, known := h.TryActive("heat"); hold != nil || !known {
+		t.Fatalf("TryActive without state = %+v, known %v; want nil, known", hold, known)
+	}
+	if _, err := send(t, h, 1.0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if hold, known := h.TryActive("heat"); !known || hold == nil || hold.Value != 1.0 {
+		t.Fatalf("TryActive = %+v, known %v; want the hold", hold, known)
+	}
+
+	seams := h.Seams()
+	state := seams.Peek("heat")
+	seams.Lock(state) // a command in flight
+	done := make(chan bool, 1)
+	go func() {
+		hold, known := h.TryActive("heat")
+		done <- hold == nil && !known
+	}()
+	select {
+	case unknown := <-done:
+		if !unknown {
+			t.Error("TryActive behind a command in flight claimed to know the hold")
+		}
+	case <-time.After(time.Second):
+		t.Error("TryActive waited for the command in flight")
+	}
+	seams.Unlock(state)
 }
