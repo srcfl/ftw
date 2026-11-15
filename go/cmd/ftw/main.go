@@ -75,6 +75,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/selfupdate"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
+	"github.com/srcfl/ftw/go/internal/thermaltwin"
 	"github.com/srcfl/ftw/go/protocol/cloudwire"
 )
 
@@ -1064,6 +1065,9 @@ func main() {
 	// the telemetry store + state DB are wired. Closure capture
 	// works because Go closes over the variable, not its value.
 	var loadSvc *loadmodel.Service
+	// Likewise constructed further down; the applier hands it the zones a
+	// changed configuration or driver catalog declares.
+	var thermalTwins *thermaltwin.Service
 
 	// Caller holds forecastConfigMu for a live transition. Keep persisted state
 	// intact during a short unconfirmed startup; only confirmed live bindings
@@ -1193,6 +1197,9 @@ func main() {
 		}
 		observeOnly = config.ObserveOnlyDriverSet(newCfg)
 		capMu.Unlock()
+		if thermalTwins != nil {
+			thermalTwins.SetZones(thermalTwinZones(newCfg.Drivers, reloadCatalog))
+		}
 		warnIfEVHasBatteryCapacity(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog)
 
 		// Swap inverter-group tags (#143) and per-driver power
@@ -1467,6 +1474,26 @@ func main() {
 	loadSvc.Start(ctx)
 	defer loadSvc.Stop()
 	slog.Info("loadmodel started", "peak_w", loadPeakW, "quality", loadSvc.Model().Quality())
+
+	// ---- Thermal twins, shadow only (docs/adr/0012) ----
+	// Learns each declared room sensor's inertia and heat response from the
+	// same outdoor temperature as the load model. It reads and stores, and
+	// nothing plans or dispatches from it.
+	//
+	// The zones come from the catalog already loaded for the drivers, here
+	// and again whenever a saved configuration reloads it, so the service
+	// reads no driver file itself.
+	twinDrivers := func() []config.Driver {
+		cfgMu.RLock()
+		defer cfgMu.RUnlock()
+		return append([]config.Driver(nil), cfg.Drivers...)
+	}
+	thermalTwins = thermaltwin.NewService(st, tel)
+	thermalTwins.Temp = loadSvc.Temp
+	thermalTwins.SetZones(thermalTwinZones(twinDrivers(), driverCatalog))
+	thermalTwins.PowerDrivers = func() []string { return thermalTwinPowerDrivers(twinDrivers()) }
+	thermalTwins.Start(ctx)
+	defer thermalTwins.Stop()
 
 	// ---- Start OCPP 1.6J Central System (optional) ----
 	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
@@ -2598,6 +2625,7 @@ func main() {
 		PlannerPrefs:     plannerPrefs,
 		PVModel:          pvSvc,
 		LoadModel:        loadSvc,
+		ThermalTwin:      thermalTwins,
 		ForecastLearning: forecastTrackerSvc,
 		Loadpoints:       lpMgr,
 		Cars:             carsRT,

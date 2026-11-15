@@ -1297,6 +1297,14 @@ func (s *Store) SaveConfig(key, value string) error {
 	})
 }
 
+// DeleteConfig removes a config k/v. A missing key is not an error.
+func (s *Store) DeleteConfig(key string) error {
+	return s.durableConfigWrite(func(tx *sql.Tx) error {
+		_, err := tx.Exec(`DELETE FROM config WHERE key = ?`, key)
+		return err
+	})
+}
+
 // LoadConfig returns the value for key, or ok=false if missing.
 func (s *Store) LoadConfig(key string) (string, bool) {
 	var v string
