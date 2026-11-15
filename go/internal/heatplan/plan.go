@@ -131,6 +131,10 @@ type Actuator struct {
 	// slots, rounded up by the caller. on_off only.
 	MinOnSlots, MinOffSlots int
 	// On and RunSlots say what the device is doing now and for how long.
+	// A RunSlots of 0 is a run time the caller does not know. It is read as
+	// a switch just made, so the device keeps its state for its whole
+	// minimum time: safe for the device, at the cost of heat held back or
+	// spent for up to that long.
 	On       bool
 	RunSlots int
 }
@@ -162,6 +166,10 @@ type Request struct {
 	SurplusKW, SurplusPrice []float64
 	Zone                    Zone
 	Actuator                Actuator
+
+	// battery is what Site offered from the battery, slot by slot, for
+	// After to take off before the next zone.
+	battery []batteryGift
 }
 
 // Slot is the proposal for one slot.

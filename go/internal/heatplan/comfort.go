@@ -5,21 +5,20 @@ import (
 	"math"
 )
 
-// This file holds the owner's two rules for what heat is worth, beside the
-// plan itself. Neither has a default in code: every number in them is the
-// owner's, the zero value of each rule changes nothing, and a caller must
-// not invent one.
+// This file holds the owner's rule for what heat is worth, beside the plan
+// itself, and what a plan saves. The rule has no default in code: every
+// number in it is the owner's, its zero value changes nothing, and a caller
+// must not invent one.
 //
-//   - PriceComfort: how warm the owner wants a zone depends on what the day
-//     costs. A cheap day may buy a warmer floor; a dear day may cost a
-//     cooler room. It moves the target before planning, so the plan and its
-//     baseline both stand on the comfort that day is worth.
-//   - SavingsGate: moving heat in time is only worth a device's writes and
-//     the owner's attention when the plans together save enough in a day.
-//     Below that the devices are left on their targets.
+// How warm the owner wants a zone depends on what the day costs. A cheap day
+// may buy a warmer floor; a dear day may cost a cooler room. PriceComfort
+// moves the target before planning, so the plan and its baseline both stand
+// on the comfort that day is worth. It needs no model of the zone and holds
+// from the first day.
 //
-// PriceComfort needs no model of the zone and holds from the first day.
-// SavingsGate weighs plans, so it is only as good as the twins behind them.
+// There is no least saving before a plan may act. What a plan saves is shown
+// to the owner from the shadow run, and the owner decides with that number
+// in view (ADR 0012, decision 9).
 
 // PriceComfort moves a zone's target with the day's mean price. All prices
 // are in the unit of Request.Price.
@@ -78,8 +77,18 @@ func (c PriceComfort) ShiftK(dayMean float64) float64 {
 	}
 	if c.StepK > 0 {
 		// math.Round rounds halves away from zero, which is what a
-		// thermostat's half-degree step should do in both directions.
+		// thermostat's half-degree step should do in both directions. It
+		// never rounds past the owner's own limit: a raise of 2.5 K in
+		// steps of 1 K is at most 2 K, not 3.
+		// The small margin keeps 0.3 K in steps of 0.1 K at 0.3.
+		const eps = 1e-9
 		shift = math.Round(shift/c.StepK) * c.StepK
+		if shift > c.RaiseK+eps {
+			shift = math.Floor(c.RaiseK/c.StepK+eps) * c.StepK
+		}
+		if shift < -c.LowerK-eps {
+			shift = -math.Floor(c.LowerK/c.StepK+eps) * c.StepK
+		}
 	}
 	return shift
 }
@@ -126,60 +135,13 @@ func DayMean(price []float64, slotH, minHours float64) (mean float64, ok bool) {
 	return sum / float64(len(price)), true
 }
 
-// SavingsGate is the owner's least saving for planned heat to be acted on.
-type SavingsGate struct {
-	// MinPerDay is what the plans must save together in a day, in the unit
-	// of Request.Price times kWh. Zero or less opens the gate always.
-	MinPerDay float64 `json:"min_per_day"`
-	// KeepShare is the share of MinPerDay below which an open gate closes
-	// again, so that a saving near the limit does not open and close it
-	// every slot. From above 0 to 1; zero means 1, no hysteresis.
-	KeepShare float64 `json:"keep_share,omitempty"`
-}
-
-// Validate refuses a gate that cannot be read one way.
-func (g SavingsGate) Validate() error {
-	if !finite(g.MinPerDay, g.KeepShare) || g.KeepShare < 0 || g.KeepShare > 1 {
-		return errors.New("heatplan: the savings gate keeps a share of 0 to 1 of a finite limit")
-	}
-	return nil
-}
-
 // Saving is what the plan saves against the device left alone at the
-// target. A plan that leaves its band saves nothing: it is not feasible,
-// and what it seems to save is comfort it did not deliver.
+// target, in the unit of Request.Price times kWh, over the plan's horizon.
+// A plan that leaves its band saves nothing: it is not feasible, and what it
+// seems to save is comfort it did not deliver.
 func (p Plan) Saving() float64 {
 	if p.BandExcursionKh > 0 || !finite(p.Cost, p.BaselineCost) {
 		return 0
 	}
 	return math.Max(0, p.BaselineCost-p.Cost)
-}
-
-// Open reports whether the plans together save enough to act on, and what
-// they save scaled to a day. horizonH is the horizon the plans cover; a
-// horizon longer than a day is scaled down and a shorter one up, since a
-// morning with half a day of prices would otherwise never reach a daily
-// limit. wasOpen is the gate's last answer.
-//
-// A closed gate means every zone is left on its target, which with
-// PriceComfort is the target that day is worth. An invalid gate, or a
-// horizon that is not a length of time, is closed: the devices then run
-// themselves, which is always safe.
-func (g SavingsGate) Open(plans []Plan, horizonH float64, wasOpen bool) (open bool, perDay float64) {
-	if g.Validate() != nil || !(horizonH > 0) || !finite(horizonH) {
-		return false, 0
-	}
-	var saved float64
-	for _, p := range plans {
-		saved += p.Saving()
-	}
-	perDay = saved * 24 / horizonH
-	if g.MinPerDay <= 0 {
-		return true, perDay
-	}
-	limit := g.MinPerDay
-	if wasOpen && g.KeepShare > 0 {
-		limit *= g.KeepShare
-	}
-	return perDay >= limit, perDay
 }

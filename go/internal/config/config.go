@@ -46,7 +46,6 @@ type Config struct {
 	OCPP             *OCPP              `yaml:"ocpp,omitempty" json:"ocpp,omitempty"`
 	Setup            *Setup             `yaml:"setup,omitempty" json:"setup,omitempty"`
 	ForecastPriors   *ForecastPriors    `yaml:"forecast_priors,omitempty" json:"forecast_priors,omitempty"`
-	Thermal          *Thermal           `yaml:"thermal,omitempty" json:"thermal,omitempty"`
 
 	// LoadWarnings collects recoverable problems Parse repaired instead of
 	// refusing the file: an on-disk config an older version accepted must
@@ -1983,9 +1982,6 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.Price.Validate(); err != nil {
-		return err
-	}
-	if err := c.Thermal.Validate(); err != nil {
 		return err
 	}
 	if c.Site.TimeZone != "" {

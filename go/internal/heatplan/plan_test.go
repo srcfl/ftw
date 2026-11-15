@@ -280,6 +280,52 @@ func TestMinimumOnAndOffTimesAreKept(t *testing.T) {
 	}
 }
 
+// The run time the device reports carries across the plan's start in both
+// directions: a device off for 2 of its 6 slots waits 4 more however cheap
+// the first hours are, and a device on for longer than its minimum may stop at
+// once when the first hours are dear.
+func TestRunTimeCarriesAcrossThePlanStart(t *testing.T) {
+	firstOn := func(p Plan) int {
+		for i, s := range p.Slots {
+			if s.Value == 1 {
+				return i
+			}
+		}
+		return -1
+	}
+	cheapFirst := hours(day, func(h float64) float64 {
+		if h < 2 {
+			return -50
+		}
+		return 100
+	})
+	r := pool(day, cheapFirst, summerDay(day))
+	r.Zone.StartC = 27
+	r.Actuator.MinOnSlots, r.Actuator.MinOffSlots = 4, 6
+	r.Actuator.On, r.Actuator.RunSlots = false, 2
+	p := propose(t, r)
+	checkRuns(t, p, r.Actuator)
+	if got := firstOn(p); got != 4 {
+		t.Fatalf("an off device 2 slots into its 6 first runs in slot %d, want 4", got)
+	}
+
+	dearFirst := hours(day, func(h float64) float64 {
+		if h < 2 {
+			return 500
+		}
+		return 100
+	})
+	r = pool(day, dearFirst, summerDay(day))
+	r.Zone.StartC = 28
+	r.Actuator.MinOnSlots, r.Actuator.MinOffSlots = 4, 6
+	r.Actuator.On, r.Actuator.RunSlots = true, 8
+	p = propose(t, r)
+	checkRuns(t, p, r.Actuator)
+	if p.Slots[0].Value != 0 {
+		t.Fatal("a device on for 8 slots, past its minimum of 4, kept running into two dear hours")
+	}
+}
+
 func TestAnUndersizedHeaterIsReportedNotHidden(t *testing.T) {
 	r := radiatorHouse(day, flat(day, 100))
 	r.Actuator.MaxHeatKW = 2 // the house loses 4.2 kW at target
@@ -550,7 +596,7 @@ func TestAfterHandsTheNextZoneWhatIsLeft(t *testing.T) {
 	tank.Site(site, limit)
 	first := propose(t, tank)
 	second := spa(day, nil)
-	second.Site(After(site, first, slotH), limit)
+	second.Site(After(site, tank, first), limit)
 	next := propose(t, second)
 	for k := range site {
 		total := site[k].GridKW + (first.Slots[k].ElecKWh+next.Slots[k].ElecKWh)/slotH
@@ -634,6 +680,78 @@ func TestBatteryEnergyCostsWhatTheSiteBuysBack(t *testing.T) {
 		if between(float64(k)*slotH, 17, 20) && math.Abs(small.SurplusKW[k]-0.2) > 1e-9 {
 			t.Fatalf("slot %d: a 0.2 kW floor is offered %.2f kW", k, small.SurplusKW[k])
 		}
+	}
+}
+
+// A heat pump is offered battery power by the electricity it draws, not by
+// the heat it gives: 6 kW of heat at a COP near 3 is about 2 kW, and the
+// import headroom grows by no more than that.
+func TestBatteryIsOfferedByTheElectricityAPumpDraws(t *testing.T) {
+	site := make([]SiteSlot, day)
+	for k := range site {
+		h := float64(k) * slotH
+		site[k] = SiteSlot{ImportPrice: 100, ExportPrice: 30, GridKW: 1}
+		switch {
+		case between(h, 17, 20):
+			site[k] = SiteSlot{ImportPrice: 300, ExportPrice: 30, BatteryDischargeKW: 4, BatterySpareKW: 10}
+		case between(h, 20, 23):
+			site[k] = SiteSlot{ImportPrice: 150, ExportPrice: 30, BatteryDischargeKW: 4, BatterySpareKW: 10}
+		}
+	}
+	r := airToAirHouse(day, nil, flat(day, 7))
+	r.Actuator.MaxHeatKW = 6
+	r.Site(site, 5)
+	for k := range site {
+		if !between(float64(k)*slotH, 17, 20) {
+			continue
+		}
+		draw := r.maxDrawKW(k)
+		if !(draw > 1 && draw < 3) {
+			t.Fatalf("slot %d: a 6 kW pump draws %.2f kW by the model, want about 2", k, draw)
+		}
+		if math.Abs(r.SurplusKW[k]-draw) > 1e-9 {
+			t.Fatalf("slot %d: offered %.2f kW from the battery, want the pump's draw %.2f", k, r.SurplusKW[k], draw)
+		}
+		if math.Abs(r.MaxElecKW[k]-(5+draw)) > 1e-9 {
+			t.Fatalf("slot %d: headroom %.2f kW, want the 5 kW limit plus %.2f", k, r.MaxElecKW[k], draw)
+		}
+	}
+}
+
+// Two zones planned one after the other share the battery's energy once.
+// What the first was carried by is taken off what the second is offered,
+// and the slot that gave it up imports it instead.
+func TestAfterOffersBatteryEnergyOnce(t *testing.T) {
+	site := batterySite(true)
+	offeredTotal := func(r Request) (kw float64) {
+		for _, v := range r.SurplusKW {
+			kw += v
+		}
+		return kw
+	}
+	first := airToAirHouse(day, nil, flat(day, 0))
+	first.Site(site, 0)
+	p := propose(t, first)
+	var used float64
+	for k, s := range p.Slots {
+		used += math.Min(s.ElecKWh/slotH, first.SurplusKW[k])
+	}
+	if used < 0.5 {
+		t.Fatalf("the first room used %.2f kW-slots of battery power; the test needs it to use some", used)
+	}
+	next := After(site, first, p)
+	second := airToAirHouse(day, nil, flat(day, 0))
+	second.Site(next, 0)
+	if got, want := offeredTotal(second), offeredTotal(first)-used; got > want+1e-6 {
+		t.Fatalf("the second room is offered %.2f kW-slots of battery power, want at most the %.2f the first left", got, want)
+	}
+	var before, after float64
+	for k := range site {
+		before += site[k].GridKW*slotH + p.Slots[k].ElecKWh
+		after += next[k].GridKW * slotH
+	}
+	if math.Abs(before-after) > 1e-6 {
+		t.Fatalf("the meter shows %.3f kWh with the first room, want the %.3f the site and the room draw together", after, before)
 	}
 }
 

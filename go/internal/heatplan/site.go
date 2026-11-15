@@ -3,6 +3,8 @@ package heatplan
 import (
 	"math"
 	"sort"
+
+	"github.com/srcfl/ftw/go/internal/thermal"
 )
 
 // SiteSlot is what the site's own plan says about one slot, before this
@@ -22,7 +24,9 @@ type SiteSlot struct {
 
 // Site sets the request's prices, surplus and import limit from the site's
 // plan. importLimitKW is the most the site may import; zero or less means no
-// limit. Set the Actuator first: its output bounds what the zone can take.
+// limit. Set the Actuator, the Zone's band and OutdoorC first: the
+// electricity the device draws at full output bounds what the zone is
+// offered.
 //
 // The site's plan comes first and heat fits around it. Surplus is only what
 // the plan still exports after the battery and the car, and headroom only
@@ -43,7 +47,12 @@ func (r *Request) Site(site []SiteSlot, importLimitKW float64) {
 	if importLimitKW > 0 {
 		r.MaxElecKW = make([]float64, n)
 	}
-	fromBattery, buyBack := batteryOffer(site, r.Actuator.MaxHeatKW)
+	draw := make([]float64, n)
+	for k := range draw {
+		draw[k] = r.maxDrawKW(k)
+	}
+	fromBattery, buyBack, given := batteryOffer(site, draw)
+	r.battery = given
 	for k, s := range site {
 		r.Price[k] = s.ImportPrice
 		r.SurplusPrice[k] = s.ImportPrice
@@ -74,13 +83,53 @@ func (r *Request) Site(site []SiteSlot, importLimitKW float64) {
 // load into the dearest slots at the import price.
 const batteryShare = 0.5
 
+// maxDrawKW is the most electricity the zone's device can draw in slot k:
+// full output at the worst efficiency the plan could run it at, with the
+// sink at its hottest. A heat pump of 6 kW heat at COP 3 draws 2 kW. Without
+// the outdoor forecast or the band for the slot it is full output at COP 1,
+// which no source draws more than. Zero means no bound.
+func (r *Request) maxDrawKW(k int) float64 {
+	a := r.Actuator
+	if !(a.MaxHeatKW > 0) {
+		return 0
+	}
+	if a.Source.Kind != SourceHeatPump || k >= len(r.OutdoorC) || k >= len(r.Zone.MaxC) {
+		return a.MaxHeatKW
+	}
+	sink := math.Max(r.Zone.MaxC[k], r.Zone.StartC)
+	if c := a.Source.Supply; c != nil {
+		supplyK := 0.0
+		if a.Strategy == thermal.InfluenceCurveOffset {
+			for i, v := range a.Values {
+				if i == 0 || v*a.SupplyKPerUnit > supplyK {
+					supplyK = v * a.SupplyKPerUnit
+				}
+			}
+		}
+		sink = c.At(r.OutdoorC[k]) + supplyK
+	}
+	cop := a.Source.COP(r.OutdoorC[k], sink)
+	if !(cop >= 1) || !finite(cop) {
+		return a.MaxHeatKW
+	}
+	return a.MaxHeatKW / cop
+}
+
+// batteryGift is battery power one slot was offered from a cheaper, later
+// slot whose cover the battery gives up for it.
+type batteryGift struct {
+	to, from int
+	kw       float64
+}
+
 // batteryOffer finds the power heat may take from the battery in each slot,
 // and the price it pays for it. The battery's energy is finite: what heat
 // takes in one slot the battery cannot give in a later one, and when the
 // site plans again it drops the cheapest slot it still meant to cover. So a
 // slot is offered energy only from cheaper slots that come after it, at
-// their price. A slot that gives is not also offered energy.
-func batteryOffer(site []SiteSlot, zoneKW float64) (kw, price []float64) {
+// their price. A slot that gives is not also offered energy. zoneKW is the
+// most electricity the zone can draw in each slot; zero means no bound.
+func batteryOffer(site []SiteSlot, zoneKW []float64) (kw, price []float64, given []batteryGift) {
 	kw, price = make([]float64, len(site)), make([]float64, len(site))
 	type covered struct {
 		slot              int
@@ -93,8 +142,8 @@ func batteryOffer(site []SiteSlot, zoneKW float64) (kw, price []float64) {
 			continue
 		}
 		want := math.Max(0, s.BatterySpareKW)
-		if zoneKW > 0 {
-			want = math.Min(want, zoneKW)
+		if k < len(zoneKW) && zoneKW[k] > 0 {
+			want = math.Min(want, zoneKW[k])
 		}
 		c = append(c, covered{slot: k, price: s.ImportPrice, give: batteryShare * s.BatteryDischargeKW, want: want})
 	}
@@ -133,24 +182,56 @@ func batteryOffer(site []SiteSlot, zoneKW float64) (kw, price []float64) {
 				x := part * (t.want - kw[t.slot])
 				price[t.slot] = (price[t.slot]*kw[t.slot] + g.price*x) / (kw[t.slot] + x)
 				kw[t.slot] += x
+				given = append(given, batteryGift{to: t.slot, from: g.slot, kw: x})
 			}
 			left -= part * room
 			g.gave = true
 		}
 	}
-	return kw, price
+	return kw, price, given
 }
 
 // After returns the site's plan with a zone's proposal added to it, for
-// planning the next zone: surplus one zone takes and headroom it fills are
-// not offered twice. Zones planned this way share the site in the order
-// they are planned; they are not optimised together.
-func After(site []SiteSlot, p Plan, slotH float64) []SiteSlot {
+// planning the next zone: surplus one zone takes, headroom it fills and
+// battery energy it is carried by are not offered twice. r is the request
+// the proposal was planned from, after its Site. Zones planned this way
+// share the site in the order they are planned; they are not optimised
+// together.
+//
+// Battery energy the zone used moves on the meter as the site will see it
+// when it plans again: the slot it was used in does not import it, and the
+// cheaper, later slot that gave it up does, with its cover for heat reduced
+// by the same amount, so that all zones together are never offered more of
+// it than one zone would be.
+func After(site []SiteSlot, r Request, p Plan) []SiteSlot {
 	out := append([]SiteSlot(nil), site...)
+	h := r.SlotH
+	if !(h > 0) {
+		return out
+	}
 	for k := range out {
-		if k < len(p.Slots) && slotH > 0 {
-			out[k].GridKW += p.Slots[k].ElecKWh / slotH
+		if k < len(p.Slots) {
+			out[k].GridKW += p.Slots[k].ElecKWh / h
 		}
+	}
+	offered := make(map[int]float64, len(r.battery))
+	for _, b := range r.battery {
+		offered[b.to] += b.kw
+	}
+	for _, b := range r.battery {
+		if b.to >= len(p.Slots) || b.to >= len(out) || b.from >= len(out) || !(offered[b.to] > 0) {
+			continue
+		}
+		used := math.Min(p.Slots[b.to].ElecKWh/h, offered[b.to])
+		taken := b.kw * used / offered[b.to]
+		if !(taken > 0) {
+			continue
+		}
+		to, from := &out[b.to], &out[b.from]
+		to.GridKW -= taken
+		to.BatterySpareKW = math.Max(0, to.BatterySpareKW-taken)
+		from.GridKW += taken
+		from.BatteryDischargeKW = math.Max(0, from.BatteryDischargeKW-taken/batteryShare)
 	}
 	return out
 }

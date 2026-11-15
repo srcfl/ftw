@@ -118,6 +118,12 @@ func TestDayMeanNeedsMostOfTheDay(t *testing.T) {
 	if m, ok := DayMean(flat(92, 100), slotH, 22); !ok || m != 100 {
 		t.Errorf("23 hours (a day the clocks go forward) = %v, %v", m, ok)
 	}
+	// A day the clocks go back has 25 hours; its mean is still the mean of
+	// every slot in it, not of 24 hours.
+	long := append(flat(96, 100), flat(4, 200)...)
+	if m, ok := DayMean(long, slotH, 22); !ok || math.Abs(m-104) > 1e-9 {
+		t.Errorf("25 hours (a day the clocks go back) = %v, %v; want 104", m, ok)
+	}
 	if _, ok := DayMean([]float64{100, math.NaN()}, 12, 22); ok {
 		t.Error("a price that is not a number passed")
 	}
@@ -127,44 +133,6 @@ func TestDayMeanNeedsMostOfTheDay(t *testing.T) {
 }
 
 func saves(v float64) Plan { return Plan{Cost: 1000 - v, BaselineCost: 1000} }
-
-// Five kronor a day, in öre, as the household set it.
-func TestSavingsGateWeighsEveryPlanTogether(t *testing.T) {
-	gate := SavingsGate{MinPerDay: 500, KeepShare: 0.8}
-	if open, perDay := gate.Open([]Plan{saves(200), saves(250)}, 24, false); open || perDay != 450 {
-		t.Errorf("450 a day: open %v, per day %v", open, perDay)
-	}
-	if open, perDay := gate.Open([]Plan{saves(200), saves(250), saves(60)}, 24, false); !open || perDay != 510 {
-		t.Errorf("510 a day: open %v, per day %v", open, perDay)
-	}
-	// Half a day of prices: the same plans are worth twice as much a day.
-	if open, perDay := gate.Open([]Plan{saves(260)}, 12, false); !open || perDay != 520 {
-		t.Errorf("260 in 12 hours: open %v, per day %v", open, perDay)
-	}
-	// Two days of horizon are not two days of saving in one.
-	if open, perDay := gate.Open([]Plan{saves(900)}, 48, false); open || perDay != 450 {
-		t.Errorf("900 in 48 hours: open %v, per day %v", open, perDay)
-	}
-}
-
-func TestSavingsGateDoesNotFlapAtTheLimit(t *testing.T) {
-	gate := SavingsGate{MinPerDay: 500, KeepShare: 0.8}
-	open := false
-	var got []bool
-	for _, v := range []float64{480, 510, 480, 410, 390, 480, 500} {
-		open, _ = gate.Open([]Plan{saves(v)}, 24, open)
-		got = append(got, open)
-	}
-	want := []bool{false, true, true, true, false, false, true}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("gate over time = %v, want %v", got, want)
-		}
-	}
-	if open, _ := (SavingsGate{MinPerDay: 500}).Open([]Plan{saves(480)}, 24, true); open {
-		t.Error("without a keep share an open gate stayed open below the limit")
-	}
-}
 
 // What a plan seems to save by leaving its band is comfort it did not
 // deliver, and a plan that costs more than leaving the device alone saves
@@ -177,33 +145,29 @@ func TestSavingCountsOnlyWhatAFeasiblePlanSaves(t *testing.T) {
 	if out.Saving() != 0 || worse.Saving() != 0 || broken.Saving() != 0 || saves(300).Saving() != 300 {
 		t.Errorf("savings = %v, %v, %v, %v; want 0, 0, 0, 300", out.Saving(), worse.Saving(), broken.Saving(), saves(300).Saving())
 	}
-	gate := SavingsGate{MinPerDay: 500}
-	if open, perDay := gate.Open([]Plan{out, worse, saves(300)}, 24, false); open || perDay != 300 {
-		t.Errorf("open %v, per day %v; want closed at 300", open, perDay)
-	}
 }
 
-// No limit set is no gate. A gate that cannot be read is closed, because
-// leaving the devices to themselves is the safe answer.
-func TestSavingsGateWithoutALimitIsOpenAndABrokenOneIsClosed(t *testing.T) {
-	if open, _ := (SavingsGate{}).Open(nil, 24, false); !open {
-		t.Error("the zero value closed the gate")
-	}
-	for name, g := range map[string]SavingsGate{
-		"keep share above 1": {MinPerDay: 500, KeepShare: 1.5},
-		"negative keep":      {MinPerDay: 500, KeepShare: -0.1},
-		"not a number":       {MinPerDay: math.NaN()},
+// A step never takes the target past what the owner allowed: 2.5 K in
+// whole steps is 2 K, and a step larger than the limit moves nothing.
+func TestPriceComfortStepNeverPassesTheOwnersLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		c    PriceComfort
+		mean float64
+		want float64
+	}{
+		{"2.5 K up in 1 K steps", PriceComfort{CheapPrice: 150, NormalPrice: 260, RaiseK: 2.5, StepK: 1}, 100, 2},
+		{"1 K up in 2 K steps", PriceComfort{CheapPrice: 150, NormalPrice: 260, RaiseK: 1, StepK: 2}, 100, 0},
+		{"1.5 K down in 1 K steps", PriceComfort{NormalPrice: 260, DearPrice: 400, LowerK: 1.5, StepK: 1}, 500, -1},
+		{"0.3 K up in 0.1 K steps", PriceComfort{CheapPrice: 150, NormalPrice: 260, RaiseK: 0.3, StepK: 0.1}, 100, 0.3},
+		{"a step that fits is kept", PriceComfort{CheapPrice: 150, NormalPrice: 260, RaiseK: 2, StepK: 0.5}, 100, 2},
 	} {
-		if g.Validate() == nil {
-			t.Errorf("%s: Validate accepted it", name)
+		got := tc.c.ShiftK(tc.mean)
+		if math.Abs(got-tc.want) > 1e-9 {
+			t.Errorf("%s: shift = %v K, want %v", tc.name, got, tc.want)
 		}
-		if open, _ := g.Open([]Plan{saves(9000)}, 24, true); open {
-			t.Errorf("%s: gate open", name)
-		}
-	}
-	for _, h := range []float64{0, -3, math.NaN(), math.Inf(1)} {
-		if open, _ := (SavingsGate{MinPerDay: 500}).Open([]Plan{saves(9000)}, h, true); open {
-			t.Errorf("horizon %v: gate open", h)
+		if got > tc.c.RaiseK+1e-9 || got < -tc.c.LowerK-1e-9 {
+			t.Errorf("%s: shift %v K is past the owner's limit", tc.name, got)
 		}
 	}
 }
