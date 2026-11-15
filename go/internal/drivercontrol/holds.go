@@ -46,25 +46,11 @@ type Hold struct {
 }
 
 // State serializes command dispatch, default dispatch and hold transitions
-// for one driver.
+// for one driver. It is opaque outside this package: callers go through
+// Holds' methods, which take and release its lock themselves.
 type State struct {
 	mu   sync.Mutex
 	hold *Hold
-}
-
-// Lock takes the per-driver lock. Exported for tests that stand in for a
-// command in flight; production callers use Holds' methods.
-func (st *State) Lock() { st.mu.Lock() }
-
-// Unlock releases the per-driver lock.
-func (st *State) Unlock() { st.mu.Unlock() }
-
-// CurrentHold returns the held setting itself, not a copy, or nil. Its
-// identity is what Expire compares.
-func (st *State) CurrentHold() *Hold {
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.hold
 }
 
 // Holds is every driver's State.
@@ -73,6 +59,11 @@ type Holds struct {
 
 	mu     sync.Mutex
 	states map[string]*State
+
+	// Test seams, nil in production and set only through Seams. Guarded by
+	// mu.
+	beforeStateLock        func()
+	beforeDefaultStateLock func()
 }
 
 // New returns empty holds. registry is read at each use, so a caller whose
@@ -97,10 +88,7 @@ func (h *Holds) reg() Registry {
 // done runs with the outcome while the lock is still held, so a caller that
 // reads registry status to explain an error sees it before any lifecycle
 // change waiting on this driver can proceed.
-//
-// beforeStateLock is a test seam, run after the state lookup and before the
-// per-driver lock; nil in production.
-func (h *Holds) Send(ctx context.Context, name, controlID string, value any, body []byte, d time.Duration, beforeStateLock func(), done func(Hold, error)) {
+func (h *Holds) Send(ctx context.Context, name, controlID string, value any, body []byte, d time.Duration, done func(Hold, error)) {
 	reg := h.reg()
 	if reg == nil {
 		done(Hold{}, errors.New("driver registry not available"))
@@ -112,7 +100,7 @@ func (h *Holds) Send(ctx context.Context, name, controlID string, value any, bod
 	// old status snapshot. The state lookup and lock are also one lifecycle
 	// transaction: clearState takes the same locks in the same order, so it
 	// cannot remove the map entry between these operations.
-	state := h.lock(name, beforeStateLock)
+	state := h.lock(name)
 	defer state.mu.Unlock()
 	sendCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
 	defer cancel()
@@ -122,17 +110,10 @@ func (h *Holds) Send(ctx context.Context, name, controlID string, value any, bod
 		done(Hold{}, err)
 		return
 	}
-	hold := h.ArmLocked(name, state, controlID, value, generation, d)
+	hold := h.armLocked(name, state, controlID, value, generation, d)
 	out := *hold
 	out.timer = nil
 	done(out, nil)
-}
-
-// State returns the driver's state, creating it.
-func (h *Holds) State(name string) *State {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.stateLocked(name)
 }
 
 func (h *Holds) stateLocked(name string) *State {
@@ -152,11 +133,11 @@ func (h *Holds) stateLocked(name string) *State {
 // can either own the state before removal starts or see a removed state
 // after removal finishes; it cannot keep a pointer that was deleted in
 // between.
-func (h *Holds) lock(name string, beforeStateLock func()) *State {
+func (h *Holds) lock(name string) *State {
 	h.mu.Lock()
 	state := h.stateLocked(name)
-	if beforeStateLock != nil {
-		beforeStateLock()
+	if h.beforeStateLock != nil {
+		h.beforeStateLock()
 	}
 	state.mu.Lock()
 	h.mu.Unlock()
@@ -177,11 +158,11 @@ func (h *Holds) tryLockExisting(name string) (state *State, locked bool) {
 	return state, state.mu.TryLock()
 }
 
-// ArmLocked replaces any existing hold for the driver; the caller holds
+// armLocked replaces any existing hold for the driver; the caller holds
 // state's lock. One driver holds one control at a time: two overlapping
 // holds on the same device would each expire into a default that undoes the
 // other.
-func (h *Holds) ArmLocked(name string, state *State, control string, value any, generation uint64, d time.Duration) *Hold {
+func (h *Holds) armLocked(name string, state *State, control string, value any, generation uint64, d time.Duration) *Hold {
 	h.clearLocked(state)
 	now := time.Now()
 	hold := &Hold{
@@ -192,7 +173,7 @@ func (h *Holds) ArmLocked(name string, state *State, control string, value any, 
 		armedAt:    now,
 	}
 	hold.timer = time.AfterFunc(d, func() {
-		if err := h.Expire(name, state, hold); err != nil {
+		if err := h.expire(name, state, hold); err != nil {
 			slog.Error("control hold expiry default failed; registry recovery gate remains active", "driver", name, "err", err)
 		}
 	})
@@ -207,11 +188,11 @@ func (h *Holds) clearLocked(state *State) {
 	state.hold = nil
 }
 
-// Expire hands the device back to itself. It checks identity first: a hold
+// expire hands the device back to itself. It checks identity first: a hold
 // that was replaced or released already had its timer stopped, but a timer
 // that had begun firing cannot be stopped, and defaulting a driver that an
 // operator has just set again is the one wrong answer here.
-func (h *Holds) Expire(name string, state *State, fired *Hold) error {
+func (h *Holds) expire(name string, state *State, fired *Hold) error {
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	if state.hold != fired {
@@ -245,9 +226,7 @@ func (h *Holds) Expire(name string, state *State, fired *Hold) error {
 // cleared once the lock is free, but only a hold armed before the default
 // returned. A later one belongs to a command sent after the default and
 // keeps its own expiry.
-//
-// beforeDefaultStateLock is a test seam; nil in production.
-func (h *Holds) SendDefault(ctx context.Context, name string, beforeDefaultStateLock func()) error {
+func (h *Holds) SendDefault(ctx context.Context, name string) error {
 	reg := h.reg()
 	if reg == nil {
 		return errors.New("driver registry not available")
@@ -255,8 +234,11 @@ func (h *Holds) SendDefault(ctx context.Context, name string, beforeDefaultState
 	if _, ok := reg.ControlStatus(name); !ok {
 		return fmt.Errorf("driver %q not found", name)
 	}
-	if beforeDefaultStateLock != nil {
-		beforeDefaultStateLock()
+	h.mu.Lock()
+	before := h.beforeDefaultStateLock
+	h.mu.Unlock()
+	if before != nil {
+		before()
 	}
 	state, locked := h.tryLockExisting(name)
 	if locked {
@@ -296,13 +278,36 @@ func (h *Holds) sendDefaultLocked(ctx context.Context, name string) error {
 
 // Active returns a copy of the driver's hold, or nil. A hold bound to a
 // generation that is no longer running is cleared, not returned.
+//
+// It takes the per-driver lock, so it waits for a command in flight, up to
+// DefaultTimeout. That suits a request. The control tick must use TryActive.
 func (h *Holds) Active(name string) *Hold {
-	state := h.Peek(name)
+	state := h.peek(name)
 	if state == nil {
 		return nil
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	return h.activeLocked(name, state)
+}
+
+// TryActive is Active for a caller that must not wait, as the control tick
+// must not. known is false when a command or a default holds the driver's
+// lock: the hold is then changing, and the caller should treat the driver as
+// held and look again on its next tick rather than send anything.
+func (h *Holds) TryActive(name string) (hold *Hold, known bool) {
+	state, locked := h.tryLockExisting(name)
+	if state == nil {
+		return nil, true
+	}
+	if !locked {
+		return nil, false
+	}
+	defer state.mu.Unlock()
+	return h.activeLocked(name, state), true
+}
+
+func (h *Holds) activeLocked(name string, state *State) *Hold {
 	if state.hold == nil {
 		return nil
 	}
@@ -321,19 +326,12 @@ func (h *Holds) Active(name string) *Hold {
 	return &hold
 }
 
-// Peek returns the driver's state without creating one.
-func (h *Holds) Peek(name string) *State {
+// peek returns the driver's state without creating one.
+func (h *Holds) peek(name string) *State {
 	h.mu.Lock()
 	state := h.states[name]
 	h.mu.Unlock()
 	return state
-}
-
-// Len is how many drivers have state. For tests of lifecycle cleanup.
-func (h *Holds) Len() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.states)
 }
 
 // Clear is called by the registry before a driver generation is removed. It
