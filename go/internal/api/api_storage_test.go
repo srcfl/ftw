@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -51,6 +52,31 @@ func TestHandleStorageInventoryReportsCoreStateAndDataHeadroom(t *testing.T) {
 	}
 	if body, err := os.ReadFile(markerPath); err != nil || string(body) != "unchanged" {
 		t.Fatalf("inventory changed an unrelated file: body=%q err=%v", body, err)
+	}
+}
+
+func TestHandleStorageInventoryIncludesForecastArchive(t *testing.T) {
+	dataDir := t.TempDir()
+	st, err := state.Open(filepath.Join(dataDir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.OpenForecastLongArchive(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv := New(&Deps{State: st, DataDir: dataDir})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/storage/inventory", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var got storageInventoryResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Databases.ForecastArchive == nil || got.Databases.ForecastArchive.AllocatedPages == 0 {
+		t.Fatalf("forecast archive inventory = %+v", got.Databases.ForecastArchive)
 	}
 }
 

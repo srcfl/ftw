@@ -172,3 +172,27 @@ func TestMarkerSkipThenBackgroundVerifyHealsNextBoot(t *testing.T) {
 		t.Errorf("precious row not restored: %q err=%v", v, err)
 	}
 }
+
+func TestSnapshotOmitsForecastLongArchive(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.OpenForecastLongArchive(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SnapshotState(); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := openRaw(filepath.Join(dir, "state.db.snapshot"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snap.Close()
+	var n int
+	if err := snap.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'fa_%'`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("quick snapshot contains %d forecast-archive tables, err=%v", n, err)
+	}
+}

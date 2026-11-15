@@ -183,6 +183,9 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
+	// The live archive is excluded above. The staged consistent copy still
+	// needs room, so count the file that copy is made from.
+	extraBytes += forecastArchiveBytes(statePath)
 	if err := ensureBackupDiskSpace(outputDir, state.BackupArchiveScratch(opts.State.BackupSourceBytes(), extraBytes)); err != nil {
 		return Info{}, err
 	}
@@ -258,6 +261,21 @@ func Create(ctx context.Context, opts CreateOptions) (Info, error) {
 		slog.Warn("full backup continues without cache.db; past prices are not in it", "err", err)
 	} else if found {
 		sources = append(sources, sourceEntry{archivePath: "data/" + path.Join(path.Dir(databaseFile), "cache.db"), sourcePath: stagedCache})
+	}
+	// Same treatment as cache.db: a consistent copy, never the live file or
+	// its WAL. A damaged analytics file must not cost the owner the backup.
+	stagedArchive := filepath.Join(stageDir, state.ForecastLongArchiveFilename)
+	if found, err := opts.State.BackupForecastLongArchive(ctx, stagedArchive); err != nil || (found && verifyDatabaseContext(ctx, stagedArchive) != nil) {
+		if ctx.Err() != nil {
+			return Info{}, ctx.Err()
+		}
+		if err == nil {
+			err = verifyDatabaseContext(ctx, stagedArchive)
+		}
+		_ = os.Remove(stagedArchive)
+		slog.Warn("full backup continues without forecast-archive.db", "err", err)
+	} else if found {
+		sources = append(sources, sourceEntry{archivePath: "data/" + path.Join(path.Dir(databaseFile), state.ForecastLongArchiveFilename), sourcePath: stagedArchive})
 	}
 	sources = append(sources, sourceEntry{
 		archivePath: databaseEntry,
@@ -346,6 +364,19 @@ func backupExtraBytes(sources []sourceEntry) (int64, error) {
 	return total, nil
 }
 
+func forecastArchiveBytes(statePath string) int64 {
+	path := state.ForecastLongArchivePath(statePath)
+	var n int64
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		info, err := os.Lstat(path + suffix)
+		if err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		n += info.Size()
+	}
+	return n
+}
+
 func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error) {
 	stateRel, _ := filepath.Rel(dataDir, statePath)
 	cacheRel, _ := filepath.Rel(dataDir, filepath.Join(filepath.Dir(statePath), "cache.db"))
@@ -408,6 +439,13 @@ func collectSources(dataDir, statePath, outputDir string) ([]sourceEntry, error)
 		// The live cache.db is never copied; Create archives a consistent
 		// copy instead. Restore moves all of them aside anyway.
 		if strings.HasPrefix(rel, stateRel+".snapshot") || rel == cacheRel || strings.HasPrefix(rel, cacheRel+"-") {
+			return nil
+		}
+		// The long-term forecast archive is staged as a consistent copy above.
+		// Copying the live file, its WAL, or a quarantined sibling would be
+		// inconsistent and can vanish during a backup.
+		archiveRel, _ := filepath.Rel(dataDir, state.ForecastLongArchivePath(statePath))
+		if rel == archiveRel || strings.HasPrefix(rel, archiveRel+"-") || strings.HasPrefix(rel, archiveRel+".") {
 			return nil
 		}
 		// FTW Cloud's key never goes into a backup. A box restored elsewhere
@@ -704,8 +742,12 @@ func verifyInWorkspaceProgressContext(ctx context.Context, archivePath, workspac
 		var writer io.Writer = h
 		var dbFile *os.File
 		parquetPath := ""
+		sqliteSide := ""
 		if entry.Path == manifest.DatabaseEntry {
 			dbFile, err = os.OpenFile(dbGzip, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		} else if path.Base(entry.Path) == state.ForecastLongArchiveFilename {
+			sqliteSide = filepath.Join(tmpDir, state.ForecastLongArchiveFilename)
+			dbFile, err = os.OpenFile(sqliteSide, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		} else if strings.HasSuffix(strings.ToLower(entry.Path), ".parquet") {
 			// Stage and remove one day at a time, not the entire cold archive.
 			parquetPath = filepath.Join(tmpDir, "parquet.tmp")
@@ -736,6 +778,14 @@ func verifyInWorkspaceProgressContext(ctx context.Context, archivePath, workspac
 				return Manifest{}, fmt.Errorf("backup: unreadable Parquet %s: %w", entry.Path, err)
 			}
 			if err := os.Remove(parquetPath); err != nil {
+				return Manifest{}, err
+			}
+		}
+		if sqliteSide != "" {
+			if err := verifyDatabaseContext(ctx, sqliteSide); err != nil {
+				return Manifest{}, fmt.Errorf("backup: forecast archive: %w", err)
+			}
+			if err := os.Remove(sqliteSide); err != nil {
 				return Manifest{}, err
 			}
 		}
@@ -1222,7 +1272,16 @@ func extractArchive(archivePath, staging string) error {
 	if len(seen) != len(want) {
 		return errors.New("backup: archive is missing one or more manifest files during extraction")
 	}
-	return verifyDatabase(filepath.Join(staging, filepath.FromSlash(manifest.DatabaseFile)))
+	if err := verifyDatabase(filepath.Join(staging, filepath.FromSlash(manifest.DatabaseFile))); err != nil {
+		return err
+	}
+	archived := filepath.Join(staging, filepath.Dir(filepath.FromSlash(manifest.DatabaseFile)), state.ForecastLongArchiveFilename)
+	if _, err := os.Stat(archived); err == nil {
+		if err := verifyDatabase(archived); err != nil {
+			return fmt.Errorf("backup: forecast archive: %w", err)
+		}
+	}
+	return nil
 }
 
 func verifyCompressedDatabase(src, workDir string) error {

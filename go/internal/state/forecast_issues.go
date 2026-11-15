@@ -703,3 +703,136 @@ func (s *Store) LoadForecastErrors(ctx context.Context, since, until int64, hour
 	}
 	return out, nil
 }
+
+// ForecastIssueCopy is one row from the 30-day issue archive, in issued order.
+// Err is set when the row cannot be decoded; the copier skips it and moves on.
+type ForecastIssueCopy struct {
+	Issue      forecasting.Issue
+	IssuedAtMS int64
+	ID         string
+	JSONBytes  int
+	GzipBytes  int
+	Err        error
+}
+
+// VisitForecastIssuesAfter walks issues strictly after the (issued_at_ms, id)
+// cursor, oldest first, at most limit rows. The long-term copier uses it so a
+// read snapshot stays short.
+func (s *Store) VisitForecastIssuesAfter(ctx context.Context, cursorIssuedMS int64, cursorID string, limit int, visit func(ForecastIssueCopy) error) error {
+	if visit == nil {
+		return errors.New("forecast issue visitor is nil")
+	}
+	if limit <= 0 || limit > 64 {
+		limit = 16
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT issued_at_ms, id, payload FROM forecast_issues
+ WHERE issued_at_ms > ? OR (issued_at_ms = ? AND id > ?)
+ ORDER BY issued_at_ms, id LIMIT ?`, cursorIssuedMS, cursorIssuedMS, cursorID, limit)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type rawIssue struct {
+		issued int64
+		id     string
+		data   []byte
+	}
+	var page []rawIssue
+	for rows.Next() {
+		var row rawIssue
+		if err = rows.Scan(&row.issued, &row.id, &row.data); err != nil {
+			return err
+		}
+		page = append(page, row)
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, row := range page {
+		item := ForecastIssueCopy{IssuedAtMS: row.issued, ID: row.id, GzipBytes: len(row.data)}
+		issue, size, decodeErr := decodeForecastIssue(row.data)
+		if decodeErr != nil {
+			item.Err = decodeErr
+		} else {
+			item.Issue = issue
+			item.JSONBytes = size
+		}
+		if err = visit(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LoadForecastModelStateRaw returns the gzip bytes stored for a model state.
+// The long-term archive copies them unchanged.
+func (s *Store) LoadForecastModelStateRaw(ctx context.Context, stateID string) (expanded int, payload []byte, err error) {
+	decodedID, err := hex.DecodeString(stateID)
+	if err != nil || len(decodedID) != sha256.Size {
+		return 0, nil, errors.New("invalid forecast model state ID")
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT expanded_bytes, payload FROM forecast_model_states WHERE id=?`, stateID).Scan(&expanded, &payload)
+	return expanded, payload, err
+}
+
+// VisitForecastObservationsAfter walks quarter-hour truth strictly after the
+// (start_ms, end_ms, config_version) cursor.
+func (s *Store) VisitForecastObservationsAfter(ctx context.Context, startMS, endMS int64, config string, limit int, visit func(forecasting.Observation) error) error {
+	if visit == nil {
+		return errors.New("forecast observation visitor is nil")
+	}
+	if limit <= 0 || limit > 512 {
+		limit = 128
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM forecast_observations
+ WHERE start_ms > ? OR (start_ms = ? AND end_ms > ?) OR (start_ms = ? AND end_ms = ? AND config_version > ?)
+ ORDER BY start_ms, end_ms, config_version LIMIT ?`, startMS, startMS, endMS, startMS, endMS, config, limit)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var payloads []string
+	for rows.Next() {
+		var data string
+		if err = rows.Scan(&data); err != nil {
+			return err
+		}
+		payloads = append(payloads, data)
+	}
+	if err = rows.Err(); err != nil {
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	for _, data := range payloads {
+		if len(data) > maxForecastRecordBytes {
+			return errors.New("oversized forecast observation")
+		}
+		var observation forecasting.Observation
+		if err = json.Unmarshal([]byte(data), &observation); err != nil {
+			return err
+		}
+		if err = observation.Validate(); err != nil {
+			return err
+		}
+		if err = visit(observation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// NewestForecastIssueMS is the latest issued_at_ms in the 30-day archive, or
+// zero when it is empty. The copier uses it only to describe lag.
+func (s *Store) NewestForecastIssueMS(ctx context.Context) (int64, error) {
+	var newest sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(issued_at_ms) FROM forecast_issues`).Scan(&newest)
+	if err != nil || !newest.Valid {
+		return 0, err
+	}
+	return newest.Int64, nil
+}

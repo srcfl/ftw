@@ -803,6 +803,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		if writer.LastError != "" || writer.MaintenanceError != "" || s.deps.State.HistoryMaintenanceStatus().LastError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
 			resp["status"] = "degraded"
 		}
+		// The long-term forecast archive is informational. A full disk or a
+		// rebuilt file must not mark the box degraded.
+		if archive, ok := s.deps.State.ForecastLongArchiveStatus(); ok {
+			resp["forecast_archive"] = archive
+		}
 	}
 	writeJSON(w, 200, resp)
 }

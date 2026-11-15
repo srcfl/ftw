@@ -36,12 +36,14 @@ const (
 	LegacyReleaseMarker = 4
 )
 
-// Store owns three SQLite databases:
+// Store owns three SQLite databases opened at startup:
 //   - history: samples, hourly summaries, energy ledger and dashboard history
 //   - db: state.db configuration, devices and learned state
 //   - cache: cache.db prices and forecasts; savings history needs past prices
 //
-// See heal.go for the boot-time integrity gate that populates healEvents.
+// forecast-archive.db is a fourth file, opened later by the forecast copier.
+// It is not on the boot path. See heal.go for the boot-time integrity gate
+// that populates healEvents.
 type Store struct {
 	aggregateHistory  atomic.Bool
 	history           *sql.DB
@@ -98,6 +100,12 @@ type Store struct {
 	deviceWriteMu  sync.Mutex
 	deviceCacheMu  sync.RWMutex
 	deviceCache    map[string]Device
+
+	// forecastLong is the long-term forecast archive. It stays nil until the
+	// copier opens it, so a slow or damaged analytics file cannot delay boot.
+	forecastLongMu     sync.Mutex
+	forecastLong       *ForecastLongArchive
+	forecastLongStatus *ForecastLongArchiveStatus
 }
 
 // Open initializes (or creates) the precious state.db at path plus the
@@ -308,6 +316,7 @@ func (s *Store) Close() error {
 	if s.history != nil {
 		err = errors.Join(err, s.history.Close())
 	}
+	err = errors.Join(err, s.closeForecastLongArchive())
 	if s.cache != nil {
 		err = errors.Join(err, s.cache.Close())
 	}
