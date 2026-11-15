@@ -54,6 +54,21 @@ func BatteryDischargeFeedsEV(batteryW, evW, loadW, pvW float64) bool {
 	return -batteryW > HouseResidualW(loadW, pvW)+SitePowerEpsW
 }
 
+// BatteryDischargeFeedsEVUnderImport adds the site's import limit to
+// BatteryDischargeFeedsEV. When the house and the car would not fit under
+// maxImportW with the battery idle, the discharge is what lets the car
+// charge that fast, so it puts battery energy into the car even while the
+// house uses all of it. A maxImportW of 0 or less means no limit.
+func BatteryDischargeFeedsEVUnderImport(batteryW, evW, loadW, pvW, maxImportW float64) bool {
+	if BatteryDischargeFeedsEV(batteryW, evW, loadW, pvW) {
+		return true
+	}
+	if evW <= 0 || batteryW >= 0 || maxImportW <= 0 {
+		return false
+	}
+	return GridW(loadW, pvW, 0, evW) > maxImportW+SitePowerEpsW
+}
+
 // PlannedSurplusForEVW is the near-term 3Φ-gate quantity: leftover PV
 // after house load, minus planned PV-soak battery charge. gridW is the
 // grid flow attributed to house+battery (planned GridW minus EV).

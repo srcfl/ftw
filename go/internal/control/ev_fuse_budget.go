@@ -996,8 +996,9 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 	// show yet (in r). Between that level and the import limit the cap holds.
 	// Battery discharge the fuse guard added ends once the site fits without
 	// it, so it is no room: a car that took it would keep the battery
-	// feeding the car at the line.
-	if reliefW := s.evFuseReliefW(store); reliefW > 0 {
+	// feeding the car at the line. Where the battery may not cover the car,
+	// no discharge is room (evBatteryDischargeW).
+	if reliefW := s.evBatteryDischargeW(store); reliefW > 0 {
 		r = s.evMeterRoom(meter, gridW, pool.phases, fuseMaxW, s.withBatteryOrders(s.pendingLoad(at), pending+reliefW))
 	}
 	fuseRoom, importRoom := 0.0, 0.0
@@ -1045,11 +1046,48 @@ func (s *State) stepEVMeterLimit(store *telemetry.Store, meter *telemetry.DerRea
 // build on it. expireOfflineFuseRelief ends it evSettle after it went offline.
 func (s *State) evFuseReliefW(store *telemetry.Store) float64 {
 	var w float64
+	for _, relief := range s.evFuseReliefByDriver(store) {
+		w += relief
+	}
+	return w
+}
+
+func (s *State) evFuseReliefByDriver(store *telemetry.Store) map[string]float64 {
+	out := make(map[string]float64, len(s.batteryFuseRelief))
 	for driver, relief := range s.batteryFuseRelief {
 		if raw, _, ok := store.OnlineRawW(driver, telemetry.DerBattery); ok {
 			relief = math.Min(relief, math.Max(0, -raw))
 		}
-		w += relief
+		out[driver] = relief
+	}
+	return out
+}
+
+// evBatteryDischargeW is the battery discharge a car's room must not
+// include. The fuse guard's relief always counts (evFuseReliefW). Where the
+// battery may not cover the car, so does every discharge Core ordered, as
+// far as a live reading shows it: the room a battery makes by covering the
+// house would let the car charge faster on battery energy whenever the fuse
+// or the import limit binds. A discharge Core did not order, such as one a
+// battery holds across a restart, is the device's own and stays room, as
+// before, until Core's next order replaces it.
+func (s *State) evBatteryDischargeW(store *telemetry.Store) float64 {
+	if s.batteryMayCoverEV() {
+		return s.evFuseReliefW(store)
+	}
+	byDriver := s.evFuseReliefByDriver(store)
+	now := s.now()
+	for driver, log := range s.batteryCommands {
+		_, _, latest, sent := log.span(now)
+		raw, _, live := store.OnlineRawW(driver, telemetry.DerBattery)
+		if !sent || !live || latest >= 0 {
+			continue
+		}
+		byDriver[driver] = math.Max(byDriver[driver], math.Min(-latest, math.Max(0, -raw)))
+	}
+	var w float64
+	for _, discharge := range byDriver {
+		w += discharge
 	}
 	return w
 }

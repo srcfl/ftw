@@ -671,7 +671,8 @@ func TestReturningBatteryReliefCountsWholeAgain(t *testing.T) {
 }
 
 // Relief is only the discharge the fuse guard added: a cancelled charge or
-// the planner's own discharge stays room for the car.
+// the planner's own discharge stays out of it. Whether the planner's
+// discharge is room for the car is evBatteryDischargeW's call.
 func TestFuseReliefIsOnlyAddedDischarge(t *testing.T) {
 	s := &State{}
 	s.recordFuseRelief(
