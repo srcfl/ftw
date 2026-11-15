@@ -757,6 +757,13 @@ func registerHost(L *lua.LState, env *HostEnv) {
 		return 0
 	}))
 
+	host.RawSetString("set_calibrating", L.NewFunction(func(L *lua.LState) int {
+		if env.Telemetry != nil {
+			env.Telemetry.SetDriverCalibrating(env.DriverName, L.CheckBool(1))
+		}
+		return 0
+	}))
+
 	host.RawSetString("set_sn", L.NewFunction(func(L *lua.LState) int {
 		env.setSN(L.CheckString(1))
 		return 0

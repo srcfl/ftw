@@ -324,9 +324,14 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if lp, ok := lps[rd.Driver]; ok && kind == telemetry.DerEV && f.Reason == "telemetry_stale" && evAwayIdle(lp, f.RequestedW) {
 				f.State, f.Reason, f.Severity = "waiting", "not_connected", "info"
 			}
-			if h := s.deps.Tel.DriverHealth(rd.Driver); h != nil && h.DeviceFault {
-				f.State, f.Reason, f.Severity = "blocked", "device_fault", "warning"
-				f.DeviceReason = h.DeviceFaultReason
+			if h := s.deps.Tel.DriverHealth(rd.Driver); h != nil {
+				switch {
+				case h.DeviceFault:
+					f.State, f.Reason, f.Severity = "blocked", "device_fault", "warning"
+					f.DeviceReason = h.DeviceFaultReason
+				case h.Calibrating && kind == telemetry.DerBattery:
+					f.State, f.Reason, f.Severity = "waiting", "battery_calibrating", "info"
+				}
 			}
 			if s.deps.Registry != nil {
 				if cs, ok := s.deps.Registry.ControlStatus(rd.Driver); ok && cs.Blocked {
@@ -427,7 +432,7 @@ func setControlStatus(f *ControlFeedback) {
 		status, severity = "no_contact", "warning"
 	case "readings_lost", "default_failed":
 		status, severity = "no_contact", "alarm"
-	case "observe_only", "disabled", "device_control":
+	case "observe_only", "disabled", "device_control", "battery_calibrating":
 		status = "not_controlled"
 	case "site_meter_stale", "site_phase_currents_stale":
 		status, severity = "not_controlled", "warning"
@@ -465,7 +470,7 @@ func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, n
 		return false
 	}
 	switch f.Reason {
-	case "observe_only", "disabled", "device_control", "not_connected", "idle", "no_command":
+	case "observe_only", "disabled", "device_control", "battery_calibrating", "not_connected", "idle", "no_command":
 		return false
 	}
 	if f.Reason == "telemetry_stale" {

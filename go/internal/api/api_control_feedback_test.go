@@ -310,3 +310,25 @@ func TestFullBatteryFeedbackKeepsEvidenceAndFaultsSeparate(t *testing.T) {
 		})
 	}
 }
+
+func TestCalibrationKeepsBatteryTelemetryAndSuspendsControl(t *testing.T) {
+	tel := telemetry.NewStore()
+	tel.Update("battery", telemetry.DerBattery, 3000, watts(0.25), nil)
+	tel.RecordDriverSuccess("battery")
+	cfg := &config.Config{Drivers: []config.Driver{{Name: "battery", BatteryCapacityWh: 10000}}}
+	srv := New(&Deps{Tel: tel, Cfg: cfg, CfgMu: &sync.RWMutex{}})
+	tel.SetDriverCalibrating("battery", true)
+	got := srv.controlFeedback(time.Now())
+	if len(got) != 1 || got[0].Reason != "battery_calibrating" || got[0].Status != "not_controlled" || got[0].Severity != "info" || !got[0].ReadingsFresh {
+		t.Fatalf("unexpected calibration feedback: %+v", got)
+	}
+	health := tel.DriverHealth("battery")
+	if health.IsOnline() || health.DeviceFault || !health.TelemetryLive() {
+		t.Fatalf("calibration must suspend control only: %+v", health)
+	}
+	tel.SetDriverCalibrating("battery", false)
+	got = srv.controlFeedback(time.Now())
+	if len(got) != 1 || got[0].Reason != "no_command" || !tel.DriverHealth("battery").IsOnline() {
+		t.Fatalf("control did not become available after calibration: %+v", got)
+	}
+}

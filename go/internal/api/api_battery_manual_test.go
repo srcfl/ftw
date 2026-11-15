@@ -244,3 +244,23 @@ func TestBatteryHoldDriverScopeFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestBatteryHoldRejectsScopedCalibration(t *testing.T) {
+	srv, st := newScopedBatteryHoldServer(t)
+	srv.deps.Tel.SetDriverCalibrating("bat_a", true)
+	post := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/battery/manual_hold", strings.NewReader(`{"driver":"bat_a","direction":"idle","hold_s":60}`))
+	srv.handleBatteryManualHold(post, req)
+	if post.Code != http.StatusConflict || !strings.Contains(post.Body.String(), "calibrating") {
+		t.Fatalf("got %d %s, want calibration conflict", post.Code, post.Body)
+	}
+	if _, active := st.GetBatteryManualHold(time.Now()); active {
+		t.Fatal("calibrating battery acquired a hold")
+	}
+	get := httptest.NewRecorder()
+	srv.handleBatteryManualHoldGet(get, httptest.NewRequest(http.MethodGet, "/api/battery/manual_hold", nil))
+	var resp batteryManualHoldResponse
+	if err := json.Unmarshal(get.Body.Bytes(), &resp); err != nil || len(resp.CalibratingDrivers) != 1 || resp.CalibratingDrivers[0] != "bat_a" {
+		t.Fatalf("calibration status missing: %s, err=%v", get.Body, err)
+	}
+}

@@ -153,6 +153,7 @@ type DriverHealth struct {
 	// Read it; do not assign it. It is derived from the two sources below
 	// so that both reach every consumer — /api/health, the driver
 	// inventory, the support report — through one field.
+	Calibrating       bool
 	DeviceFault       bool
 	DeviceFaultReason string
 
@@ -264,7 +265,7 @@ func (h *DriverHealth) SetCommandFault(faulted bool, reason string) {
 // IsOnline reports whether the driver is usable for control. A stale-flagged
 // driver (Status offline) OR one that cannot actuate is not.
 func (h *DriverHealth) IsOnline() bool {
-	return h.Status != StatusOffline && !h.DeviceFault
+	return h.Status != StatusOffline && !h.DeviceFault && !h.Calibrating
 }
 
 // TelemetryLive reports whether this driver's last reading is still a
@@ -1012,6 +1013,19 @@ func (s *Store) SetDriverDeviceFault(name string, faulted bool, reason string) {
 			slog.Info("driver device fault cleared — back in control", "driver", name)
 		}
 	}
+}
+
+// SetDriverCalibrating records a device-managed calibration. Measurements
+// remain live while the dispatcher and planner wait for control to resume.
+func (s *Store) SetDriverCalibrating(name string, calibrating bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h, ok := s.health[name]
+	if !ok {
+		h = &DriverHealth{Name: name, StartedAt: time.Now()}
+		s.health[name] = h
+	}
+	h.Calibrating = calibrating
 }
 
 // SetDriverCommandFault records that core could not get its commands into
