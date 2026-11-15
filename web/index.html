@@ -631,7 +631,8 @@
           <span id="plan-ev-legend" class="legend-item" hidden title="Average planned car charging power"><span class="legend-color" style="background:var(--violet)"></span> Car charging</span>
           <span class="legend-item bat-only" title="Slot where the plan charges the battery"><span class="legend-color" style="background:var(--cyan)"></span> Charge</span>
           <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:var(--energy-gives)"></span> Discharge</span>
-          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100"><span class="legend-color" style="background:var(--cyan)"></span> SoC</span>
+          <span id="plan-sell-legend" class="legend-item bat-only" hidden title="What the battery gives that the home sells to the grid"><span class="legend-color" style="background:var(--red-e)"></span> Sell</span>
+          <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100. Its line takes the colour of what the battery does, grey where it waits"><span class="legend-color" style="background:var(--fg-dim)"></span> SoC</span>
         </div>
         <!-- The escape hatch for "why is it doing that?". Downloads one
              Markdown file holding the live state, the active plan slot,

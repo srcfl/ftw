@@ -66,6 +66,11 @@ describe("charts draw in theme roles", () => {
     assert.match(plan, /PRICE_INK = \{ cheap: 0\.32, flat: 0\.5, dear: 0\.8/);
     assert.match(plan, /\{ ore: spotOre,\s+color: C\.text,\s+alpha: level/);
     assert.match(plan, /ctx\.fillStyle = a\.battery_w >= 0 \? C\.stores : C\.gives;/);
+    // What the home sells takes the grid's hue, in the band, the bars and
+    // the level line, as on the phone.
+    assert.match(plan, /if \(hue\) \{ ctx\.fillStyle = C\[hue\];/);
+    assert.match(plan, /if \(sold > 0\) \{ ctx\.fillStyle = C\.grid;/);
+    assert.match(plan, /const role = batteryHue\(a\) \|\| 'dim';/);
     assert.match(plan, /ctx\.strokeStyle = C\.car;/);
   });
 
