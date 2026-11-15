@@ -94,10 +94,28 @@ type feedbackReading struct {
 	DeviceLimitA       *float64 `json:"device_limit_a"`
 	DeviceLimitAgeS    *float64 `json:"device_limit_age_s"`
 	Reason             string   `json:"reason_no_current_label"`
+	ReasonObservedAt   string   `json:"reason_observed_at"`
+	StateObservedAt    string   `json:"state_observed_at"`
 	LimitA             *float64 `json:"current_limit_a"`
 	LimitedBy          string   `json:"current_limited_by"`
 	Connected          *bool    `json:"connected"`
 	Online             *bool    `json:"is_online"`
+}
+
+// Timestamped reasons describe the charger state in which they were reported.
+func (d feedbackReading) currentChargerReason(now time.Time) string {
+	if d.Reason == "" || d.ReasonObservedAt == "" {
+		return d.Reason
+	}
+	reasonAt, err := time.Parse(time.RFC3339Nano, d.ReasonObservedAt)
+	if err != nil || reasonAt.After(now) {
+		return ""
+	}
+	stateAt, err := time.Parse(time.RFC3339Nano, d.StateObservedAt)
+	if err == nil && reasonAt.Before(stateAt) {
+		return ""
+	}
+	return d.Reason
 }
 
 func watts(v float64) *float64 {
@@ -173,7 +191,10 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			f := ControlFeedback{Driver: rd.Driver, Kind: kind.String(), Mode: mode, State: "waiting", Reason: "no_command", Severity: "info", Response: "unconfirmed"}
 			var d feedbackReading
 			_ = json.Unmarshal(rd.Data, &d)
-			f.ReadbackW, f.OfferedA, f.DeviceReason = d.SetpointW, d.MaxA, d.Reason
+			f.ReadbackW, f.OfferedA = d.SetpointW, d.MaxA
+			if kind != telemetry.DerEV {
+				f.DeviceReason = d.Reason
+			}
 			f.DynamicLimitA = d.DynamicLimitA
 			pilotAge, pilotValid := pilotReadingAge(d, now)
 			pilotFresh := pilotValid && pilotAge <= pilotFreshFor
@@ -208,6 +229,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			}
 			if d.Online != nil && !*d.Online {
 				fresh = false
+			}
+			if kind == telemetry.DerEV && fresh && (d.Connected == nil || *d.Connected) {
+				f.DeviceReason = d.currentChargerReason(now)
 			}
 			measurement, powerKnown := telemetry.ControlPowerObservation(rd.RawW, rd.Data, rd.UpdatedAt)
 			if !measurement.At.IsZero() {

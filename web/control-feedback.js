@@ -144,9 +144,13 @@ function evPowerWarning(row) {
 
 function nextStep(row) {
   const name = noun(row);
+  const reported = row.kind === 'ev' && row.readings_fresh === true && typeof row.device_reason === 'string'
+    ? row.device_reason.trim() : '';
+  const chargerReport = reported ? `The charger reports: ${reported}.` : '';
   switch (row.reason) {
-    case 'power_below_target': case 'power_above_target': case 'power_wrong_direction':
-    case 'no_power_response': case 'power_while_idle':
+    case 'power_below_target': case 'no_power_response':
+      return chargerReport || `The ${name} has not said why. Check its app or display.`;
+    case 'power_above_target': case 'power_wrong_direction': case 'power_while_idle':
       return `The ${name} has not said why. Check its app or display.`;
     case 'vehicle_declined': return 'Check the car’s charge limit and schedule.';
     case 'setpoint_changed': return 'Another app or controller may be changing it.';
@@ -154,8 +158,8 @@ function nextStep(row) {
     case 'telemetry_stale': case 'readings_lost': case 'command_failed': case 'default_failed':
       return `Check the ${name}’s connection.`;
     case 'site_meter_stale': case 'site_phase_currents_stale': return 'Check the grid meter’s connection.';
-    case 'device_limit': return 'Raise the limit in the charger’s app if you want faster charging.';
-    case 'offered_current_lower': return 'Check the charger’s load balancing and limits.';
+    case 'device_limit': return [chargerReport, 'Raise the limit in the charger’s app if you want faster charging.'].filter(Boolean).join(' ');
+    case 'offered_current_lower': return [chargerReport, 'Check the charger’s load balancing and limits.'].filter(Boolean).join(' ');
     case 'charger_pilot_limit': return 'Check Available energy in the charger’s app for the active limit.';
     case 'load_balancer_limit': return 'If this happens often, compare the charger’s load balancing settings with FTW’s main fuse setting.';
     case 'observe_only': return 'Turn on control in the device settings if you want FTW to steer it.';

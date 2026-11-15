@@ -310,3 +310,33 @@ func TestFullBatteryFeedbackKeepsEvidenceAndFaultsSeparate(t *testing.T) {
 		})
 	}
 }
+
+func TestControlFeedbackUsesCurrentChargerReason(t *testing.T) {
+	now := time.Now()
+	for _, tc := range []struct {
+		name, data, want string
+		age              time.Duration
+	}{
+		{"same charger state", `{"reason_no_current_label":"limited","reason_observed_at":"2000-01-01T00:00:01Z","state_observed_at":"2000-01-01T00:00:01Z"}`, "limited", 0},
+		{"older than charger state", `{"reason_no_current_label":"limited","reason_observed_at":"2000-01-01T00:00:00Z","state_observed_at":"2000-01-01T00:00:01Z"}`, "", 0},
+		{"legacy label", `{"reason_no_current_label":"limited"}`, "limited", 0},
+		{"stale reading", `{"reason_no_current_label":"limited"}`, "", 2 * time.Minute},
+		{"offline", `{"is_online":false,"reason_no_current_label":"limited"}`, "", 0},
+		{"unplugged", `{"connected":false,"reason_no_current_label":"limited"}`, "", 0},
+		{"future reason", `{"reason_no_current_label":"limited","reason_observed_at":"2999-01-01T00:00:00Z"}`, "", 0},
+		{"no current label", `{}`, "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := telemetry.NewStore()
+			tel.Update("charger", telemetry.DerEV, 0, nil, []byte(`{"reason_no_current_label":"previous reason"}`))
+			cmd := tel.BeginCommand("charger", []byte(`{"action":"ev_set_current","power_w":3680}`), now)
+			tel.CompleteCommand(cmd, "accepted")
+			tel.Update("charger", telemetry.DerEV, 0, nil, []byte(tc.data))
+			srv := New(&Deps{Tel: tel})
+			rows := srv.controlFeedback(time.Now().Add(tc.age))
+			if len(rows) != 1 || rows[0].DeviceReason != tc.want {
+				t.Fatalf("feedback %+v, want charger reason %q", rows, tc.want)
+			}
+		})
+	}
+}
