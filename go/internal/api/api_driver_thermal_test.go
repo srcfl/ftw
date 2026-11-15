@@ -59,7 +59,7 @@ func TestDriverControlRefusesValueOutsideDeclaredOptions(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("undeclared option = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
-	if hold := srv.activeControlHold("heat"); hold != nil {
+	if hold := srv.controlHolds.Active("heat"); hold != nil {
 		t.Fatalf("hold = %+v after a refused value, want none", hold)
 	}
 	// Give the driver a few polls; a refused value must not have been sent.
