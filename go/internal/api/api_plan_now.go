@@ -21,8 +21,12 @@ const (
 	// A gap this large and this share of the plan counts as off plan.
 	planNowFloorW = 300.0
 	planNowShare  = 0.3
-	// A change must hold this long, so a passing cloud changes nothing.
+	// Going off plan must hold this long, so a passing cloud changes
+	// nothing. Means cover the same span.
 	planNowHold = time.Minute
+	// Coming back needs less: a minute of the old figure beside the live
+	// one read as wrong.
+	planNowBackHold = 15 * time.Second
 	// Readings further apart than this say nothing about what held between.
 	planNowGap = 30 * time.Second
 	// A flow names the cause when it explains this much of the gap.
@@ -33,7 +37,8 @@ const (
 // PlanNow says whether the batteries do what the plan meant for this quarter
 // and, when they do not, why. Core decides it once so every client says the
 // same thing. Watts follow the site convention: charge and load positive,
-// solar negative. Measured values are the last minute's mean.
+// solar negative. Measured values are the mean of the last minute, or of
+// the time since the plan's battery target last moved, if that is shorter.
 //
 // Why is empty as planned, else one of: manual (the owner holds the battery),
 // device (a battery cannot follow; DeviceReason is its control_feedback
@@ -71,6 +76,8 @@ func planOff(plannedW, actualW float64) bool {
 type planNowSample struct {
 	at                    time.Time
 	battery, pv, load, ev float64
+	// planned is the battery target the reading is held against.
+	planned float64
 }
 
 // planNowTracker settles the answer over time. The journal samples it every
@@ -80,6 +87,7 @@ type planNowTracker struct {
 	status  string
 	since   time.Time
 	pending time.Time
+	planned float64
 	samples []planNowSample
 }
 
@@ -91,11 +99,19 @@ func (t *planNowTracker) reset() {
 
 // observe takes one reading and answers with the settled status, since when
 // it holds, when a change under way settles (zero if none), and the last
-// minute's means. A change holds for planNowHold and is dated from when it
-// began. The first reading settles at once.
+// minute's means. Going off plan holds for planNowHold, coming back for
+// planNowBackHold, and either is dated from when it began. The first reading
+// settles at once.
 func (t *planNowTracker) observe(s planNowSample, off bool) (string, time.Time, time.Time, planNowSample) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.status != "" && planOff(t.planned, s.planned) {
+		// The target moved, at a new quarter or with a new plan. The last
+		// minute measured the old one, so start over, and give the battery
+		// the minute any change gets to reach the new one.
+		t.status, t.since, t.pending, t.samples = planNowAsPlanned, s.at, time.Time{}, nil
+	}
+	t.planned = s.planned
 	if n := len(t.samples); n > 0 {
 		gap := s.at.Sub(t.samples[n-1].at)
 		if gap < time.Second {
@@ -116,7 +132,7 @@ func (t *planNowTracker) observe(s planNowSample, off bool) (string, time.Time, 
 		t.pending = time.Time{}
 	case t.pending.IsZero():
 		t.pending = s.at
-	case s.at.Sub(t.pending) >= planNowHold:
+	case s.at.Sub(t.pending) >= planNowHoldFor(want):
 		t.status, t.since, t.pending = want, t.pending, time.Time{}
 	}
 	t.samples = append(t.samples, s)
@@ -133,7 +149,19 @@ func (t *planNowTracker) settles() time.Time {
 	if t.pending.IsZero() {
 		return time.Time{}
 	}
-	return t.pending.Add(planNowHold)
+	want := planNowOffPlan
+	if t.status == planNowOffPlan {
+		want = planNowAsPlanned
+	}
+	return t.pending.Add(planNowHoldFor(want))
+}
+
+// planNowHoldFor is how long a change to status must hold.
+func planNowHoldFor(status string) time.Duration {
+	if status == planNowAsPlanned {
+		return planNowBackHold
+	}
+	return planNowHold
 }
 
 func (t *planNowTracker) mean() planNowSample {
@@ -222,7 +250,7 @@ func (s *Server) planNow(now time.Time, rows []ControlFeedback) *PlanNow {
 		return nil
 	}
 	battery := live.BatteryW - s.unplannedBatteryW(live)
-	sample := planNowSample{at: now, battery: battery, pv: live.PVW, load: live.LoadW, ev: live.EVW + live.V2XW}
+	sample := planNowSample{at: now, battery: battery, pv: live.PVW, load: live.LoadW, ev: live.EVW + live.V2XW, planned: slot.BatteryW}
 	status, since, settles, mean := s.planNowState.observe(sample, planOff(slot.BatteryW, battery))
 	out := &PlanNow{
 		Status: status, SinceMs: since.UnixMilli(),
