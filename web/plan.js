@@ -1563,8 +1563,9 @@ import {
   }
 
   // Pulls GET /api/support/dump and saves it. That archive leads with
-  // 00-help-report.md — the readable answer to "why is it doing that?" —
-  // and carries the logs, config and telemetry behind it. One button and
+  // 00-help-report.md — the readable answer to "why is it doing that?" and
+  // "what happened last night?" — and carries the logs, config and a week
+  // of telemetry, plans and control journal behind it. One button and
   // one file, because a user asking for help should not have to work out
   // which of two downloads we wanted. The bare report is still at
   // /api/support/report for anyone who wants only the text.

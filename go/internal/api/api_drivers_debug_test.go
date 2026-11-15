@@ -581,12 +581,32 @@ func TestRejectUnsafeProbeTargetsAllowsOnlyConfiguredLoopbackException(t *testin
 	}
 }
 
+func TestIsCoordinateKey(t *testing.T) {
+	for _, k := range []string{"lat", "lon", "lng", "latitude", "Longitude", "home_lat", "latitude_deg", "site.lon"} {
+		if !isCoordinateKey(k) {
+			t.Errorf("isCoordinateKey(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{"latest_ms", "latency_ms", "longest", "relative", "plateau", "salon", "flat"} {
+		if isCoordinateKey(k) {
+			t.Errorf("isCoordinateKey(%q) = true, want false", k)
+		}
+	}
+	got := redactDumpLog(`{"lat":"56.7","position":{"latitude":-12.6},"latest_ms":56123} lat=56.7 lon=n/a`)
+	want := `{"lat":"57","position":{"latitude":-13},"latest_ms":56123} lat=57 lon=***`
+	if got != want {
+		t.Errorf("redactDumpLog\n got %s\nwant %s", got, want)
+	}
+}
+
 func TestIsSensitiveKey(t *testing.T) {
 	sensitive := []string{
 		"password", "Password", "mqtt_password", "passwd", "client_secret",
 		"refresh_token", "access_token", "api_key", "apikey", "private_key",
 		"authorization", "Authorization", "credential", "credentials",
 		"auth", "AUTH", "auth_header", "x-auth",
+		// Who the owner is: a cloud account's username is often an e-mail.
+		"username", "ev_charger_username", "email", "Email", "user_name",
 	}
 	for _, k := range sensitive {
 		if !isSensitiveKey(k) {
@@ -594,7 +614,7 @@ func TestIsSensitiveKey(t *testing.T) {
 		}
 	}
 	keep := []string{
-		"host", "username", "name", "oauth", "oauth_client_id", "client_id",
+		"host", "user", "name", "oauth", "oauth_client_id", "client_id",
 		"port", "lua",
 	}
 	for _, k := range keep {

@@ -2758,6 +2758,9 @@ func main() {
 	// in control?", the one GET /api/status serves.
 	notifSvc.SetControlReader(srv.ControlStates)
 	ctrlJournal.start(ctx, srv.JournalVerdicts, st)
+	// Warning and error counts per hour, so the support file covers a week
+	// of them after the log ring has turned over or the box has restarted.
+	go runLogDigest(ctx, logRing, st)
 	// FuseReader: on each HealthTick the fuse_over_limit rule reads
 	// the site meter's live per-phase currents from telemetry and
 	// compares against cfg.Fuse.MaxAmps. Closes over cfg + cfgMu so
@@ -2966,6 +2969,7 @@ func main() {
 			cloudLink.Bye(cloudwire.ByeShutdown, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
 			ctrlJournal.shutdown()
+			flushLogDigest(context.Background(), logRing, st, time.Now())
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("shutdown"); err != nil {
 				slog.Warn("failed to persist shutdown event", "err", err)
@@ -2982,6 +2986,7 @@ func main() {
 			cloudLink.Bye(cloudwire.ByeUpdate, cloudByeWait)
 			markNativeCleanExit(nativeRoot)
 			ctrlJournal.shutdown()
+			flushLogDigest(context.Background(), logRing, st, time.Now())
 			flushHistoryOnStop(st)
 			if err := st.RecordEvent("restart"); err != nil {
 				slog.Warn("failed to persist restart event", "err", err)

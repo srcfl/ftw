@@ -48,9 +48,12 @@ func supportJSON(v any) []byte {
 		switch x := v.(type) {
 		case map[string]any:
 			for k, val := range x {
-				if isSensitiveKey(k) {
+				switch {
+				case isSensitiveKey(k):
 					x[k] = "***"
-				} else {
+				case isCoordinateKey(k):
+					x[k] = roundCoordinate(val)
+				default:
 					x[k] = redact(val)
 				}
 			}

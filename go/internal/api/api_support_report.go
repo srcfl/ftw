@@ -135,12 +135,12 @@ func comparePlanControlDecision(plan *mpc.Plan, slot control.SlotEnergySnapshot)
 
 func (s *Server) handleSupportReport(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
-	body := s.buildSupportReport(r.Context(), now)
+	body := hideNtfyTopic([]byte(s.buildSupportReport(r.Context(), now)), s.ntfyTopic())
 	stamp := now.UTC().Format("20060102-150405")
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="ftw-help-`+stamp+`.md"`)
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(body))
+	_, _ = w.Write(body)
 }
 
 // liveSnapshot adds forecast context to the same qualified live power that
@@ -203,6 +203,12 @@ func (s *Server) liveNow(ctrl control.State, now time.Time) liveSnapshot {
 }
 
 func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
+	return s.buildSupportReportWith(ctx, now, s.loadSupportWeek(ctx, now, false))
+}
+
+// buildSupportReportWith writes the report around a week already read, so
+// the support archive reads storage once for the report and its files.
+func (s *Server) buildSupportReportWith(ctx context.Context, now time.Time, week *supportWeek) string {
 	s.deps.CtrlMu.Lock()
 	ctrl := *s.deps.Ctrl
 	targets := append([]control.DispatchTarget{}, s.deps.Ctrl.LastTargets...)
@@ -227,6 +233,7 @@ func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
 	var b strings.Builder
 	writeReportHeader(&b, s.deps.Version, now)
 	writeFindings(&b, findings)
+	writeWeekSection(&b, week)
 	if feedback, err := json.MarshalIndent(s.controlFeedback(now), "", "  "); err == nil {
 		b.WriteString("## Command feedback\n\nDriver-call results, readbacks and measured power are separate evidence. Missing values are unknown.\n\n```json\n")
 		b.Write(feedback)
@@ -272,10 +279,11 @@ func writeReportHeader(b *strings.Builder, version string, now time.Time) {
 		"(importing, charging the battery); **negative W = power out** " +
 		"(exporting, discharging). This holds in every table below.\n\n")
 	b.WriteString("Read `Findings` first — it lists what looks wrong without " +
-		"needing the tables. `Right now` is what the system is doing at this " +
-		"instant; `Plan` is what it intends to do next. Those two answer " +
-		"different questions and often disagree, which is usually the point " +
-		"of the question.\n\n")
+		"needing the tables. `What happened over the last week` answers " +
+		"questions about the past seven days, night by night. `Right now` is " +
+		"what the system is doing at this instant; `Plan` is what it intends " +
+		"to do next. Those two answer different questions and often disagree, " +
+		"which is usually the point of the question.\n\n")
 }
 
 func writeFindings(b *strings.Builder, findings []finding) {
@@ -688,9 +696,10 @@ func (s *Server) writeLogSection(b *strings.Builder) {
 
 func writeReportFooter(b *strings.Builder) {
 	b.WriteString("---\n\n")
-	b.WriteString("Deeper data lives in `/api/support/dump` (logs, telemetry, " +
-		"redacted config) and `/api/mpc/diagnose` (every slot the optimizer " +
-		"saw). This report deliberately omits both to stay readable.\n")
+	b.WriteString("Deeper data lives in `/api/support/dump` (logs, a week of " +
+		"series, control journal, plans and warnings, redacted config) and " +
+		"`/api/mpc/diagnose` (every slot the optimizer saw). This report " +
+		"deliberately omits both to stay readable.\n")
 }
 
 // ---- findings ----

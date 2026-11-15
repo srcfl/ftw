@@ -1023,6 +1023,21 @@ func (s *Store) migrate() error {
 		) STRICT`,
 		`CREATE INDEX IF NOT EXISTS idx_control_journal_start ON control_journal(start_ms DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_control_journal_open ON control_journal(end_ms) WHERE end_ms IS NULL`,
+		// log_digest: warning and error patterns per hour (log_digest.go),
+		// so the support file can show a week of them. At most a few hundred
+		// rows an hour, pruned after eight days; kept in recovery snapshots.
+		`CREATE TABLE IF NOT EXISTS log_digest (
+			hour_ms  INTEGER NOT NULL,
+			level    TEXT NOT NULL,
+			driver   TEXT NOT NULL DEFAULT '',
+			pattern  TEXT NOT NULL,
+			msg      TEXT NOT NULL,
+			attrs    TEXT NOT NULL DEFAULT '',
+			count    INTEGER NOT NULL,
+			first_ms INTEGER NOT NULL,
+			last_ms  INTEGER NOT NULL,
+			PRIMARY KEY (hour_ms, level, driver, pattern)
+		) STRICT`,
 
 		// Independently installed Lua drivers. Content lives on disk; SQLite
 		// records activation history and the exact previous artifact used for

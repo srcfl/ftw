@@ -497,7 +497,7 @@
       downloadWithFeedback(
         "/api/support/dump",
         "Preparing support bundle",
-        "Collecting logs, redacted config, driver health, and recent telemetry.",
+        "Collecting logs, redacted config, driver health, and the last seven days of telemetry, plans and control.",
         "ftw-support.zip"
       );
     });

@@ -86,6 +86,57 @@ func (s *Store) LoadDiagnosticsInRange(sinceMs, untilMs int64,
 	return out, rows.Err()
 }
 
+// PlannerReplan is a stored replan with the solver fields the support week
+// counts: which engine made the plan, and whether it was Core's fallback.
+type PlannerReplan struct {
+	DiagnosticSummary
+	Engine         string `json:"engine,omitempty"`
+	Backend        string `json:"backend,omitempty"`
+	Status         string `json:"status,omitempty"`
+	Fallback       bool   `json:"fallback,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
+}
+
+// PlannerReplans returns the replans in [sinceMs, untilMs], oldest first.
+// A positive limit keeps the newest. SQLite reads the solver fields from
+// each blob, so Go never holds the full snapshots.
+func (s *Store) PlannerReplans(ctx context.Context, sinceMs, untilMs int64, limit int) ([]PlannerReplan, error) {
+	q := `SELECT ts_ms, reason, zone, total_cost_ore, horizon_slots,
+	        COALESCE(json_extract(json, '$.solver.engine'), ''),
+	        COALESCE(json_extract(json, '$.solver.backend'), ''),
+	        COALESCE(json_extract(json, '$.solver.status'), ''),
+	        COALESCE(json_extract(json, '$.solver.fallback') = 1, 0),
+	        COALESCE(json_extract(json, '$.solver.fallback_reason'), '')
+	      FROM planner_diagnostics WHERE ts_ms >= ? AND ts_ms <= ?
+	      ORDER BY ts_ms DESC`
+	args := []any{sinceMs, untilMs}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PlannerReplan{}
+	for rows.Next() {
+		var r PlannerReplan
+		if err := rows.Scan(&r.TsMs, &r.Reason, &r.Zone, &r.TotalCostOre, &r.HorizonSlots,
+			&r.Engine, &r.Backend, &r.Status, &r.Fallback, &r.FallbackReason); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out, nil
+}
+
 // PlannerDay sums the plans kept since sinceMs: how many, the longest any
 // took to solve in milliseconds, and how many were a fallback plan. The
 // anonymous fleet report coarsens these into buckets; nothing else of a plan
