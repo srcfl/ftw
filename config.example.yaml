@@ -280,6 +280,23 @@ fleet_ping:
 #   soc_min: 0.10
 #   soc_max: 0.95
 
+# Heat comfort that follows the day's price (docs/adr/0012). Optional, and
+# nothing here has a default: every number is yours. Prices are the day's
+# mean total price in öre/kWh. Between the levels the change is gradual.
+# Parsed and checked today; heat control itself is not released yet.
+# thermal:
+#   cheap_day_ore_kwh: 150      # at or below: all of cheap_day_raise_k
+#   normal_day_ore_kwh: 260     # your own target, unchanged
+#   dear_day_ore_kwh: 400       # at or above: all of dear_day_lower_k
+#   min_saving_ore_per_day: 500 # move heat in time only if all zones together
+#                               # save this much in a day; 0 = no limit
+#   zones:
+#     - comfort_sensor: { driver: wiser, metric: bathroom_floor_c }
+#       cheap_day_raise_k: 2.5  # a warmer floor on a cheap day
+#     - comfort_sensor: { driver: wiser, metric: bathroom_air_c }
+#       dear_day_lower_k: 1.0   # cooler air on a dear day, never warmer
+#       step_k: 0.5             # the thermostat's step
+
 # Peak-power tariff (weekday 06–20 local time). Same minor units as
 # grid_tariff_ore_kwh, per kW, excluding VAT. 0 disables it.
 # price:

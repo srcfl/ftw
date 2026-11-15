@@ -140,6 +140,47 @@ thermal:
 - Without a comfort sensor, a zone cannot be planned. The roadmap does not
   let Core assume indoor temperature.
 
+#### Comfort follows the day's price
+
+Proposed; see [Open](#open). What a degree is worth to the owner depends on
+what the day costs. A warm bathroom floor is cheap comfort on a cheap day,
+and a slightly cooler room is an easy saving on a dear one. That is a choice
+about comfort, not about timing, and it needs no model of the house:
+
+```yaml
+thermal:
+  cheap_day_ore_kwh: 150      # at or below: all of cheap_day_raise_k
+  normal_day_ore_kwh: 260     # the owner's own target
+  dear_day_ore_kwh: 400       # at or above: all of dear_day_lower_k
+  min_saving_ore_per_day: 500
+  zones:
+    - comfort_sensor: { driver: wiser, metric: bathroom_floor_c }
+      cheap_day_raise_k: 2.5
+    - comfort_sensor: { driver: wiser, metric: bathroom_air_c }
+      dear_day_lower_k: 1.0
+      step_k: 0.5
+```
+
+- The price is the mean total consumer price of the day the comfort is for,
+  once at least 22 hours of it are known. Between the levels the target
+  moves linearly, so a day one öre over a level is not a different day.
+- Each direction is per zone and off at zero. A floor may follow cheap days
+  up while the room air only follows dear days down.
+- The moved target stays inside the zone's hard band.
+- **Nothing has a default.** These numbers depend on the contract, the
+  price area and the household. A site that sets none is unchanged.
+- `min_saving_ore_per_day` is the least the plans of all zones must save
+  together in a day before any planned value is sent. Below it, every zone
+  is left on its target for the day. Moving heat for a few öre costs device
+  writes and the owner's trust in what the house is doing, and the saving is
+  inside the twin's error. An open gate closes again at 80 % of the limit,
+  so a saving near the limit does not start and stop the planning.
+- **The two are layered.** The day's comfort moves the target first. The
+  plan and the baseline it is measured against both stand on that target,
+  so the plan is never credited with what the comfort rule saved. The
+  comfort rule holds without a trusted twin; the gate weighs plans and so
+  applies only where a twin is trusted.
+
 ### 2. Declaration by the driver
 
 Two optional fields on an existing control, an optional `sensors` list and
@@ -362,6 +403,13 @@ Fredrik answered on the hot-water floor on 12 November 2026:
 
 ## Open
 
+- **Comfort that follows the day's price, and the least daily saving.**
+  Proposed in section 1 and not yet answered. One household has run both
+  since November 2026 on three floor-heating zones: with a 5 kr limit, the
+  planned savings of 0.1–4.9 kr per day never opened the gate, so in
+  practice only the day's comfort level acted. Whether the day's mean is
+  the right measure of a cheap or dear day, against a longer reference such
+  as the month, is open.
 - **Holding off a reheat needs a control.** Many heat pumps start a
   hot-water charge by themselves at their own start temperature. The planner
   can only delay a reheat on a device whose driver declares a control that
