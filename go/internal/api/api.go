@@ -309,13 +309,6 @@ type Server struct {
 	// nil in production; SendWithGeneration still binds every real dispatch to
 	// the selected running generation.
 	beforeDriverControlSend func()
-	// beforeDriverControlStateLock is a package-test seam for the narrower
-	// lookup-to-lock lifecycle race. It runs after the state map lookup while
-	// the map lock is still held, before the per-driver state lock is taken.
-	beforeDriverControlStateLock func()
-	// beforeDriverDefaultStateLock is a package-test seam for the default path's
-	// lookup-to-lock lifecycle race. It is nil in production.
-	beforeDriverDefaultStateLock func()
 
 	versionUpdateMu sync.Mutex
 	driverUpdateMu  sync.Mutex

@@ -129,7 +129,7 @@ func (s *Server) handleDriverControl(w http.ResponseWriter, r *http.Request) {
 	// command. The response is written inside done, still under that lock, so
 	// the status read that explains an error is the one that caused it.
 	s.controlHolds.Send(r.Context(), name, control.ID, applied, body,
-		time.Duration(seconds)*time.Second, s.beforeDriverControlStateLock,
+		time.Duration(seconds)*time.Second,
 		func(hold drivercontrol.Hold, err error) {
 			if err != nil {
 				s.writeControlSendError(w, name, err)
@@ -254,5 +254,5 @@ func (s *Server) controlRegistry() drivercontrol.Registry {
 // it clears any hold under the per-driver lock and sends the driver's own
 // default. See drivercontrol.Holds.SendDefault.
 func (s *Server) SendDriverDefault(ctx context.Context, name string) error {
-	return s.controlHolds.SendDefault(ctx, name, s.beforeDriverDefaultStateLock)
+	return s.controlHolds.SendDefault(ctx, name)
 }
