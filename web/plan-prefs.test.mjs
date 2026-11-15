@@ -15,6 +15,8 @@ import {
   extraSunLine,
   prefsKnown,
   isBatterySale,
+  batterySoldW,
+  batteryHue,
   exportSentence,
   prefsFromStatus,
   SAFETY_K_STEP,
@@ -215,6 +217,32 @@ describe("export sentences", () => {
   it("does not treat house-only discharge as a battery sale", () => {
     assert.equal(isBatterySale({ battery_w: -2000, grid_w: 300 }), false);
     assert.equal(isBatterySale({ battery_w: -2000, grid_w: -400 }), true);
+  });
+});
+
+// The phone's PlanEntry.Slot.soldW and PlanStrip.Battery, which the plan
+// chart's colours follow (ftw-app appleApp/FTWKit PlanGlance.swift).
+describe("the battery's colour in the plan", () => {
+  it("sells what leaves the meter, up to what the battery gives", () => {
+    assert.equal(batterySoldW({ battery_w: -2000, grid_w: 300 }), 0, "covers the home");
+    assert.equal(batterySoldW({ battery_w: -2000, grid_w: -400 }), 400, "sells a part");
+    assert.equal(batterySoldW({ battery_w: -2000, grid_w: -5000 }), 2000, "the sun sells the rest");
+    assert.equal(batterySoldW({ battery_w: 2000, grid_w: -400 }), 0, "charging sells nothing");
+    assert.equal(batterySoldW({ battery_w: -2000 }), 0, "no meter forecast");
+  });
+
+  it("stores in cyan, gives in gold and takes the grid's hue when most is sold", () => {
+    assert.equal(batteryHue({ battery_w: 1500, grid_w: 1500 }), "stores");
+    assert.equal(batteryHue({ battery_w: -2000, grid_w: 300 }), "gives");
+    assert.equal(batteryHue({ battery_w: -2000, grid_w: -400 }), "gives", "a fifth sold");
+    assert.equal(batteryHue({ battery_w: -2000, grid_w: -1000 }), "grid", "half sold");
+    assert.equal(batteryHue({ battery_w: -2000, grid_w: -3000 }), "grid");
+  });
+
+  it("waits within 100 W of zero, as the phone's idleW", () => {
+    assert.equal(batteryHue({ battery_w: 100, grid_w: 0 }), null);
+    assert.equal(batteryHue({ battery_w: -100, grid_w: -900 }), null);
+    assert.equal(batteryHue({}), null);
   });
 });
 

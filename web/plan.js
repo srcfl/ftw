@@ -20,6 +20,8 @@ import {
   exportSentence,
   prefsFromStatus,
   prefsQueue,
+  batteryHue,
+  batterySoldW,
 } from "./plan-prefs.js";
 
 (function () {
@@ -699,6 +701,10 @@ import {
     const evActions = plan && plan.actions || [];
     const evLegend = document.getElementById('plan-ev-legend');
     if (evLegend) evLegend.hidden = !evActions.some(a => plannedEVWatts(a) > 0);
+    // Named only while the plan sells some of what the battery gives, as
+    // the phone's legend.
+    const sellLegend = document.getElementById('plan-sell-legend');
+    if (sellLegend) sellLegend.hidden = !evActions.some(a => a.slot_start_ms <= tMax && batterySoldW(a) > 0);
     ctx.save();
     ctx.beginPath(); ctx.rect(pad.l, powerY0, plotW, powerH); ctx.clip();
     ctx.strokeStyle = C.car;
@@ -752,11 +758,12 @@ import {
         if (a.slot_start_ms > tMax) break;
         const x0 = xScale(a.slot_start_ms);
         const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        // The battery stores in one hue and gives in another; idle is a
-        // trace of ink.
-        if (a.battery_w > 100)       { ctx.fillStyle = C.stores; ctx.globalAlpha = PLAN_INK; }
-        else if (a.battery_w < -100) { ctx.fillStyle = C.gives; ctx.globalAlpha = PLAN_INK; }
-        else                         { ctx.fillStyle = C.text; ctx.globalAlpha = 0.08; }
+        // As the phone's strip: cyan stores, gold gives, the grid's
+        // magenta where most of what it gives is sold; idle is a trace of
+        // ink.
+        const hue = batteryHue(a);
+        if (hue) { ctx.fillStyle = C[hue]; ctx.globalAlpha = PLAN_INK; }
+        else     { ctx.fillStyle = C.text; ctx.globalAlpha = 0.08; }
         ctx.fillRect(x0, modeBandY0, Math.max(1, x1 - x0 - 1), modeBandH);
       }
       ctx.globalAlpha = 1;
@@ -772,10 +779,18 @@ import {
         if (a.slot_start_ms > tMax) break;
         const x0 = xScale(a.slot_start_ms);
         const x1 = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        const y = powerY(a.battery_w);
-        ctx.fillStyle = a.battery_w >= 0 ? C.stores : C.gives;
+        const span = (fromW, toW) => {
+          const ya = powerY(fromW), yb = powerY(toW);
+          ctx.fillRect(x0, Math.min(ya, yb), Math.max(1, x1 - x0 - 1), Math.abs(yb - ya));
+        };
         ctx.globalAlpha = PLAN_INK;
-        ctx.fillRect(x0, Math.min(y, powerYCenter), Math.max(1, x1 - x0 - 1), Math.abs(y - powerYCenter));
+        // As the phone's dial: a discharge the home sells in part is two
+        // pieces, gold for what the home keeps from the zero line, then
+        // the grid's magenta for what leaves it, out to the bar's end.
+        const sold = batterySoldW(a);
+        ctx.fillStyle = a.battery_w >= 0 ? C.stores : C.gives;
+        span(0, a.battery_w + sold);
+        if (sold > 0) { ctx.fillStyle = C.grid; span(a.battery_w + sold, a.battery_w); }
       }
       ctx.globalAlpha = 1;
       // SoC line — clip to the SoC band so a reconstructed point past
@@ -784,28 +799,35 @@ import {
       ctx.beginPath();
       ctx.rect(pad.l, socY0, plotW, socH);
       ctx.clip();
-      // The battery's level takes its storing hue.
-      ctx.strokeStyle = C.stores;
+      // As the phone's level line: each slot's stretch in the colour of
+      // what the battery does in it, ink2 where it waits.
       ctx.lineWidth = 2;
-      ctx.beginPath();
-      first = true;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.globalAlpha = PLAN_INK;
+      const levelPaths = new Map();
       // Anchor at start SoC at now. Skip non-finite points: a missing
       // soc used to become canvas y=0 (a fake empty battery).
       const startSoc = socPercent(plan.initial_soc);
-      if (startSoc != null) {
-        ctx.moveTo(xScale(now), socY(startSoc));
-        first = false;
-      }
+      let last = startSoc != null ? [xScale(now), socY(startSoc)] : null;
       for (const a of plan.actions) {
         if (a.slot_start_ms > tMax) break;
         const endSoc = socPercent(a.soc);
         if (endSoc == null) continue;
-        const x = xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000);
-        const y = socY(endSoc);
-        if (first) { ctx.moveTo(x, y); first = false; }
-        else ctx.lineTo(x, y);
+        const point = [xScale(a.slot_start_ms + a.slot_len_min * 60 * 1000), socY(endSoc)];
+        if (last) {
+          const role = batteryHue(a) || 'dim';
+          if (!levelPaths.has(role)) levelPaths.set(role, []);
+          levelPaths.get(role).push([last, point]);
+        }
+        last = point;
       }
-      ctx.stroke();
+      for (const [role, stretches] of levelPaths) {
+        ctx.strokeStyle = C[role];
+        ctx.beginPath();
+        for (const [[ax, ay], [bx, by]] of stretches) { ctx.moveTo(ax, ay); ctx.lineTo(bx, by); }
+        ctx.stroke();
+      }
       ctx.restore();
       // SoC axis labels: right-align flush against the plot's right edge
       // so they read as part of the chart frame instead of floating off
