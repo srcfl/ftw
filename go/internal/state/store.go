@@ -134,6 +134,10 @@ func OpenWithBackgroundHistory(path, coldDir string, onProgress func(HistoryMigr
 		m.cancel()
 		return nil, err
 	}
+	// Build the optional forecast index before starting history import or
+	// returning the store to Core's live writers. SQLite holds its writer
+	// lock while building the index.
+	s.prepareForecastHourlyIndex()
 	idle, err := s.legacyHistoryIdle()
 	if err != nil {
 		s.historyMigration = nil

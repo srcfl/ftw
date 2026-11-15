@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/forecasting"
@@ -65,6 +66,47 @@ CREATE INDEX IF NOT EXISTS forecast_errors_time ON forecast_errors(start_ms);
 CREATE INDEX IF NOT EXISTS forecast_errors_retention ON forecast_errors(
  end_ms DESC,start_ms DESC,series DESC,lead DESC,config_version DESC,length(payload));
 `)
+	return err
+}
+
+const forecastHourlyIndexFailureKey = "forecast_errors_hourly_v1_build_failed"
+
+// prepareForecastHourlyIndex runs before live writers start. After a failed
+// build, hourly reads keep working through the timestamp index on later boots.
+func (s *Store) prepareForecastHourlyIndex() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	var skip bool
+	if err := s.db.QueryRowContext(ctx, `SELECT
+ EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='forecast_errors_hourly')
+ OR EXISTS(SELECT 1 FROM config WHERE key=?)`, forecastHourlyIndexFailureKey).Scan(&skip); err != nil {
+		slog.Warn("forecast hourly index status unavailable", "err", err)
+		return
+	}
+	if skip {
+		return
+	}
+	if err := s.InitForecastArchive(ctx); err != nil {
+		slog.Warn("forecast archive preparation failed", "err", err)
+		return
+	}
+	if err := s.EnsureForecastHourlyIndex(ctx); err != nil {
+		slog.Warn("forecast hourly index unavailable", "err", err)
+		// Give the marker its own deadline since the build may have used its
+		// entire budget.
+		recordCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if _, err := s.db.ExecContext(recordCtx, `INSERT OR IGNORE INTO config(key,value) VALUES (?,'1')`, forecastHourlyIndexFailureKey); err != nil {
+			slog.Warn("forecast hourly index failure could not be recorded", "err", err)
+		}
+	}
+}
+
+// EnsureForecastHourlyIndex prepares the optional calibration read index.
+// Existing archives may take longer to index than the archive startup budget.
+func (s *Store) EnsureForecastHourlyIndex(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS forecast_errors_hourly
+ ON forecast_errors(start_ms,series DESC,lead DESC) WHERE start_ms%3600000=0`)
 	return err
 }
 
@@ -600,6 +642,16 @@ func (s *Store) PruneForecastErrors(ctx context.Context, now int64) error {
 	return s.pruneForecastRecords(ctx, "forecast_errors", "end_ms DESC,start_ms DESC,series DESC,lead DESC,config_version DESC", "end_ms", now, MaxForecastErrors, MaxForecastErrorBytes)
 }
 
+func forecastErrorLoadQuery(hourly bool) string {
+	const bounds = `SELECT payload FROM forecast_errors WHERE start_ms>=? AND end_ms<=? AND available_at_ms<=?`
+	const ordered = ` ORDER BY start_ms DESC,series,lead LIMIT ?`
+	if hourly {
+		// Match the partial index predicate so SQLite can seek and read in order.
+		return bounds + ` AND start_ms%3600000=0` + ordered
+	}
+	return bounds + ordered
+}
+
 // LoadForecastErrors reads a bounded set of valid residuals. With hourly set,
 // adjacent replans and quarter-hour points cannot crowd independent days out.
 func (s *Store) LoadForecastErrors(ctx context.Context, since, until int64, hourly bool) (out []forecasting.ErrorSample, err error) {
@@ -611,8 +663,7 @@ func (s *Store) LoadForecastErrors(ctx context.Context, since, until int64, hour
 	}
 	timing.conn = conn
 	timing.next("query")
-	rows, err := conn.QueryContext(ctx, `SELECT payload FROM forecast_errors WHERE start_ms>=? AND end_ms<=? AND available_at_ms<=?
- AND (?=0 OR start_ms%3600000=0) ORDER BY start_ms DESC,series,lead LIMIT ?`, since, until, until, hourly, MaxForecastErrors+1)
+	rows, err := conn.QueryContext(ctx, forecastErrorLoadQuery(hourly), since, until, until, MaxForecastErrors+1)
 	if err != nil {
 		return nil, err
 	}
