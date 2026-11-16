@@ -13,11 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/forecasting"
-	"modernc.org/sqlite"
 )
 
 const (
@@ -153,40 +153,69 @@ func (s *Store) ForecastLongArchiveStatus() (ForecastLongArchiveStatus, bool) {
 
 // OpenForecastLongArchive opens or creates the archive after startup. A
 // damaged file is moved aside and replaced with an empty one. Boot does not
-// call this.
+// call this. The quick_check can take minutes on an SD card, so it runs
+// without forecastLongMu: health, inventory, backup and Close never wait
+// for it. forecastLongOpenMu keeps two opens apart.
 func (s *Store) OpenForecastLongArchive(ctx context.Context) (*ForecastLongArchive, error) {
 	if s == nil || s.mainDBPath == "" {
 		return nil, errors.New("forecast archive: state store unavailable")
 	}
+	s.forecastLongOpenMu.Lock()
+	defer s.forecastLongOpenMu.Unlock()
 	s.forecastLongMu.Lock()
-	defer s.forecastLongMu.Unlock()
-	if s.forecastLong != nil {
-		return s.forecastLong, nil
+	cached, closed := s.forecastLong, s.forecastLongClosed
+	s.forecastLongMu.Unlock()
+	if closed {
+		return nil, errForecastArchiveClosed
 	}
-	path := ForecastLongArchivePath(s.mainDBPath)
-	arch, ev, err := openForecastLongFile(ctx, path)
+	if cached != nil {
+		return cached, nil
+	}
+	arch, ev, err := openForecastLongFile(ctx, ForecastLongArchivePath(s.mainDBPath))
 	if err != nil {
 		return nil, err
 	}
 	arch.store = s
+	s.forecastLongMu.Lock()
+	closed = s.forecastLongClosed
+	if !closed {
+		s.forecastLong = arch
+	}
+	s.forecastLongMu.Unlock()
+	if closed {
+		_ = arch.Close()
+		return nil, errForecastArchiveClosed
+	}
 	if ev != nil {
 		s.RecordHealEvent(*ev)
-		arch.rebuilt = true
-		arch.status.State = "rebuilt"
 	}
-	s.forecastLong = arch
 	return arch, nil
 }
+
+var errForecastArchiveClosed = errors.New("forecast archive: state store closed")
 
 func (s *Store) closeForecastLongArchive() error {
 	s.forecastLongMu.Lock()
 	arch := s.forecastLong
 	s.forecastLong = nil
+	s.forecastLongClosed = true
 	s.forecastLongMu.Unlock()
 	if arch == nil {
 		return nil
 	}
 	return arch.Close()
+}
+
+// dropForecastLongArchive closes a handle that hit damage, so the next
+// hourly copy reopens the file, checks it and heals it. Close waits for a
+// backup or inventory read that is already running on the handle.
+func (s *Store) dropForecastLongArchive(arch *ForecastLongArchive) {
+	s.forecastLongMu.Lock()
+	if s.forecastLong == arch {
+		s.forecastLong = nil
+	}
+	s.forecastLongMu.Unlock()
+	_ = arch.Close()
 }
 
 func openForecastLongFile(ctx context.Context, path string) (*ForecastLongArchive, *HealEvent, error) {
@@ -196,13 +225,12 @@ func openForecastLongFile(ctx context.Context, path string) (*ForecastLongArchiv
 	}
 	var ev *HealEvent
 	if damaged {
-		if db != nil {
-			_ = db.Close()
-		}
 		nowMs := time.Now().UnixMilli()
+		slog.Warn("forecast long archive damaged; moving it aside", "err", err)
 		if err := quarantine(path, nowMs); err != nil {
 			return nil, nil, err
 		}
+		removeOlderForecastLongQuarantine(path, nowMs)
 		db, _, err = openForecastLongDB(ctx, path)
 		if err != nil {
 			return nil, nil, err
@@ -233,6 +261,10 @@ func openForecastLongFile(ctx context.Context, path string) (*ForecastLongArchiv
 	return arch, ev, nil
 }
 
+// openForecastLongDB reports damage only when quick_check ran and found
+// problems or SQLite returned a corruption code. Busy, I/O, full-disk,
+// memory and permission errors leave a good file in place; the copier
+// reports unavailable and tries again next hour.
 func openForecastLongDB(ctx context.Context, path string) (*sql.DB, bool, error) {
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		db, err := openRawPragmas(path, forecastLongPragmas)
@@ -247,10 +279,7 @@ func openForecastLongDB(ctx context.Context, path string) (*sql.DB, bool, error)
 	}
 	db, err := openRawPragmas(path, forecastLongPragmas)
 	if err != nil {
-		if sqliteCorrupt(err) {
-			return nil, true, err
-		}
-		return nil, false, err
+		return nil, sqliteCorrupt(err), err
 	}
 	ok, qerr := quickCheckContext(ctx, db)
 	if qerr == nil && ok {
@@ -260,15 +289,37 @@ func openForecastLongDB(ctx context.Context, path string) (*sql.DB, bool, error)
 		}
 		return db, false, nil
 	}
+	_ = db.Close()
+	if qerr == nil {
+		return nil, true, errors.New("forecast archive: quick_check found problems")
+	}
 	if ctx.Err() != nil {
-		_ = db.Close()
 		return nil, false, ctx.Err()
 	}
-	if sqliteBusy(qerr) {
-		_ = db.Close()
-		return nil, false, qerr
+	return nil, sqliteCorrupt(qerr), qerr
+}
+
+// removeOlderForecastLongQuarantine keeps only the copy just moved aside, so
+// repeated damage cannot fill the card. Backups never include these files.
+func removeOlderForecastLongQuarantine(path string, keepMs int64) {
+	dir, name := filepath.Split(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		slog.Warn("forecast long archive: cannot list old quarantined files", "err", err)
+		return
 	}
-	return db, true, qerr
+	keep := fmt.Sprintf(".corrupt-%d", keepMs)
+	for _, entry := range entries {
+		for _, base := range []string{name, name + "-wal", name + "-shm"} {
+			n := entry.Name()
+			if !strings.HasPrefix(n, base+".corrupt-") || n == base+keep {
+				continue
+			}
+			if err := os.Remove(filepath.Join(dir, n)); err != nil {
+				slog.Warn("forecast long archive: cannot remove old quarantined file", "file", n, "err", err)
+			}
+		}
+	}
 }
 
 const forecastLongPragmas = sqlitePragmas + "&_pragma=journal_size_limit(4194304)&_pragma=auto_vacuum(INCREMENTAL)"
@@ -366,11 +417,6 @@ INSERT OR IGNORE INTO fa_migrations(name) VALUES('fa-v1');
 	}
 	_, err = db.ExecContext(ctx, `INSERT OR IGNORE INTO fa_meta(key, value) VALUES('created_at_ms', ?)`, fmt.Sprint(time.Now().UnixMilli()))
 	return err
-}
-
-func sqliteBusy(err error) bool {
-	var e *sqlite.Error
-	return errors.As(err, &e) && (e.Code()&0xff == 5 || e.Code()&0xff == 6)
 }
 
 func sqliteFull(err error) bool {

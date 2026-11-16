@@ -83,9 +83,12 @@ func (a *forecastLongArchiver) runOnce(ctx context.Context) {
 	if a == nil || a.store == nil || ctx.Err() != nil {
 		return
 	}
-	openCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	arch, err := a.store.OpenForecastLongArchive(openCtx)
-	cancel()
+	// No deadline beyond the worker's own context. quick_check of a full
+	// 512 MiB archive can take minutes on a slow SD card; a fixed timeout
+	// would throw that work away and fail the same way every hour. The open
+	// is off the boot path, health does not wait on it, and shutdown cancels
+	// it through ctx.
+	arch, err := a.store.OpenForecastLongArchive(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return

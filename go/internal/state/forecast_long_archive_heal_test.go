@@ -22,6 +22,14 @@ func TestForecastLongArchiveRebuildsCorruption(t *testing.T) {
 	if err := os.WriteFile(archivePath, []byte("this is not a sqlite database"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Copies left by earlier damage. Only the newest quarantine stays.
+	stale := []string{"forecast-archive.db.corrupt-1", "forecast-archive.db-wal.corrupt-1", "forecast-archive.db-shm.corrupt-2"}
+	others := []string{"cache.db.corrupt-1", "forecast-archive.db.corrupted"}
+	for _, name := range append(append([]string(nil), stale...), others...) {
+		if err := os.WriteFile(filepath.Join(dir, name), make([]byte, 4096), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	reopened, err := Open(path)
 	if err != nil {
 		t.Fatalf("state.Open failed because of the analytics file: %v", err)
@@ -46,13 +54,18 @@ func TestForecastLongArchiveRebuildsCorruption(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	quarantined := false
+	var quarantined []string
 	for _, entry := range entries {
-		if strings.Contains(entry.Name(), "forecast-archive.db.corrupt-") {
-			quarantined = true
+		if strings.HasPrefix(entry.Name(), "forecast-archive.db") && strings.Contains(entry.Name(), ".corrupt-") {
+			quarantined = append(quarantined, entry.Name())
 		}
 	}
-	if !quarantined {
-		t.Fatal("damaged archive was not moved aside")
+	if len(quarantined) != 1 || quarantined[0] == stale[0] || !strings.HasPrefix(quarantined[0], "forecast-archive.db.corrupt-") {
+		t.Fatalf("quarantined archive files = %v, want only the new copy", quarantined)
+	}
+	for _, name := range others {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("unrelated file %s was removed: %v", name, err)
+		}
 	}
 }

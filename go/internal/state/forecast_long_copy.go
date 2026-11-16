@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/forecasting"
@@ -30,11 +31,42 @@ type forecastLongObsCursor struct {
 	Config  string `json:"config_version"`
 }
 
+// forecastLongSourceError marks a failed read of state.db. Damage there is
+// healed at boot and must not send the archive to quarantine.
+type forecastLongSourceError struct{ err error }
+
+func (e forecastLongSourceError) Error() string { return "state.db: " + e.err.Error() }
+func (e forecastLongSourceError) Unwrap() error { return e.err }
+
+func fromForecastSource(err error) error {
+	if err == nil {
+		return nil
+	}
+	return forecastLongSourceError{err}
+}
+
+// forecastLongDamaged reports a corruption code from the archive itself.
+func forecastLongDamaged(err error) bool {
+	var source forecastLongSourceError
+	return sqliteCorrupt(err) && !errors.As(err, &source)
+}
+
 // Sync copies the 30-day issue and observation tables and holds the archive
 // to its cap. Once a day it also thins, prunes expired runs and gives free
 // pages back. Failures stay in the published status. Below the disk floor
-// copying pauses until the next call, but the deletes still run.
+// copying pauses until the next call, but the deletes still run. When the
+// archive reports damage, Sync closes it, so the next copy reopens the file,
+// runs quick_check and heals it without a restart.
 func (a *ForecastLongArchive) Sync(ctx context.Context, src *Store, now time.Time) error {
+	err := a.syncOnce(ctx, src, now)
+	if forecastLongDamaged(err) && a.store != nil {
+		slog.Warn("forecast long archive: damage found while copying; the next copy checks the file", "err", err)
+		a.store.dropForecastLongArchive(a)
+	}
+	return err
+}
+
+func (a *ForecastLongArchive) syncOnce(ctx context.Context, src *Store, now time.Time) error {
 	if a == nil || src == nil {
 		return errors.New("forecast archive: copy source unavailable")
 	}
@@ -45,6 +77,7 @@ func (a *ForecastLongArchive) Sync(ctx context.Context, src *Store, now time.Tim
 	a.status.LastError = ""
 	a.mu.Unlock()
 	if err := src.InitForecastArchive(ctx); err != nil {
+		err = fromForecastSource(err)
 		a.fail("schema", err)
 		return err
 	}
@@ -135,7 +168,7 @@ func (a *ForecastLongArchive) copyIssues(ctx context.Context, src *Store) error 
 		})
 		cancel()
 		if err != nil {
-			return err
+			return fromForecastSource(err)
 		}
 		if len(page) == 0 {
 			return nil
@@ -195,7 +228,7 @@ func forecastLongStatesFrom(ctx context.Context, src *Store, issue forecasting.I
 			continue
 		}
 		if err != nil {
-			return nil, err
+			return nil, fromForecastSource(err)
 		}
 		states[model.StateID] = ForecastModelBlob{Expanded: expanded, Gzip: payload}
 	}
@@ -219,7 +252,7 @@ func (a *ForecastLongArchive) copyObservations(ctx context.Context, src *Store) 
 		})
 		cancel()
 		if err != nil {
-			return err
+			return fromForecastSource(err)
 		}
 		if len(page) == 0 {
 			return nil

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,6 +126,12 @@ func TestFullBackupSkipsDamagedForecastArchive(t *testing.T) {
 	if err := os.WriteFile(state.ForecastLongArchivePath(statePath), []byte("not a database"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// Copies an earlier heal moved aside stay out of the backup too.
+	for _, name := range []string{"forecast-archive.db.corrupt-1", "forecast-archive.db-wal.corrupt-1", "forecast-archive.db-shm.corrupt-1"} {
+		if err := os.WriteFile(filepath.Join(dataDir, name), []byte("quarantined"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	info, err := Create(context.Background(), CreateOptions{
 		State: st, StatePath: statePath, DataDir: dataDir,
 		OutputDir: filepath.Join(root, "backups"),
@@ -151,8 +158,8 @@ func TestFullBackupSkipsDamagedForecastArchive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if header.Name == "data/forecast-archive.db" || header.Name == "data/forecast-archive.db-wal" {
-			t.Fatalf("damaged archive was copied: %s", header.Name)
+		if strings.HasPrefix(header.Name, "data/forecast-archive.db") {
+			t.Fatalf("damaged or quarantined archive was copied: %s", header.Name)
 		}
 	}
 }

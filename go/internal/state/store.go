@@ -103,8 +103,12 @@ type Store struct {
 
 	// forecastLong is the long-term forecast archive. It stays nil until the
 	// copier opens it, so a slow or damaged analytics file cannot delay boot.
+	// forecastLongMu is held only to read or swap these fields, never for
+	// file work; forecastLongOpenMu keeps two opens apart.
+	forecastLongOpenMu sync.Mutex
 	forecastLongMu     sync.Mutex
 	forecastLong       *ForecastLongArchive
+	forecastLongClosed bool
 	forecastLongStatus *ForecastLongArchiveStatus
 }
 

@@ -508,7 +508,7 @@ func (a *ForecastLongArchive) recompute(ctx context.Context, src *Store, now tim
 	}
 	lag, err := src.forecastCopyLag(ctx, cursor, now.UnixMilli())
 	if err != nil {
-		return err
+		return fromForecastSource(err)
 	}
 	p50, p95, gz, err := a.issueSizePercentiles(ctx)
 	if err != nil {
