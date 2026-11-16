@@ -379,6 +379,45 @@ func TestAnOwnerClearsAScheduleWithoutACeremony(t *testing.T) {
 	}
 }
 
+// The phone's version row reads the check without a ceremony. On a box with
+// no native updater the handler itself answers, so the phone learns who
+// updates FTW there rather than meeting E_NEEDS_STEP_UP.
+func TestAnOwnerReadsTheVersionCheckWithoutACeremony(t *testing.T) {
+	rig := newAppSession(t, apiauth.RoleOwner)
+	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
+		Method: appproto.APIGet,
+		Path:   "/api/version/check",
+	})
+	head := decode[appproto.APIHeadMsg](t, rig.frames.await(t, appproto.MsgAPIHead))
+	if head.Status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want the handler's 503 for a box that does not update itself", head.Status)
+	}
+}
+
+func TestTheUpdateStillNeedsTheCeremony(t *testing.T) {
+	rig := newAppSession(t, apiauth.RoleOwner)
+	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
+		Method: appproto.APIPost,
+		Path:   "/api/version/update",
+	})
+	refusal := decode[appproto.ErrorBody](t, rig.frames.await(t, appproto.MsgError))
+	if refusal.Code != appproto.ErrNeedsStepUp {
+		t.Fatalf("refusal = %+v, want E_NEEDS_STEP_UP", refusal)
+	}
+}
+
+func TestAViewerCannotReadTheVersionCheck(t *testing.T) {
+	rig := newAppSession(t, apiauth.RoleViewer)
+	rig.send(t, appproto.MsgAPIReq, 1, appproto.APIReq{
+		Method: appproto.APIGet,
+		Path:   "/api/version/check",
+	})
+	refusal := decode[appproto.ErrorBody](t, rig.frames.await(t, appproto.MsgError))
+	if refusal.Code != appproto.ErrScopeDenied {
+		t.Fatalf("refusal = %+v, want E_SCOPE_DENIED", refusal)
+	}
+}
+
 func TestAViewerCannotSaveASchedule(t *testing.T) {
 	mgr := loadpoint.NewManager()
 	mgr.Load([]loadpoint.Config{{ID: "garage", DriverName: "easee"}})
@@ -417,6 +456,38 @@ func TestScheduleConfigureSkipsTheCeremony(t *testing.T) {
 	rules := srv.Route(newSyntheticRequest("PUT", "/api/notifications/rules"))
 	if rules.NoStepUp {
 		t.Fatal("notification rules skipped the ceremony")
+	}
+}
+
+// A phone asks whether a newer Core exists without Face ID; installing it,
+// or anything else that changes what runs, still takes the ceremony.
+func TestVersionCheckSkipsTheCeremonyButTheUpdateDoesNot(t *testing.T) {
+	srv := New(&Deps{})
+	for _, path := range []string{"/api/version/check", "/api/version/check?force=1"} {
+		facts := srv.Route(httptest.NewRequest(http.MethodGet, path, nil))
+		if facts.Tier != apiauth.TierConfigure {
+			t.Fatalf("GET %s tier = %q, want configure: a viewer must not make the box ask GitHub", path, facts.Tier)
+		}
+		if !facts.NoStepUp {
+			t.Fatalf("GET %s still needs a ceremony; reading it must not", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/version/update",
+		"/api/version/channel",
+		"/api/version/skip",
+		"/api/version/unskip",
+		"/api/version/restart",
+		"/api/version/binary-rollback",
+	} {
+		facts := srv.Route(newSyntheticRequest("POST", path))
+		if facts.Tier != apiauth.TierConfigure || facts.NoStepUp {
+			t.Fatalf("POST %s = %+v, want configure with a ceremony", path, facts)
+		}
+	}
+	status := srv.Route(newSyntheticRequest("GET", "/api/version/update/status"))
+	if status.Tier != apiauth.TierRead {
+		t.Fatalf("GET /api/version/update/status tier = %q, want read", status.Tier)
 	}
 }
 
