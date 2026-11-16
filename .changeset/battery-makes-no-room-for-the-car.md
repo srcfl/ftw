@@ -9,4 +9,5 @@ went to the car, so battery energy charged the car although the battery
 should cover only the house. The car now gets the room the grid gives beside
 the house with the battery idle, in Core's planner, its reserve plan, the
 check of every worker plan and the charger's fuse limit. A battery boost, or
-the old site-wide battery cover, still lets the battery help the car.
+the old site-wide battery cover, still lets the battery help the car; a
+boosted car may also start on the battery's room before it draws.

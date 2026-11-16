@@ -377,8 +377,8 @@ func (c *Controller) evaluateBatteryBoost(id string, now time.Time, connected, d
 // loadpoint snapshot from the current tick.
 func (c *Controller) ActiveBatteryBoostTotals(states []State, now time.Time) (powerW, reserveSoC float64) {
 	for _, st := range states {
-		lease, status := c.BatteryBoost(st.ID, now)
-		if !status.Active || !st.PluggedIn || st.SurplusOnly {
+		lease, ok := c.servedBatteryBoost(st, now)
+		if !ok {
 			continue
 		}
 		if st.CurrentPowerW > 0 {
@@ -389,4 +389,21 @@ func (c *Controller) ActiveBatteryBoostTotals(states []State, now time.Time) (po
 		}
 	}
 	return powerW, reserveSoC
+}
+
+// HasActiveBatteryBoost reports whether a loadpoint in the snapshot has a
+// lease ActiveBatteryBoostTotals would serve, whether or not its car draws
+// yet: the lease's live watts stay zero until the car starts.
+func (c *Controller) HasActiveBatteryBoost(states []State, now time.Time) bool {
+	for _, st := range states {
+		if _, ok := c.servedBatteryBoost(st, now); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Controller) servedBatteryBoost(st State, now time.Time) (BatteryBoostLease, bool) {
+	lease, status := c.BatteryBoost(st.ID, now)
+	return lease, status.Active && st.PluggedIn && !st.SurplusOnly
 }

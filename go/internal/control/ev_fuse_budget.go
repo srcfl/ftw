@@ -1070,9 +1070,11 @@ func (s *State) evFuseReliefByDriver(store *telemetry.Store) map[string]float64 
 // house would let the car charge faster on battery energy whenever the fuse
 // or the import limit binds. A discharge Core did not order, such as one a
 // battery holds across a restart, is the device's own and stays room, as
-// before, until Core's next order replaces it.
+// before, until Core's next order replaces it. An active boost lease lets
+// the battery cover the car before its car draws, so a boosted car can
+// start on that room.
 func (s *State) evBatteryDischargeW(store *telemetry.Store) float64 {
-	if s.batteryMayCoverEV() {
+	if s.batteryMayCoverEV() || s.BatteryBoostActive {
 		return s.evFuseReliefW(store)
 	}
 	byDriver := s.evFuseReliefByDriver(store)
