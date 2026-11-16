@@ -202,10 +202,12 @@ func TestForecastLongLateRunLosesToThinnedSurvivor(t *testing.T) {
 }
 
 // thinDaily archives a run every 15 minutes over [from, to) in zone, then
-// thins once a day at 12:02 UTC until every day is past the cutoff. After
+// thins once a day at 18:40 UTC until every day is past the cutoff. After
 // each pass every complete UTC hour holds only its run on the hour and every
 // complete local day keeps model-state references on its first run. Later
-// hours and days are untouched.
+// hours and days are untouched. The pass falls 40 minutes into an hour, so
+// the open hour already holds runs a pass could wrongly thin, and 10 minutes
+// after a Kolkata day ends, so that day must wait for its last UTC hour.
 func thinDaily(t *testing.T, zone string, from, to time.Time) *ForecastLongArchive {
 	t.Helper()
 	_, arch := openLongArchive(t)
@@ -227,7 +229,7 @@ func thinDaily(t *testing.T, zone string, from, to time.Time) *ForecastLongArchi
 		}
 	}
 	hourMS := forecastLongHourMS
-	for cutoff := from.Add(12*time.Hour + 2*time.Minute); cutoff.Before(to.Add(36 * time.Hour)); cutoff = cutoff.Add(24 * time.Hour) {
+	for cutoff := from.Add(18*time.Hour + 40*time.Minute); cutoff.Before(to.Add(36 * time.Hour)); cutoff = cutoff.Add(24 * time.Hour) {
 		if err := arch.thin(ctx, cutoff.Add(arch.fullDetail)); err != nil {
 			t.Fatal(err)
 		}
@@ -299,4 +301,15 @@ func thinDaily(t *testing.T, zone string, from, to time.Time) *ForecastLongArchi
 		}
 	}
 	return arch
+}
+
+// Each daily pass looks for the next day left to thin. Through the origin
+// index that walks every thinned run first; the partial index holds only
+// the runs still to thin.
+func TestForecastLongThinPlansUseIndexes(t *testing.T) {
+	_, arch := openLongArchive(t)
+	span := []any{int64(0), int64(1)}
+	assertPlanSearches(t, arch, forecastLongNextUnthinned, span, "fa_runs", "fa_runs_unthinned")
+	assertPlanSearches(t, arch, forecastLongHourLosers, span, "fa_runs", "fa_runs_origin")
+	assertPlanSearches(t, arch, forecastLongDayRuns, span, "fa_runs", "fa_runs_origin")
 }

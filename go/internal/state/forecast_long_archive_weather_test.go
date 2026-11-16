@@ -118,41 +118,42 @@ func TestForecastLongWeatherOutsideSeriesSpanRoundTrips(t *testing.T) {
 // correlated subquery is what made garbage collection quadratic.
 func TestForecastLongGarbagePlansUseIndexes(t *testing.T) {
 	_, arch := openLongArchive(t)
-	for _, tc := range []struct {
-		query, ref, index string
-	}{
-		{forecastLongWeatherGC, "fa_run_weather", "fa_run_weather_fetch"},
-		{forecastLongStateGC, "fa_run_states", "fa_run_states_ref"},
-	} {
-		rows, err := arch.db.Query(`EXPLAIN QUERY PLAN `+tc.query, forecastPruneBatch)
-		if err != nil {
+	assertPlanSearches(t, arch, forecastLongWeatherGC, []any{forecastPruneBatch}, "fa_run_weather", "fa_run_weather_fetch")
+	assertPlanSearches(t, arch, forecastLongStateGC, []any{forecastPruneBatch}, "fa_run_states", "fa_run_states_ref")
+}
+
+// assertPlanSearches fails unless the query plan reads table through index
+// and never scans it.
+func assertPlanSearches(t *testing.T, arch *ForecastLongArchive, query string, args []any, table, index string) {
+	t.Helper()
+	rows, err := arch.db.Query(`EXPLAIN QUERY PLAN `+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
 			t.Fatal(err)
 		}
-		var plan []string
-		for rows.Next() {
-			var id, parent, unused int
-			var detail string
-			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
-				t.Fatal(err)
-			}
-			plan = append(plan, detail)
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	searched := false
+	for _, detail := range plan {
+		if strings.HasPrefix(detail, "SCAN "+table) {
+			t.Fatalf("%s is scanned: %q", table, plan)
 		}
-		if err := rows.Err(); err != nil {
-			t.Fatal(err)
+		if strings.HasPrefix(detail, "SEARCH "+table+" ") && strings.Contains(detail, "INDEX "+index+" ") {
+			searched = true
 		}
-		rows.Close()
-		searched := false
-		for _, detail := range plan {
-			if strings.HasPrefix(detail, "SCAN "+tc.ref) {
-				t.Fatalf("%s is scanned: %q", tc.ref, plan)
-			}
-			if strings.HasPrefix(detail, "SEARCH "+tc.ref+" ") && strings.Contains(detail, "INDEX "+tc.index+" ") {
-				searched = true
-			}
-		}
-		if !searched {
-			t.Fatalf("%s is not searched through %s: %q", tc.ref, tc.index, plan)
-		}
+	}
+	if !searched {
+		t.Fatalf("%s is not searched through %s: %q", table, index, plan)
 	}
 }
 
@@ -237,5 +238,27 @@ func TestForecastLongWeatherStartsCodec(t *testing.T) {
 		if _, err := decodeForecastStarts(bad); err == nil {
 			t.Fatalf("%x was accepted", bad)
 		}
+	}
+}
+
+// A run must load with every weather row it was issued with. If one linked
+// row is gone, LoadIssue fails rather than return a shorter list.
+func TestForecastLongLoadFailsWhenLinkedWeatherIsMissing(t *testing.T) {
+	_, arch := openLongArchive(t)
+	ctx := context.Background()
+	origin := longOrigin()
+	s := origin.UnixMilli()
+	hour := time.Hour.Milliseconds()
+	issue := longIssue("gap", origin)
+	issue.Weather = []forecasting.Weather{longWeather("open_meteo", s, s-hour), longWeather("open_meteo", s+hour, s-hour)}
+	if err := arch.ArchiveIssues(ctx, []ForecastArchiveIssue{{Issue: issue}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := arch.db.ExecContext(ctx, `DELETE FROM fa_weather WHERE start_ms=?`, s+hour); err != nil {
+		t.Fatal(err)
+	}
+	got, err := arch.LoadIssue(ctx, "gap")
+	if err == nil || !strings.Contains(err.Error(), "missing 1 weather rows") {
+		t.Fatalf("LoadIssue = %d weather rows, err=%v; want a missing-row error", len(got.Weather), err)
 	}
 }

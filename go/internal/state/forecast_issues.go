@@ -762,65 +762,47 @@ func (s *Store) LoadForecastModelStateRaw(ctx context.Context, stateID string) (
 	return expanded, payload, err
 }
 
-// visitForecastObservationsAfter walks quarter-hour truth after the cursor in
+// forecastObservationsAfter lists quarter-hour truth after the cursor in
 // (available_at_ms, start_ms, end_ms, config_version) order, no later than
 // untilMS. The tracker writes rows in available_at_ms order.
-func (s *Store) visitForecastObservationsAfter(ctx context.Context, after forecastLongObsCursor, untilMS int64, limit int, visit func(forecasting.Observation) error) error {
-	if visit == nil {
-		return errors.New("forecast observation visitor is nil")
-	}
-	if limit <= 0 || limit > 512 {
-		limit = 128
-	}
+func (s *Store) forecastObservationsAfter(ctx context.Context, after forecastLongObsCursor, untilMS int64, limit int) ([]forecasting.Observation, error) {
 	rows, err := s.db.QueryContext(ctx, forecastObservationsAfterQuery,
 		after.AvailableMS, after.StartMS, after.EndMS, after.Config, untilMS, limit)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
 	var payloads []string
 	for rows.Next() {
 		var data string
 		if err = rows.Scan(&data); err != nil {
-			return err
+			return nil, err
 		}
 		payloads = append(payloads, data)
 	}
 	if err = rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if err = rows.Close(); err != nil {
-		return err
+		return nil, err
 	}
+	out := make([]forecasting.Observation, 0, len(payloads))
 	for _, data := range payloads {
 		if len(data) > maxForecastRecordBytes {
-			return errors.New("oversized forecast observation")
+			return nil, errors.New("oversized forecast observation")
 		}
 		var observation forecasting.Observation
 		if err = json.Unmarshal([]byte(data), &observation); err != nil {
-			return err
+			return nil, err
 		}
 		if err = observation.Validate(); err != nil {
-			return err
+			return nil, err
 		}
-		if err = visit(observation); err != nil {
-			return err
-		}
+		out = append(out, observation)
 	}
-	return nil
+	return out, nil
 }
 
 const forecastObservationsAfterQuery = `SELECT payload FROM forecast_observations
  WHERE (available_at_ms, start_ms, end_ms, config_version) > (?, ?, ?, ?) AND available_at_ms <= ?
  ORDER BY available_at_ms, start_ms, end_ms, config_version LIMIT ?`
-
-// NewestForecastIssueMS is the latest issued_at_ms in the 30-day archive, or
-// zero when it is empty. The copier uses it only to describe lag.
-func (s *Store) NewestForecastIssueMS(ctx context.Context) (int64, error) {
-	var newest sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT MAX(issued_at_ms) FROM forecast_issues`).Scan(&newest)
-	if err != nil || !newest.Valid {
-		return 0, err
-	}
-	return newest.Int64, nil
-}

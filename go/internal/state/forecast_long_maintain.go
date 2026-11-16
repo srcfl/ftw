@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"math"
 	"sort"
 	"time"
@@ -39,7 +40,6 @@ func (a *ForecastLongArchive) enforceCap(ctx context.Context, now time.Time) err
 }
 
 type forecastLongDay struct {
-	key   string
 	start int64
 	end   int64
 	ids   []string
@@ -92,12 +92,29 @@ func (a *ForecastLongArchive) thin(ctx context.Context, now time.Time) error {
 	}
 }
 
+// The thinning queries read fa_runs by origin. nextUnthinned runs once per
+// local day, so the partial index fa_runs_unthinned spares it a walk over
+// every thinned run before the first one left to thin.
+const (
+	forecastLongNextUnthinned = `SELECT origin_ms, timezone FROM fa_runs
+ WHERE thinned=0 AND origin_ms>=? AND origin_ms<? ORDER BY origin_ms LIMIT 1`
+	forecastLongHourLosers = `SELECT run_id FROM (
+ SELECT run_id, ROW_NUMBER() OVER (
+  PARTITION BY origin_ms/3600000
+  ORDER BY thinned DESC, CASE WHEN origin_ms % 3600000 = 0 THEN 0 ELSE 1 END, issued_at_ms, run_id
+ ) AS rn
+ FROM fa_runs WHERE origin_ms>=? AND origin_ms<?
+) WHERE rn > 1`
+	forecastLongDayRuns = `SELECT run_id, origin_ms, timezone, thinned,
+ EXISTS(SELECT 1 FROM fa_run_states s WHERE s.run_id=fa_runs.run_id)
+ FROM fa_runs WHERE origin_ms>=? AND origin_ms<? ORDER BY origin_ms, issued_at_ms, run_id`
+)
+
 func (a *ForecastLongArchive) nextUnthinned(ctx context.Context, from, cut int64) (int64, string, bool, error) {
 	var origin int64
 	var tz sql.NullString
-	err := a.db.QueryRowContext(ctx, `SELECT origin_ms, timezone FROM fa_runs
- WHERE thinned=0 AND origin_ms>=? AND origin_ms<? ORDER BY origin_ms LIMIT 1`, from, cut).Scan(&origin, &tz)
-	if errorsIsNoRows(err) {
+	err := a.db.QueryRowContext(ctx, forecastLongNextUnthinned, from, cut).Scan(&origin, &tz)
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", false, nil
 	}
 	if err != nil {
@@ -123,13 +140,7 @@ func forecastLongLocalDay(origin int64, tz string) (start, end int64, key string
 // not. A thinned survivor keeps its place; otherwise the run on the hour
 // wins, then the earliest issued.
 func (a *ForecastLongArchive) hourLosers(ctx context.Context, start, end int64) ([]string, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT run_id FROM (
- SELECT run_id, ROW_NUMBER() OVER (
-  PARTITION BY origin_ms/3600000
-  ORDER BY thinned DESC, CASE WHEN origin_ms % 3600000 = 0 THEN 0 ELSE 1 END, issued_at_ms, run_id
- ) AS rn
- FROM fa_runs WHERE origin_ms>=? AND origin_ms<?
-) WHERE rn > 1`, start, end)
+	rows, err := a.db.QueryContext(ctx, forecastLongHourLosers, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -148,9 +159,7 @@ func (a *ForecastLongArchive) hourLosers(ctx context.Context, start, end int64) 
 // thinDay keeps model-state references on the first run of a complete local
 // day that has any, drops them from the other runs, and marks the day thinned.
 func (a *ForecastLongArchive) thinDay(ctx context.Context, start, end int64, key string) error {
-	rows, err := a.db.QueryContext(ctx, `SELECT run_id, origin_ms, timezone, thinned,
- EXISTS(SELECT 1 FROM fa_run_states s WHERE s.run_id=fa_runs.run_id)
- FROM fa_runs WHERE origin_ms>=? AND origin_ms<? ORDER BY origin_ms, issued_at_ms, run_id`, start, end)
+	rows, err := a.db.QueryContext(ctx, forecastLongDayRuns, start, end)
 	if err != nil {
 		return err
 	}
@@ -183,7 +192,7 @@ func (a *ForecastLongArchive) thinDay(ctx context.Context, start, end int64, key
 		return err
 	}
 	rows.Close()
-	if err := a.deleteWhereIDs(ctx, "fa_run_states", "run_id", extra); err != nil {
+	if err := a.deleteRunStates(ctx, extra); err != nil {
 		return err
 	}
 	if len(unmarked) == 0 {
@@ -196,7 +205,7 @@ func (a *ForecastLongArchive) thinDay(ctx context.Context, start, end int64, key
 func (a *ForecastLongArchive) pruneExpired(ctx context.Context, now time.Time) error {
 	cutoff := now.Add(-a.retention).UnixMilli()
 	protect := now.Add(-a.fullDetail).UnixMilli()
-	if err := a.deleteRunsBefore(ctx, cutoff, protect, "issued_at_ms"); err != nil {
+	if err := a.deleteRunsIssuedBefore(ctx, cutoff, protect); err != nil {
 		return err
 	}
 	return a.deleteObservationsBefore(ctx, cutoff, protect)
@@ -252,14 +261,14 @@ func (a *ForecastLongArchive) pruneToCap(ctx context.Context, now time.Time) (bo
 	return pruned, nil
 }
 
-func (a *ForecastLongArchive) deleteRunsBefore(ctx context.Context, cutoff, protect int64, column string) error {
+func (a *ForecastLongArchive) deleteRunsIssuedBefore(ctx context.Context, cutoff, protect int64) error {
 	for {
 		day, ok, err := a.oldestDay(ctx, protect)
 		if err != nil || !ok {
 			return err
 		}
 		var ids []string
-		query := `SELECT run_id FROM fa_runs WHERE run_id IN (` + placeholders(len(day.ids)) + `) AND ` + column + `<?`
+		query := `SELECT run_id FROM fa_runs WHERE run_id IN (` + placeholders(len(day.ids)) + `) AND issued_at_ms<?`
 		args := stringsToArgs(day.ids)
 		args = append(args, cutoff)
 		rows, err := a.db.QueryContext(ctx, query, args...)
@@ -292,7 +301,7 @@ func (a *ForecastLongArchive) oldestDay(ctx context.Context, protect int64) (for
 	var origin int64
 	var tz sql.NullString
 	err := a.db.QueryRowContext(ctx, `SELECT origin_ms, timezone FROM fa_runs WHERE origin_ms<? ORDER BY origin_ms, run_id LIMIT 1`, protect).Scan(&origin, &tz)
-	if errorsIsNoRows(err) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return forecastLongDay{}, false, nil
 	}
 	if err != nil {
@@ -304,7 +313,7 @@ func (a *ForecastLongArchive) oldestDay(ctx context.Context, protect int64) (for
 		return forecastLongDay{}, false, err
 	}
 	defer rows.Close()
-	day := forecastLongDay{key: key, start: start, end: end}
+	day := forecastLongDay{start: start, end: end}
 	for rows.Next() {
 		var id string
 		var at int64
@@ -355,7 +364,9 @@ func (a *ForecastLongArchive) deleteRunIDs(ctx context.Context, ids []string) er
 	return nil
 }
 
-func (a *ForecastLongArchive) deleteWhereIDs(ctx context.Context, table, column string, ids []string) error {
+// deleteRunStates drops the model-state references of runs that keep their
+// series. Garbage collection removes the states nothing references.
+func (a *ForecastLongArchive) deleteRunStates(ctx context.Context, ids []string) error {
 	for len(ids) > 0 {
 		n := forecastPruneBatch
 		if n > len(ids) {
@@ -363,11 +374,11 @@ func (a *ForecastLongArchive) deleteWhereIDs(ctx context.Context, table, column 
 		}
 		chunk := ids[:n]
 		ids = ids[n:]
-		if _, err := a.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE `+column+` IN (`+placeholders(len(chunk))+`)`, stringsToArgs(chunk)...); err != nil {
+		if _, err := a.db.ExecContext(ctx, `DELETE FROM fa_run_states WHERE run_id IN (`+placeholders(len(chunk))+`)`, stringsToArgs(chunk)...); err != nil {
 			return err
 		}
 		if forecastLongAfterDeleteBatch != nil {
-			forecastLongAfterDeleteBatch(table, len(chunk))
+			forecastLongAfterDeleteBatch("fa_run_states", len(chunk))
 		}
 		if err := pauseMaintenance(ctx); err != nil {
 			return err
@@ -452,12 +463,10 @@ func (a *ForecastLongArchive) deleteOrphans(ctx context.Context, query, table st
 	}
 }
 
+// incrementalVacuum moves free pages to the end of the file and cuts them
+// off. In WAL mode the cut lands in the database file only when a checkpoint
+// copies it, so the pass ends with one.
 func (a *ForecastLongArchive) incrementalVacuum(ctx context.Context) error {
-	// WAL holds the freed pages until a checkpoint, and incremental_vacuum
-	// can only give back pages that are already on the main freelist.
-	if _, err := a.db.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`); err != nil {
-		return err
-	}
 	deadline := time.Now().Add(forecastLongVacuumBudget)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -471,7 +480,6 @@ func (a *ForecastLongArchive) incrementalVacuum(ctx context.Context) error {
 			return err
 		}
 		if free*page < forecastLongFreeTarget || time.Now().After(deadline) {
-			// The file shrinks when the checkpoint copies the truncation.
 			_, err := a.db.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
 			return err
 		}
@@ -648,8 +656,4 @@ func stringsToArgs(ids []string) []any {
 		args[i] = id
 	}
 	return args
-}
-
-func errorsIsNoRows(err error) bool {
-	return err == sql.ErrNoRows
 }

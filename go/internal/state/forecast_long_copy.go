@@ -344,11 +344,7 @@ func (a *ForecastLongArchive) copyObservations(ctx context.Context, src *Store, 
 			return err
 		}
 		pageCtx, cancel := context.WithTimeout(ctx, forecastLongPageTimeout)
-		var page []forecasting.Observation
-		err = src.visitForecastObservationsAfter(pageCtx, from, until, forecastLongObsPage, func(row forecasting.Observation) error {
-			page = append(page, row)
-			return nil
-		})
+		page, err := src.forecastObservationsAfter(pageCtx, from, until, forecastLongObsPage)
 		cancel()
 		if err != nil {
 			return fromForecastSource(err)
