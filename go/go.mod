@@ -10,16 +10,16 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/parquet-go/parquet-go v0.32.0
-	github.com/quic-go/quic-go v0.64.1
+	github.com/quic-go/quic-go v0.65.0
 	github.com/shirou/gopsutil/v4 v4.26.10
 	github.com/simonvetter/modbus v1.6.4
 	github.com/srcfl/device-simulator v0.7.0
 	github.com/yuin/gopher-lua v1.1.2
 	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.60.0
-	golang.org/x/sys v0.49.0
+	golang.org/x/net v0.62.0
+	golang.org/x/sys v0.50.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.61.1
+	modernc.org/sqlite v1.62.0
 )
 
 require (
@@ -55,7 +55,7 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
-	modernc.org/libc v1.79.0 // indirect
+	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.12.1 // indirect
 )
