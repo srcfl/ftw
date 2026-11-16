@@ -19,10 +19,20 @@ func (a *ForecastLongArchive) maintain(ctx context.Context, now time.Time) error
 	if err := a.pruneExpired(ctx, now); err != nil {
 		return err
 	}
-	if err := a.pruneToCap(ctx, now); err != nil {
+	if _, err := a.pruneToCap(ctx, now); err != nil {
 		return err
 	}
 	if err := a.collectGarbage(ctx); err != nil {
+		return err
+	}
+	return a.incrementalVacuum(ctx)
+}
+
+// enforceCap runs on every copy between the daily passes. Under the cap and
+// above the disk floor it costs one page count.
+func (a *ForecastLongArchive) enforceCap(ctx context.Context, now time.Time) error {
+	pruned, err := a.pruneToCap(ctx, now)
+	if err != nil || !pruned {
 		return err
 	}
 	return a.incrementalVacuum(ctx)
@@ -35,28 +45,42 @@ type forecastLongDay struct {
 	ids   []string
 }
 
+const forecastLongHourMS = int64(time.Hour / time.Millisecond)
+
+// thin keeps one run per complete UTC hour before the full-detail cutoff and
+// model-state references on one run per complete local day. Hours and days
+// count as complete when they end at or before the cutoff's whole hour, so a
+// day in a half-hour zone waits for its last UTC hour. A day stays unmarked
+// until it is complete, and a run copied late into a thinned hour loses to
+// the survivor already there.
 func (a *ForecastLongArchive) thin(ctx context.Context, now time.Time) error {
-	cutoff := now.Add(-a.fullDetail).UnixMilli()
+	cut := now.Add(-a.fullDetail).UnixMilli()
+	cut -= cut % forecastLongHourMS
+	from := int64(math.MinInt64)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		day, ok, err := a.nextUnthinnedDay(ctx, cutoff)
+		origin, tz, ok, err := a.nextUnthinned(ctx, from, cut)
 		if err != nil || !ok {
 			return err
 		}
-		losers, err := a.thinnedLosers(ctx, day.ids)
+		start, end, key := forecastLongLocalDay(origin, tz)
+		hoursEnd := (end + forecastLongHourMS - 1) / forecastLongHourMS * forecastLongHourMS
+		if hoursEnd > cut {
+			hoursEnd = cut
+		}
+		losers, err := a.hourLosers(ctx, start-start%forecastLongHourMS, hoursEnd)
 		if err != nil {
 			return err
 		}
 		if err := a.deleteRunIDs(ctx, losers); err != nil {
 			return err
 		}
-		if err := a.keepDailyState(ctx, day.ids, losers); err != nil {
-			return err
-		}
-		if err := a.markThinned(ctx, day.ids, losers); err != nil {
-			return err
+		if end <= cut {
+			if err := a.thinDay(ctx, start, end, key); err != nil {
+				return err
+			}
 		}
 		if err := a.collectGarbage(ctx); err != nil {
 			return err
@@ -64,48 +88,22 @@ func (a *ForecastLongArchive) thin(ctx context.Context, now time.Time) error {
 		if err := pauseMaintenance(ctx); err != nil {
 			return err
 		}
+		from = end
 	}
 }
 
-func (a *ForecastLongArchive) nextUnthinnedDay(ctx context.Context, cutoff int64) (forecastLongDay, bool, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT run_id, origin_ms, timezone FROM fa_runs
- WHERE thinned=0 AND origin_ms<? ORDER BY origin_ms, run_id`, cutoff)
+func (a *ForecastLongArchive) nextUnthinned(ctx context.Context, from, cut int64) (int64, string, bool, error) {
+	var origin int64
+	var tz sql.NullString
+	err := a.db.QueryRowContext(ctx, `SELECT origin_ms, timezone FROM fa_runs
+ WHERE thinned=0 AND origin_ms>=? AND origin_ms<? ORDER BY origin_ms LIMIT 1`, from, cut).Scan(&origin, &tz)
+	if errorsIsNoRows(err) {
+		return 0, "", false, nil
+	}
 	if err != nil {
-		return forecastLongDay{}, false, err
+		return 0, "", false, err
 	}
-	defer rows.Close()
-	var best forecastLongDay
-	found := false
-	var bestOrigin int64
-	grouped := map[string]*forecastLongDay{}
-	for rows.Next() {
-		var id, tz sql.NullString
-		var origin int64
-		if err := rows.Scan(&id, &origin, &tz); err != nil {
-			return forecastLongDay{}, false, err
-		}
-		start, end, key := forecastLongLocalDay(origin, tz.String)
-		day := grouped[key]
-		if day == nil {
-			day = &forecastLongDay{key: key, start: start, end: end}
-			grouped[key] = day
-		}
-		day.ids = append(day.ids, id.String)
-		if !found || origin < bestOrigin {
-			found = true
-			bestOrigin = origin
-			best = *day
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return forecastLongDay{}, false, err
-	}
-	if !found {
-		return forecastLongDay{}, false, nil
-	}
-	// best was copied before later ids of the same day were appended.
-	best = *grouped[best.key]
-	return best, true, nil
+	return origin, tz.String, true, nil
 }
 
 func forecastLongLocalDay(origin int64, tz string) (start, end int64, key string) {
@@ -121,22 +119,17 @@ func forecastLongLocalDay(origin int64, tz string) (start, end int64, key string
 	return day.UnixMilli(), next.UnixMilli(), day.Format("2006-01-02") + "|" + loc.String()
 }
 
-func (a *ForecastLongArchive) thinnedLosers(ctx context.Context, ids []string) ([]string, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	query := `SELECT run_id FROM (
+// hourLosers ranks every run of each UTC hour in [start, end), thinned or
+// not. A thinned survivor keeps its place; otherwise the run on the hour
+// wins, then the earliest issued.
+func (a *ForecastLongArchive) hourLosers(ctx context.Context, start, end int64) ([]string, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT run_id FROM (
  SELECT run_id, ROW_NUMBER() OVER (
   PARTITION BY origin_ms/3600000
-  ORDER BY CASE WHEN origin_ms % 3600000 = 0 THEN 0 ELSE 1 END, issued_at_ms, run_id
+  ORDER BY thinned DESC, CASE WHEN origin_ms % 3600000 = 0 THEN 0 ELSE 1 END, issued_at_ms, run_id
  ) AS rn
- FROM fa_runs WHERE run_id IN (` + placeholders(len(ids)) + `)
-) WHERE rn > 1`
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		args[i] = id
-	}
-	rows, err := a.db.QueryContext(ctx, query, args...)
+ FROM fa_runs WHERE origin_ms>=? AND origin_ms<?
+) WHERE rn > 1`, start, end)
 	if err != nil {
 		return nil, err
 	}
@@ -152,54 +145,51 @@ func (a *ForecastLongArchive) thinnedLosers(ctx context.Context, ids []string) (
 	return losers, rows.Err()
 }
 
-func (a *ForecastLongArchive) keepDailyState(ctx context.Context, ids, losers []string) error {
-	drop := map[string]bool{}
-	for _, id := range losers {
-		drop[id] = true
-	}
-	var kept []string
-	for _, id := range ids {
-		if !drop[id] {
-			kept = append(kept, id)
-		}
-	}
-	if len(kept) <= 1 {
-		return nil
-	}
-	query := `SELECT run_id FROM fa_runs WHERE run_id IN (` + placeholders(len(kept)) + `)
- ORDER BY origin_ms, issued_at_ms, run_id LIMIT 1`
-	args := make([]any, len(kept))
-	for i, id := range kept {
-		args[i] = id
-	}
-	var first string
-	if err := a.db.QueryRowContext(ctx, query, args...).Scan(&first); err != nil {
+// thinDay keeps model-state references on the first run of a complete local
+// day that has any, drops them from the other runs, and marks the day thinned.
+func (a *ForecastLongArchive) thinDay(ctx context.Context, start, end int64, key string) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT run_id, origin_ms, timezone, thinned,
+ EXISTS(SELECT 1 FROM fa_run_states s WHERE s.run_id=fa_runs.run_id)
+ FROM fa_runs WHERE origin_ms>=? AND origin_ms<? ORDER BY origin_ms, issued_at_ms, run_id`, start, end)
+	if err != nil {
 		return err
 	}
-	var extra []string
-	for _, id := range kept {
-		if id != first {
-			extra = append(extra, id)
+	held := false
+	var extra, unmarked []string
+	for rows.Next() {
+		var id string
+		var origin int64
+		var tz sql.NullString
+		var thinned, refs int
+		if err := rows.Scan(&id, &origin, &tz, &thinned, &refs); err != nil {
+			rows.Close()
+			return err
+		}
+		if _, _, k := forecastLongLocalDay(origin, tz.String); k != key {
+			continue
+		}
+		if refs != 0 {
+			if held {
+				extra = append(extra, id)
+			}
+			held = true
+		}
+		if thinned == 0 {
+			unmarked = append(unmarked, id)
 		}
 	}
-	return a.deleteWhereIDs(ctx, "fa_run_states", "run_id", extra)
-}
-
-func (a *ForecastLongArchive) markThinned(ctx context.Context, ids, losers []string) error {
-	drop := map[string]bool{}
-	for _, id := range losers {
-		drop[id] = true
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
-	var kept []string
-	for _, id := range ids {
-		if !drop[id] {
-			kept = append(kept, id)
-		}
+	rows.Close()
+	if err := a.deleteWhereIDs(ctx, "fa_run_states", "run_id", extra); err != nil {
+		return err
 	}
-	if len(kept) == 0 {
+	if len(unmarked) == 0 {
 		return nil
 	}
-	_, err := a.db.ExecContext(ctx, `UPDATE fa_runs SET thinned=1 WHERE run_id IN (`+placeholders(len(kept))+`)`, stringsToArgs(kept)...)
+	_, err = a.db.ExecContext(ctx, `UPDATE fa_runs SET thinned=1 WHERE run_id IN (`+placeholders(len(unmarked))+`)`, stringsToArgs(unmarked)...)
 	return err
 }
 
@@ -212,44 +202,54 @@ func (a *ForecastLongArchive) pruneExpired(ctx context.Context, now time.Time) e
 	return a.deleteObservationsBefore(ctx, cutoff, protect)
 }
 
-func (a *ForecastLongArchive) pruneToCap(ctx context.Context, now time.Time) error {
+// pruneToCap deletes the oldest days outside the full-detail window while
+// live pages exceed the cap. Below the disk floor the target drops by the
+// missing free space, so the archive gives that much back. It reports
+// whether it deleted a day.
+func (a *ForecastLongArchive) pruneToCap(ctx context.Context, now time.Time) (bool, error) {
 	protect := now.Add(-a.fullDetail).UnixMilli()
-	for {
+	live, err := a.liveByteCount(ctx)
+	if err != nil {
+		return false, err
+	}
+	target := a.maxBytes
+	if short := a.freeShortfall(); short > 0 && live-short < target {
+		target = live - short
+	}
+	pruned := false
+	for live > target {
 		if err := ctx.Err(); err != nil {
-			return err
-		}
-		live, err := a.liveByteCount(ctx)
-		if err != nil {
-			return err
-		}
-		if live <= a.maxBytes {
-			a.mu.Lock()
-			if a.status.State == "over_cap" {
-				a.status.State = ""
-			}
-			a.mu.Unlock()
-			return nil
+			return pruned, err
 		}
 		day, ok, err := a.oldestDay(ctx, protect)
 		if err != nil {
-			return err
+			return pruned, err
 		}
 		if !ok {
-			a.mu.Lock()
-			a.status.State = "over_cap"
-			a.mu.Unlock()
-			return nil
+			break
 		}
 		if err := a.deleteRunIDs(ctx, day.ids); err != nil {
-			return err
+			return pruned, err
 		}
 		if err := a.deleteObservationsBetween(ctx, day.start, day.end, protect); err != nil {
-			return err
+			return pruned, err
 		}
 		if err := a.collectGarbage(ctx); err != nil {
-			return err
+			return pruned, err
+		}
+		pruned = true
+		if live, err = a.liveByteCount(ctx); err != nil {
+			return pruned, err
 		}
 	}
+	a.mu.Lock()
+	if live > a.maxBytes {
+		a.status.State = "over_cap"
+	} else if a.status.State == "over_cap" {
+		a.status.State = ""
+	}
+	a.mu.Unlock()
+	return pruned, nil
 }
 
 func (a *ForecastLongArchive) deleteRunsBefore(ctx context.Context, cutoff, protect int64, column string) error {
@@ -323,6 +323,7 @@ func (a *ForecastLongArchive) oldestDay(ctx context.Context, protect int64) (for
 	return day, true, rows.Err()
 }
 
+// deleteRunIDs does not check the disk floor: deletes give space back.
 func (a *ForecastLongArchive) deleteRunIDs(ctx context.Context, ids []string) error {
 	for len(ids) > 0 {
 		n := forecastPruneBatch
@@ -331,9 +332,6 @@ func (a *ForecastLongArchive) deleteRunIDs(ctx context.Context, ids []string) er
 		}
 		chunk := ids[:n]
 		ids = ids[n:]
-		if err := a.beforeWrite(); err != nil {
-			return err
-		}
 		tx, err := a.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -473,7 +471,9 @@ func (a *ForecastLongArchive) incrementalVacuum(ctx context.Context) error {
 			return err
 		}
 		if free*page < forecastLongFreeTarget || time.Now().After(deadline) {
-			return nil
+			// The file shrinks when the checkpoint copies the truncation.
+			_, err := a.db.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+			return err
 		}
 		if _, err := a.db.ExecContext(ctx, `PRAGMA incremental_vacuum(256)`); err != nil {
 			return err

@@ -35,7 +35,9 @@ const (
 	// around a size estimate, not a measurement from a box.
 	ForecastLongMaxBytes = 512 << 20
 	// ForecastLongMinFreeBytes is the free-space floor on the data volume.
-	// Below it the copier pauses instead of filling the card.
+	// Below it the copier pauses instead of filling the card, and the
+	// archive deletes its oldest days outside the full-detail window until
+	// it has given back the shortfall.
 	ForecastLongMinFreeBytes = 1 << 30
 
 	forecastLongVacuumPages  = 256
@@ -319,6 +321,7 @@ CREATE TABLE IF NOT EXISTS fa_runs(
 ) STRICT;
 CREATE INDEX IF NOT EXISTS fa_runs_origin ON fa_runs(origin_ms);
 CREATE INDEX IF NOT EXISTS fa_runs_issued ON fa_runs(issued_at_ms);
+CREATE INDEX IF NOT EXISTS fa_runs_unthinned ON fa_runs(origin_ms) WHERE thinned=0;
 CREATE TABLE IF NOT EXISTS fa_series(
   run_id TEXT NOT NULL, series TEXT NOT NULL, model_version TEXT NOT NULL,
   start_ms INTEGER NOT NULL, slot_ms INTEGER NOT NULL, n INTEGER NOT NULL,
@@ -463,14 +466,20 @@ func (a *ForecastLongArchive) beforeWrite() error {
 			return err
 		}
 	}
-	avail, err := forecastLongDiskAvail(filepath.Dir(a.path))
-	if err != nil {
-		return nil
-	}
-	if avail < a.minFree {
+	if a.freeShortfall() > 0 {
 		return errForecastArchiveDiskFull
 	}
 	return nil
+}
+
+// freeShortfall is how far the data volume is below the free-space floor.
+// A failed probe counts as no shortfall.
+func (a *ForecastLongArchive) freeShortfall() int64 {
+	avail, err := forecastLongDiskAvail(filepath.Dir(a.path))
+	if err != nil || avail >= a.minFree {
+		return 0
+	}
+	return a.minFree - avail
 }
 
 var errForecastArchiveDiskFull = errors.New("forecast archive paused: data volume is below the free-space floor")

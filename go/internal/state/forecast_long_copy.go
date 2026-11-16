@@ -30,9 +30,10 @@ type forecastLongObsCursor struct {
 	Config  string `json:"config_version"`
 }
 
-// Sync copies the 30-day issue and observation tables, then at most once a
-// day thins, prunes and gives free pages back. Failures stay in the published
-// status. A full disk pauses until the next call instead of retrying.
+// Sync copies the 30-day issue and observation tables and holds the archive
+// to its cap. Once a day it also thins, prunes expired runs and gives free
+// pages back. Failures stay in the published status. Below the disk floor
+// copying pauses until the next call, but the deletes still run.
 func (a *ForecastLongArchive) Sync(ctx context.Context, src *Store, now time.Time) error {
 	if a == nil || src == nil {
 		return errors.New("forecast archive: copy source unavailable")
@@ -68,24 +69,26 @@ func (a *ForecastLongArchive) Sync(ctx context.Context, src *Store, now time.Tim
 			}
 		}
 	}
-	if paused == nil {
-		due, err := a.maintenanceDue(ctx, now)
-		if err != nil {
+	due, err := a.maintenanceDue(ctx, now)
+	if err != nil {
+		a.fail("maintenance", err)
+		return err
+	}
+	if due {
+		err = a.maintain(ctx, now)
+		if err == nil {
+			err = a.setMeta(ctx, "last_maintain_ms", jsonInt(now.UnixMilli()))
+		}
+	} else {
+		err = a.enforceCap(ctx, now)
+	}
+	if err != nil {
+		if !forecastLongPaused(err) {
 			a.fail("maintenance", err)
 			return err
 		}
-		if due {
-			if err := a.maintain(ctx, now); err != nil {
-				if forecastLongPaused(err) {
-					paused = err
-				} else {
-					a.fail("maintenance", err)
-					return err
-				}
-			} else if err := a.setMeta(ctx, "last_maintain_ms", jsonInt(now.UnixMilli())); err != nil {
-				a.fail("maintenance", err)
-				return err
-			}
+		if paused == nil {
+			paused = err
 		}
 	}
 	if err := a.recompute(ctx, src, now, paused); err != nil {

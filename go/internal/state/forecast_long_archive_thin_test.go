@@ -120,3 +120,183 @@ func TestForecastLongDeletesAreBatched(t *testing.T) {
 		t.Fatalf("batches = %v, want a full batch of %d", batches, forecastPruneBatch)
 	}
 }
+
+func TestForecastLongDailyPassesThinWholeHoursAndDays(t *testing.T) {
+	for _, tc := range []struct {
+		name, zone string
+		from, to   time.Time
+	}{
+		{"stockholm", "Europe/Stockholm", time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 14, 0, 0, 0, 0, time.UTC)},
+		{"kolkata", "Asia/Kolkata", time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC), time.Date(2026, 1, 14, 0, 0, 0, 0, time.UTC)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			thinDaily(t, tc.zone, tc.from, tc.to)
+		})
+	}
+}
+
+func TestForecastLongDailyPassesThinDSTDays(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		from, to time.Time
+		day      time.Time
+		hours    int
+	}{
+		{"spring", time.Date(2026, 3, 28, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 31, 0, 0, 0, 0, time.UTC), time.Date(2026, 3, 29, 0, 0, 0, 0, time.UTC), 23},
+		{"autumn", time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC), time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC), 25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			arch := thinDaily(t, "Europe/Stockholm", tc.from, tc.to)
+			loc, err := time.LoadLocation("Europe/Stockholm")
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := time.Date(tc.day.Year(), tc.day.Month(), tc.day.Day(), 0, 0, 0, 0, loc)
+			end := start.AddDate(0, 0, 1)
+			var runs, holders int
+			if err := arch.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT s.run_id) FROM fa_runs r
+ LEFT JOIN fa_run_states s ON s.run_id=r.run_id WHERE r.origin_ms>=? AND r.origin_ms<?`,
+				start.UnixMilli(), end.UnixMilli()).Scan(&runs, &holders); err != nil {
+				t.Fatal(err)
+			}
+			if runs != tc.hours || holders != 1 {
+				t.Fatalf("%s kept %d runs and %d state holders, want %d and 1", start.Format("2006-01-02"), runs, holders, tc.hours)
+			}
+		})
+	}
+}
+
+func TestForecastLongLateRunLosesToThinnedSurvivor(t *testing.T) {
+	_, arch := openLongArchive(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 15, 12, 2, 0, 0, time.UTC)
+	hour := now.Add(-40 * 24 * time.Hour).Truncate(time.Hour)
+	if err := arch.ArchiveIssues(ctx, []ForecastArchiveIssue{{Issue: longIssue("keep", hour)}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := arch.thin(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	// Ranked afresh, the late run on the hour would win: it was issued
+	// earlier and its id sorts first.
+	late := longIssue("a-late", hour)
+	late.IssuedAtMS = hour.UnixMilli()
+	quarter := longIssue("late-quarter", hour.Add(30*time.Minute))
+	if err := arch.ArchiveIssues(ctx, []ForecastArchiveIssue{{Issue: late}, {Issue: quarter}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := arch.thin(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	assertRuns(t, arch, map[string]bool{"keep": true})
+	var holder string
+	if err := arch.db.QueryRow(`SELECT DISTINCT run_id FROM fa_run_states`).Scan(&holder); err != nil || holder != "keep" {
+		t.Fatalf("state holder = %q err=%v", holder, err)
+	}
+	if err := arch.thin(ctx, now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	assertRuns(t, arch, map[string]bool{"keep": true})
+}
+
+// thinDaily archives a run every 15 minutes over [from, to) in zone, then
+// thins once a day at 12:02 UTC until every day is past the cutoff. After
+// each pass every complete UTC hour holds only its run on the hour and every
+// complete local day keeps model-state references on its first run. Later
+// hours and days are untouched.
+func thinDaily(t *testing.T, zone string, from, to time.Time) *ForecastLongArchive {
+	t.Helper()
+	_, arch := openLongArchive(t)
+	ctx := context.Background()
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var batch []ForecastArchiveIssue
+	for at := from; at.Before(to); at = at.Add(15 * time.Minute) {
+		issue := longIssue("q-"+at.Format("0102T1504"), at)
+		issue.Site.Timezone = zone
+		batch = append(batch, ForecastArchiveIssue{Issue: issue})
+		if len(batch) == 96 || !at.Add(15*time.Minute).Before(to) {
+			if err := arch.ArchiveIssues(ctx, batch); err != nil {
+				t.Fatal(err)
+			}
+			batch = nil
+		}
+	}
+	hourMS := forecastLongHourMS
+	for cutoff := from.Add(12*time.Hour + 2*time.Minute); cutoff.Before(to.Add(36 * time.Hour)); cutoff = cutoff.Add(24 * time.Hour) {
+		if err := arch.thin(ctx, cutoff.Add(arch.fullDetail)); err != nil {
+			t.Fatal(err)
+		}
+		cut := cutoff.UnixMilli() / hourMS * hourMS
+		runs := map[int64][]string{}
+		holders := map[string]bool{}
+		rows, err := arch.db.Query(`SELECT r.run_id, r.origin_ms, EXISTS(SELECT 1 FROM fa_run_states s WHERE s.run_id=r.run_id)
+ FROM fa_runs r ORDER BY r.origin_ms`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var order []int64
+		ids := map[int64]string{}
+		for rows.Next() {
+			var id string
+			var origin int64
+			var refs int
+			if err := rows.Scan(&id, &origin, &refs); err != nil {
+				t.Fatal(err)
+			}
+			h := origin / hourMS * hourMS
+			runs[h] = append(runs[h], id)
+			order = append(order, origin)
+			ids[origin] = id
+			if refs != 0 {
+				holders[id] = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		rows.Close()
+		for h := from.UnixMilli(); h < to.UnixMilli(); h += hourMS {
+			got := runs[h]
+			if h+hourMS <= cut {
+				if len(got) != 1 || got[0] != ids[h] {
+					t.Fatalf("pass %s: complete hour %s kept %v, want only its run on the hour",
+						cutoff.Format(time.RFC3339), time.UnixMilli(h).UTC().Format(time.RFC3339), got)
+				}
+			} else if len(got) != 4 {
+				t.Fatalf("pass %s: open hour %s kept %v, want all four runs",
+					cutoff.Format(time.RFC3339), time.UnixMilli(h).UTC().Format(time.RFC3339), got)
+			}
+		}
+		first := from.In(loc)
+		for day := time.Date(first.Year(), first.Month(), first.Day(), 0, 0, 0, 0, loc); day.Before(to); day = day.AddDate(0, 0, 1) {
+			start, end := day.UnixMilli(), day.AddDate(0, 0, 1).UnixMilli()
+			var inDay, held []string
+			for _, origin := range order {
+				if origin >= start && origin < end {
+					inDay = append(inDay, ids[origin])
+					if holders[ids[origin]] {
+						held = append(held, ids[origin])
+					}
+				}
+			}
+			if len(inDay) == 0 {
+				continue
+			}
+			if end <= cut {
+				if len(held) != 1 || held[0] != inDay[0] {
+					t.Fatalf("pass %s: complete day %s has state on %v, want only %s",
+						cutoff.Format(time.RFC3339), day.Format("2006-01-02"), held, inDay[0])
+				}
+			} else if len(held) != len(inDay) {
+				t.Fatalf("pass %s: open day %s lost state references: %d of %d runs keep them",
+					cutoff.Format(time.RFC3339), day.Format("2006-01-02"), len(held), len(inDay))
+			}
+		}
+	}
+	return arch
+}
