@@ -73,7 +73,7 @@ holds:
 - `cache.db` — prices and forecasts; past prices cost the savings history
   and come back only from a full backup;
 - `forecast-archive.db` — issued forecasts and quarter-hour measurements
-  kept for later analysis, at most 512 MiB; Core moves a damaged file aside
+  kept for later analysis, at most 1 GiB; Core moves a damaged file aside
   and starts an empty one;
 - key files such as `nova.key` — the box's identity; keep them with the data;
 - `drivers/` — custom and managed drivers;

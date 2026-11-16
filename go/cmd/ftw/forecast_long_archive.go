@@ -84,7 +84,7 @@ func (a *forecastLongArchiver) runOnce(ctx context.Context) {
 		return
 	}
 	// No deadline beyond the worker's own context. quick_check of a full
-	// 512 MiB archive can take minutes on a slow SD card; a fixed timeout
+	// 1 GiB archive can take minutes on a slow SD card; a fixed timeout
 	// would throw that work away and fail the same way every hour. The open
 	// is off the boot path, health does not wait on it, and shutdown cancels
 	// it through ctx.

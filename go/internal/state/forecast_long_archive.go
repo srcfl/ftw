@@ -31,9 +31,11 @@ const (
 	// not a setting.
 	ForecastLongRetention = 2 * 365 * 24 * time.Hour
 	// ForecastLongMaxBytes is the live-page cap. Past it, the oldest days
-	// outside the full-detail window are deleted. The figure is a margin
-	// around a size estimate, not a measurement from a box.
-	ForecastLongMaxBytes = 512 << 20
+	// outside the full-detail window are deleted. Sized for two years: the
+	// newest 30 days take about 160 MiB and a thinned day about 1.2 MiB,
+	// estimated with a 32 KiB-expanded Energyplan state in a simulation and
+	// the real state's fixed shape, not measured on a box.
+	ForecastLongMaxBytes = 1 << 30
 	// ForecastLongMinFreeBytes is the free-space floor on the data volume.
 	// Below it the copier pauses instead of filling the card, and the
 	// archive deletes its oldest days outside the full-detail window until
@@ -625,8 +627,12 @@ func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes 
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	keepStates, err := forecastLongHourNeedsStates(ctx, tx, issue.OriginMS)
+	if err != nil {
+		return err
+	}
 	for id, blob := range states {
-		if len(blob.Gzip) == 0 {
+		if len(blob.Gzip) == 0 || !keepStates {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO fa_model_states(id, created_at_ms, expanded_bytes, payload) VALUES(?,?,?,?)`,
@@ -673,6 +679,22 @@ func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes 
 		}
 	}
 	return nil
+}
+
+// forecastLongHourNeedsStates reports whether a run keeps its model states.
+// Inside the newest 30 days one run per UTC hour is enough: the run on the
+// hour, or the first run copied into an hour that has no states yet. The
+// states between can be rebuilt from the archived observations, and the
+// Energyplan state alone is about 90 KiB gzip per run.
+func forecastLongHourNeedsStates(ctx context.Context, tx *sql.Tx, originMS int64) (bool, error) {
+	hour := originMS - originMS%forecastLongHourMS
+	if originMS == hour {
+		return true, nil
+	}
+	var held bool
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM fa_runs r JOIN fa_run_states s ON s.run_id=r.run_id
+ WHERE r.origin_ms>=? AND r.origin_ms<?)`, hour, hour+forecastLongHourMS).Scan(&held)
+	return !held, err
 }
 
 func nullMS(v int64, ok bool) any {

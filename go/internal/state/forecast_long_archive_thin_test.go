@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -71,9 +72,10 @@ func TestForecastLongThinningKeepsOneRunPerHour(t *testing.T) {
 		t.Fatal(err)
 	}
 	// One reference for the first kept run of each local day. Both old hours
-	// are the same local day, so one reference remains. Young runs are not thinned.
-	if states != 3 {
-		t.Fatalf("state references = %d, want the daily old reference plus two young runs", states)
+	// are the same local day, so one reference remains. Young runs are not
+	// thinned, and only young-a, on the hour, holds states.
+	if states != 2 {
+		t.Fatalf("state references = %d, want the daily old reference plus young-a", states)
 	}
 	var weather int
 	if err := arch.db.QueryRow(`SELECT COUNT(*) FROM fa_weather`).Scan(&weather); err != nil || weather != 4 {
@@ -205,7 +207,8 @@ func TestForecastLongLateRunLosesToThinnedSurvivor(t *testing.T) {
 // thins once a day at 18:40 UTC until every day is past the cutoff. After
 // each pass every complete UTC hour holds only its run on the hour and every
 // complete local day keeps model-state references on its first run. Later
-// hours and days are untouched. The pass falls 40 minutes into an hour, so
+// hours keep all their runs, and an open day keeps states on its runs on the
+// hour. The pass falls 40 minutes into an hour, so
 // the open hour already holds runs a pass could wrongly thin, and 10 minutes
 // after a Kolkata day ends, so that day must wait for its last UTC hour.
 func thinDaily(t *testing.T, zone string, from, to time.Time) *ForecastLongArchive {
@@ -294,9 +297,18 @@ func thinDaily(t *testing.T, zone string, from, to time.Time) *ForecastLongArchi
 					t.Fatalf("pass %s: complete day %s has state on %v, want only %s",
 						cutoff.Format(time.RFC3339), day.Format("2006-01-02"), held, inDay[0])
 				}
-			} else if len(held) != len(inDay) {
-				t.Fatalf("pass %s: open day %s lost state references: %d of %d runs keep them",
-					cutoff.Format(time.RFC3339), day.Format("2006-01-02"), len(held), len(inDay))
+			} else {
+				// An open day keeps states on its runs on the hour only.
+				var onHour []string
+				for _, origin := range order {
+					if origin >= start && origin < end && origin%hourMS == 0 {
+						onHour = append(onHour, ids[origin])
+					}
+				}
+				if strings.Join(held, ",") != strings.Join(onHour, ",") {
+					t.Fatalf("pass %s: open day %s has state on %v, want its runs on the hour %v",
+						cutoff.Format(time.RFC3339), day.Format("2006-01-02"), held, onHour)
+				}
 			}
 		}
 	}
@@ -312,4 +324,47 @@ func TestForecastLongThinPlansUseIndexes(t *testing.T) {
 	assertPlanSearches(t, arch, forecastLongNextUnthinned, span, "fa_runs", "fa_runs_unthinned")
 	assertPlanSearches(t, arch, forecastLongHourLosers, span, "fa_runs", "fa_runs_origin")
 	assertPlanSearches(t, arch, forecastLongDayRuns, span, "fa_runs", "fa_runs_origin")
+}
+
+// Inside the newest 30 days one run per UTC hour keeps its model states: the
+// run on the hour, or the first run copied into an hour without states.
+func TestForecastLongKeepsStatesOncePerHour(t *testing.T) {
+	_, arch := openLongArchive(t)
+	ctx := context.Background()
+	hour := time.Now().UTC().Truncate(time.Hour).Add(-3 * time.Hour)
+	for _, run := range []struct {
+		id     string
+		origin time.Time
+	}{
+		{"a-00", hour},
+		{"a-15", hour.Add(15 * time.Minute)},
+		{"b-15", hour.Add(75 * time.Minute)}, // the next hour has no run on the hour yet
+		{"b-30", hour.Add(90 * time.Minute)},
+		{"b-00", hour.Add(time.Hour)}, // copied late; a run on the hour always keeps them
+	} {
+		if err := arch.ArchiveIssues(ctx, []ForecastArchiveIssue{{Issue: longIssue(run.id, run.origin)}}); err != nil {
+			t.Fatalf("%s: %v", run.id, err)
+		}
+	}
+	rows, err := arch.db.Query(`SELECT DISTINCT run_id FROM fa_run_states ORDER BY run_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var held []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, id)
+	}
+	if got := strings.Join(held, ","); got != "a-00,b-00,b-15" {
+		t.Fatalf("state holders = %s, want a-00,b-00,b-15", got)
+	}
+	for _, id := range []string{"a-15", "b-30"} {
+		if _, err := arch.LoadIssue(ctx, id); err != nil {
+			t.Fatalf("%s without states does not load: %v", id, err)
+		}
+	}
 }
