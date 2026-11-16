@@ -413,15 +413,26 @@ func (a *ForecastLongArchive) deleteObservationsBetween(ctx context.Context, sta
 	}
 }
 
-func (a *ForecastLongArchive) collectGarbage(ctx context.Context) error {
-	if err := a.deleteOrphans(ctx, `DELETE FROM fa_weather WHERE (source, available_at_ms, start_ms) IN (
+// The orphan deletes probe the reference tables through fa_run_weather_fetch
+// and fa_run_states_ref, so each candidate row costs one index lookup rather
+// than a scan of every reference. A fetch's weather rows stay while any run
+// still links that fetch.
+const (
+	forecastLongWeatherGC = `DELETE FROM fa_weather WHERE (source, available_at_ms, start_ms) IN (
  SELECT source, available_at_ms, start_ms FROM fa_weather w
- WHERE NOT EXISTS (SELECT 1 FROM fa_run_weather r WHERE r.available_at_ms=w.available_at_ms)
- LIMIT ?)`, "fa_weather"); err != nil {
+ WHERE NOT EXISTS (SELECT 1 FROM fa_run_weather WHERE fa_run_weather.source=w.source AND fa_run_weather.available_at_ms=w.available_at_ms)
+ LIMIT ?)`
+	forecastLongStateGC = `DELETE FROM fa_model_states WHERE rowid IN (
+ SELECT rowid FROM fa_model_states m
+ WHERE NOT EXISTS (SELECT 1 FROM fa_run_states WHERE fa_run_states.state_id=m.id)
+ LIMIT ?)`
+)
+
+func (a *ForecastLongArchive) collectGarbage(ctx context.Context) error {
+	if err := a.deleteOrphans(ctx, forecastLongWeatherGC, "fa_weather"); err != nil {
 		return err
 	}
-	return a.deleteOrphans(ctx, `DELETE FROM fa_model_states WHERE rowid IN (
- SELECT rowid FROM fa_model_states WHERE id NOT IN (SELECT state_id FROM fa_run_states) LIMIT ?)`, "fa_model_states")
+	return a.deleteOrphans(ctx, forecastLongStateGC, "fa_model_states")
 }
 
 func (a *ForecastLongArchive) deleteOrphans(ctx context.Context, query, table string) error {

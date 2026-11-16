@@ -245,6 +245,46 @@ func decodeBandStats(b []byte, n int) (samples, days [][3]int, err error) {
 	return samples, days, nil
 }
 
+// encodeForecastStarts packs the weather slot starts one run used from one
+// fetch as uvarints: the first start, then each gap to the next. An hourly
+// day of 48 slots takes about 200 bytes.
+func encodeForecastStarts(starts []int64) ([]byte, error) {
+	if len(starts) == 0 || len(starts) > forecastLongMaxVector {
+		return nil, errors.New("forecast archive weather slot list length is invalid")
+	}
+	sorted := append([]int64(nil), starts...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	if sorted[0] <= 0 {
+		return nil, errors.New("forecast archive weather slot start is invalid")
+	}
+	out := binary.AppendUvarint(nil, uint64(sorted[0]))
+	for i := 1; i < len(sorted); i++ {
+		if sorted[i] == sorted[i-1] {
+			return nil, errors.New("forecast archive weather slot repeats")
+		}
+		out = binary.AppendUvarint(out, uint64(sorted[i]-sorted[i-1]))
+	}
+	return out, nil
+}
+
+func decodeForecastStarts(b []byte) ([]int64, error) {
+	var out []int64
+	var last uint64
+	for len(b) > 0 {
+		v, n := binary.Uvarint(b)
+		if n <= 0 || v == 0 || v > math.MaxInt64-last || len(out) >= forecastLongMaxVector {
+			return nil, errors.New("forecast archive weather slot list is invalid")
+		}
+		last += v
+		out = append(out, int64(last))
+		b = b[n:]
+	}
+	if len(out) == 0 {
+		return nil, errors.New("forecast archive weather slot list is empty")
+	}
+	return out, nil
+}
+
 // encodeOccupancy stores a bit per quarter when the rows are contiguous, and
 // the available-at time of each quarter so a restored issue still validates.
 // Gaps use an explicit record. An empty slice returns a nil blob.

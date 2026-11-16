@@ -12,7 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"strings"
+	"sort"
 	"sync"
 	"time"
 
@@ -312,7 +312,6 @@ CREATE TABLE IF NOT EXISTS fa_runs(
   has_location INTEGER NOT NULL DEFAULT 0, latitude REAL, longitude REAL,
   models TEXT NOT NULL,
   occupancy BLOB, occupancy_start_ms INTEGER, occupancy_n INTEGER,
-  weather_avail TEXT,
   input_hash TEXT NOT NULL,
   thinned INTEGER NOT NULL DEFAULT 0,
   json_bytes INTEGER NOT NULL DEFAULT 0,
@@ -338,9 +337,11 @@ CREATE TABLE IF NOT EXISTS fa_weather(
   PRIMARY KEY(source, available_at_ms, start_ms)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS fa_run_weather(
-  run_id TEXT NOT NULL, available_at_ms INTEGER NOT NULL,
-  PRIMARY KEY(run_id, available_at_ms)
+  run_id TEXT NOT NULL, source TEXT NOT NULL, available_at_ms INTEGER NOT NULL,
+  starts BLOB NOT NULL,
+  PRIMARY KEY(run_id, source, available_at_ms)
 ) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS fa_run_weather_fetch ON fa_run_weather(source, available_at_ms);
 CREATE TABLE IF NOT EXISTS fa_observations_15m(
   start_ms INTEGER NOT NULL, end_ms INTEGER NOT NULL, config_version TEXT NOT NULL,
   available_at_ms INTEGER NOT NULL, pv_w REAL NOT NULL, load_w REAL NOT NULL,
@@ -536,7 +537,7 @@ func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes 
 		}
 	}
 	if err := insertForecastWeather(ctx, tx, issue); err != nil {
-		if !strings.Contains(err.Error(), "is immutable") {
+		if !errors.Is(err, errForecastWeatherConflict) {
 			return err
 		}
 		a.warn("weather", err)
@@ -545,7 +546,6 @@ func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes 
 	if err != nil {
 		return err
 	}
-	avail := forecastWeatherAvail(issue.Weather)
 	modelsJSON, err := json.Marshal(issue.Models)
 	if err != nil {
 		return err
@@ -566,11 +566,11 @@ func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes 
 	_, err = tx.ExecContext(ctx, `INSERT INTO fa_runs(
  run_id, decision_id, origin_ms, issued_at_ms, latest_input_ms, config_version,
  site_id, learning_revision, timezone, has_location, latitude, longitude,
- models, occupancy, occupancy_start_ms, occupancy_n, weather_avail, input_hash,
- thinned, json_bytes, gzip_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)`,
+ models, occupancy, occupancy_start_ms, occupancy_n, input_hash,
+ thinned, json_bytes, gzip_bytes) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)`,
 		issue.ID, issue.DecisionID, issue.OriginMS, issue.IssuedAtMS, issue.LatestInputMS, issue.ConfigVersion,
 		siteID, learning, tz, hasLoc, lat, lon, string(modelsJSON), nullableBlob(occ), nullMS(occStart, occN > 0), nullCount(occN),
-		nullText(avail), hash, item.JSONBytes, item.GzipBytes)
+		hash, item.JSONBytes, item.GzipBytes)
 	if err != nil {
 		return err
 	}
@@ -594,13 +594,6 @@ func nullCount(n int) any {
 		return nil
 	}
 	return n
-}
-
-func nullText(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
 }
 
 func nullableBlob(b []byte) any {
@@ -878,35 +871,30 @@ func bytesEqualNil(a, b []byte) bool {
 	return true
 }
 
-func forecastWeatherAvail(rows []forecasting.Weather) string {
-	if len(rows) == 0 {
-		return ""
-	}
-	seen := map[int64]bool{}
-	var ids []int64
-	for _, row := range rows {
-		if seen[row.AvailableAtMS] {
-			continue
-		}
-		seen[row.AvailableAtMS] = true
-		ids = append(ids, row.AvailableAtMS)
-	}
-	data, err := json.Marshal(ids)
-	if err != nil {
-		return ""
-	}
-	return string(data)
+// forecastWeatherFetch is one source's fetch, named by its available-at time.
+type forecastWeatherFetch struct {
+	source  string
+	availMS int64
 }
 
+var errForecastWeatherConflict = errors.New("forecast archive weather row is immutable")
+
+// insertForecastWeather shares weather rows across runs and records, per
+// fetch, the exact slots this run used. A partial refresh leaves one issue
+// with rows from two fetches, and another run may use other slots of the
+// same fetch, so the fetch alone does not say which rows belong to a run.
+// A stored row that differs from the issued one is kept and reported as
+// errForecastWeatherConflict after every row is linked.
 func insertForecastWeather(ctx context.Context, tx *sql.Tx, issue forecasting.Issue) error {
-	seen := map[int64]bool{}
+	starts := map[forecastWeatherFetch][]int64{}
+	var order []forecastWeatherFetch
+	var conflict error
 	for _, row := range issue.Weather {
-		if !seen[row.AvailableAtMS] {
-			seen[row.AvailableAtMS] = true
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO fa_run_weather(run_id, available_at_ms) VALUES(?,?)`, issue.ID, row.AvailableAtMS); err != nil {
-				return err
-			}
+		key := forecastWeatherFetch{source: row.Source, availMS: row.AvailableAtMS}
+		if _, ok := starts[key]; !ok {
+			order = append(order, key)
 		}
+		starts[key] = append(starts[key], row.StartMS)
 		res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO fa_weather(
  source, available_at_ms, start_ms, end_ms, ghi, cloud, temp, direct_pv, est_pv) VALUES(?,?,?,?,?,?,?,?,?)`,
 			row.Source, row.AvailableAtMS, row.StartMS, row.EndMS,
@@ -924,12 +912,22 @@ func insertForecastWeather(ctx context.Context, tx *sql.Tx, issue forecasting.Is
  WHERE source=? AND available_at_ms=? AND start_ms=?`, row.Source, row.AvailableAtMS, row.StartMS).Scan(&end, &ghi, &cloud, &temp, &direct, &est); err != nil {
 			return err
 		}
-		if end != row.EndMS || !nullFloatEqual(ghi, row.GHIWm2) || !nullFloatEqual(cloud, row.CloudPct) || !nullFloatEqual(temp, row.TempC) ||
-			!nullFloatEqual(direct, row.DirectPVW) || !nullFloatEqual(est, row.EstimatedPVW) {
-			return fmt.Errorf("forecast archive weather at %d is immutable", row.AvailableAtMS)
+		if conflict == nil && (end != row.EndMS || !nullFloatEqual(ghi, row.GHIWm2) || !nullFloatEqual(cloud, row.CloudPct) ||
+			!nullFloatEqual(temp, row.TempC) || !nullFloatEqual(direct, row.DirectPVW) || !nullFloatEqual(est, row.EstimatedPVW)) {
+			conflict = fmt.Errorf("%w: %s fetch %d slot %d", errForecastWeatherConflict, row.Source, row.AvailableAtMS, row.StartMS)
 		}
 	}
-	return nil
+	for _, key := range order {
+		blob, err := encodeForecastStarts(starts[key])
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO fa_run_weather(run_id, source, available_at_ms, starts) VALUES(?,?,?,?)`,
+			issue.ID, key.source, key.availMS, blob); err != nil {
+			return err
+		}
+	}
+	return conflict
 }
 
 func nullFloat(v *float64) any {
@@ -950,7 +948,7 @@ func nullFloatEqual(got sql.NullFloat64, want *float64) bool {
 // get an explicit cold-start band, because only the champion interval was kept.
 func (a *ForecastLongArchive) LoadIssue(ctx context.Context, runID string) (forecasting.Issue, error) {
 	var issue forecasting.Issue
-	var siteID, learning, tz, modelsJSON, weatherAvail sql.NullString
+	var siteID, learning, tz, modelsJSON sql.NullString
 	var lat, lon sql.NullFloat64
 	var hasLoc int
 	var occ []byte
@@ -958,10 +956,10 @@ func (a *ForecastLongArchive) LoadIssue(ctx context.Context, runID string) (fore
 	var occN sql.NullInt64
 	err := a.db.QueryRowContext(ctx, `SELECT decision_id, origin_ms, issued_at_ms, latest_input_ms, config_version,
  site_id, learning_revision, timezone, has_location, latitude, longitude, models,
- occupancy, occupancy_start_ms, occupancy_n, weather_avail
+ occupancy, occupancy_start_ms, occupancy_n
  FROM fa_runs WHERE run_id=?`, runID).Scan(
 		&issue.DecisionID, &issue.OriginMS, &issue.IssuedAtMS, &issue.LatestInputMS, &issue.ConfigVersion,
-		&siteID, &learning, &tz, &hasLoc, &lat, &lon, &modelsJSON, &occ, &occStart, &occN, &weatherAvail)
+		&siteID, &learning, &tz, &hasLoc, &lat, &lon, &modelsJSON, &occ, &occStart, &occN)
 	if err != nil {
 		return forecasting.Issue{}, err
 	}
@@ -997,18 +995,7 @@ func (a *ForecastLongArchive) LoadIssue(ctx context.Context, runID string) (fore
 	if err != nil {
 		return forecasting.Issue{}, err
 	}
-	var spanStart, spanEnd int64
-	for _, series := range issue.Series {
-		for _, p := range series.Points {
-			if spanStart == 0 || p.StartMS < spanStart {
-				spanStart = p.StartMS
-			}
-			if p.EndMS > spanEnd {
-				spanEnd = p.EndMS
-			}
-		}
-	}
-	if issue.Weather, err = a.loadWeather(ctx, weatherAvail.String, spanStart, spanEnd); err != nil {
+	if issue.Weather, err = a.loadWeather(ctx, runID); err != nil {
 		return forecasting.Issue{}, err
 	}
 	if err := issue.Validate(); err != nil {
@@ -1166,25 +1153,60 @@ func decodeStoredSeries(name, version string, layout seriesLayout, pvB, loadB, f
 	return forecasting.Series{Name: name, ModelVersion: version, Points: points}, nil
 }
 
-func (a *ForecastLongArchive) loadWeather(ctx context.Context, availJSON string, spanStart, spanEnd int64) ([]forecasting.Weather, error) {
-	if availJSON == "" || spanEnd <= spanStart {
-		return nil, nil
-	}
-	var ids []int64
-	if err := json.Unmarshal([]byte(availJSON), &ids); err != nil {
+// loadWeather returns exactly the weather rows the run was issued with, in
+// start order.
+func (a *ForecastLongArchive) loadWeather(ctx context.Context, runID string) ([]forecasting.Weather, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT source, available_at_ms, starts FROM fa_run_weather WHERE run_id=?`, runID)
+	if err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 {
-		return nil, nil
+	type fetch struct {
+		key    forecastWeatherFetch
+		starts []int64
 	}
-	query := `SELECT source, available_at_ms, start_ms, end_ms, ghi, cloud, temp, direct_pv, est_pv FROM fa_weather
- WHERE available_at_ms IN (` + placeholders(len(ids)) + `) AND start_ms < ? AND end_ms > ? ORDER BY start_ms, source`
-	args := make([]any, 0, len(ids)+2)
-	for _, id := range ids {
-		args = append(args, id)
+	var fetches []fetch
+	for rows.Next() {
+		var f fetch
+		var blob []byte
+		if err := rows.Scan(&f.key.source, &f.key.availMS, &blob); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if f.starts, err = decodeForecastStarts(blob); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		fetches = append(fetches, f)
 	}
-	args = append(args, spanEnd, spanStart)
-	rows, err := a.db.QueryContext(ctx, query, args...)
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []forecasting.Weather
+	for _, f := range fetches {
+		got, err := a.fetchWeatherRows(ctx, f.key, f.starts)
+		if err != nil {
+			return nil, err
+		}
+		if len(got) != len(f.starts) {
+			return nil, fmt.Errorf("forecast archive run %s is missing %d weather rows", runID, len(f.starts)-len(got))
+		}
+		out = append(out, got...)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].StartMS < out[j].StartMS })
+	return out, nil
+}
+
+func (a *ForecastLongArchive) fetchWeatherRows(ctx context.Context, key forecastWeatherFetch, starts []int64) ([]forecasting.Weather, error) {
+	args := make([]any, 0, len(starts)+2)
+	args = append(args, key.source, key.availMS)
+	for _, start := range starts {
+		args = append(args, start)
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT source, available_at_ms, start_ms, end_ms, ghi, cloud, temp, direct_pv, est_pv FROM fa_weather
+ WHERE source=? AND available_at_ms=? AND start_ms IN (`+placeholders(len(starts))+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
