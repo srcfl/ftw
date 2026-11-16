@@ -26,10 +26,17 @@ import (
 // tests can assert WHICH gate fired, not just that something failed.
 func runPatchDriver(t *testing.T, env *HostEnv, targetURL string) (ok bool, deniedBy string) {
 	t.Helper()
+	return runHTTPWriteDriver(t, env, "http_patch", targetURL)
+}
+
+// runHTTPWriteDriver runs the same one-shot driver through any mutating
+// verb (host.http_patch or host.http_put).
+func runHTTPWriteDriver(t *testing.T, env *HostEnv, fn, targetURL string) (ok bool, deniedBy string) {
+	t.Helper()
 	src := `
 		function driver_init() end
 		function driver_poll()
-			local body, err = host.http_patch("` + targetURL + `",
+			local body, err = host.` + fn + `("` + targetURL + `",
 				'[{"variableId":5202,"integerValue":3000}]',
 				{ Authorization = "Basic dTpw" })
 			if err then
