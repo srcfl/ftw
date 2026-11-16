@@ -208,3 +208,45 @@ func sqliteErrorOf(t *testing.T) error {
 	}
 	return err
 }
+
+// A corruption code that quick_check would not see still heals the file, and
+// the rebuild waits for the last read on the dropped handle.
+func TestForecastLongDropRebuildsAfterLastRead(t *testing.T) {
+	store, arch := openLongArchive(t)
+	ctx := context.Background()
+	if err := arch.ArchiveIssues(ctx, []ForecastArchiveIssue{{Issue: longIssue("kept", time.Now().UTC().Truncate(time.Hour))}}); err != nil {
+		t.Fatal(err)
+	}
+	// A backup still reading on the handle when Sync drops it.
+	reading, err := arch.db.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.dropForecastLongArchive(arch)
+	if _, err := store.OpenForecastLongArchive(ctx); err == nil {
+		t.Fatal("open rebuilt the file while a read on the dropped handle was running")
+	}
+	if files := quarantinedFiles(t, filepath.Dir(arch.path)); len(files) != 0 {
+		t.Fatalf("file moved aside under a running read: %v", files)
+	}
+	if err := reading.Close(); err != nil {
+		t.Fatal(err)
+	}
+	healed, err := store.OpenForecastLongArchive(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files := quarantinedFiles(t, filepath.Dir(arch.path)); len(files) == 0 {
+		t.Fatal("file that passed quick_check was not moved aside after a corruption code")
+	}
+	if events := store.HealEvents(); len(events) != 1 || events[0].Tier != "forecast_archive" {
+		t.Fatalf("heal events = %+v", events)
+	}
+	if _, err := healed.LoadIssue(ctx, "kept"); err == nil {
+		t.Fatal("rebuilt archive still holds the old run")
+	}
+	again, err := store.OpenForecastLongArchive(ctx)
+	if err != nil || again != healed {
+		t.Fatalf("second open = %v, %v; want the cached handle", again, err)
+	}
+}

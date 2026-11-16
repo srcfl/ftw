@@ -280,9 +280,13 @@ func (a *ForecastLongArchive) readIssuePage(ctx context.Context, src *Store, fro
 			a.warn("decode", item.Err)
 			continue
 		}
-		states, err := forecastLongStatesFrom(ctx, src, item.Issue)
+		states, missing, err := forecastLongStatesFrom(ctx, src, item.Issue)
 		if err != nil {
 			return batch, err
+		}
+		if missing > 0 {
+			// state.db pruned these blobs first; the run keeps its ids.
+			slog.Info("forecast long archive: model state no longer in state.db", "run", key.ID, "missing", missing)
 		}
 		batch.issues = append(batch.issues, ForecastArchiveIssue{
 			Issue: item.Issue, JSONBytes: item.JSONBytes, GzipBytes: item.GzipBytes, States: states,
@@ -301,8 +305,9 @@ func (a *ForecastLongArchive) hasRun(ctx context.Context, id string) (bool, erro
 	return err == nil, err
 }
 
-func forecastLongStatesFrom(ctx context.Context, src *Store, issue forecasting.Issue) (map[string]ForecastModelBlob, error) {
+func forecastLongStatesFrom(ctx context.Context, src *Store, issue forecasting.Issue) (map[string]ForecastModelBlob, int, error) {
 	states := map[string]ForecastModelBlob{}
+	missing := 0
 	for _, model := range issue.Models {
 		if model.StateID == "" {
 			continue
@@ -312,14 +317,15 @@ func forecastLongStatesFrom(ctx context.Context, src *Store, issue forecasting.I
 		}
 		expanded, payload, err := src.LoadForecastModelStateRaw(ctx, model.StateID)
 		if errors.Is(err, sql.ErrNoRows) {
+			missing++
 			continue
 		}
 		if err != nil {
-			return nil, fromForecastSource(err)
+			return nil, 0, fromForecastSource(err)
 		}
 		states[model.StateID] = ForecastModelBlob{Expanded: expanded, Gzip: payload}
 	}
-	return states, nil
+	return states, missing, nil
 }
 
 // copyObservations follows the same rules as copyIssues on the
@@ -352,10 +358,17 @@ func (a *ForecastLongArchive) copyObservations(ctx context.Context, src *Store, 
 		if len(page) == 0 {
 			return nil
 		}
-		last := page[len(page)-1]
-		from = forecastLongObsCursor{AvailableMS: last.AvailableAtMS, StartMS: last.StartMS, EndMS: last.EndMS, Config: last.ConfigVersion}
+		from = page[len(page)-1].Key
+		rows := make([]forecasting.Observation, 0, len(page))
+		for _, row := range page {
+			if row.Err != nil {
+				a.warn("decode", row.Err)
+				continue
+			}
+			rows = append(rows, row.Observation)
+		}
 		writeCtx, cancelWrite := context.WithTimeout(ctx, forecastLongPageTimeout)
-		err = a.ArchiveObservations(writeCtx, page)
+		err = a.ArchiveObservations(writeCtx, rows)
 		if err == nil && from.after(cursor) {
 			cursor = from
 			err = a.writeObsCursor(writeCtx, cursor)

@@ -791,6 +791,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.deps.State != nil {
 		storage := map[string]any{"state": "ok", "cache": "ok", "history": "ok"}
 		for _, ev := range s.deps.State.HealEvents() {
+			if ev.Tier == "forecast_archive" {
+				continue // shown in forecast_archive; it must not replace a boot event
+			}
 			storage[ev.Tier] = ev.Action // "rebuilt" | "restored"
 			storage["last_event_ms"] = ev.AtMs
 			storage["detail"] = ev.Detail

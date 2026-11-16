@@ -542,7 +542,7 @@ func (a *ForecastLongArchive) recompute(ctx context.Context, src *Store, now tim
 	}
 	if paused != nil {
 		state = "paused_disk_full"
-		lastErr = paused.Error()
+		lastErr = "copying paused: the data volume is full or below the free-space floor"
 	}
 	a.status = ForecastLongArchiveStatus{
 		State: state, LiveBytes: inv.LiveBytes, FileBytes: inv.FileBytes, WALBytes: inv.WALBytes,

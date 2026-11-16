@@ -163,7 +163,7 @@ func (s *Store) OpenForecastLongArchive(ctx context.Context) (*ForecastLongArchi
 	s.forecastLongOpenMu.Lock()
 	defer s.forecastLongOpenMu.Unlock()
 	s.forecastLongMu.Lock()
-	cached, closed := s.forecastLong, s.forecastLongClosed
+	cached, closed, dropped := s.forecastLong, s.forecastLongClosed, s.forecastLongDropped
 	s.forecastLongMu.Unlock()
 	if closed {
 		return nil, errForecastArchiveClosed
@@ -171,7 +171,12 @@ func (s *Store) OpenForecastLongArchive(ctx context.Context) (*ForecastLongArchi
 	if cached != nil {
 		return cached, nil
 	}
-	arch, ev, err := openForecastLongFile(ctx, ForecastLongArchivePath(s.mainDBPath))
+	if dropped != nil && dropped.Stats().OpenConnections > 0 {
+		// Its last connection would delete the WAL by name, which after a
+		// rebuild belongs to the new file. Try again next hour.
+		return nil, errors.New("forecast archive: a read on the damaged file has not ended")
+	}
+	arch, ev, err := openForecastLongFile(ctx, ForecastLongArchivePath(s.mainDBPath), dropped != nil)
 	if err != nil {
 		return nil, err
 	}
@@ -180,6 +185,7 @@ func (s *Store) OpenForecastLongArchive(ctx context.Context) (*ForecastLongArchi
 	closed = s.forecastLongClosed
 	if !closed {
 		s.forecastLong = arch
+		s.forecastLongDropped = nil
 	}
 	s.forecastLongMu.Unlock()
 	if closed {
@@ -206,20 +212,27 @@ func (s *Store) closeForecastLongArchive() error {
 	return arch.Close()
 }
 
-// dropForecastLongArchive closes a handle that hit damage, so the next
-// hourly copy reopens the file, checks it and heals it. Close waits for a
-// backup or inventory read that is already running on the handle.
+// dropForecastLongArchive closes a handle that returned a corruption code,
+// so the next hourly copy moves the file aside and starts an empty one.
+// quick_check can miss what the copy hit, so it is not asked again. Close
+// does not wait for a backup or inventory read already running on the
+// handle; that connection closes when the read ends.
 func (s *Store) dropForecastLongArchive(arch *ForecastLongArchive) {
 	s.forecastLongMu.Lock()
 	if s.forecastLong == arch {
 		s.forecastLong = nil
+		s.forecastLongDropped = arch.db
 	}
 	s.forecastLongMu.Unlock()
 	_ = arch.Close()
 }
 
-func openForecastLongFile(ctx context.Context, path string) (*ForecastLongArchive, *HealEvent, error) {
-	db, damaged, err := openForecastLongDB(ctx, path)
+func openForecastLongFile(ctx context.Context, path string, damagedBefore bool) (*ForecastLongArchive, *HealEvent, error) {
+	var db *sql.DB
+	damaged, err := true, errors.New("forecast archive: the last copy hit a corruption code")
+	if !damagedBefore {
+		db, damaged, err = openForecastLongDB(ctx, path)
+	}
 	if err != nil && !damaged {
 		return nil, nil, err
 	}
@@ -438,7 +451,7 @@ func (a *ForecastLongArchive) warn(kind string, err error) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.status.LastError = err.Error()
+	a.status.LastError = forecastLongReason(kind)
 	now := time.Now()
 	if a.warned == nil {
 		a.warned = map[string]time.Time{}
@@ -459,18 +472,22 @@ func (a *ForecastLongArchive) publish() {
 	}
 }
 
-func (a *ForecastLongArchive) setState(state, lastError string) {
-	a.mu.Lock()
-	a.status.State = state
-	if lastError != "" {
-		a.status.LastError = lastError
+// forecastLongReason is the short text health shows for a failure. Raw
+// errors carry host paths, so they go only to the Core log.
+func forecastLongReason(kind string) string {
+	switch kind {
+	case "immutable":
+		return "a forecast differs from its archived copy; the archived copy is kept"
+	case "weather":
+		return "a weather row differs from its archived copy; the archived copy is kept"
+	case "decode", "skip-series", "invalid":
+		return "skipped a row the archive cannot store"
 	}
-	if state == "ok" || state == "rebuilt" {
-		a.status.LastError = lastError
-	}
-	a.mu.Unlock()
-	a.publish()
+	return kind + " failed; see the Core log"
 }
+
+// ForecastLongOpenFailed is the health text when the archive cannot open.
+const ForecastLongOpenFailed = "cannot open the archive; see the Core log"
 
 // ArchiveIssues stores one page of issued forecasts. An identical run is left
 // untouched. A different payload with the same id is rejected and the stored
@@ -492,12 +509,16 @@ func (a *ForecastLongArchive) ArchiveIssues(ctx context.Context, batch []Forecas
 	var immutable error
 	for _, item := range batch {
 		if err := a.archiveOne(ctx, tx, codes, item); err != nil {
-			if errors.Is(err, errForecastArchiveImmutable) {
+			var invalid forecastLongInvalid
+			switch {
+			case errors.Is(err, errForecastArchiveImmutable):
 				a.warn("immutable", err)
 				immutable = err
-				continue
+			case errors.As(err, &invalid):
+				a.warn("invalid", err) // skipped; one bad run must not stop the copy
+			default:
+				return err
 			}
-			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -531,10 +552,19 @@ func (a *ForecastLongArchive) freeShortfall() int64 {
 var errForecastArchiveDiskFull = errors.New("forecast archive paused: data volume is below the free-space floor")
 var errForecastArchiveImmutable = errors.New("forecast long archive run is immutable")
 
+// forecastLongInvalid marks an issue the archive cannot store. archiveOne
+// returns it before writing any run rows, so the page can skip the issue.
+type forecastLongInvalid struct{ err error }
+
+func (e forecastLongInvalid) Error() string {
+	return "forecast archive cannot store issue: " + e.err.Error()
+}
+func (e forecastLongInvalid) Unwrap() error { return e.err }
+
 func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes map[string]byte, item ForecastArchiveIssue) error {
 	issue := item.Issue
 	if err := issue.Validate(); err != nil {
-		return err
+		return forecastLongInvalid{err}
 	}
 	kept := make([]forecasting.Series, 0, 4)
 	for _, series := range issue.Series {
@@ -548,18 +578,34 @@ func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes 
 	}
 	states, models, err := forecastLongModelBlobs(issue, item.States)
 	if err != nil {
-		return err
+		return forecastLongInvalid{err}
 	}
 	issue.Models = models
 	hash, err := forecastLongInputHash(issue)
 	if err != nil {
-		return err
+		return forecastLongInvalid{err}
 	}
+	var dictErr error
 	encoded, err := encodeKeptSeries(kept, func(kind, value string) (byte, error) {
-		return forecastLongDict(ctx, tx, codes, kind, value)
+		code, err := forecastLongDict(ctx, tx, codes, kind, value)
+		if err != nil {
+			dictErr = err
+		}
+		return code, err
 	})
+	if dictErr != nil {
+		return dictErr
+	}
 	if err != nil {
-		return err
+		return forecastLongInvalid{err}
+	}
+	occ, occStart, occN, err := encodeOccupancy(issue.Occupancy)
+	if err != nil {
+		return forecastLongInvalid{err}
+	}
+	modelsJSON, err := json.Marshal(issue.Models)
+	if err != nil {
+		return forecastLongInvalid{err}
 	}
 	var decision, config, existingHash string
 	var origin, issued, latest int64
@@ -596,14 +642,6 @@ func (a *ForecastLongArchive) archiveOne(ctx context.Context, tx *sql.Tx, codes 
 			return err
 		}
 		a.warn("weather", err)
-	}
-	occ, occStart, occN, err := encodeOccupancy(issue.Occupancy)
-	if err != nil {
-		return err
-	}
-	modelsJSON, err := json.Marshal(issue.Models)
-	if err != nil {
-		return err
 	}
 	var siteID, learning, tz sql.NullString
 	var lat, lon sql.NullFloat64

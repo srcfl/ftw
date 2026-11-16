@@ -303,3 +303,48 @@ func TestForecastLongCopyQueriesUseIndexes(t *testing.T) {
 		}
 	}
 }
+
+// One row the archive cannot store is skipped with a short health reason.
+// It must not stop the copy, and health must not carry the raw error.
+func TestForecastLongCopySkipsRowsItCannotStore(t *testing.T) {
+	store, arch := openLongArchive(t)
+	ctx := context.Background()
+	if err := store.InitForecastArchive(ctx); err != nil {
+		t.Fatal(err)
+	}
+	origin := time.Now().UTC().Truncate(time.Hour).Add(-2 * time.Hour)
+	// float32 holds no 1e39, so the series cannot be encoded.
+	wide := longIssue("a-wide", origin)
+	wide.Series[0].Points[0].PVW = 1e39
+	if err := store.SaveForecastIssue(ctx, wide); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveForecastIssue(ctx, longIssue("b-good", origin)); err != nil {
+		t.Fatal(err)
+	}
+	bad := longObservation(origin, time.Minute)
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO forecast_observations(start_ms,end_ms,available_at_ms,config_version,payload)
+ VALUES(?,?,?,?,?)`, bad.StartMS, bad.EndMS, bad.AvailableAtMS, bad.ConfigVersion, `{"start_ms":"not a number"}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveForecastObservation(ctx, longObservation(origin.Add(15*time.Minute), time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := arch.Sync(ctx, store, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if runs := copiedRunIDs(t, arch); runs["a-wide"] || !runs["b-good"] {
+		t.Fatalf("runs = %v, want only b-good", runs)
+	}
+	if n := countRows(t, arch, `SELECT COUNT(*) FROM fa_observations_15m`); n != 1 {
+		t.Fatalf("observations = %d, the copy stopped at the bad row", n)
+	}
+	cursor, err := arch.obsCursor(ctx)
+	if err != nil || cursor.StartMS != origin.Add(15*time.Minute).UnixMilli() {
+		t.Fatalf("observation cursor = %+v, %v; want it past the bad row", cursor, err)
+	}
+	status, _ := store.ForecastLongArchiveStatus()
+	if status.LastError != forecastLongReason("invalid") {
+		t.Fatalf("health last_error = %q, want a short reason", status.LastError)
+	}
+}

@@ -762,47 +762,51 @@ func (s *Store) LoadForecastModelStateRaw(ctx context.Context, stateID string) (
 	return expanded, payload, err
 }
 
+// forecastObservationCopy is one quarter-hour row for the long-term copier.
+// Err is set when the payload cannot be read; the copier skips the row.
+type forecastObservationCopy struct {
+	Key         forecastLongObsCursor
+	Observation forecasting.Observation
+	Err         error
+}
+
 // forecastObservationsAfter lists quarter-hour truth after the cursor in
 // (available_at_ms, start_ms, end_ms, config_version) order, no later than
 // untilMS. The tracker writes rows in available_at_ms order.
-func (s *Store) forecastObservationsAfter(ctx context.Context, after forecastLongObsCursor, untilMS int64, limit int) ([]forecasting.Observation, error) {
+func (s *Store) forecastObservationsAfter(ctx context.Context, after forecastLongObsCursor, untilMS int64, limit int) ([]forecastObservationCopy, error) {
 	rows, err := s.db.QueryContext(ctx, forecastObservationsAfterQuery,
 		after.AvailableMS, after.StartMS, after.EndMS, after.Config, untilMS, limit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var payloads []string
+	var out []forecastObservationCopy
 	for rows.Next() {
+		var row forecastObservationCopy
 		var data string
-		if err = rows.Scan(&data); err != nil {
+		if err = rows.Scan(&row.Key.AvailableMS, &row.Key.StartMS, &row.Key.EndMS, &row.Key.Config, &data); err != nil {
 			return nil, err
 		}
-		payloads = append(payloads, data)
+		row.Observation, row.Err = decodeForecastObservation(data)
+		out = append(out, row)
 	}
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	if err = rows.Close(); err != nil {
-		return nil, err
-	}
-	out := make([]forecasting.Observation, 0, len(payloads))
-	for _, data := range payloads {
-		if len(data) > maxForecastRecordBytes {
-			return nil, errors.New("oversized forecast observation")
-		}
-		var observation forecasting.Observation
-		if err = json.Unmarshal([]byte(data), &observation); err != nil {
-			return nil, err
-		}
-		if err = observation.Validate(); err != nil {
-			return nil, err
-		}
-		out = append(out, observation)
-	}
-	return out, nil
+	return out, rows.Close()
 }
 
-const forecastObservationsAfterQuery = `SELECT payload FROM forecast_observations
+func decodeForecastObservation(data string) (forecasting.Observation, error) {
+	var observation forecasting.Observation
+	if len(data) > maxForecastRecordBytes {
+		return observation, errors.New("oversized forecast observation")
+	}
+	if err := json.Unmarshal([]byte(data), &observation); err != nil {
+		return observation, err
+	}
+	return observation, observation.Validate()
+}
+
+const forecastObservationsAfterQuery = `SELECT available_at_ms, start_ms, end_ms, config_version, payload FROM forecast_observations
  WHERE (available_at_ms, start_ms, end_ms, config_version) > (?, ?, ?, ?) AND available_at_ms <= ?
  ORDER BY available_at_ms, start_ms, end_ms, config_version LIMIT ?`

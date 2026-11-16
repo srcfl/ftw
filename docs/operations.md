@@ -72,6 +72,9 @@ holds:
   90 days, 1 h for 5 years) and the energy ledger;
 - `cache.db` — prices and forecasts; past prices cost the savings history
   and come back only from a full backup;
+- `forecast-archive.db` — issued forecasts and quarter-hour measurements
+  kept for later analysis, at most 512 MiB; Core moves a damaged file aside
+  and starts an empty one;
 - key files such as `nova.key` — the box's identity; keep them with the data;
 - `drivers/` — custom and managed drivers;
 - `backups/` — full backups, unless `state.backup_dir` points elsewhere.
@@ -95,8 +98,9 @@ remain on the same disk and cannot recover a failed SD card.
 
 Core exposes a read-only storage check at
 `GET /api/storage/inventory`. It reports allocated, live and free SQLite pages
-for `state.db` and `cache.db`, their WAL/SHM sizes, and free space on the volume
-that contains the data directory. It does not expose paths, scan a storage
+for `state.db` and `cache.db`, and for `forecast-archive.db` once Core has
+opened it, their WAL/SHM sizes, and free space on the volume that contains
+the data directory. It does not expose paths, scan a storage
 engine's internal files, change retention, checkpoint WAL, run `VACUUM`, or
 delete data. `GET /api/backups` lists full backups and their sizes.
 

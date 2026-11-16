@@ -109,7 +109,11 @@ type Store struct {
 	forecastLongMu     sync.Mutex
 	forecastLong       *ForecastLongArchive
 	forecastLongClosed bool
-	forecastLongStatus *ForecastLongArchiveStatus
+	// forecastLongDropped is a handle Sync closed after a corruption code.
+	// The next open moves the file aside without quick_check, once the last
+	// read on that handle has ended.
+	forecastLongDropped *sql.DB
+	forecastLongStatus  *ForecastLongArchiveStatus
 }
 
 // Open initializes (or creates) the precious state.db at path plus the

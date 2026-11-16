@@ -95,7 +95,7 @@ func (a *forecastLongArchiver) runOnce(ctx context.Context) {
 		}
 		slog.Warn("forecast long archive unavailable", "err", err)
 		a.store.ReportForecastLongArchive(state.ForecastLongArchiveStatus{
-			State: "unavailable", CapBytes: state.ForecastLongMaxBytes, LastError: err.Error(),
+			State: "unavailable", CapBytes: state.ForecastLongMaxBytes, LastError: state.ForecastLongOpenFailed,
 		})
 		return
 	}
