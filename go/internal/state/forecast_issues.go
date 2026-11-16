@@ -704,7 +704,7 @@ func (s *Store) LoadForecastErrors(ctx context.Context, since, until int64, hour
 	return out, nil
 }
 
-// ForecastIssueCopy is one row from the 30-day issue archive, in issued order.
+// ForecastIssueCopy is one row from the 30-day issue archive.
 // Err is set when the row cannot be decoded; the copier skips it and moves on.
 type ForecastIssueCopy struct {
 	Issue      forecasting.Issue
@@ -715,56 +715,40 @@ type ForecastIssueCopy struct {
 	Err        error
 }
 
-// VisitForecastIssuesAfter walks issues strictly after the (issued_at_ms, id)
-// cursor, oldest first, at most limit rows. The long-term copier uses it so a
-// read snapshot stays short.
-func (s *Store) VisitForecastIssuesAfter(ctx context.Context, cursorIssuedMS int64, cursorID string, limit int, visit func(ForecastIssueCopy) error) error {
-	if visit == nil {
-		return errors.New("forecast issue visitor is nil")
-	}
-	if limit <= 0 || limit > 64 {
-		limit = 16
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT issued_at_ms, id, payload FROM forecast_issues
- WHERE issued_at_ms > ? OR (issued_at_ms = ? AND id > ?)
- ORDER BY issued_at_ms, id LIMIT ?`, cursorIssuedMS, cursorIssuedMS, cursorID, limit)
+// forecastIssueKeysAfter lists issues after the (issued_at_ms, id) cursor and
+// no later than untilMS, oldest first. It reads no payloads, so the long-term
+// copier can skip runs it already holds.
+func (s *Store) forecastIssueKeysAfter(ctx context.Context, after forecastLongIssueCursor, untilMS int64, limit int) ([]forecastLongIssueCursor, error) {
+	rows, err := s.db.QueryContext(ctx, forecastIssueKeysQuery, after.IssuedAtMS, after.ID, untilMS, limit)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rows.Close()
-	type rawIssue struct {
-		issued int64
-		id     string
-		data   []byte
-	}
-	var page []rawIssue
+	var keys []forecastLongIssueCursor
 	for rows.Next() {
-		var row rawIssue
-		if err = rows.Scan(&row.issued, &row.id, &row.data); err != nil {
-			return err
+		var key forecastLongIssueCursor
+		if err := rows.Scan(&key.IssuedAtMS, &key.ID); err != nil {
+			return nil, err
 		}
-		page = append(page, row)
+		keys = append(keys, key)
 	}
-	if err = rows.Err(); err != nil {
-		return err
+	return keys, rows.Err()
+}
+
+const forecastIssueKeysQuery = `SELECT issued_at_ms, id FROM forecast_issues
+ WHERE (issued_at_ms, id) > (?, ?) AND issued_at_ms <= ?
+ ORDER BY issued_at_ms, id LIMIT ?`
+
+// forecastIssueCopy reads and decodes one issue. It returns sql.ErrNoRows
+// when retention removed the row after it was listed.
+func (s *Store) forecastIssueCopy(ctx context.Context, key forecastLongIssueCursor) (ForecastIssueCopy, error) {
+	var data []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT payload FROM forecast_issues WHERE id=?`, key.ID).Scan(&data); err != nil {
+		return ForecastIssueCopy{}, err
 	}
-	if err = rows.Close(); err != nil {
-		return err
-	}
-	for _, row := range page {
-		item := ForecastIssueCopy{IssuedAtMS: row.issued, ID: row.id, GzipBytes: len(row.data)}
-		issue, size, decodeErr := decodeForecastIssue(row.data)
-		if decodeErr != nil {
-			item.Err = decodeErr
-		} else {
-			item.Issue = issue
-			item.JSONBytes = size
-		}
-		if err = visit(item); err != nil {
-			return err
-		}
-	}
-	return nil
+	item := ForecastIssueCopy{IssuedAtMS: key.IssuedAtMS, ID: key.ID, GzipBytes: len(data)}
+	item.Issue, item.JSONBytes, item.Err = decodeForecastIssue(data)
+	return item, nil
 }
 
 // LoadForecastModelStateRaw returns the gzip bytes stored for a model state.
@@ -778,18 +762,18 @@ func (s *Store) LoadForecastModelStateRaw(ctx context.Context, stateID string) (
 	return expanded, payload, err
 }
 
-// VisitForecastObservationsAfter walks quarter-hour truth strictly after the
-// (start_ms, end_ms, config_version) cursor.
-func (s *Store) VisitForecastObservationsAfter(ctx context.Context, startMS, endMS int64, config string, limit int, visit func(forecasting.Observation) error) error {
+// visitForecastObservationsAfter walks quarter-hour truth after the cursor in
+// (available_at_ms, start_ms, end_ms, config_version) order, no later than
+// untilMS. The tracker writes rows in available_at_ms order.
+func (s *Store) visitForecastObservationsAfter(ctx context.Context, after forecastLongObsCursor, untilMS int64, limit int, visit func(forecasting.Observation) error) error {
 	if visit == nil {
 		return errors.New("forecast observation visitor is nil")
 	}
 	if limit <= 0 || limit > 512 {
 		limit = 128
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM forecast_observations
- WHERE start_ms > ? OR (start_ms = ? AND end_ms > ?) OR (start_ms = ? AND end_ms = ? AND config_version > ?)
- ORDER BY start_ms, end_ms, config_version LIMIT ?`, startMS, startMS, endMS, startMS, endMS, config, limit)
+	rows, err := s.db.QueryContext(ctx, forecastObservationsAfterQuery,
+		after.AvailableMS, after.StartMS, after.EndMS, after.Config, untilMS, limit)
 	if err != nil {
 		return err
 	}
@@ -825,6 +809,10 @@ func (s *Store) VisitForecastObservationsAfter(ctx context.Context, startMS, end
 	}
 	return nil
 }
+
+const forecastObservationsAfterQuery = `SELECT payload FROM forecast_observations
+ WHERE (available_at_ms, start_ms, end_ms, config_version) > (?, ?, ?, ?) AND available_at_ms <= ?
+ ORDER BY available_at_ms, start_ms, end_ms, config_version LIMIT ?`
 
 // NewestForecastIssueMS is the latest issued_at_ms in the 30-day archive, or
 // zero when it is empty. The copier uses it only to describe lag.

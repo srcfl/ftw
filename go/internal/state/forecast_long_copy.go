@@ -14,6 +14,13 @@ import (
 const (
 	forecastLongIssuePage = 16
 	forecastLongObsPage   = 128
+	// forecastLongCopyOverlap is how far before its cursor each copy reads
+	// again. A row that commits late with a slightly earlier key, such as a
+	// shadow issue saved after its primary or a write after a small clock
+	// step back, is still copied. It must be at least maxForecastFutureSkew:
+	// a cursor never runs further ahead of the clock than that, so every row
+	// written after a step back sorts after cursor minus overlap.
+	forecastLongCopyOverlap = time.Hour
 )
 
 // forecastLongAfterIssuePage runs after a committed issue page. Tests use it
@@ -25,10 +32,31 @@ type forecastLongIssueCursor struct {
 	ID         string `json:"id"`
 }
 
+func (c forecastLongIssueCursor) after(o forecastLongIssueCursor) bool {
+	return c.IssuedAtMS > o.IssuedAtMS || (c.IssuedAtMS == o.IssuedAtMS && c.ID > o.ID)
+}
+
+// forecastLongObsCursor follows available_at_ms, the time a quarter was
+// released. The tracker writes observations in that order, while a quarter
+// with an earlier start can be released after a later one.
 type forecastLongObsCursor struct {
-	StartMS int64  `json:"start_ms"`
-	EndMS   int64  `json:"end_ms"`
-	Config  string `json:"config_version"`
+	AvailableMS int64  `json:"available_at_ms"`
+	StartMS     int64  `json:"start_ms"`
+	EndMS       int64  `json:"end_ms"`
+	Config      string `json:"config_version"`
+}
+
+func (c forecastLongObsCursor) after(o forecastLongObsCursor) bool {
+	if c.AvailableMS != o.AvailableMS {
+		return c.AvailableMS > o.AvailableMS
+	}
+	if c.StartMS != o.StartMS {
+		return c.StartMS > o.StartMS
+	}
+	if c.EndMS != o.EndMS {
+		return c.EndMS > o.EndMS
+	}
+	return c.Config > o.Config
 }
 
 // forecastLongSourceError marks a failed read of state.db. Damage there is
@@ -83,7 +111,7 @@ func (a *ForecastLongArchive) syncOnce(ctx context.Context, src *Store, now time
 	}
 	var paused error
 	if !a.blocked() {
-		if err := a.copyIssues(ctx, src); err != nil {
+		if err := a.copyIssues(ctx, src, now); err != nil {
 			if forecastLongPaused(err) {
 				paused = err
 			} else {
@@ -93,7 +121,7 @@ func (a *ForecastLongArchive) syncOnce(ctx context.Context, src *Store, now time
 		}
 	}
 	if paused == nil && !a.blocked() {
-		if err := a.copyObservations(ctx, src); err != nil {
+		if err := a.copyObservations(ctx, src, now); err != nil {
 			if forecastLongPaused(err) {
 				paused = err
 			} else {
@@ -151,46 +179,46 @@ func (a *ForecastLongArchive) fail(kind string, err error) {
 	a.publish()
 }
 
-func (a *ForecastLongArchive) copyIssues(ctx context.Context, src *Store) error {
+// copyIssues reads from an hour before its cursor up to the clock plus
+// maxForecastFutureSkew. A run already archived is skipped by id before its
+// payload is read, so the overlap and a full rescan stay cheap. A cursor
+// further ahead than that bound came from a wrong clock; the copy then
+// starts again from the beginning of the 30-day table.
+func (a *ForecastLongArchive) copyIssues(ctx context.Context, src *Store, now time.Time) error {
+	until := now.UnixMilli() + maxForecastFutureSkew.Milliseconds()
 	cursor, err := a.issueCursor(ctx)
 	if err != nil {
 		return err
 	}
+	if cursor.IssuedAtMS > until {
+		slog.Warn("forecast long archive: issue cursor is ahead of the clock; copying the 30-day table again",
+			"cursor_ms", cursor.IssuedAtMS, "now_ms", now.UnixMilli())
+		cursor = forecastLongIssueCursor{}
+		if err := a.writeIssueCursor(ctx, cursor); err != nil {
+			return err
+		}
+	}
+	from := forecastLongIssueCursor{IssuedAtMS: cursor.IssuedAtMS - forecastLongCopyOverlap.Milliseconds()}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		pageCtx, cancel := context.WithTimeout(ctx, forecastLongPageTimeout)
-		var page []ForecastIssueCopy
-		err = src.VisitForecastIssuesAfter(pageCtx, cursor.IssuedAtMS, cursor.ID, forecastLongIssuePage, func(item ForecastIssueCopy) error {
-			page = append(page, item)
-			return nil
-		})
-		cancel()
+		batch, err := a.readIssuePage(ctx, src, from, until)
 		if err != nil {
-			return fromForecastSource(err)
+			return err
 		}
-		if len(page) == 0 {
+		if batch.keys == 0 {
 			return nil
 		}
-		batch := make([]ForecastArchiveIssue, 0, len(page))
-		for _, item := range page {
-			cursor = forecastLongIssueCursor{IssuedAtMS: item.IssuedAtMS, ID: item.ID}
-			if item.Err != nil {
-				a.warn("decode", item.Err)
-				continue
-			}
-			states, err := forecastLongStatesFrom(ctx, src, item.Issue)
-			if err != nil {
-				return err
-			}
-			batch = append(batch, ForecastArchiveIssue{
-				Issue: item.Issue, JSONBytes: item.JSONBytes, GzipBytes: item.GzipBytes, States: states,
-			})
-		}
+		from = batch.last
+		advanced := from.after(cursor)
 		writeCtx, cancelWrite := context.WithTimeout(ctx, forecastLongPageTimeout)
-		err = a.ArchiveIssues(writeCtx, batch)
-		if err == nil || errors.Is(err, errForecastArchiveImmutable) {
+		err = a.ArchiveIssues(writeCtx, batch.issues)
+		if errors.Is(err, errForecastArchiveImmutable) {
+			err = nil // warned; the stored run stays
+		}
+		if err == nil && advanced {
+			cursor = from
 			err = a.writeIssueCursor(writeCtx, cursor)
 		}
 		cancelWrite()
@@ -198,20 +226,79 @@ func (a *ForecastLongArchive) copyIssues(ctx context.Context, src *Store) error 
 			return err
 		}
 		if forecastLongAfterIssuePage != nil {
-			if err := forecastLongAfterIssuePage(len(page)); err != nil {
+			if err := forecastLongAfterIssuePage(batch.keys); err != nil {
 				return err
 			}
 		}
-		a.mu.Lock()
-		a.status.LastCopyMS = time.Now().UnixMilli()
-		a.mu.Unlock()
-		if len(page) < forecastLongIssuePage {
+		if advanced || len(batch.issues) > 0 {
+			a.mu.Lock()
+			a.status.LastCopyMS = time.Now().UnixMilli()
+			a.mu.Unlock()
+		}
+		if batch.keys < forecastLongIssuePage {
 			return nil
 		}
 		if err := pauseMaintenance(ctx); err != nil {
 			return err
 		}
 	}
+}
+
+type forecastLongIssueBatch struct {
+	issues []ForecastArchiveIssue
+	last   forecastLongIssueCursor
+	keys   int
+}
+
+// readIssuePage lists one page of keys and loads only the runs the archive
+// does not hold. Model states are read outside the page deadline, as
+// before, so a slow blob read does not use it up.
+func (a *ForecastLongArchive) readIssuePage(ctx context.Context, src *Store, from forecastLongIssueCursor, until int64) (forecastLongIssueBatch, error) {
+	var batch forecastLongIssueBatch
+	pageCtx, cancel := context.WithTimeout(ctx, forecastLongPageTimeout)
+	defer cancel()
+	keys, err := src.forecastIssueKeysAfter(pageCtx, from, until, forecastLongIssuePage)
+	if err != nil || len(keys) == 0 {
+		return batch, fromForecastSource(err)
+	}
+	for _, key := range keys {
+		known, err := a.hasRun(pageCtx, key.ID)
+		if err != nil {
+			return batch, err
+		}
+		if known {
+			continue
+		}
+		item, err := src.forecastIssueCopy(pageCtx, key)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue // pruned from state.db after the key list
+		}
+		if err != nil {
+			return batch, fromForecastSource(err)
+		}
+		if item.Err != nil {
+			a.warn("decode", item.Err)
+			continue
+		}
+		states, err := forecastLongStatesFrom(ctx, src, item.Issue)
+		if err != nil {
+			return batch, err
+		}
+		batch.issues = append(batch.issues, ForecastArchiveIssue{
+			Issue: item.Issue, JSONBytes: item.JSONBytes, GzipBytes: item.GzipBytes, States: states,
+		})
+	}
+	batch.last, batch.keys = keys[len(keys)-1], len(keys)
+	return batch, nil
+}
+
+func (a *ForecastLongArchive) hasRun(ctx context.Context, id string) (bool, error) {
+	var one int
+	err := a.db.QueryRowContext(ctx, `SELECT 1 FROM fa_runs WHERE run_id=?`, id).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func forecastLongStatesFrom(ctx context.Context, src *Store, issue forecasting.Issue) (map[string]ForecastModelBlob, error) {
@@ -235,18 +322,30 @@ func forecastLongStatesFrom(ctx context.Context, src *Store, issue forecasting.I
 	return states, nil
 }
 
-func (a *ForecastLongArchive) copyObservations(ctx context.Context, src *Store) error {
+// copyObservations follows the same rules as copyIssues on the
+// available_at_ms order. Rows read again are ignored on insert.
+func (a *ForecastLongArchive) copyObservations(ctx context.Context, src *Store, now time.Time) error {
+	until := now.UnixMilli() + maxForecastFutureSkew.Milliseconds()
 	cursor, err := a.obsCursor(ctx)
 	if err != nil {
 		return err
 	}
+	if cursor.AvailableMS > until {
+		slog.Warn("forecast long archive: observation cursor is ahead of the clock; copying the 30-day table again",
+			"cursor_ms", cursor.AvailableMS, "now_ms", now.UnixMilli())
+		cursor = forecastLongObsCursor{}
+		if err := a.writeObsCursor(ctx, cursor); err != nil {
+			return err
+		}
+	}
+	from := forecastLongObsCursor{AvailableMS: cursor.AvailableMS - forecastLongCopyOverlap.Milliseconds()}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		pageCtx, cancel := context.WithTimeout(ctx, forecastLongPageTimeout)
 		var page []forecasting.Observation
-		err = src.VisitForecastObservationsAfter(pageCtx, cursor.StartMS, cursor.EndMS, cursor.Config, forecastLongObsPage, func(row forecasting.Observation) error {
+		err = src.visitForecastObservationsAfter(pageCtx, from, until, forecastLongObsPage, func(row forecasting.Observation) error {
 			page = append(page, row)
 			return nil
 		})
@@ -257,11 +356,12 @@ func (a *ForecastLongArchive) copyObservations(ctx context.Context, src *Store) 
 		if len(page) == 0 {
 			return nil
 		}
+		last := page[len(page)-1]
+		from = forecastLongObsCursor{AvailableMS: last.AvailableAtMS, StartMS: last.StartMS, EndMS: last.EndMS, Config: last.ConfigVersion}
 		writeCtx, cancelWrite := context.WithTimeout(ctx, forecastLongPageTimeout)
 		err = a.ArchiveObservations(writeCtx, page)
-		if err == nil {
-			last := page[len(page)-1]
-			cursor = forecastLongObsCursor{StartMS: last.StartMS, EndMS: last.EndMS, Config: last.ConfigVersion}
+		if err == nil && from.after(cursor) {
+			cursor = from
 			err = a.writeObsCursor(writeCtx, cursor)
 		}
 		cancelWrite()
