@@ -101,7 +101,8 @@ const (
 	forecastLongHourLosers = `SELECT run_id FROM (
  SELECT run_id, ROW_NUMBER() OVER (
   PARTITION BY origin_ms/3600000
-  ORDER BY thinned DESC, CASE WHEN origin_ms % 3600000 = 0 THEN 0 ELSE 1 END, issued_at_ms, run_id
+  ORDER BY thinned DESC, EXISTS(SELECT 1 FROM fa_run_states s WHERE s.run_id=fa_runs.run_id) DESC,
+   CASE WHEN origin_ms % 3600000 = 0 THEN 0 ELSE 1 END, issued_at_ms, run_id
  ) AS rn
  FROM fa_runs WHERE origin_ms>=? AND origin_ms<?
 ) WHERE rn > 1`
@@ -137,8 +138,8 @@ func forecastLongLocalDay(origin int64, tz string) (start, end int64, key string
 }
 
 // hourLosers ranks every run of each UTC hour in [start, end), thinned or
-// not. A thinned survivor keeps its place; otherwise the run on the hour
-// wins, then the earliest issued.
+// not. A thinned survivor keeps its place; otherwise a run with model states
+// wins, then the run on the hour, then the earliest issued.
 func (a *ForecastLongArchive) hourLosers(ctx context.Context, start, end int64) ([]string, error) {
 	rows, err := a.db.QueryContext(ctx, forecastLongHourLosers, start, end)
 	if err != nil {

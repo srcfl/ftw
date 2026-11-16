@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/forecasting"
 )
 
 func TestForecastLongThinningKeepsOneRunPerHour(t *testing.T) {
@@ -324,6 +326,70 @@ func TestForecastLongThinPlansUseIndexes(t *testing.T) {
 	assertPlanSearches(t, arch, forecastLongNextUnthinned, span, "fa_runs", "fa_runs_unthinned")
 	assertPlanSearches(t, arch, forecastLongHourLosers, span, "fa_runs", "fa_runs_origin")
 	assertPlanSearches(t, arch, forecastLongDayRuns, span, "fa_runs", "fa_runs_origin")
+	assertPlanSearches(t, arch, forecastLongHourHeld, span, "r", "fa_runs_origin")
+	for _, query := range []string{forecastLongHourLosers, forecastLongDayRuns, forecastLongHourHeld} {
+		assertPlanNoScan(t, arch, query, span, "s")
+	}
+}
+
+// assertPlanNoScan fails when the plan reads table (or alias) row by row.
+func assertPlanNoScan(t *testing.T, arch *ForecastLongArchive, query string, args []any, table string) {
+	t.Helper()
+	rows, err := arch.db.Query(`EXPLAIN QUERY PLAN `+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if detail == "SCAN "+table || strings.HasPrefix(detail, "SCAN "+table+" ") {
+			t.Fatalf("%s is scanned: %q", table, detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// In an hour with no run on the hour, the run that holds the states may be
+// copied before a run issued earlier. Thinning must keep the holder, or the
+// whole day loses its model states.
+func TestForecastLongThinningKeepsTheStateHolder(t *testing.T) {
+	_, arch := openLongArchive(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 15, 12, 2, 0, 0, time.UTC)
+	day := now.Add(-40 * 24 * time.Hour).Truncate(24 * time.Hour)
+	for h := 0; h < 24; h++ {
+		hour := day.Add(time.Duration(h) * time.Hour)
+		late := longIssue("x-"+forecastLongItoa(h), hour.Add(30*time.Minute))
+		late.IssuedAtMS = hour.Add(31 * time.Minute).UnixMilli()
+		early := longIssue("y-"+forecastLongItoa(h), hour.Add(15*time.Minute))
+		early.IssuedAtMS = hour.Add(16 * time.Minute).UnixMilli()
+		for _, issue := range []forecasting.Issue{late, early} { // copied out of issue order
+			if err := arch.ArchiveIssues(ctx, []ForecastArchiveIssue{{Issue: issue}}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := arch.thin(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	var runs, holders int
+	if err := arch.db.QueryRow(`SELECT COUNT(*), COUNT(DISTINCT s.run_id) FROM fa_runs r
+ LEFT JOIN fa_run_states s ON s.run_id=r.run_id`).Scan(&runs, &holders); err != nil {
+		t.Fatal(err)
+	}
+	if runs != 24 || holders != 1 {
+		t.Fatalf("kept %d runs and %d state holders, want 24 and 1", runs, holders)
+	}
+	var holder string
+	if err := arch.db.QueryRow(`SELECT run_id FROM fa_run_states LIMIT 1`).Scan(&holder); err != nil || holder != "x-0" {
+		t.Fatalf("state holder = %q err=%v, want x-0", holder, err)
+	}
 }
 
 // Inside the newest 30 days one run per UTC hour keeps its model states: the
