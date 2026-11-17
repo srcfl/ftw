@@ -41,9 +41,12 @@ type Store interface {
 }
 
 const (
-	skippedKey           = "update.skipped_version"
-	channelKey           = "update.channel"
-	lastRunKey           = "update.last_run_version"
+	skippedKey = "update.skipped_version"
+	channelKey = "update.channel"
+	lastRunKey = "update.last_run_version"
+	// announcedKey holds the last version events.UpdateAvailable named, so
+	// a restart does not tell the owners about the same version again.
+	announcedKey         = "update.announced_version"
 	defaultCheckInterval = 1 * time.Hour
 	defaultHTTPTimeout   = 10 * time.Second
 	// staleThreshold flags an in-flight update as failed when its status
@@ -204,7 +207,7 @@ type Checker struct {
 
 	mu               sync.RWMutex
 	info             Info
-	lastAnnouncedTag string // dedupe: last tag we emitted UpdateAvailable for
+	lastAnnouncedTag string // dedupe: last tag we emitted UpdateAvailable for, kept under announcedKey
 }
 
 // New constructs a Checker but does not start the background loop.
@@ -243,6 +246,9 @@ func New(cfg Config, store Store) *Checker {
 		}
 	}
 	c := &Checker{cfg: cfg, store: store}
+	if store != nil {
+		c.lastAnnouncedTag, _ = store.LoadConfig(announcedKey)
+	}
 	c.info.Current = cfg.CurrentVersion
 	c.info.CurrentStateSchema = cfg.CurrentStateSchema
 	c.info.FullBackupRequired = true
@@ -279,7 +285,7 @@ func (c *Checker) announceInstalled() {
 	if err := c.store.SaveConfig(lastRunKey, cur); err != nil {
 		// Fail closed on the announcement too: a version this could not
 		// record would be re-announced on every boot, and a repeated
-		// "your box updated itself" teaches the operator to ignore it.
+		// "FTW is updated" teaches the operator to ignore it.
 		slog.Warn("selfupdate: could not record the running version", "err", err)
 		return
 	}
@@ -375,14 +381,15 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	// Decide whether to emit under the lock, then publish outside it.
 	var announce *events.UpdateAvailable
 	if c.cfg.Bus != nil && c.info.UpdateAvailable && !c.info.Skipped &&
-		c.info.Latest != "" && c.info.Latest != c.lastAnnouncedTag {
-		c.lastAnnouncedTag = c.info.Latest
+		c.info.Latest != "" && c.info.Latest != c.lastAnnouncedTag && c.recordAnnouncedLocked(c.info.Latest) {
 		announce = &events.UpdateAvailable{
 			Version:         c.info.Latest,
 			PreviousVersion: c.info.Current,
 			ReleaseNotesURL: c.info.ReleaseNotesURL,
 			PublishedAt:     c.info.PublishedAt,
 			At:              c.cfg.Now(),
+			Installable: c.info.Native && c.info.InstallReady && !c.info.FullBackupRequired &&
+				c.info.LastFailed != c.info.Latest,
 		}
 	}
 	info := c.info
@@ -651,9 +658,24 @@ func (c *Checker) SetChannel(channel Channel) error {
 	c.info.UpdateAvailable = false
 	c.info.Err = ""
 	c.info.Skipped = false
-	c.lastAnnouncedTag = ""
+	// The announced version stays: a version is news once, on whichever
+	// channel it was found.
 	c.mu.Unlock()
 	return nil
+}
+
+// recordAnnouncedLocked writes tag down as announced before anyone is told,
+// as announceInstalled does with the running version. A version this could
+// not record would be announced again on every boot, so it is not announced.
+func (c *Checker) recordAnnouncedLocked(tag string) bool {
+	if c.store != nil {
+		if err := c.store.SaveConfig(announcedKey, tag); err != nil {
+			slog.Warn("selfupdate: could not record the announced version", "version", tag, "err", err)
+			return false
+		}
+	}
+	c.lastAnnouncedTag = tag
+	return true
 }
 
 func (c *Checker) reloadSkipLocked() {

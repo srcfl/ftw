@@ -149,6 +149,14 @@ change to stored data or an unready installation cannot start an update.
 [ADR 0007](adr/0007-self-updating-binary.md) and
 [full backup and restore](backup-and-restore.md).
 
+Nothing updates by itself. When a newer release appears that an owner can
+install from the app, the owners' phones get one `update.available` notice
+(on by default, once per version, also across restarts; never for a skipped
+version). A release that changes stored data, an unready installation and a
+version that failed on this box get no notice; the Version row says why.
+Viewers get none. A tap opens the Version row, where the owner starts the
+update. After it, `update.installed` says which version runs.
+
 Docker 0.x runs the same package without the launcher. Change `FTW_VERSION`
 in `.env` and run `docker compose up -d --build` to update or go back; there
 is no automatic fallback. See [Docker](native-beta.md#docker).
