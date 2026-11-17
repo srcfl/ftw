@@ -102,6 +102,10 @@ func DefaultRules() []config.NotificationRule {
 		// plan cannot make the goal: rare, and the moment to act.
 		{Type: PushChargingGoalAtRisk, Enabled: false, Priority: 4},
 		{Type: PushUpdateInstalled, Enabled: false, Priority: 2},
+		// A newer FTW an owner can install from the app. On by default
+		// (Fredrik, 17 Nov 2026: no automatic updates, but a notice): once
+		// per version, so it cannot nag.
+		{Type: PushUpdateAvailable, Enabled: true, Priority: 3},
 		// Phone lock-screen counterparts of the operator rules above.
 		// Same thresholds so a blip or a kettle is not a notification;
 		// the sentences come from the catalogue, never from templates.
@@ -142,7 +146,7 @@ func KnownRuleTypes() []string {
 		EventDriverOffline, EventDriverRecovered, EventUpdateAvailable,
 		EventFuseOverLimit, EventConcurrentDriversOffline,
 		PushChargingConnected, PushChargingSessionComplete, PushChargingInterrupted,
-		PushChargingGoalAtRisk, PushUpdateInstalled, PushDriverOffline, PushFuseOverLimit,
+		PushChargingGoalAtRisk, PushUpdateAvailable, PushUpdateInstalled, PushDriverOffline, PushFuseOverLimit,
 		PushControlNotFollowing, PushCloudGranted, PushCloudRevoked, PushAgentAdded, PushAgentRequest,
 		PushAgentExpiring, PushApprovalKeySet, PushOwnerAdded, PushCarWhich,
 	}
@@ -434,6 +438,12 @@ func (s *Service) Subscribe(bus *events.Bus) {
 		// Dispatch in a goroutine for the same reason as HealthTick —
 		// the bus is synchronous and Publish can block up to 10 s.
 		go s.handleUpdateAvailable(ev)
+		// The owners' phones hear only of a version they can install from
+		// the app. The checker sends each version once, so no cooldown.
+		if ev.Installable {
+			go s.handleCatalogued(PushUpdateAvailable, ev.Version,
+				map[string]string{"version": ev.Version})
+		}
 	})
 	// The catalogue-worded events. Each producer already fires once per
 	// real-world moment — the loadpoint latches, the boot version check —
@@ -498,6 +508,11 @@ func (s *Service) handleCatalogued(kind, device string, args map[string]string) 
 		return
 	}
 	rule, ok := findRule(s.cfg.Events, kind)
+	if !ok {
+		// Rules saved before a release added this kind: the kind runs at
+		// its default, as the API's rules document already shows it.
+		rule, ok = findRule(DefaultRules(), kind)
+	}
 	if !ok || !rule.Enabled {
 		s.mu.Unlock()
 		return

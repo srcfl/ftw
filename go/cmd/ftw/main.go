@@ -2542,6 +2542,11 @@ func main() {
 	default:
 		slog.Info("app link disabled — set app_link.enabled to turn it on")
 	}
+	// A kind only an owner may hear skips the browsers of phones that are
+	// no longer owners.
+	if webPush != nil && appEnroll != nil {
+		webPush.SetOwners(ownerByDevice(appEnroll))
+	}
 
 	// FTW Cloud: the phones' own sessions with the box, carried as
 	// ciphertext the service cannot read, from the first pairing on; and a

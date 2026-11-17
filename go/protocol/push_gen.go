@@ -12,6 +12,7 @@ const (
 	PushChargingSessionComplete = "charging.session_complete"
 	PushChargingGoalAtRisk      = "charging.goal_at_risk"
 	PushChargingInterrupted     = "charging.interrupted"
+	PushUpdateAvailable         = "update.available"
 	PushUpdateInstalled         = "update.installed"
 	PushDriverOffline           = "driver.offline"
 	PushFuseOverLimit           = "fuse.over_limit"
@@ -40,7 +41,8 @@ var PushSentences = map[string]PushSentence{
 	PushChargingSessionComplete: {Title: "Car charged", Body: "{kwh} kWh delivered — ready to go."},
 	PushChargingGoalAtRisk:      {Title: "The car may not be ready", Body: "It will not reach {target} % by {by} at this pace."},
 	PushChargingInterrupted:     {Title: "Charging stopped early", Body: "The car stopped charging before it was done."},
-	PushUpdateInstalled:         {Title: "Your box updated itself", Body: "Now running {version}. Everything came back on its own."},
+	PushUpdateAvailable:         {Title: "A newer FTW is ready", Body: "{version} is ready for your box. Open FTW to see what is new and update."},
+	PushUpdateInstalled:         {Title: "FTW is updated", Body: "Your box now runs {version}. Everything came back after the restart."},
 	PushDriverOffline:           {Title: "A device went quiet", Body: "{name} stopped answering."},
 	PushFuseOverLimit:           {Title: "The house is drawing too much", Body: "{phase} is over the fuse rating."},
 	PushControlNotFollowing:     {Title: "A device is not following FTW", Body: "{name} does not do what FTW asks. Open FTW to see why."},

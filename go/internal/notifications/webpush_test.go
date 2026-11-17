@@ -468,3 +468,43 @@ func TestPublishWithNoSubscriptionsIsNothingToSend(t *testing.T) {
 		t.Fatalf("err = %v, want ErrNothingToSend", err)
 	}
 }
+
+// A newer FTW goes to owners alone: a phone made a viewer after it
+// subscribed keeps its row and hears the rest, but not this. A row from the
+// box's own page has no device and counts as the owner at home.
+func TestPublishSendsOwnerOnlyKindsToOwners(t *testing.T) {
+	owner, viewer, local := newTestSubscriber(t), newTestSubscriber(t), newTestSubscriber(t)
+	key := newTestVAPIDKey(t)
+	var mu sync.Mutex
+	hits := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits[r.URL.Path]++
+		mu.Unlock()
+		w.WriteHeader(201)
+	}))
+	defer srv.Close()
+
+	o := owner.subscription("o", srv.URL+"/owner")
+	o.DeviceID = "aaaa1111"
+	v := viewer.subscription("v", srv.URL+"/viewer")
+	v.DeviceID = "bbbb2222"
+	l := local.subscription("l", srv.URL+"/local")
+	wp, err := NewWebPush(key, &memSubs{rows: []PushSubscription{o, v, l}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wp.SetOwners(func(id string) bool { return id == "aaaa1111" })
+
+	if err := wp.Publish(context.Background(), Message{Kind: PushUpdateAvailable, Title: "t", Body: "b"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if err := wp.Publish(context.Background(), Message{Kind: PushDriverOffline, Title: "t", Body: "b"}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits["/owner"] != 2 || hits["/local"] != 2 || hits["/viewer"] != 1 {
+		t.Fatalf("deliveries = %v, want owner 2, local 2, viewer 1", hits)
+	}
+}
