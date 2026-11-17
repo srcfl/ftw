@@ -56,6 +56,26 @@ func TestBatteryDischargeFeedsEV(t *testing.T) {
 	}
 }
 
+func TestBatteryDischargeFeedsEVUnderImport(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		battery, ev, load, limit float64
+		want                     bool
+	}{
+		{"past the house", -4000, 4000, 500, 0, true},
+		{"house cover, no limit", -3000, 8280, 3800, 0, false},
+		{"house cover makes the car's room", -3000, 8280, 3800, 9250, true},
+		{"car fits the grid alone", -3000, 5450, 3800, 9250, false},
+		{"within the meter's noise", -3000, 5500, 3800, 9250, false},
+		{"battery charging", 500, 8280, 3800, 9250, false},
+		{"car idle", -3000, 0, 3800, 9250, false},
+	} {
+		if got := BatteryDischargeFeedsEVUnderImport(tc.battery, tc.ev, tc.load, 0, tc.limit); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestEffectivePVWActiveZeroIsTrueCap(t *testing.T) {
 	if got := EffectivePVW(-5000, 0, false); got != -5000 {
 		t.Errorf("inactive = %.0f, want -5000", got)
