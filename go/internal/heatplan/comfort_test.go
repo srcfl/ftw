@@ -171,3 +171,257 @@ func TestPriceComfortStepNeverPassesTheOwnersLimit(t *testing.T) {
 		}
 	}
 }
+
+// Five kronor a day, in öre, as a household set it.
+func TestSavingsGateWeighsEveryPlanTogether(t *testing.T) {
+	gate := SavingsGate{MinPerDay: 500, KeepShare: 0.8}
+	if open, perDay := gate.Open([]Plan{saves(200), saves(250)}, 24, false); open || perDay != 450 {
+		t.Errorf("450 a day: open %v, per day %v", open, perDay)
+	}
+	if open, perDay := gate.Open([]Plan{saves(200), saves(250), saves(60)}, 24, false); !open || perDay != 510 {
+		t.Errorf("510 a day: open %v, per day %v", open, perDay)
+	}
+	// No room reaches the limit alone, and together they do. A limit read
+	// against one room at a time would look as if it were never reached.
+	for _, one := range []float64{200, 190, 180} {
+		if open, _ := gate.Open([]Plan{saves(one)}, 24, false); open {
+			t.Errorf("%v from one room opened the gate", one)
+		}
+	}
+	if open, perDay := gate.Open([]Plan{saves(200), saves(190), saves(180)}, 24, false); !open || perDay != 570 {
+		t.Errorf("three rooms: open %v, per day %v", open, perDay)
+	}
+	// Half a day of prices: the same plans are worth twice as much a day.
+	if open, perDay := gate.Open([]Plan{saves(260)}, 12, false); !open || perDay != 520 {
+		t.Errorf("260 in 12 hours: open %v, per day %v", open, perDay)
+	}
+	// Two days of horizon are not two days of saving in one.
+	if open, perDay := gate.Open([]Plan{saves(900)}, 48, false); open || perDay != 450 {
+		t.Errorf("900 in 48 hours: open %v, per day %v", open, perDay)
+	}
+}
+
+func TestSavingsGateDoesNotFlapAtTheLimit(t *testing.T) {
+	gate := SavingsGate{MinPerDay: 500, KeepShare: 0.8}
+	open := false
+	var got []bool
+	for _, v := range []float64{480, 510, 480, 410, 390, 480, 500} {
+		open, _ = gate.Open([]Plan{saves(v)}, 24, open)
+		got = append(got, open)
+	}
+	want := []bool{false, true, true, true, false, false, true}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("gate over time = %v, want %v", got, want)
+		}
+	}
+	if open, _ := (SavingsGate{MinPerDay: 500}).Open([]Plan{saves(480)}, 24, true); open {
+		t.Error("without a keep share an open gate stayed open below the limit")
+	}
+}
+
+// A plan that leaves its band, or costs more than leaving the device alone,
+// adds nothing to what the gate weighs.
+func TestSavingsGateCountsOnlyFeasiblePlans(t *testing.T) {
+	out := saves(900)
+	out.BandExcursionKh = 0.5
+	worse := Plan{Cost: 1100, BaselineCost: 1000}
+	gate := SavingsGate{MinPerDay: 500}
+	if open, perDay := gate.Open([]Plan{out, worse, saves(300)}, 24, false); open || perDay != 300 {
+		t.Errorf("open %v, per day %v; want closed at 300", open, perDay)
+	}
+}
+
+// No limit set is no gate. A gate that cannot be read is closed, because
+// leaving the devices to themselves is the safe answer.
+func TestSavingsGateWithoutALimitIsOpenAndABrokenOneIsClosed(t *testing.T) {
+	if open, _ := (SavingsGate{}).Open(nil, 24, false); !open {
+		t.Error("the zero value closed the gate")
+	}
+	for name, g := range map[string]SavingsGate{
+		"keep share above 1": {MinPerDay: 500, KeepShare: 1.5},
+		"negative keep":      {MinPerDay: 500, KeepShare: -0.1},
+		"not a number":       {MinPerDay: math.NaN()},
+	} {
+		if g.Validate() == nil {
+			t.Errorf("%s: Validate accepted it", name)
+		}
+		if open, _ := g.Open([]Plan{saves(9000)}, 24, true); open {
+			t.Errorf("%s: gate open", name)
+		}
+	}
+	for _, h := range []float64{0, -3, math.NaN(), math.Inf(1)} {
+		if open, _ := (SavingsGate{MinPerDay: 500}).Open([]Plan{saves(9000)}, h, true); open {
+			t.Errorf("horizon %v: gate open", h)
+		}
+	}
+}
+
+// The owner's rule from the house that built it: a peak is at least 200 and
+// three times the lowest price of the next 12 hours, and the zone may sit at
+// the bottom of its band for at most 3 hours of one.
+var houseRule = PeakRelief{MinPrice: 200, Factor: 3, WindowH: 12, MaxHours: 3}
+
+func relievedHours(r PeakRelief, price []float64) float64 {
+	var n float64
+	for _, v := range r.Slots(price, slotH) {
+		if v {
+			n += slotH
+		}
+	}
+	return n
+}
+
+func TestPeakReliefNeedsASharpPeakNotAHighDay(t *testing.T) {
+	// A flat price, even a dear one, has nothing to wait for.
+	if got := relievedHours(houseRule, flat(day, 450)); got != 0 {
+		t.Errorf("a flat dear day relieved %v h", got)
+	}
+	// A dear plateau: the dearest hour is 1.4 times the cheapest, not 3.
+	plateau := hours(day, func(h float64) float64 { return 300 + 100*math.Sin(h/24*2*math.Pi) })
+	if got := relievedHours(houseRule, plateau); got != 0 {
+		t.Errorf("a plateau relieved %v h", got)
+	}
+	// A real peak: 100 at night, 450 for five evening hours.
+	peak := eveningPeak(day, 100, 450)
+	got := relievedHours(houseRule, peak)
+	if got != 3 {
+		t.Errorf("a 3-hour limit relieved %v h of a 3-hour peak", got)
+	}
+}
+
+func TestPeakReliefLimitsALongPeakToItsDearestHours(t *testing.T) {
+	price := hours(day, func(h float64) float64 {
+		switch {
+		case between(h, 17, 22):
+			return 400 + 10*(h-17) // five hours, rising
+		default:
+			return 100
+		}
+	})
+	rule := PeakRelief{MinPrice: 200, Factor: 3, WindowH: 12, MaxHours: 2}
+	got := rule.Slots(price, slotH)
+	var n float64
+	for i, v := range got {
+		if v {
+			n += slotH
+			if h := math.Mod(float64(i)*slotH, 24); h < 20 {
+				t.Errorf("relieved slot at %v h, before the dearest two hours of a rising peak", h)
+			}
+		}
+	}
+	if n != 2 {
+		t.Errorf("relieved %v h, want 2", n)
+	}
+}
+
+func TestPeakReliefBelowItsMinimumPriceIsNoPeak(t *testing.T) {
+	// A tenfold step, but at prices an owner calls small.
+	price := hours(day, func(h float64) float64 {
+		if between(h, 17, 20) {
+			return 50
+		}
+		return 5
+	})
+	if got := relievedHours(houseRule, price); got != 0 {
+		t.Errorf("relieved %v h below the minimum price", got)
+	}
+}
+
+func TestPeakReliefLetsTheTargetDownToTheBandOnly(t *testing.T) {
+	price := eveningPeak(day, 100, 450)
+	z := radiatorHouse(day, price).Zone
+	before := append([]float64(nil), z.TargetC...)
+	out := houseRule.Apply(z, price, slotH)
+	if len(out.TargetC) != len(before) {
+		t.Fatalf("target length %d, want %d", len(out.TargetC), len(before))
+	}
+	var lowered int
+	for i := range before {
+		switch {
+		case out.TargetC[i] == before[i]:
+		case out.TargetC[i] == z.MinC[i]:
+			lowered++
+		default:
+			t.Fatalf("slot %d target %v: neither untouched nor the bottom of the band %v", i, out.TargetC[i], z.MinC[i])
+		}
+		if out.MinC[i] != z.MinC[i] || out.MaxC[i] != z.MaxC[i] {
+			t.Fatalf("slot %d: the band moved", i)
+		}
+	}
+	if lowered == 0 {
+		t.Fatal("no slot was let down")
+	}
+	for i, v := range before {
+		if z.TargetC[i] != v {
+			t.Fatal("Apply changed the zone it was given")
+		}
+	}
+}
+
+func TestPeakReliefOffOrBrokenChangesNothing(t *testing.T) {
+	price := eveningPeak(day, 100, 450)
+	z := radiatorHouse(day, price).Zone
+	for name, r := range map[string]PeakRelief{
+		"zero value":         {},
+		"no longest relief":  {MinPrice: 200, Factor: 3, WindowH: 12},
+		"factor not above 1": {MinPrice: 200, Factor: 1, WindowH: 12, MaxHours: 3},
+		"no window":          {MinPrice: 200, Factor: 3, MaxHours: 3},
+		"not a number":       {MinPrice: math.NaN(), Factor: 3, WindowH: 12, MaxHours: 3},
+		"longer than a day":  {MinPrice: 200, Factor: 3, WindowH: 12, MaxHours: 30},
+		"negative longest":   {MinPrice: 200, Factor: 3, WindowH: 12, MaxHours: -1},
+	} {
+		if relievedHours(r, price) != 0 {
+			t.Errorf("%s relieved something", name)
+		}
+		out := r.Apply(z, price, slotH)
+		for i := range z.TargetC {
+			if out.TargetC[i] != z.TargetC[i] {
+				t.Errorf("%s moved the target in slot %d", name, i)
+				break
+			}
+		}
+	}
+	if (PeakRelief{}).Validate() != nil {
+		t.Error("the zero value is not a valid, switched-off rule")
+	}
+	if houseRule.Validate() != nil {
+		t.Errorf("the house rule was refused: %v", houseRule.Validate())
+	}
+	if (PeakRelief{MinPrice: 200, Factor: 1, WindowH: 12, MaxHours: 3}).Validate() == nil {
+		t.Error("a factor of 1 was accepted")
+	}
+	// A price that is not a number relieves nothing.
+	bad := append([]float64(nil), price...)
+	bad[10] = math.NaN()
+	if relievedHours(houseRule, bad) != 0 {
+		t.Error("a price series with a NaN relieved something")
+	}
+}
+
+// Through the plan: the zone is let down further inside a relieved peak, and
+// what it stored is worth more than the heat it would have held for comfort,
+// so the heat bought comes out cheaper. The plan already buys nothing inside
+// a peak this sharp, so the difference is where the zone sits, not how much
+// is bought.
+func TestPeakReliefLetsThePlanSitLowerThroughAPeak(t *testing.T) {
+	price := eveningPeak(day, 100, 450)
+	r := radiatorHouse(day, price)
+	plain := propose(t, r)
+	r.Zone = houseRule.Apply(r.Zone, price, slotH)
+	relieved := propose(t, r)
+	if got := heat(relieved, 17, 20); got > heat(plain, 17, 20)+1e-9 {
+		t.Errorf("bought %.2f kWh in the relieved peak, more than %.2f without the rule", got, heat(plain, 17, 20))
+	}
+	loPlain, _ := tempRange(plain, 17, 20)
+	loRelieved, _ := tempRange(relieved, 17, 20)
+	if !(loRelieved < loPlain-0.05) {
+		t.Errorf("coldest in the peak %.2f with the rule, %.2f without: it did not sit lower", loRelieved, loPlain)
+	}
+	if loRelieved < r.Zone.MinC[0]-1e-6 {
+		t.Errorf("the zone left its band: %.2f below %.2f", loRelieved, r.Zone.MinC[0])
+	}
+	if !(relieved.Cost < plain.Cost) {
+		t.Errorf("heat cost %.0f with the rule, %.0f without: nothing was saved", relieved.Cost, plain.Cost)
+	}
+}
