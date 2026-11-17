@@ -24,6 +24,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -44,9 +45,14 @@ const (
 	skippedKey = "update.skipped_version"
 	channelKey = "update.channel"
 	lastRunKey = "update.last_run_version"
-	// announcedKey holds the last version events.UpdateAvailable named, so
-	// a restart does not tell the owners about the same version again.
-	announcedKey         = "update.announced_version"
+	// announcedKey holds the versions events.UpdateAvailable named, space
+	// separated and oldest first, so neither a restart nor a channel switch
+	// tells the owners about the same version again. A box from before the
+	// list kept one version here, which reads as a list of one.
+	announcedKey = "update.announced_version"
+	// maxAnnounced bounds that list. Each channel only moves forward, so
+	// only a switch can bring back a version, and only a recent one.
+	maxAnnounced         = 16
 	defaultCheckInterval = 1 * time.Hour
 	defaultHTTPTimeout   = 10 * time.Second
 	// staleThreshold flags an in-flight update as failed when its status
@@ -205,9 +211,9 @@ type Checker struct {
 	cfg   Config
 	store Store
 
-	mu               sync.RWMutex
-	info             Info
-	lastAnnouncedTag string // dedupe: last tag we emitted UpdateAvailable for, kept under announcedKey
+	mu        sync.RWMutex
+	info      Info
+	announced []string // dedupe: the versions UpdateAvailable named, kept under announcedKey
 }
 
 // New constructs a Checker but does not start the background loop.
@@ -247,7 +253,7 @@ func New(cfg Config, store Store) *Checker {
 	}
 	c := &Checker{cfg: cfg, store: store}
 	if store != nil {
-		c.lastAnnouncedTag, _ = store.LoadConfig(announcedKey)
+		c.announced = announcedVersions(store)
 	}
 	c.info.Current = cfg.CurrentVersion
 	c.info.CurrentStateSchema = cfg.CurrentStateSchema
@@ -381,15 +387,14 @@ func (c *Checker) Check(ctx context.Context, force bool) (Info, error) {
 	// Decide whether to emit under the lock, then publish outside it.
 	var announce *events.UpdateAvailable
 	if c.cfg.Bus != nil && c.info.UpdateAvailable && !c.info.Skipped &&
-		c.info.Latest != "" && c.info.Latest != c.lastAnnouncedTag && c.recordAnnouncedLocked(c.info.Latest) {
+		c.info.Latest != "" && !slices.Contains(c.announced, c.info.Latest) && c.recordAnnouncedLocked(c.info.Latest) {
 		announce = &events.UpdateAvailable{
 			Version:         c.info.Latest,
 			PreviousVersion: c.info.Current,
 			ReleaseNotesURL: c.info.ReleaseNotesURL,
 			PublishedAt:     c.info.PublishedAt,
 			At:              c.cfg.Now(),
-			Installable: c.info.Native && c.info.InstallReady && !c.info.FullBackupRequired &&
-				c.info.LastFailed != c.info.Latest,
+			Installable:     c.installableLocked(),
 		}
 	}
 	info := c.info
@@ -658,7 +663,7 @@ func (c *Checker) SetChannel(channel Channel) error {
 	c.info.UpdateAvailable = false
 	c.info.Err = ""
 	c.info.Skipped = false
-	// The announced version stays: a version is news once, on whichever
+	// The announced versions stay: a version is news once, on whichever
 	// channel it was found.
 	c.mu.Unlock()
 	return nil
@@ -668,14 +673,45 @@ func (c *Checker) SetChannel(channel Channel) error {
 // as announceInstalled does with the running version. A version this could
 // not record would be announced again on every boot, so it is not announced.
 func (c *Checker) recordAnnouncedLocked(tag string) bool {
+	next := rememberAnnounced(c.announced, tag)
 	if c.store != nil {
-		if err := c.store.SaveConfig(announcedKey, tag); err != nil {
+		if err := c.store.SaveConfig(announcedKey, strings.Join(next, " ")); err != nil {
 			slog.Warn("selfupdate: could not record the announced version", "version", tag, "err", err)
 			return false
 		}
 	}
-	c.lastAnnouncedTag = tag
+	c.announced = next
 	return true
+}
+
+// installableLocked is whether an owner can install Latest from the app
+// now: what TriggerUpdate checks before it downloads anything.
+func (c *Checker) installableLocked() bool {
+	if !c.info.Native || !c.info.InstallReady || c.info.FullBackupRequired ||
+		c.info.LastFailed == c.info.Latest {
+		return false
+	}
+	manager := nativeupdate.Manager{Root: c.cfg.NativeRoot}
+	slots, err := manager.Read()
+	if err != nil {
+		return false
+	}
+	return manager.CheckSpace(slots.Current) == nil
+}
+
+// announcedVersions reads the versions already announced.
+func announcedVersions(store Store) []string {
+	raw, _ := store.LoadConfig(announcedKey)
+	return strings.Fields(raw)
+}
+
+// rememberAnnounced adds tag to list and keeps the newest maxAnnounced.
+func rememberAnnounced(list []string, tag string) []string {
+	next := append(slices.DeleteFunc(slices.Clone(list), func(v string) bool { return v == tag }), tag)
+	if len(next) > maxAnnounced {
+		next = next[len(next)-maxAnnounced:]
+	}
+	return next
 }
 
 func (c *Checker) reloadSkipLocked() {

@@ -33,11 +33,14 @@ events:
     title: Charging stopped early
     body: "The car stopped charging before it was done."
   - kind: update.available
-    # To owners, once per version, across restarts. Only a native box sends
-    # it, and only when an owner can install that version from the app: the
-    # box can stage it, it keeps the stored data as it is, it has not failed
-    # here before, and nobody skipped it. Nothing installs by itself; the
-    # owner starts every update.
+    # To owners, once per version, across restarts and channel switches.
+    # Only a box that updates itself sends it: a native install, or Docker
+    # running ftw-launcher. Home Assistant and balena change release by
+    # deploying and send none. It goes out only when an owner can install
+    # that version from the app: the box can stage it and has room for the
+    # download, it keeps the stored data as it is, it has not failed here
+    # before, and nobody skipped it. Nothing installs by itself; the owner
+    # starts every update.
     title: A newer FTW is ready
     body: "{version} is ready for your box. Open FTW to see what is new and update."
   - kind: update.installed
