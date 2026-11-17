@@ -34,6 +34,18 @@ type HeatZone struct {
 	// Control is the declared control the plan moves, "<driver>/<control>".
 	// Empty means the zone is planned in shadow only.
 	Control string `yaml:"control,omitempty" json:"control,omitempty"`
+	// Boundary is what the zone loses heat to: "outdoor" for the weather
+	// forecast, or "<driver>/<metric>" for a measured temperature, such as
+	// the room air around a floor. Required: a floor that loses heat to
+	// outdoors is planned as a different thing.
+	Boundary string `yaml:"boundary" json:"boundary"`
+	// Source is what makes the heat. Only "direct_electric" is planned yet;
+	// a heat pump needs its efficiency declared, which this section does not
+	// carry.
+	Source string `yaml:"source" json:"source"`
+	// HeatKW is the heat at full output, the owner's figure: a floor's area
+	// times its rating, a radiator's plate.
+	HeatKW float64 `yaml:"heat_kw" json:"heat_kw"`
 	// TargetC is what the owner asks for; MinC and MaxC the hard band
 	// around it. The band is never widened.
 	TargetC float64 `yaml:"target_c" json:"target_c"`
@@ -46,6 +58,12 @@ type HeatZone struct {
 	// PeakRelief lets the zone sit at the bottom of its band through a peak.
 	PeakRelief *heatplan.PeakRelief `yaml:"peak_relief,omitempty" json:"peak_relief,omitempty"`
 }
+
+// The words a heat zone's boundary and source may take besides a sensor key.
+const (
+	HeatBoundaryOutdoor      = "outdoor"
+	HeatSourceDirectElectric = "direct_electric"
+)
 
 var heatKey = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
@@ -74,6 +92,15 @@ func (h *Heat) Validate() error {
 		}
 		if z.Control != "" && !heatKey.MatchString(z.Control) {
 			return fmt.Errorf("%s (%s): control must be \"<driver>/<control>\"", at, z.Name)
+		}
+		if z.Boundary != HeatBoundaryOutdoor && !heatKey.MatchString(z.Boundary) {
+			return fmt.Errorf("%s (%s): boundary must be \"outdoor\" or \"<driver>/<metric>\"", at, z.Name)
+		}
+		if z.Source != HeatSourceDirectElectric {
+			return fmt.Errorf("%s (%s): source must be %q; a heat pump is not planned from this section yet", at, z.Name, HeatSourceDirectElectric)
+		}
+		if !(z.HeatKW > 0) || z.HeatKW > 500 {
+			return fmt.Errorf("%s (%s): heat_kw must be above 0 and at most 500", at, z.Name)
 		}
 		for _, v := range []float64{z.TargetC, z.MinC, z.MaxC, z.ComfortWeight} {
 			if math.IsNaN(v) || math.IsInf(v, 0) {

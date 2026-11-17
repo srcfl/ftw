@@ -18,6 +18,9 @@ zones:
   - name: badrum
     sensor: wiser_7/floor_temp_c
     control: wiser_7/set_setpoint
+    boundary: wiser_7/room_temp_c
+    source: direct_electric
+    heat_kw: 0.6
     target_c: 24.5
     min_c: 20
     max_c: 27
@@ -48,7 +51,7 @@ func TestHeatSectionLeftOutOrEmptyChangesNothing(t *testing.T) {
 }
 
 func TestHeatSectionRefusesWhatCannotBeReadOneWay(t *testing.T) {
-	ok := HeatZone{Name: "a", Sensor: "d/m", TargetC: 22, MinC: 20, MaxC: 24}
+	ok := HeatZone{Name: "a", Sensor: "d/m", Boundary: "outdoor", Source: "direct_electric", HeatKW: 1, TargetC: 22, MinC: 20, MaxC: 24}
 	for name, tc := range map[string]struct {
 		h    Heat
 		want string
@@ -57,10 +60,10 @@ func TestHeatSectionRefusesWhatCannotBeReadOneWay(t *testing.T) {
 		"twice":            {Heat{Zones: []HeatZone{ok, ok}}, "twice"},
 		"bad sensor":       {Heat{Zones: []HeatZone{{Name: "a", Sensor: "dm", TargetC: 22, MinC: 20, MaxC: 24}}}, "sensor"},
 		"bad control":      {Heat{Zones: []HeatZone{{Name: "a", Sensor: "d/m", Control: "x", TargetC: 22, MinC: 20, MaxC: 24}}}, "control"},
-		"target outside":   {Heat{Zones: []HeatZone{{Name: "a", Sensor: "d/m", TargetC: 25, MinC: 20, MaxC: 24}}}, "min_c"},
-		"no band":          {Heat{Zones: []HeatZone{{Name: "a", Sensor: "d/m", TargetC: 22, MinC: 22, MaxC: 22}}}, "band"},
+		"target outside":   {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.TargetC = 25 })}}, "min_c"},
+		"no band":          {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.MinC, z.TargetC, z.MaxC = 22, 22, 22 })}}, "band"},
 		"bad gate":         {Heat{Savings: &heatplan.SavingsGate{MinPerDay: 5, KeepShare: 2}, Zones: []HeatZone{ok}}, "savings"},
-		"bad relief":       {Heat{Zones: []HeatZone{{Name: "a", Sensor: "d/m", TargetC: 22, MinC: 20, MaxC: 24, PeakRelief: &heatplan.PeakRelief{MaxHours: 3, Factor: 1, WindowH: 12}}}}, "peak_relief"},
+		"bad relief":       {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.PeakRelief = &heatplan.PeakRelief{MaxHours: 3, Factor: 1, WindowH: 12} })}}, "peak_relief"},
 		"write no control": {Heat{Write: true, Zones: []HeatZone{ok}}, "control"},
 	} {
 		err := tc.h.Validate()
@@ -74,3 +77,5 @@ func TestHeatSectionRefusesWhatCannotBeReadOneWay(t *testing.T) {
 		t.Errorf("a zone with a control and write on was refused: %v", err)
 	}
 }
+
+func with(z HeatZone, f func(*HeatZone)) HeatZone { f(&z); return z }

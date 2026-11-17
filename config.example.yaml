@@ -280,6 +280,27 @@ fleet_ping:
 #   soc_min: 0.10
 #   soc_max: 0.95
 
+# Heat control (docs/adr/0012). Every number is the owner's and none has a
+# default. Without write: true the plan is shadow: GET /api/heat/plan shows
+# it and what it would save, and nothing is written. Prices are the stored
+# total price (öre/kWh); min_per_day is in öre for all zones together.
+# heat:
+#   write: false
+#   savings: { min_per_day: 500, keep_share: 0.8 }
+#   zones:
+#     - name: bathroom_floor
+#       sensor: wiser_7/floor_temp_c      # the twin that judges this zone
+#       control: wiser_7/set_setpoint     # a declared setpoint control
+#       boundary: wiser_7/room_temp_c     # or "outdoor"
+#       source: direct_electric
+#       heat_kw: 0.6
+#       target_c: 24.5
+#       min_c: 20
+#       max_c: 27
+#       comfort_weight: 2
+#       price_comfort: { cheap_price: 150, normal_price: 260, dear_price: 400, raise_k: 1, lower_k: 0 }
+#       peak_relief: { min_price: 200, factor: 3, window_h: 12, max_hours: 3 }
+
 # Peak-power tariff (weekday 06–20 local time). Same minor units as
 # grid_tariff_ore_kwh, per kW, excluding VAT. 0 disables it.
 # price:
