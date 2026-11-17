@@ -48,8 +48,9 @@ journalctl -u ftw -n 200 --no-pager         # logs; -f follows
 
 Docker 0.x, in `~/ftw-local`: `docker compose ps`,
 `docker compose logs --tail 200` and `docker compose exec ftw ftw status`.
-Update or go back by changing `FTW_VERSION` in `.env` and running
-`docker compose up -d --build`.
+It runs the same launcher; update and go back with
+`docker compose run --rm --entrypoint ftw ftw update` and `… ftw rollback`,
+in a container of their own because Core's restart ends `exec` sessions.
 
 Older Docker installs (1.x–3.x), in `~/ftw` or `/opt/ftw` on the old
 Raspberry Pi image: `docker compose ps`,
@@ -474,8 +475,15 @@ its promoted stable build identify the same commit.
   sudo systemctl restart ftw
   ```
 
-- Docker 0.x: set the previous `FTW_VERSION` in `.env` and run
-  `docker compose up -d --build`. There is no automatic fallback.
+- Docker 0.x: `docker compose run --rm --entrypoint ftw ftw rollback`. If
+  Core does not start, roll back offline and let Docker start it again:
+
+  ```bash
+  docker compose run --rm --entrypoint /app/ftw-launcher ftw -root /opt/ftw rollback
+  docker compose restart ftw
+  ```
+
+  A lower `FTW_VERSION` in `.env` does not go back.
 - Across a state-schema change, restore a full backup made before the update;
   see [backup-and-restore.md](backup-and-restore.md).
 - Older Docker installs (1.x–3.x) roll back within their own line through

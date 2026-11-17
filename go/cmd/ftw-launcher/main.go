@@ -17,8 +17,9 @@ func main() {
 	root := flag.String("root", "/opt/ftw", "directory containing releases and slots.json")
 	config := flag.String("config", "/var/lib/ftw/config.yaml", "persistent FTW config")
 	userDrivers := flag.String("user-drivers", "/var/lib/ftw/drivers", "persistent driver overlay")
+	image := flag.String("image", "", "release package a container image carries; run takes it into the slots first")
 	flag.Parse()
-	if err := run(*root, *config, *userDrivers, flag.Args(), syscall.Exec); err != nil {
+	if err := run(*root, *config, *userDrivers, *image, flag.Args(), syscall.Exec); err != nil {
 		fmt.Fprintln(os.Stderr, "ftw-launcher:", err)
 		os.Exit(1)
 	}
@@ -26,18 +27,24 @@ func main() {
 
 type execFunc func(string, []string, []string) error
 
-const usage = `usage: ftw-launcher [-root DIR] [-config FILE] [-user-drivers DIR] [run [CORE ARGS]]
+const usage = `usage: ftw-launcher [-root DIR] [-config FILE] [-user-drivers DIR] [-image DIR] [run [CORE ARGS]]
        ftw-launcher [-root DIR] install TAG ARCHIVE CHECKSUM
        ftw-launcher [-root DIR] init TAG
        ftw-launcher [-root DIR] status
        ftw-launcher [-root DIR] prune
        ftw-launcher [-root DIR] rollback`
 
-func run(root, config, userDrivers string, args []string, execFn execFunc) error {
+func run(root, config, userDrivers, image string, args []string, execFn execFunc) error {
 	manager := nativeupdate.Manager{Root: root}
 	command := "run"
 	if len(args) > 0 {
 		command = args[0]
+	}
+	if command == "run" && image != "" {
+		// A container's first start finds an empty volume, or none.
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			return err
+		}
 	}
 	if command != "status" {
 		// Everything but status writes slot files.
@@ -87,15 +94,37 @@ func run(root, config, userDrivers string, args []string, execFn execFunc) error
 		if err != nil {
 			return err
 		}
-		fmt.Printf("The next start runs %s once. Restart now with: sudo systemctl restart ftw\n", previous)
+		fmt.Printf("The next start runs %s once. Restart FTW now: sudo systemctl restart ftw, or docker compose restart ftw in Docker\n", previous)
 		return nil
 	case "run":
 		if len(args) > 0 {
 			args = args[1:]
 		}
+		if image != "" {
+			if err := takeImage(manager, image); err != nil {
+				return err
+			}
+		}
 		return launch(root, config, userDrivers, args, execFn)
 	}
 	return fmt.Errorf("unknown command %q\n%s", command, usage)
+}
+
+// takeImage runs at every container start. Only a box with no usable slots
+// stops on its error; one that runs keeps the release it has.
+func takeImage(manager nativeupdate.Manager, image string) error {
+	note, err := manager.TakeImage(context.Background(), image)
+	if note != "" {
+		fmt.Fprintln(os.Stderr, "ftw-launcher:", note)
+	}
+	if err == nil {
+		return nil
+	}
+	if _, readErr := manager.Read(); readErr != nil {
+		return fmt.Errorf("image release: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "ftw-launcher: image release not taken:", err)
+	return nil
 }
 
 func launch(root, config, userDrivers string, extra []string, execFn execFunc) error {

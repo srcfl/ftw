@@ -15,7 +15,7 @@ import (
 
 const stateFile = "slots.json"
 
-var releaseTag = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-beta\.[0-9]+)?$`)
+var releaseTag = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(?:-beta\.([0-9]+))?$`)
 
 // Slots is the one durable source of truth for the installed releases.
 // All transitions replace this file in one rename and sync its directory.
