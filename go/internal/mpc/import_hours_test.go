@@ -429,10 +429,9 @@ func (ceilinglessOptimizer) Optimize(ctx context.Context, slots []Slot, p Params
 
 func (ceilinglessOptimizer) Close() error { return nil }
 
-// A worker plan that overruns an hour falls back to Core's own plan. When
-// Core cannot plan the site itself, here a battery below its floor, the
-// worker's plan is published as before the hours, with a warning, rather
-// than no plan at all.
+// A worker plan that overruns an hour falls back to Core's own plan. A
+// battery below its floor no longer stops Core from planning (#2043), so the
+// plan stays inside the hour there too.
 func TestImportCeilingWorkerPlanOverrunsAnHour(t *testing.T) {
 	for _, soc := range []float64{.5, .05} {
 		t.Run(fmt.Sprintf("battery %.0f %%", soc*100), func(t *testing.T) {
@@ -444,30 +443,25 @@ func TestImportCeilingWorkerPlanOverrunsAnHour(t *testing.T) {
 			snap := svc.PlanSnapshot()
 			got := planImportWh(*snap.Plan, start.UnixMilli(), start.Add(time.Hour).UnixMilli())
 			warned := strings.Contains(strings.Join(snap.Warnings, " "), "Core cannot plan this site itself")
-			if soc == .5 {
-				if !snap.Plan.Solver.Fallback || got > 4155 || warned {
-					t.Fatalf("solver %+v, 09:00 imports %.0f Wh, warned %v; want Core's plan inside the hour", snap.Plan.Solver, got, warned)
-				}
-				return
-			}
-			if snap.Plan.Solver.Fallback || got <= 4155 || !warned {
-				t.Fatalf("solver %+v, 09:00 imports %.0f Wh, warnings %q; want the worker's plan with a warning", snap.Plan.Solver, got, snap.Warnings)
+			if !snap.Plan.Solver.Fallback || got > 4155 || warned {
+				t.Fatalf("solver %+v, 09:00 imports %.0f Wh, warned %v; want Core's plan inside the hour", snap.Plan.Solver, got, warned)
 			}
 		})
 	}
 }
 
-func TestNativeImportCeilingWhenCoreCannotPlan(t *testing.T) {
+func TestNativeImportCeilingBelowTheFloor(t *testing.T) {
 	worker := nativeWorker(t, 1500*time.Millisecond)
 	t.Cleanup(func() { _ = worker.Close() })
-	svc, _ := importCeilingFieldService(t, worker, true)
+	svc, start := importCeilingFieldService(t, worker, true)
 	soc := .05
 	svc.Tele.Update("sungrow", telemetry.DerBattery, 0, &soc, nil)
 	if svc.Replan(context.Background()) == nil {
 		t.Fatalf("no plan published: %+v", svc.PlanSnapshot())
 	}
-	if w := strings.Join(svc.PlanSnapshot().Warnings, " "); !strings.Contains(w, "Core cannot plan this site itself") {
-		t.Fatalf("warnings %q", w)
+	snap := svc.PlanSnapshot()
+	if got := planImportWh(*snap.Plan, start.UnixMilli(), start.Add(time.Hour).UnixMilli()); got > 4155 {
+		t.Fatalf("09:00 imports %.0f Wh, warnings %q", got, snap.Warnings)
 	}
 }
 
