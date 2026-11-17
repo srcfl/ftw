@@ -1513,8 +1513,8 @@
               }
             } else if (m.name === "vehicle_soc_age_s") {
               label = "SoC age at test";
-              if (Number.isFinite(m.value) && m.value >= 0) {
-                var seconds = Math.floor(m.value);
+              if (Number.isFinite(m.value)) {
+                var seconds = Math.floor(Math.max(0, m.value));
                 var hours = Math.floor(seconds / 3600);
                 var minutes = Math.floor((seconds % 3600) / 60);
                 value = hours + " h " + minutes + " min " + (seconds % 60) + " s";
