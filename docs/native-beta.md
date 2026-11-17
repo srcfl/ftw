@@ -1,21 +1,41 @@
 # Install and update FTW
 
-**FTW 2.x and 3.x will receive no further updates. All new development and
-releases use the new 0.x line. Move to it now to follow the latest fixes and
-features. Do not install 3.x beta or use it as an intermediate upgrade.**
+**This draft targets `v0.142.1`; stable has not been published yet.** FTW
+2.x and 3.x get no more updates. [Svenska](setup-guide/update-sv.md).
 
-The new line starts at `v0.131.0-beta.1`. Older 0.x releases, up to 0.130.x,
-belong to the retired line too. The lower version number is deliberate.
-Choosing `beta` in an old installation does not move it to the new line.
+## Quick answer
 
-You can switch now with a new setup and separate data. The guided migration
-that preserves old settings, history, identity and goals is not ready yet.
-If you need those data moved before switching, get help for your exact
-installation; do not copy old databases into a new install.
+| You run | Do this |
+|---|---|
+| New FTW 0.x, native | Open **More → Version → Update FTW** in the web UI, or run `ftw update` on the box. Nothing else. |
+| New FTW 0.x in Docker | Set `FTW_VERSION=v0.142.1` in `.env` and run `docker compose up -d --build`. [Details](#update-new-docker) |
+| No FTW yet, on 64-bit Linux or a new Pi card | [Install](#install) with the stable tag. |
+| Old FTW 2.x, 3.x or the old Pi image | Move data and config through a full backup to a second SD card or host. [Steps](#coming-from-an-older-ftw) |
+| Home Assistant app | Keep the app backup and move to another Linux host; keep Home Assistant on MQTT. [Steps](#coming-from-an-older-ftw) |
+| Windows or macOS | Not supported. Use a Raspberry Pi or another 64-bit Linux machine. |
 
-Use this guide for both people and agents. [Svenska](setup-guide/update-sv.md).
-The owner runs the host; FTW supplies the commands. Native systemd and Docker
-on 64-bit Linux use the same release package.
+While an update runs, keep the box powered and do not press Restart. Wait for
+the update to finish. On native, `ftw rollback` returns to the previous
+compatible release. For Docker, follow [Update new Docker](#update-new-docker).
+
+**Keep your settings, history, identity and goals when you move.** Follow
+[Move with your data](migration.md) to choose the source format, export a full
+backup, import a separate copy and check the result before switching control.
+A new site uses setup; an existing site uses its saved settings. Keep the old
+installation and an off-host backup for return.
+
+The migration guide names the data cases tested with the published beta and
+the work still needed for other layouts. An import error is a stop point:
+keep both copies and resolve it before starting Core. The masked config API
+is not a full settings export. DuckDB uses the exact target's
+[history converter](history-conversion.md); it needs no intermediate release.
+
+The rest of this page has the details, for people and agents. The owner runs
+the host; FTW supplies the commands. Native systemd and Docker on 64-bit Linux
+use the same release package. The new line starts at `v0.131.0-beta.1`; older
+0.x releases, up to 0.130.x, belong to the retired line. Choosing `beta` in an
+old installation does not move it to the new line, and 3.x beta is not a step
+on the way.
 
 ## Choose your path
 
@@ -98,10 +118,10 @@ running Core; inspect containers and their restart rules. A service called
 ## Coming from an older FTW
 
 Move directly to the new line using one of the paths below. Keep the old
-installation and its data for recovery; the new setup does not import them.
-Before switching, save device addresses, goals and schedules, and make a
-verified full backup using the tools your installed version supports. Keep
-that backup off the host. Not every old version has the same backup UI.
+installation and its data for recovery. Use [Move with your data](migration.md)
+for a verified full backup and an import into the separate target. Keep the
+backup off the host. Check saved settings, credentials, goals and historical
+periods on that target before it takes control. Not every old version has the same backup UI.
 Calendar support is gone: use loadpoint targets and ready-by schedules.
 
 **Only one Core may control the equipment.** An old Core can keep controlling
@@ -126,7 +146,8 @@ new Core, and stop new Core before returning to the old install.
    control the same equipment. If the old card supplied MQTT, arrange a broker
    for the new setup. The old card's broker does not move with FTW.
 6. **In SSH on the new card:** follow [Install](#install), then open
-   `http://<host>:8080/setup` and set up the site again.
+   [import the saved data](migration.md#restore-a-full-backup-on-a-new-native-target)
+   before the new Core takes control. The saved API port may differ from 8080.
 7. Follow [Verify the switch](#verify-the-switch).
 
 To return, shut down and put the old card back. Also stop any new FTW you ran
@@ -144,17 +165,26 @@ because the native installer refused the old card.
    `~/forty-two-watts`; use the path found on this host. Save its Compose files
    and `.env` with the backup so recovery uses the same old version.
 2. Check whether that project also supplies Mosquitto or another needed
-   service. Arrange continued MQTT before stopping the whole project.
-3. Stop the old project with its actual files and project name. For a standard
-   project, run `docker compose down` from its directory (with `sudo` if
-   required). Do not add `-v`, delete data, or stop Docker as a whole.
+   service. Keep those services running. Use `docker compose config --services`
+   with the source's actual files and project name to identify them.
+3. Stop only the confirmed Core and updater services. For a Core service named
+   `ftw`, run `docker compose stop ftw`, then
+   `docker update --restart=no "$(docker compose ps -aq ftw)"`. Repeat for an
+   updater if one exists. Set `restart: "no"` for those services in the saved
+   source Compose files too. Check that their containers are stopped and their
+   restart policies are `no`. Do not run `docker compose down` while that
+   project still supplies needed MQTT. Do not add `-v` or delete data.
 4. Check systemd, timers and custom scripts that could recreate or start old
    Core or its updater at boot. Disable only the confirmed old start path.
    Docker's container restart policy is only one possible start path.
-5. Follow [Docker](#docker) in a new directory with separate empty data,
-   normally `~/ftw-local`. If that directory already exists, inspect it first;
-   do not overwrite an earlier test or attach the old data directory.
-6. Set up the site and follow [Verify the switch](#verify-the-switch).
+   When keeping the broker, name its service in later Compose commands.
+   `docker compose up -d` for the whole old project starts old Core again,
+   even with `restart: "no"`.
+5. Prepare [Docker](#docker) in a new directory, normally `~/ftw-local`. Keep
+   new Core stopped until [the copied data are imported](migration.md). Inspect
+   an existing target directory before using it.
+6. Check the imported settings and data, then follow
+   [Verify the switch](#verify-the-switch).
 
 To return, stop the new project first, then start the saved old project with
 its original files and version pin. Restore only the start rules you disabled.
@@ -173,11 +203,12 @@ with a separate FTW host still works; see [Home Assistant](ha-integration.md).
 return to [the second-card steps](#raspberry-pi-use-a-second-sd-card) first.
 This section does not update or migrate an old installation.
 
-Choose an exact published new 0.x beta from [Releases](https://github.com/srcfl/ftw/releases).
-Check that it includes the Linux package for your architecture and its SHA-256
-file. Do not use `releases/latest`: it still points to the retired 2.x line.
-Copy the tag from the release title; do not retype it. Replace only
-`v0.X.Y-beta.N` in the block below. Paste the **whole block, including `(`
+Use the newest stable tag from [Releases](https://github.com/srcfl/ftw/releases),
+`v0.142.1` or later with no `-beta` in it. Choose a beta only if you test new
+builds. Check that the release includes the Linux package for your
+architecture and its SHA-256 file. Do not use `releases/latest`: it still
+points to the retired 2.x line. Copy the tag from the release title; do not
+retype it. Replace only `v0.X.Y` in the block below. Paste the **whole block, including `(`
 and `)`**, into SSH on the new host. It stops at the first error and downloads
 that release's installer to a temporary file.
 `--fresh-host` confirms that this host has no existing FTW site, including
@@ -186,7 +217,7 @@ stopped containers or data in a custom directory:
 ```bash
 (
   set -eu
-  tag=v0.X.Y-beta.N
+  tag=v0.X.Y
   if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
     echo "STOP: copy an exact published new 0.x tag from Releases." >&2
     exit 1
@@ -229,7 +260,7 @@ closing or reloading the page does not cancel or repeat the update.
 ftw status                                   # version, releases, last update, disk, health
 ftw update                                   # install the next release on the saved channel
 ftw rollback                                 # return to the previous release
-ftw backup --output-dir /media/usb/ftw       # make a verified backup and copy it off the disk
+ftw backup                                   # make a verified full backup; prints its path
 ftw support                                  # write the redacted support file for a report
 journalctl -u ftw -n 100                     # logs
 sudo systemctl restart ftw                   # restart
@@ -240,9 +271,8 @@ when the box is current or the update succeeded, and 1 when a step failed.
 
 ## Update a native box
 
-Run the commands on the box. From another computer, connect with
-`ssh <user>@<box-address>` first. The native web UI shows the version and
-update notice; it has no Update button.
+Use **More → Version → Update FTW** in the web UI, or run the commands on the
+box. From another computer, connect with `ssh <user>@<box-address>` first.
 
 ```bash
 ftw status                    # check the running version, saved channel and health
@@ -251,9 +281,13 @@ ftw status                    # confirm the running version and health afterward
 journalctl -u ftw --since "10 minutes ago" --no-pager
 ```
 
-`ftw update` follows the saved channel. Use `ftw update --channel beta` if
-you mean to switch this site to beta. Publishing a beta does not update a
-box by itself. Do not rerun the installer for a routine Core update.
+`ftw update` follows the channel you chose with `--channel`. If you never
+chose one, it follows what the box runs: a stable release follows stable, a
+beta follows beta. Beta also offers a newer stable, so a beta box moves to
+stable when one comes out. To stay on beta after that, run
+`ftw update --channel beta`; to leave beta, run `ftw update --channel stable`.
+Publishing a release does not update a box by itself. Do not rerun the
+installer for a routine Core update.
 
 The command shows each step and waits until Core is ready. Check that its
 `Now running` line and the final `ftw status` name the expected version,
@@ -336,7 +370,7 @@ the installer from that release. Replace the placeholder with its exact tag:
 ```bash
 (
   set -eu
-  tag=v0.X.Y-beta.N
+  tag=v0.X.Y
   if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
     echo "STOP: copy an exact published new 0.x tag from Releases." >&2
     exit 1
@@ -361,8 +395,8 @@ include both plugins. Do not reinstall Docker on a running site without
 checking its existing services. Docker Desktop has a different network setup;
 this Linux host-network recipe does not establish LAN device access there.
 
-Copy an exact published new 0.x tag from [Releases](https://github.com/srcfl/ftw/releases).
-Replace only `v0.X.Y-beta.N` and paste the **whole block, including `(` and `)`**.
+Copy the newest stable tag from [Releases](https://github.com/srcfl/ftw/releases).
+Replace only `v0.X.Y` and paste the **whole block, including `(` and `)`**.
 It downloads both files to a temporary directory before creating the project,
 so a failed download leaves no project behind. Correct the tag or connection
 and paste the whole block again. It stops at the first error and refuses an
@@ -372,7 +406,7 @@ else; do not delete it to make the command pass.
 ```bash
 (
   set -eu
-  tag=v0.X.Y-beta.N
+  tag=v0.X.Y
   if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
     echo "STOP: copy an exact published new 0.x tag from Releases." >&2
     exit 1
@@ -450,19 +484,75 @@ image: `docker image ls ftw-local` lists them, and
 `docker image rm ftw-local:<version>` frees the space of one you no longer
 need.
 
-Back up and restore the whole data directory while FTW is stopped:
+### Back up and restore new Docker
+
+Use the `ftw-backup` tool in the same release image. It verifies a portable
+`.ftwbak` archive and retains replaced data during restore. These commands
+apply to the new Docker project above; they do not migrate an older install.
+Run them from `~/ftw-local`. Only the `ftw` service stops.
+
+Mount another disk first and replace `/media/usb/ftw-backups` with a dedicated
+directory on that disk. The container runs as UID 100, GID 101. The backup
+block creates that directory with those owners and private permissions:
 
 ```bash
-docker compose stop
-sudo tar -czf /media/usb/ftw/ftw-data-$(date +%F).tar.gz data
-docker compose start
-
-# restore
-docker compose stop
-sudo mv data data.before-restore-$(date +%F-%H%M)
-sudo tar -xzf /media/usb/ftw/ftw-data-<date>.tar.gz
-docker compose start
+(
+  set -eu
+  backup_dir=/media/usb/ftw-backups
+  sudo install -d -o 100 -g 101 -m 0700 "$backup_dir"
+  docker compose stop ftw
+  docker compose run --rm --no-deps --entrypoint /app/ftw-backup \
+    --volume "$backup_dir:/backup:z" ftw \
+    create -state /app/data/state.db -data /app/data -output /backup -progress
+  docker compose start ftw
+)
 ```
+
+The final JSON names the verified archive under `/backup`; the file is in
+`backup_dir` on the host. Keep the printed name. A backup error stops the
+block and leaves FTW stopped. Resolve it before restarting; do not treat a
+partial file as a backup.
+
+To restore, use the exact `.ftwbak` name and a compatible release image:
+
+```bash
+(
+  set -eu
+  backup_dir=/media/usb/ftw-backups
+  archive=ftw-full-backup-YYYYMMDDTHHMMSS.ftwbak
+  test -f "$backup_dir/$archive"
+  docker compose stop ftw
+  docker compose run --rm --no-deps --entrypoint /app/ftw-backup \
+    --volume "$backup_dir:/backup:ro,z" ftw \
+    restore -archive "/backup/$archive" -data /app/data -yes
+  docker compose start ftw
+)
+```
+
+Restore verifies and extracts before replacing data. Any helper error stops
+the block before Core starts. Earlier data stays under the printed
+`/app/data/.ftw-pre-restore-…` path. Keep it until you have checked config,
+identity, old and new history, goals, fresh device readings and planning.
+Wait for healthy status in `docker compose ps`, then run
+`docker compose exec ftw ftw status`.
+
+To return to the retained data, replace `safety` with that printed container
+path. Use the compatible image for those data:
+
+```bash
+(
+  set -eu
+  safety=/app/data/.ftw-pre-restore-YYYYMMDDTHHMMSS
+  docker compose stop ftw
+  docker compose run --rm --no-deps --entrypoint /app/ftw-backup ftw \
+    revert -data /app/data -safety "$safety" -yes
+  docker compose start ftw
+)
+```
+
+These helpers accept `.ftwbak`, not an old raw `.tar.gz`. Keep raw archives
+and the matching old installation for recovery; do not rename them to
+`.ftwbak`. See [full backup and restore](backup-and-restore.md).
 
 To remove it, run `docker compose down`, remove the `ftw-local` images and
 delete `~/ftw-local`.
