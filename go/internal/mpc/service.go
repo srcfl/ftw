@@ -1911,6 +1911,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		}
 	}
 	warnings := append(forecastWarnings, limitPlanningLoadpointSteps(&p)...)
+	// The worker's plan was published with the battery making the car's
+	// room, because Core cannot plan this site itself (planOverrun).
+	heldCarRoom := false
 	s.mu.Lock()
 	if request.generation == s.latestReplanGeneration {
 		s.planningWarnings = warnings
@@ -2135,17 +2138,24 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			}
 
 			plan = candidate
-		} else if overrun := (*importHourOverrun)(nil); errors.As(err, &overrun) && (recoveryRequired && !downsidePrimary || coreDPModelError(p) != nil) {
+		} else if overrun := (*planOverrun)(nil); errors.As(err, &overrun) && (recoveryRequired && !downsidePrimary || coreDPModelError(p) != nil) {
 			// Core cannot plan this site itself. The worker's plan keeps
-			// every rule but the hours, as before the hours existed; the
-			// live limit still holds each hour.
+			// every rule but the hours or the car's room. The live limit
+			// still holds each hour, and the charger's room leaves battery
+			// discharge out where the battery may not cover the car.
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
 			}
 			s.recordPlanningFailure(request, "primary_optimizer", err.Error(), slots, p, optimizerErr)
 			plan = overrun.plan
-			p.ImportHours, p.ImportMeanW = nil, 0
-			warnings = append(warnings, "Core cannot plan this site itself, so the plan may import more in an hour than the limit allows; Core still holds each hour to it: "+err.Error())
+			if overrun.hours != nil {
+				p.ImportHours, p.ImportMeanW = nil, 0
+				warnings = append(warnings, "Core cannot plan this site itself, so the plan may import more in an hour than the limit allows; Core still holds each hour to it: "+overrun.hours.Error())
+			}
+			if overrun.carRoom != nil {
+				heldCarRoom = true
+				warnings = append(warnings, "Core cannot plan this site itself, so the plan lets the battery make room for the car; the charger still leaves that room out: "+overrun.carRoom.Error())
+			}
 		} else {
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
@@ -2217,7 +2227,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"err", err)
 		return fail("plan_timeline", err.Error())
 	}
-	if err := ValidatePlan(slots, p, &plan); err != nil {
+	if err := ValidatePlan(slots, p, &plan); err != nil && !(heldCarRoom && onlyCarRoom(err)) {
 		engine := "go-dp"
 		if plan.Solver != nil && plan.Solver.Engine != "" {
 			engine = plan.Solver.Engine

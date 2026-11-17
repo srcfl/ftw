@@ -1,6 +1,7 @@
 package mpc
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -151,15 +152,32 @@ func evAverageRoomW(capW, baseW, peakW float64) float64 {
 	return max(0, min(peakW, (capW-off)*peakW/(on-off)))
 }
 
-// importHourOverrun is a plan that keeps every rule but a clock hour's
-// import. Core plans the site itself instead; when it cannot, it publishes
-// this plan, and the live limit still holds each hour.
-type importHourOverrun struct {
-	plan Plan
-	err  error
+// planOverrun is a plan that keeps every rule but ones live control holds
+// by itself: a clock hour's import (hours), which the live limit holds, and
+// a battery that makes a car's import room (carRoom), which the charger's
+// room leaves out (control.evBatteryDischargeW). Core plans the site itself
+// instead; when it cannot, it publishes this plan.
+type planOverrun struct {
+	plan           Plan
+	hours, carRoom error
 }
 
-func (e *importHourOverrun) Error() string { return e.err.Error() }
+func (e *planOverrun) Error() string {
+	switch {
+	case e.carRoom == nil:
+		return e.hours.Error()
+	case e.hours == nil:
+		return e.carRoom.Error()
+	}
+	return e.carRoom.Error() + "; " + e.hours.Error()
+}
+
+// onlyCarRoom reports whether err is a planOverrun that breaks only the
+// car's room.
+func onlyCarRoom(err error) bool {
+	var overrun *planOverrun
+	return errors.As(err, &overrun) && overrun.hours == nil && overrun.carRoom != nil
+}
 
 func actionChargesCar(a Action) bool {
 	if a.LoadpointW > solverZeroPowerToleranceW {
