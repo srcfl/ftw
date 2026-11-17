@@ -424,10 +424,12 @@ func (*physicsGateCountingOptimizer) Close() error { return nil }
 
 type physicsGateRecoveryOptimizer struct {
 	calls atomic.Int32
+	got   atomic.Pointer[Params]
 }
 
 func (o *physicsGateRecoveryOptimizer) Optimize(_ context.Context, slots []Slot, p Params) (Plan, error) {
 	o.calls.Add(1)
+	o.got.Store(&p)
 	plan := Plan{
 		GeneratedAtMs: time.Now().UnixMilli(), Mode: p.Mode,
 		HorizonSlots: len(slots), CapacityWh: p.CapacityWh,
@@ -681,117 +683,96 @@ func TestReplanRejectsInvalidPhysicsBeforeGoDP(t *testing.T) {
 	}
 }
 
-func TestReplanRecoveryUsesExternalPlannerWithoutDPDerivedResults(t *testing.T) {
+// A battery below its floor reaches the worker on the band edge, as it
+// reaches Core's own planner (#2043). Energyplan 0.7.0, given a start just
+// under the floor and a car, kept the battery idle for the whole horizon.
+func TestReplanGivesTheWorkerAnInBandStart(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(*Service)
 	}{
-		{"aggregate recovery", func(svc *Service) { svc.Defaults.InitialSoC = 0.05 }},
-		{"storage member recovery", func(svc *Service) { configurePhysicsGateFleet(svc, 0.05, 0.55) }},
+		{"aggregate below the floor", func(svc *Service) { svc.Defaults.InitialSoC = 0.097 }},
+		{"aggregate far below the floor", func(svc *Service) { svc.Defaults.InitialSoC = 0.01 }},
+		{"storage member below the floor", func(svc *Service) { configurePhysicsGateFleet(svc, 0.05, 0.55) }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer st.Close()
-			now := time.Now().UTC().Truncate(time.Minute)
-			if err := st.SavePrices([]state.PricePoint{{
-				Zone: "SE3", SlotTsMs: now.Add(-5 * time.Minute).UnixMilli(), SlotLenMin: 60,
-				SpotOreKwh: 50, TotalOreKwh: 100, Source: "test", FetchedAtMs: now.UnixMilli(),
-			}}); err != nil {
-				t.Fatal(err)
-			}
-
-			p := validPlanningParams()
-			p.Mode = ModeArbitrage
+			svc := recoveryTestService(t)
 			optimizer := &physicsGateRecoveryOptimizer{}
-			svc := New(st, nil, "SE3", p)
-			svc.BaseLoad = 500
 			svc.Optimizer = optimizer
 			tc.setup(svc)
 			plan := svc.Replan(context.Background())
 			if plan == nil || plan.Solver == nil || plan.Solver.Backend != "recovery" {
-				t.Fatalf("external recovery plan = %+v", plan)
+				t.Fatalf("worker plan = %+v", plan)
 			}
 			if optimizer.calls.Load() != 1 {
-				t.Fatalf("external optimizer calls = %d, want 1", optimizer.calls.Load())
+				t.Fatalf("worker calls = %d, want 1", optimizer.calls.Load())
 			}
-			if plan.DPEvaluationShadow != nil || plan.DPShadow != nil || plan.Baselines != nil {
-				t.Fatalf("DP-derived results must be absent during recovery: evaluation=%+v downside=%+v baselines=%+v",
-					plan.DPEvaluationShadow, plan.DPShadow, plan.Baselines)
+			got := optimizer.got.Load()
+			if planningParamsRequireRecovery(*got) || got.InitialSoC < got.SoCMin {
+				t.Fatalf("worker got an out-of-band start: soc %.3f, min %.3f, storages %+v", got.InitialSoC, got.SoCMin, got.Storages)
+			}
+			if got.InitialSoCUnclamped == 0 {
+				t.Fatal("the real reading was not recorded")
 			}
 		})
 	}
 }
 
-func TestReplanRecoveryKeepsPreviousPlanWhenDPWouldBeRequired(t *testing.T) {
+// A worker that fails while the battery is below its floor must not leave
+// the site on an old plan: Core plans from the band edge instead. (Core's
+// planner cannot hold two storages at any charge, so a fleet keeps its
+// previous plan either way.)
+func TestReplanFallsBackToCoreWhenTheWorkerFailsBelowTheFloor(t *testing.T) {
 	tests := []struct {
-		name          string
-		baseline      PlanOptimizer
-		recovery      PlanOptimizer
-		wantFailCalls int32
-		setupRecovery func(*Service)
+		name  string
+		setup func(*Service)
 	}{
-		// Only the external-champion path still refuses: its operating-band
-		// recovery ratchet is what the DP cannot represent, so a failed primary
-		// must not silently become a DP plan solved from a snapped SoC. With
-		// Core as the configured planner the same state is clamped and planned
-		// — see TestCoreChampionClampsOutOfBandSoC.
-		{name: "aggregate failed primary", baseline: &physicsGateCountingOptimizer{}, recovery: &physicsGateFailingOptimizer{}, wantFailCalls: 1,
-			setupRecovery: func(svc *Service) { svc.Defaults.InitialSoC = 0.05 }},
-		{name: "storage member failed primary", baseline: &physicsGateCountingOptimizer{}, recovery: &physicsGateFailingOptimizer{}, wantFailCalls: 1,
-			setupRecovery: func(svc *Service) { configurePhysicsGateFleet(svc, 0.05, 0.55) }},
+		{"just below the floor", func(svc *Service) { svc.Defaults.InitialSoC = 0.097 }},
+		{"far below the floor", func(svc *Service) { svc.Defaults.InitialSoC = 0.01 }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer st.Close()
-			now := time.Now().UTC().Truncate(time.Minute)
-			if err := st.SavePrices([]state.PricePoint{{
-				Zone: "SE3", SlotTsMs: now.Add(-5 * time.Minute).UnixMilli(), SlotLenMin: 60,
-				SpotOreKwh: 50, TotalOreKwh: 100, Source: "test", FetchedAtMs: now.UnixMilli(),
-			}}); err != nil {
-				t.Fatal(err)
-			}
-
-			p := validPlanningParams()
-			svc := New(st, nil, "SE3", p)
-			svc.BaseLoad = 500
-			svc.Optimizer = tc.baseline
-			var idCalls, saveCalls atomic.Int32
-			svc.decisionIDFactory = func() string {
-				idCalls.Add(1)
-				return "00000000-0000-4000-8000-000000000098"
-			}
-			svc.SaveDiag = func(*Diagnostic, string) error {
-				saveCalls.Add(1)
-				return nil
-			}
+			svc := recoveryTestService(t)
+			svc.Optimizer = &physicsGateCountingOptimizer{}
 			accepted := svc.Replan(context.Background())
-			if accepted == nil || accepted.DecisionID == "" {
-				t.Fatalf("baseline plan = %+v", accepted)
+			if accepted == nil {
+				t.Fatal("no baseline plan")
 			}
-
-			tc.setupRecovery(svc)
-			svc.Optimizer = tc.recovery
+			failing := &physicsGateFailingOptimizer{}
+			svc.Optimizer = failing
+			tc.setup(svc)
 			got := svc.Replan(context.Background())
-			if got != accepted || svc.Latest() != accepted {
-				t.Fatalf("recovery replaced prior plan through Go DP: got=%p accepted=%p latest=%p",
-					got, accepted, svc.Latest())
+			if got == nil || got == accepted || svc.Latest() != got {
+				t.Fatalf("site kept the old plan: got=%p accepted=%p latest=%p", got, accepted, svc.Latest())
 			}
-			if idCalls.Load() != 1 || saveCalls.Load() != 1 {
-				t.Fatalf("calls after recovery rejection: id=%d save=%d, want 1/1", idCalls.Load(), saveCalls.Load())
+			if got.Solver == nil || !got.Solver.Fallback || got.InitialSoC < svc.lastParams.SoCMin {
+				t.Fatalf("fallback plan = %+v from soc %.3f", got.Solver, got.InitialSoC)
 			}
-			if failing, ok := tc.recovery.(*physicsGateFailingOptimizer); ok && failing.calls.Load() != tc.wantFailCalls {
-				t.Fatalf("failing optimizer calls = %d, want %d", failing.calls.Load(), tc.wantFailCalls)
+			if failing.calls.Load() != 1 {
+				t.Fatalf("failing worker calls = %d, want 1", failing.calls.Load())
 			}
 		})
 	}
+}
+
+func recoveryTestService(t *testing.T) *Service {
+	t.Helper()
+	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	now := time.Now().UTC().Truncate(time.Minute)
+	if err := st.SavePrices([]state.PricePoint{{
+		Zone: "SE3", SlotTsMs: now.Add(-5 * time.Minute).UnixMilli(), SlotLenMin: 60,
+		SpotOreKwh: 50, TotalOreKwh: 100, Source: "test", FetchedAtMs: now.UnixMilli(),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	svc := New(st, nil, "SE3", validPlanningParams())
+	svc.BaseLoad = 500
+	return svc
 }
 
 func TestReplanSnapshotsPVUncertaintyOnce(t *testing.T) {

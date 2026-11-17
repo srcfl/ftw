@@ -1957,11 +1957,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		slog.Error("mpc: invalid optimization parameters; keeping previous plan", "err", err)
 		return fail("inputs", err.Error())
 	}
-	recoveryRequired := planningParamsRequireRecovery(p)
-	if recoveryRequired && s.Optimizer == nil {
-		// Core is the planner, so this state has to produce a plan. Clamp onto
-		// the band edge and record the real reading; the argument for clamping
-		// over refusing is in clampParamsIntoOperatingBand.
+	if planningParamsRequireRecovery(p) {
+		// A battery outside its band still needs a plan, whichever planner
+		// runs. Clamp onto the band edge and record the real reading; the
+		// argument for clamping over refusing is in
+		// clampParamsIntoOperatingBand. The worker gets the clamped state too:
+		// Energyplan 0.7.0, given a start 0.1 Wh under the floor and a car,
+		// published an idle battery for the whole horizon (#2043), and a
+		// failed worker could not fall back to Core from an out-of-band start.
 		clamped, ok := clampParamsIntoOperatingBand(&p)
 		if !ok {
 			slog.Error("mpc: battery state is not physically possible; keeping previous plan",
@@ -1979,8 +1982,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 				"soc_max", p.SoCMax)
 		}
 		// The state is inside the band now, so this is an ordinary solve:
-		// baselines and shadows apply as usual.
-		recoveryRequired = false
+		// baselines, shadows and the Core fallback apply as usual.
 	}
 
 	slog.Info("mpc: optimize params",
@@ -2085,7 +2087,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			return s.canceledReplan(request, "primary-solve")
 		}
 		if err == nil {
-			if recoveryRequired || downsidePrimary || coreDPModelError(p) != nil {
+			if downsidePrimary || coreDPModelError(p) != nil {
 				candidate.DPEvaluationShadow = nil
 				candidate.DPShadow = nil
 				candidate.Baselines = nil
@@ -2138,7 +2140,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			}
 
 			plan = candidate
-		} else if overrun := (*planOverrun)(nil); errors.As(err, &overrun) && (recoveryRequired && !downsidePrimary || coreDPModelError(p) != nil) {
+		} else if overrun := (*planOverrun)(nil); errors.As(err, &overrun) && coreDPModelError(p) != nil {
 			// Core cannot plan this site itself. The worker's plan keeps
 			// every rule but the hours or the car's room. The live limit
 			// still holds each hour, and the charger's room leaves battery
@@ -2165,14 +2167,6 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		} else {
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
-			}
-			if recoveryRequired && !downsidePrimary {
-				slog.Error("mpc: primary optimizer failed and Go DP cannot model operating-bound recovery; keeping previous plan",
-					"err", err,
-					"soc_start", p.InitialSoC,
-					"soc_min", p.SoCMin,
-					"soc_max", p.SoCMax)
-				return fail("core_fallback", "Optimizer failed: "+err.Error())
 			}
 			if modelErr := coreDPModelError(p); modelErr != nil {
 				slog.Error("mpc: primary failed and fallback cannot represent this site; keeping previous plan", "err", err, "fallback", modelErr)
@@ -2262,7 +2256,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil && (plan.Solver == nil || (!plan.Solver.Fallback && plan.Solver.Backend != "ev_reserve")) {
+	if p.Mode != ModeSelfConsumption && coreDPModelError(p) == nil && (plan.Solver == nil || (!plan.Solver.Fallback && plan.Solver.Backend != "ev_reserve")) {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}
