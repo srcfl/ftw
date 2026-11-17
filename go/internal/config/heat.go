@@ -34,6 +34,12 @@ type HeatZone struct {
 	// Control is the declared control the plan moves, "<driver>/<control>".
 	// Empty means the zone is planned in shadow only.
 	Control string `yaml:"control,omitempty" json:"control,omitempty"`
+	// HeatInput is the "<driver>/<metric>" that measures or estimates the
+	// heat warming this zone, for the thermal twin to learn against. Needed
+	// when the sensor is on one device and the heat comes from another, as
+	// room sensors on an underfloor gateway heated by a heat pump. Empty
+	// lets the twin find a heat pump's power by itself.
+	HeatInput string `yaml:"heat_input,omitempty" json:"heat_input,omitempty"`
 	// Boundary is what the zone loses heat to: "outdoor" for the weather
 	// forecast, or "<driver>/<metric>" for a measured temperature, such as
 	// the room air around a floor. Required: a floor that loses heat to
@@ -92,6 +98,9 @@ func (h *Heat) Validate() error {
 		}
 		if z.Control != "" && !heatKey.MatchString(z.Control) {
 			return fmt.Errorf("%s (%s): control must be \"<driver>/<control>\"", at, z.Name)
+		}
+		if z.HeatInput != "" && !heatKey.MatchString(z.HeatInput) {
+			return fmt.Errorf("%s (%s): heat_input must be \"<driver>/<metric>\"", at, z.Name)
 		}
 		if z.Boundary != HeatBoundaryOutdoor && !heatKey.MatchString(z.Boundary) {
 			return fmt.Errorf("%s (%s): boundary must be \"outdoor\" or \"<driver>/<metric>\"", at, z.Name)

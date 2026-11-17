@@ -1205,7 +1205,7 @@ func main() {
 		observeOnly = config.ObserveOnlyDriverSet(newCfg)
 		capMu.Unlock()
 		if thermalTwins != nil {
-			thermalTwins.SetZones(thermalTwinZones(newCfg.Drivers, reloadCatalog))
+			thermalTwins.SetZones(thermalTwinZones(newCfg.Drivers, reloadCatalog, newCfg.Heat))
 		}
 		heatCat.set(newCfg.Drivers, reloadCatalog)
 		warnIfEVHasBatteryCapacity(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog)
@@ -1498,7 +1498,7 @@ func main() {
 	}
 	thermalTwins = thermaltwin.NewService(st, tel)
 	thermalTwins.Temp = loadSvc.Temp
-	thermalTwins.SetZones(thermalTwinZones(twinDrivers(), driverCatalog))
+	thermalTwins.SetZones(thermalTwinZones(twinDrivers(), driverCatalog, func() *config.Heat { cfgMu.RLock(); defer cfgMu.RUnlock(); return cfg.Heat }()))
 	thermalTwins.PowerDrivers = func() []string { return thermalTwinPowerDrivers(twinDrivers()) }
 	thermalTwins.Start(ctx)
 	defer thermalTwins.Stop()

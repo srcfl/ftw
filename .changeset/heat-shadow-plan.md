@@ -13,3 +13,8 @@ holds as an operator's request, only while its twin is trusted, the least
 saving is reached and the site meter is fresh, and the device is handed back
 to its own default otherwise. A device that drops a written value by itself is
 written again before it does.
+
+A zone can name its heat input (`heat_input: "<driver>/<metric>"`), so a room
+sensor on one device, such as an underfloor gateway, learns against the heat
+of another, such as a heat pump's estimated space heat. A sensor named in
+`heat.zones` is learned even when its driver does not declare it.

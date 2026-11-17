@@ -221,3 +221,34 @@ func TestServiceNeedsOutdoorTemperature(t *testing.T) {
 		t.Errorf("samples = %d without outdoor temperature, want 0", got.Samples)
 	}
 }
+
+// A room sensor on an underfloor gateway is heated by a heat pump on another
+// device. The owner names the pump's space heat as its heat input, and that
+// wins over every power the twin could otherwise find, even with several.
+func TestServiceUsesTheHeatInputTheOwnerNamed(t *testing.T) {
+	tele := fakeTele{}
+	room := Zone{Key: "lk/zone_1_temp_c", SensorDriver: "lk", SensorMetric: "zone_1_temp_c", HeatInput: "ctc/space_heat_w"}
+	s := newTestService(tele, fakeStore{}, room)
+	run(s, t0, 31, func(now time.Time) {
+		tele["lk/zone_1_temp_c"] = metric{21, now}
+		tele["ctc/space_heat_w"] = metric{4000, now}
+		tele["heishamon/hp_power_w"] = metric{1500, now}
+		tele["nibe/hp_power_w"] = metric{900, now}
+	})
+	if z := zoneStatus(t, s, room.Key); z.PowerSource != "ctc/space_heat_w" {
+		t.Errorf("power source = %q, want ctc/space_heat_w", z.PowerSource)
+	}
+
+	// Without a reading from the named source there is no heat input: the
+	// twin does not fall back to a pump the owner did not name.
+	quiet := Zone{Key: "lk/zone_2_temp_c", SensorDriver: "lk", SensorMetric: "zone_2_temp_c", HeatInput: "ctc/space_heat_w"}
+	tele2 := fakeTele{}
+	s2 := newTestService(tele2, fakeStore{}, quiet)
+	run(s2, t0, 31, func(now time.Time) {
+		tele2["lk/zone_2_temp_c"] = metric{21, now}
+		tele2["heishamon/hp_power_w"] = metric{1500, now}
+	})
+	if z := zoneStatus(t, s2, quiet.Key); z.PowerSource != "" {
+		t.Errorf("power source = %q, want none when the named input is silent", z.PowerSource)
+	}
+}

@@ -291,6 +291,7 @@ fleet_ping:
 #     - name: bathroom_floor
 #       sensor: wiser_7/floor_temp_c      # the twin that judges this zone
 #       control: wiser_7/set_setpoint     # a declared setpoint control
+#       # heat_input: ctc/space_heat_w  # when the heat comes from another device
 #       boundary: wiser_7/room_temp_c     # or "outdoor"
 #       source: direct_electric
 #       heat_kw: 0.6

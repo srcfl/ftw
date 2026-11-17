@@ -40,6 +40,11 @@ type Zone struct {
 	Key          string `json:"key"`
 	SensorDriver string `json:"sensor_driver"`
 	SensorMetric string `json:"sensor_metric"`
+	// HeatInput is the owner's "<driver>/<metric>" for the heat that warms
+	// this zone, such as a heat pump's estimated space heat for a room
+	// sensor on another device. Empty means the sensor's own driver's, or
+	// the single other driver's, HeatPowerMetric.
+	HeatInput string `json:"heat_input,omitempty"`
 }
 
 // MetricReader is the part of the telemetry store the service reads.
@@ -222,7 +227,8 @@ func (s *Service) sampleLocked(zs *zoneState, now time.Time) {
 	}
 	zs.src = src
 	if src != "" {
-		p, _, ok := s.read(src, HeatPowerMetric, now)
+		driver, metric := powerRef(src)
+		p, _, ok := s.read(driver, metric, now)
 		if !ok {
 			zs.gap = true
 			return
@@ -236,6 +242,14 @@ func (s *Service) sampleLocked(zs *zoneState, now time.Time) {
 // driver reporting heat power. Two candidates is no answer: the twin cannot
 // tell which one heats this zone.
 func (s *Service) powerSourceLocked(z Zone, now time.Time) string {
+	if z.HeatInput != "" {
+		// The owner named it: that one or none, never a guess.
+		driver, metric := powerRef(z.HeatInput)
+		if _, _, ok := s.read(driver, metric, now); ok {
+			return z.HeatInput
+		}
+		return ""
+	}
 	if _, _, ok := s.read(z.SensorDriver, HeatPowerMetric, now); ok {
 		return z.SensorDriver
 	}
@@ -252,6 +266,15 @@ func (s *Service) powerSourceLocked(z Zone, now time.Time) string {
 		return found[0]
 	}
 	return ""
+}
+
+// powerRef splits a heat input source: "<driver>/<metric>" as the owner
+// named it, or a bare driver name for its HeatPowerMetric.
+func powerRef(src string) (driver, metric string) {
+	if i := strings.Index(src, "/"); i >= 0 {
+		return src[:i], src[i+1:]
+	}
+	return src, HeatPowerMetric
 }
 
 func (s *Service) read(driver, metric string, now time.Time) (float64, time.Time, bool) {
