@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -616,5 +617,29 @@ func TestSlotEnergyBooksAreInTheReport(t *testing.T) {
 		if strings.Contains(out, forbidden) {
 			t.Errorf("report mislabels budget accounting: %s", out)
 		}
+	}
+}
+
+// On a Pi the week can take most of a minute. A reading that lands meanwhile
+// is newer than the clock the week used, and the live sections must not
+// call it stale.
+func TestSupportReportReadsTheClockAfterTheWeek(t *testing.T) {
+	srv, _, _ := reportTestServer(t)
+	weekAt := time.Now().Add(-58 * time.Second)
+	reads := 0
+	clock := func() time.Time {
+		reads++
+		if reads == 1 {
+			return weekAt
+		}
+		return time.Now()
+	}
+	report, _, liveAt := srv.buildSupportReport(context.Background(), clock, false)
+	if !liveAt.After(weekAt) {
+		t.Fatalf("live sections read the clock at %v, before the week's %v", liveAt, weekAt)
+	}
+	devices := sectionOf(report, "## Devices")
+	if strings.Contains(devices, "| -") || !strings.Contains(devices, "| meter | ok | 0 s ago |") {
+		t.Errorf("a reading taken while the week loaded shows a negative or wrong age:\n%s", devices)
 	}
 }

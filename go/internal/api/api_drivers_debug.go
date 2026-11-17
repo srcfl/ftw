@@ -790,8 +790,8 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// below it is what you reach for when the report does not settle the
 	// question. Shipping them together means the person asking for help
 	// sends one file and never has to pick the right one.
-	week := s.loadSupportWeek(r.Context(), now, true)
-	addFile("00-help-report.md", []byte(redactDumpLog(s.buildSupportReportWith(r.Context(), now, week))))
+	report, week, liveAt := s.buildSupportReport(r.Context(), func() time.Time { return time.Now().UTC() }, true)
+	addFile("00-help-report.md", []byte(redactDumpLog(report)))
 
 	manifest := map[string]any{
 		"generated_at": now.Format(time.RFC3339),
@@ -838,8 +838,11 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// All driver health in one file — easier to scan than one-per-driver.
 	healthBody, _ := json.MarshalIndent(s.deps.Tel.AllHealth(), "", "  ")
 	addFile("drivers.json", healthBody)
-	addFile("planner.json", supportJSON(s.supportPlanner(now)))
-	addFile("loadpoints.json", supportJSON(s.loadpointsPayload(now)))
+	// Building the report took time too; read the clock again so a reading
+	// that arrived meanwhile is not newer than these files' clock.
+	liveAt = time.Now().UTC()
+	addFile("planner.json", supportJSON(s.supportPlanner(liveAt)))
+	addFile("loadpoints.json", supportJSON(s.loadpointsPayload(liveAt)))
 
 	// Logs. Lua host.log and HTTP error bodies often carry OAuth JSON;
 	// redact before the zip leaves the house.
@@ -859,7 +862,7 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// next to week/'s five-minute buckets. Only metrics the operator
 	// actually emitted in this window appear.
 	if s.deps.State != nil {
-		untilMs := now.UnixMilli()
+		untilMs := liveAt.UnixMilli()
 		sinceMs := untilMs - 3600*1000
 		drivers, _ := s.deps.State.DriverNames()
 		metrics, _ := s.deps.State.MetricNames()

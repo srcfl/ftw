@@ -293,7 +293,8 @@ func TestSupportWeekOnANewBox(t *testing.T) {
 		Ctrl: control.NewState(0, 50, "meter"), CtrlMu: &sync.Mutex{},
 		Tel: telemetry.NewStore(), LogRing: telemetry.NewLogRing(), Version: "test", State: st,
 	})
-	week := sectionOf(srv.buildSupportReport(context.Background(), now), "## What happened over the last week")
+	report, _, _ := srv.buildSupportReport(context.Background(), func() time.Time { return now }, false)
+	week := sectionOf(report, "## What happened over the last week")
 	if strings.Contains(week, "clean shutdown") {
 		t.Errorf("a new box's first start is not a crash:\n%s", week)
 	}
