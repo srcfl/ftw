@@ -67,6 +67,11 @@ const (
 	// offers few values: a sliver over the limit can buy a whole slot of
 	// heat, and must still lose.
 	limitWeightFactor = 1e3
+	// A change of value must gain at least this share of what one slot at
+	// full output costs. Without it the plan stops for a single slot to
+	// win a sliver on a small price step, and every such stop is a write
+	// to the device and a relay cycle.
+	switchShare = 0.1
 )
 
 // Zone is one heated thing as its twin describes it, in thermal terms.
@@ -343,6 +348,7 @@ type solver struct {
 	bandPerKh    float64
 	limitPerKWh  float64
 	chatter      float64
+	switchCost   float64
 
 	lo, step float64
 	points   int
@@ -409,6 +415,7 @@ func newSolver(r Request) *solver {
 	s.comfortPerKh = z.ComfortWeight * holdPerKh
 	s.bandPerKh = bandWeightFactor * (heatPrice*z.CapacityKWhPerK + holdPerKh + 1e-9)
 	s.chatter = chatterShare * holdPerKh * r.SlotH
+	s.switchCost = switchShare * heatPrice * a.MaxHeatKW * r.SlotH
 	// The site's import limit outranks the band. A kWh held back costs the
 	// zone at most 1/C kelvin outside its band for the rest of the horizon;
 	// a kWh over the limit must cost more than that.
@@ -675,7 +682,7 @@ func (s *solver) run(baseline bool) Plan {
 		}
 	}
 
-	plan := Plan{Slots: make([]Slot, 0, s.n)}
+	idx := make([]int, s.n)
 	temp, rs := s.r.Zone.StartC, s.startState()
 	for k := 0; k < s.n; k++ {
 		var next [][]float64
@@ -683,11 +690,34 @@ func (s *solver) run(baseline bool) Plan {
 			next = values[k+1]
 		}
 		j, st, nrs := pick(k, rs, temp, next)
+		idx[k], temp, rs = j, st.next, nrs
+	}
+	if !baseline {
+		s.smooth(idx)
+	}
+	return s.follow(idx)
+}
+
+// act is the action for an index; below zero is a device with only start
+// and stop left on its own thermostat, which holds the target.
+func (s *solver) act(i int) action {
+	if i < 0 {
+		return action{setpoint: func(k int) float64 { return s.r.Zone.TargetC[k] }}
+	}
+	return s.acts[i]
+}
+
+// follow predicts the zone under a sequence of actions.
+func (s *solver) follow(idx []int) Plan {
+	plan := Plan{Slots: make([]Slot, 0, s.n)}
+	temp := s.r.Zone.StartC
+	for k, j := range idx {
+		st := s.advance(k, temp, s.act(j))
 		value := s.r.Zone.TargetC[k]
 		if j >= 0 {
 			value = s.acts[j].value
 		}
-		temp, rs = st.next, nrs
+		temp = st.next
 		plan.Slots = append(plan.Slots, Slot{Value: value, TempC: temp, HeatKWh: st.heatKWh, ElecKWh: st.elecKWh, Cost: st.cost})
 		plan.Cost += st.cost
 		plan.BandExcursionKh += s.excursion(k, temp) * s.r.SlotH
@@ -695,4 +725,76 @@ func (s *solver) run(baseline bool) Plan {
 	}
 	plan.Cost += s.terminal(temp)
 	return plan
+}
+
+// objective is what the plan minimises for a sequence of actions, or +Inf
+// when the sequence breaks a minimum run.
+func (s *solver) objective(idx []int) float64 {
+	temp, rs, total := s.r.Zone.StartC, s.startState(), 0.0
+	for k, j := range idx {
+		next, ok := s.allowed(rs, s.acts[j])
+		if !ok {
+			return math.Inf(1)
+		}
+		st := s.advance(k, temp, s.acts[j])
+		total += st.cost + st.penalty
+		if j != s.neutral(k) {
+			total += s.chatter
+		}
+		temp, rs = st.next, next
+	}
+	return total + s.terminal(temp)
+}
+
+// smooth removes the changes of value that do not pay for themselves. The
+// optimum is found first and without a cost on changing, so that a long
+// preheat is weighed as a whole; then each run of one value is folded into
+// a neighbour when that costs less than switchCost for every change it
+// removes. What is left is the plan's shape without the single slots it
+// stopped or started for a sliver.
+func (s *solver) smooth(idx []int) {
+	total := s.objective(idx)
+	run := make([]int, 0, s.n)
+	for a := 0; a < s.n; {
+		b := a
+		for b < s.n && idx[b] == idx[a] {
+			b++
+		}
+		if a == 0 && b == s.n {
+			return
+		}
+		run = append(run[:0], idx[a:b]...)
+		removed := 1
+		if a > 0 && b < s.n && idx[a-1] == idx[b] {
+			removed = 2
+		}
+		best, bestTotal := -1, total+s.switchCost*float64(removed)
+		try := func(v int) {
+			for k := a; k < b; k++ {
+				idx[k] = v
+			}
+			if t := s.objective(idx); t < bestTotal {
+				best, bestTotal = v, t
+			}
+			copy(idx[a:b], run)
+		}
+		if a > 0 {
+			try(idx[a-1])
+		}
+		if b < s.n && (a == 0 || idx[b] != idx[a-1]) {
+			try(idx[b])
+		}
+		if best < 0 {
+			a = b
+			continue
+		}
+		for k := a; k < b; k++ {
+			idx[k] = best
+		}
+		total = bestTotal
+		// The run has joined a neighbour: weigh the joined run again.
+		for a > 0 && idx[a-1] == idx[a] {
+			a--
+		}
+	}
 }
