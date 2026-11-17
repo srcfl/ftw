@@ -339,3 +339,67 @@ func TestShortDeviceHoldIsRenewedBetweenPlans(t *testing.T) {
 		t.Fatalf("a stale meter did not hand the device back: %v", h.w.released)
 	}
 }
+
+// The house heated by a CTC on a heat curve, its rooms read by an
+// underfloor gateway: a heat pump zone planned on the outdoor forecast, in
+// shadow, and through a curve offset once the pump declares one.
+func heatPumpHouse(h *house, outdoor bool) *Service {
+	h.cfg = &config.Heat{Zones: []config.HeatZone{{
+		Name: "house", Sensor: "wiser_7/floor_temp_c", HeatInput: "CTC/space_heat_w",
+		Boundary: "outdoor", Source: "heat_pump", HeatKW: 6,
+		TargetC: 21, MinC: 20, MaxC: 22.5, ComfortWeight: 2,
+		HeatPump: &config.HeatPump{Supply: &config.HeatSupplyCurve{ColdOutdoorC: -20, ColdSupplyC: 45, MildOutdoorC: 15, MildSupplyC: 24}},
+	}}}
+	h.floor = 21
+	s := h.service()
+	s.in.Twins = func() []thermaltwin.ZoneStatus {
+		return []thermaltwin.ZoneStatus{{Zone: thermaltwin.Zone{Key: "wiser_7/floor_temp_c"}, Status: h.status,
+			Params: thermaltwin.Params{TauH: fp(60), CapacityKWhPerK: fp(5)}}}
+	}
+	if outdoor {
+		s.in.Outdoor = func(_ time.Time, n int) ([]float64, bool) { return constant(n, 0), true }
+	}
+	return s
+}
+
+func TestHeatPumpZoneNeedsTheForecastAndPlansWithIt(t *testing.T) {
+	h := newHouse()
+	s := heatPumpHouse(h, false)
+	s.Tick(context.Background())
+	if z := s.Snapshot().Zones[0]; z.Planned || !strings.Contains(z.Reason, "outdoor forecast") {
+		t.Fatalf("without a forecast: planned %v, %q", z.Planned, z.Reason)
+	}
+	h = newHouse()
+	s = heatPumpHouse(h, true)
+	s.Tick(context.Background())
+	if z := s.Snapshot().Zones[0]; !z.Planned || z.Value == nil {
+		t.Fatalf("with a forecast: %+v", z)
+	}
+}
+
+func TestCurveOffsetIsPlannedOnlyWithItsEffect(t *testing.T) {
+	h := newHouse()
+	s := heatPumpHouse(h, true)
+	h.cfg.Zones[0].Control = "CTC/set_heat_curve_offset"
+	s.in.Control = func(driver, control string) (drivers.CatalogControl, bool) {
+		return drivers.CatalogControl{ID: control,
+			Input:   drivers.CatalogControlInput{Type: "number", Min: fp(-5), Max: fp(5), Step: fp(1), Default: fp(0)},
+			Thermal: &drivers.CatalogThermalControl{Asset: thermal.AssetSpaceHeat, Strategy: thermal.InfluenceCurveOffset},
+		}, true
+	}
+	s.Tick(context.Background())
+	if z := s.Snapshot().Zones[0]; z.Planned || !strings.Contains(z.Reason, "curve_effect") {
+		t.Fatalf("without an effect: planned %v, %q", z.Planned, z.Reason)
+	}
+	h.cfg.Zones[0].CurveEffect = &config.CurveEffect{ZoneKPerUnit: 0.5, SupplyKPerUnit: 1}
+	s.Tick(context.Background())
+	z := s.Snapshot().Zones[0]
+	if !z.Planned || z.Neutral == nil || *z.Neutral != 0 {
+		t.Fatalf("with an effect: %+v", z)
+	}
+	for _, sl := range z.Slots {
+		if sl.Value < -5 || sl.Value > 5 {
+			t.Fatalf("offset %v outside the declared range", sl.Value)
+		}
+	}
+}

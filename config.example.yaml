@@ -301,6 +301,21 @@ fleet_ping:
 #       comfort_weight: 2
 #       price_comfort: { cheap_price: 150, normal_price: 260, dear_price: 400, raise_k: 1, lower_k: 0 }
 #       peak_relief: { min_price: 200, factor: 3, window_h: 12, max_hours: 3 }
+#     # A house heated by a hydronic heat pump, its rooms read elsewhere.
+#     - name: house
+#       sensor: LK/zone_2_temp_c
+#       heat_input: CTC/space_heat_w      # the pump's estimated space heat
+#       boundary: outdoor
+#       source: heat_pump
+#       heat_kw: 6
+#       target_c: 21
+#       min_c: 20
+#       max_c: 22.5
+#       heat_pump:                        # zero or absent: the planner's start point
+#         carnot_fraction: 0.5
+#         supply: { cold_outdoor_c: -20, cold_supply_c: 45, mild_outdoor_c: 15, mild_supply_c: 24 }
+#       # control: CTC/set_heat_curve_offset   # once the driver declares one
+#       # curve_effect: { zone_k_per_unit: 0.5, supply_k_per_unit: 1 }
 
 # Peak-power tariff (weekday 06–20 local time). Same minor units as
 # grid_tariff_ore_kwh, per kW, excluding VAT. 0 disables it.

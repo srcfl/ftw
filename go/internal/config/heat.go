@@ -45,10 +45,16 @@ type HeatZone struct {
 	// the room air around a floor. Required: a floor that loses heat to
 	// outdoors is planned as a different thing.
 	Boundary string `yaml:"boundary" json:"boundary"`
-	// Source is what makes the heat. Only "direct_electric" is planned yet;
-	// a heat pump needs its efficiency declared, which this section does not
-	// carry.
+	// Source is what makes the heat: "direct_electric" or "heat_pump".
 	Source string `yaml:"source" json:"source"`
+	// HeatPump is the pump's efficiency, for source heat_pump. Nil, or a
+	// field left at zero, takes the planner's starting point (half the
+	// ideal COP, capped at 6), which is no claim about any pump.
+	HeatPump *HeatPump `yaml:"heat_pump,omitempty" json:"heat_pump,omitempty"`
+	// CurveEffect is what one unit of a curve_offset control does, the
+	// owner's figures until a twin learns them. Required for a zone whose
+	// control is a curve offset.
+	CurveEffect *CurveEffect `yaml:"curve_effect,omitempty" json:"curve_effect,omitempty"`
 	// HeatKW is the heat at full output, the owner's figure: a floor's area
 	// times its rating, a radiator's plate.
 	HeatKW float64 `yaml:"heat_kw" json:"heat_kw"`
@@ -69,7 +75,53 @@ type HeatZone struct {
 const (
 	HeatBoundaryOutdoor      = "outdoor"
 	HeatSourceDirectElectric = "direct_electric"
+	HeatSourceHeatPump       = "heat_pump"
 )
+
+// HeatPump is a heat pump's efficiency as the owner knows it.
+type HeatPump struct {
+	// CarnotFraction is the share of the ideal COP the pump reaches.
+	CarnotFraction float64 `yaml:"carnot_fraction,omitempty" json:"carnot_fraction,omitempty"`
+	// MaxCOP caps the COP.
+	MaxCOP float64 `yaml:"max_cop,omitempty" json:"max_cop,omitempty"`
+	// FrostLoss is the share of output an air-source pump loses to
+	// defrosting at its worst, around +1 °C.
+	FrostLoss float64 `yaml:"frost_loss,omitempty" json:"frost_loss,omitempty"`
+	// Supply is the heat curve of a hydronic pump: the flow temperature at
+	// a cold and a mild outdoor temperature. Nil for a pump that heats the
+	// zone itself.
+	Supply *HeatSupplyCurve `yaml:"supply,omitempty" json:"supply,omitempty"`
+}
+
+// HeatSupplyCurve is a heat curve by two points, flat outside them.
+type HeatSupplyCurve struct {
+	ColdOutdoorC float64 `yaml:"cold_outdoor_c" json:"cold_outdoor_c"`
+	ColdSupplyC  float64 `yaml:"cold_supply_c" json:"cold_supply_c"`
+	MildOutdoorC float64 `yaml:"mild_outdoor_c" json:"mild_outdoor_c"`
+	MildSupplyC  float64 `yaml:"mild_supply_c" json:"mild_supply_c"`
+}
+
+// CurveEffect is one unit of a curve offset: how far it moves the zone and
+// the flow.
+type CurveEffect struct {
+	ZoneKPerUnit   float64 `yaml:"zone_k_per_unit" json:"zone_k_per_unit"`
+	SupplyKPerUnit float64 `yaml:"supply_k_per_unit" json:"supply_k_per_unit"`
+}
+
+// PlanSource is the zone's source as the planner reads it.
+func (z HeatZone) PlanSource() heatplan.Source {
+	if z.Source != HeatSourceHeatPump {
+		return heatplan.Source{Kind: heatplan.SourceDirectElectric}
+	}
+	src := heatplan.Source{Kind: heatplan.SourceHeatPump}
+	if hp := z.HeatPump; hp != nil {
+		src.CarnotFraction, src.MaxCOP, src.FrostLoss = hp.CarnotFraction, hp.MaxCOP, hp.FrostLoss
+		if c := hp.Supply; c != nil {
+			src.Supply = &heatplan.SupplyCurve{ColdOutdoorC: c.ColdOutdoorC, ColdSupplyC: c.ColdSupplyC, MildOutdoorC: c.MildOutdoorC, MildSupplyC: c.MildSupplyC}
+		}
+	}
+	return src
+}
 
 var heatKey = regexp.MustCompile(`^[^/\s]+/[^/\s]+$`)
 
@@ -105,8 +157,20 @@ func (h *Heat) Validate() error {
 		if z.Boundary != HeatBoundaryOutdoor && !heatKey.MatchString(z.Boundary) {
 			return fmt.Errorf("%s (%s): boundary must be \"outdoor\" or \"<driver>/<metric>\"", at, z.Name)
 		}
-		if z.Source != HeatSourceDirectElectric {
-			return fmt.Errorf("%s (%s): source must be %q; a heat pump is not planned from this section yet", at, z.Name, HeatSourceDirectElectric)
+		if z.Source != HeatSourceDirectElectric && z.Source != HeatSourceHeatPump {
+			return fmt.Errorf("%s (%s): source must be %q or %q", at, z.Name, HeatSourceDirectElectric, HeatSourceHeatPump)
+		}
+		if z.HeatPump != nil && z.Source != HeatSourceHeatPump {
+			return fmt.Errorf("%s (%s): heat_pump is set but source is %q", at, z.Name, z.Source)
+		}
+		if err := z.PlanSource().Validate(); err != nil {
+			return fmt.Errorf("%s (%s): heat_pump: %w", at, z.Name, err)
+		}
+		if e := z.CurveEffect; e != nil {
+			if math.IsNaN(e.ZoneKPerUnit+e.SupplyKPerUnit) || math.IsInf(e.ZoneKPerUnit+e.SupplyKPerUnit, 0) ||
+				e.ZoneKPerUnit <= 0 || e.ZoneKPerUnit > 5 || e.SupplyKPerUnit < 0 || e.SupplyKPerUnit > 10 {
+				return fmt.Errorf("%s (%s): curve_effect needs zone_k_per_unit above 0 and at most 5, supply_k_per_unit 0 to 10", at, z.Name)
+			}
 		}
 		if !(z.HeatKW > 0) || z.HeatKW > 500 {
 			return fmt.Errorf("%s (%s): heat_kw must be above 0 and at most 500", at, z.Name)

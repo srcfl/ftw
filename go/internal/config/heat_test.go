@@ -65,6 +65,16 @@ func TestHeatSectionRefusesWhatCannotBeReadOneWay(t *testing.T) {
 		"bad gate":         {Heat{Savings: &heatplan.SavingsGate{MinPerDay: 5, KeepShare: 2}, Zones: []HeatZone{ok}}, "savings"},
 		"bad relief":       {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.PeakRelief = &heatplan.PeakRelief{MaxHours: 3, Factor: 1, WindowH: 12} })}}, "peak_relief"},
 		"write no control": {Heat{Write: true, Zones: []HeatZone{ok}}, "control"},
+		"bad boundary":     {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.Boundary = "" })}}, "boundary"},
+		"no heat":          {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.HeatKW = 0 })}}, "heat_kw"},
+		"bad heat input":   {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.HeatInput = "ctc" })}}, "heat_input"},
+		"unknown source":   {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.Source = "gas" })}}, "source"},
+		"pump on electric": {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.HeatPump = &HeatPump{} })}}, "heat_pump"},
+		"bad curve": {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) {
+			z.Source = "heat_pump"
+			z.HeatPump = &HeatPump{Supply: &HeatSupplyCurve{ColdOutdoorC: 15, ColdSupplyC: 45, MildOutdoorC: -15, MildSupplyC: 25}}
+		})}}, "heat_pump"},
+		"bad effect": {Heat{Zones: []HeatZone{with(ok, func(z *HeatZone) { z.CurveEffect = &CurveEffect{ZoneKPerUnit: 0} })}}, "curve_effect"},
 	} {
 		err := tc.h.Validate()
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -79,3 +89,39 @@ func TestHeatSectionRefusesWhatCannotBeReadOneWay(t *testing.T) {
 }
 
 func with(z HeatZone, f func(*HeatZone)) HeatZone { f(&z); return z }
+
+// The house the planner was built for: a CTC with an air-to-water pump on
+// a heat curve, the rooms read by an underfloor gateway.
+const houseHeatPumpYAML = `
+zones:
+  - name: house
+    sensor: LK/zone_2_temp_c
+    heat_input: CTC/space_heat_w
+    boundary: outdoor
+    source: heat_pump
+    heat_kw: 6
+    target_c: 21
+    min_c: 20
+    max_c: 22.5
+    heat_pump:
+      carnot_fraction: 0.45
+      supply: { cold_outdoor_c: -20, cold_supply_c: 45, mild_outdoor_c: 15, mild_supply_c: 24 }
+    curve_effect: { zone_k_per_unit: 0.5, supply_k_per_unit: 1 }
+`
+
+func TestHeatSectionReadsAHeatPump(t *testing.T) {
+	var h Heat
+	if err := yaml.Unmarshal([]byte(houseHeatPumpYAML), &h); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	src := h.Zones[0].PlanSource()
+	if src.Kind != heatplan.SourceHeatPump || src.CarnotFraction != 0.45 || src.Supply == nil || src.Supply.At(-20) != 45 {
+		t.Fatalf("source = %+v", src)
+	}
+	if h.Zones[0].CurveEffect.ZoneKPerUnit != 0.5 || h.Zones[0].HeatInput != "CTC/space_heat_w" {
+		t.Fatalf("zone = %+v", h.Zones[0])
+	}
+}

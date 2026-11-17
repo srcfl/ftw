@@ -462,6 +462,9 @@ func (s *Service) request(zc config.HeatZone, twins map[string]thermaltwin.ZoneS
 		boundary = constant(n, b)
 	}
 	if outdoor == nil {
+		if zc.Source == config.HeatSourceHeatPump {
+			return nil, errors.New("a heat pump needs the outdoor forecast for the horizon")
+		}
 		// Direct electric heat does not depend on the weather; the
 		// planner still wants a series.
 		outdoor = boundary
@@ -508,7 +511,9 @@ func (s *Service) request(zc config.HeatZone, twins map[string]thermaltwin.ZoneS
 // control is planned as if a thermostat could be set anywhere in its band
 // in half-degree steps, so the owner sees what a control would do.
 func (s *Service) actuator(zc config.HeatZone) (heatplan.Actuator, *float64, error) {
+	act := heatplan.Actuator{Strategy: thermal.InfluenceSetpoint, MaxHeatKW: zc.HeatKW, Source: zc.PlanSource()}
 	lo, hi, step := zc.MinC, zc.MaxC, 0.5
+	var declaredDefault *float64
 	if zc.Control != "" {
 		if s.in.Control == nil {
 			return heatplan.Actuator{}, nil, errors.New("the control's declaration is not known")
@@ -517,34 +522,51 @@ func (s *Service) actuator(zc config.HeatZone) (heatplan.Actuator, *float64, err
 		if !ok {
 			return heatplan.Actuator{}, nil, fmt.Errorf("%s is not a declared control", zc.Control)
 		}
-		if c.Thermal == nil || c.Thermal.Strategy != thermal.InfluenceSetpoint {
-			return heatplan.Actuator{}, nil, fmt.Errorf("%s is not declared as a setpoint; only setpoints are planned yet", zc.Control)
+		if c.Thermal == nil {
+			return heatplan.Actuator{}, nil, fmt.Errorf("%s does not say what it does to heat", zc.Control)
 		}
 		in := c.Input
 		if in.Min == nil || in.Max == nil {
 			return heatplan.Actuator{}, nil, fmt.Errorf("%s declares no range", zc.Control)
 		}
-		lo, hi = math.Max(lo, *in.Min), math.Min(hi, *in.Max)
 		if in.Step != nil && *in.Step > 0 {
 			step = *in.Step
 		}
+		declaredDefault = in.Default
+		switch c.Thermal.Strategy {
+		case thermal.InfluenceSetpoint:
+			lo, hi = math.Max(lo, *in.Min), math.Min(hi, *in.Max)
+		case thermal.InfluenceCurveOffset:
+			if zc.CurveEffect == nil {
+				return heatplan.Actuator{}, nil, fmt.Errorf("%s is a curve offset; the zone needs curve_effect", zc.Control)
+			}
+			act.Strategy = thermal.InfluenceCurveOffset
+			act.ZoneKPerUnit, act.SupplyKPerUnit = zc.CurveEffect.ZoneKPerUnit, zc.CurveEffect.SupplyKPerUnit
+			lo, hi = *in.Min, *in.Max
+		default:
+			return heatplan.Actuator{}, nil, fmt.Errorf("%s is %s; only setpoints and curve offsets are planned yet", zc.Control, c.Thermal.Strategy)
+		}
 	}
-	values := candidates(lo, hi, step)
-	if len(values) == 0 {
+	act.Values = candidates(lo, hi, step)
+	if len(act.Values) == 0 {
 		return heatplan.Actuator{}, nil, errors.New("the control can reach nothing inside the band")
 	}
-	neutral := values[0]
-	for _, v := range values {
-		if math.Abs(v-zc.TargetC) < math.Abs(neutral-zc.TargetC) {
+	// The device's own value: its declared default, or for a setpoint the
+	// step nearest the target, for an offset the step nearest zero.
+	aim := zc.TargetC
+	if act.Strategy == thermal.InfluenceCurveOffset {
+		aim = 0
+	}
+	if declaredDefault != nil {
+		aim = *declaredDefault
+	}
+	neutral := act.Values[0]
+	for _, v := range act.Values {
+		if math.Abs(v-aim) < math.Abs(neutral-aim) {
 			neutral = v
 		}
 	}
-	return heatplan.Actuator{
-		Strategy:  thermal.InfluenceSetpoint,
-		Values:    values,
-		MaxHeatKW: zc.HeatKW,
-		Source:    heatplan.Source{Kind: heatplan.SourceDirectElectric},
-	}, &neutral, nil
+	return act, &neutral, nil
 }
 
 // candidates are the control's steps from lo to hi, at most 16; a fine step

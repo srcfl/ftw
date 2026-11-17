@@ -18,3 +18,7 @@ A zone can name its heat input (`heat_input: "<driver>/<metric>"`), so a room
 sensor on one device, such as an underfloor gateway, learns against the heat
 of another, such as a heat pump's estimated space heat. A sensor named in
 `heat.zones` is learned even when its driver does not declare it.
+
+A zone can be heated by a heat pump (`source: heat_pump`) with the owner's
+efficiency and heat curve, and planned through a declared curve offset with
+the owner's figures for what one unit does.
