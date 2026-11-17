@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/loadpoint"
+	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -66,8 +67,11 @@ func TestValidatePlanNamesTheCarRoomOverrun(t *testing.T) {
 
 // carRoomOptimizer plans as the fleet worker does on the field night: in
 // the first slot where the house draws, the battery covers the house and
-// the car charges on the room that frees. Every other rule holds.
-type carRoomOptimizer struct{}
+// the car charges on the room that frees. Every other rule holds. A
+// downside worker plans the caution forecast first, as Energyplan does.
+type carRoomOptimizer struct{ downside bool }
+
+func (o carRoomOptimizer) UsesDownsidePV() bool { return o.downside }
 
 func (carRoomOptimizer) Optimize(_ context.Context, slots []Slot, p Params) (Plan, error) {
 	lp := p.activeLoadpoints()[0]
@@ -170,6 +174,29 @@ func TestCarRoomWorkerPlanWhenCoreCannotPlan(t *testing.T) {
 		if snap.Plan.Solver.Fallback || snap.Plan.Solver.Backend != "car-room-test" || !warned {
 			t.Fatalf("2 storages: solver %+v, warnings %q; want the worker's plan with a warning", snap.Plan.Solver, snap.Warnings)
 		}
+	}
+}
+
+// A worker that plans the caution forecast first returns only its point
+// plan's error once caution fails. Core publishes that point plan, so the
+// plan reads as one without the extra forecast margin.
+func TestCarRoomPointPlanIsWithoutCaution(t *testing.T) {
+	svc := carRoomFieldService(t, carRoomOptimizer{downside: true}, 2)
+	svc.PVForecastSafetyK = .3
+	svc.ForecastSnapshot = func(time.Time, []state.ForecastPoint) ForecastInputs {
+		return ForecastInputs{Load: func(time.Time) float64 { return 800 },
+			Risk: func(_, risk []Slot, _ float64) {
+				for i := range risk {
+					risk[i].LoadW = 900
+				}
+			}}
+	}
+	plan := svc.Replan(context.Background())
+	if plan == nil || plan.Solver == nil || plan.Solver.Backend != "car-room-test" {
+		t.Fatalf("no worker plan published: %+v", svc.PlanSnapshot())
+	}
+	if !plan.CautionOff || !strings.Contains(strings.Join(svc.PlanSnapshot().Warnings, " "), "caution") {
+		t.Fatalf("caution off = %v, warnings %q; want the point plan marked without caution", plan.CautionOff, svc.PlanSnapshot().Warnings)
 	}
 }
 

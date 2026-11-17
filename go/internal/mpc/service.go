@@ -2148,6 +2148,12 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			}
 			s.recordPlanningFailure(request, "primary_optimizer", err.Error(), slots, p, optimizerErr)
 			plan = overrun.plan
+			// planWithForecastMargin returns only a point solve's error, so
+			// this plan leaves out a caution forecast that differed.
+			if downsidePrimary && !sameForecast(baseForecastSlots, fallbackSlots) {
+				cautionOff = true
+				warnings = append(warnings, "Forecast caution gave no plan Core could publish; using the point forecast.")
+			}
 			if overrun.hours != nil {
 				p.ImportHours, p.ImportMeanW = nil, 0
 				warnings = append(warnings, "Core cannot plan this site itself, so the plan may import more in an hour than the limit allows; Core still holds each hour to it: "+overrun.hours.Error())
