@@ -126,14 +126,18 @@ func (NotificationDispatched) Kind() string { return KindNotificationDispatched 
 
 // UpdateAvailable is emitted by the self-update checker when a new
 // release is discovered (and not on the operator's skip list). Emitted
-// at most once per unique Version so a periodic re-check doesn't spam
-// subscribers that already saw the transition.
+// at most once per unique Version, across restarts, so a periodic
+// re-check or a reboot doesn't spam subscribers that already saw it.
 type UpdateAvailable struct {
 	Version         string
 	PreviousVersion string
 	ReleaseNotesURL string
 	PublishedAt     time.Time
 	At              time.Time
+	// Installable says an owner can install Version from the app now: the
+	// box can stage it, it keeps the stored data as it is, and it has not
+	// failed here before. Only then do the owners' phones hear of it.
+	Installable bool
 }
 
 func (UpdateAvailable) Kind() string { return KindUpdateAvailable }
@@ -149,8 +153,7 @@ func (NotificationTest) Kind() string { return KindNotificationTest }
 
 // UpdateInstalled is emitted once, on the first boot of a new version: the
 // previous run wrote its version down, and this run reads a different one
-// back. It is the "everything came back on its own" moment, which is the
-// only update fact worth a lock screen.
+// back. It is the "everything came back after the restart" moment.
 type UpdateInstalled struct {
 	Version         string
 	PreviousVersion string

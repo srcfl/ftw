@@ -404,6 +404,11 @@ type State struct {
 	// main.go refreshes both from loadpoint.Controller every dispatch tick.
 	BatteryBoostEVChargingW float64
 	BatteryBoostReserveSoC  float64
+	// BatteryBoostActive reports a valid lease on a plugged-in loadpoint
+	// that is not surplus-only, whether or not its car draws yet. The room
+	// a battery makes counts for the car from the start
+	// (evBatteryDischargeW): the lease's draw is zero until the car starts.
+	BatteryBoostActive bool
 	// EVCommandedW is the frozen sum of final charger offers from this tick.
 	// It reserves site capacity before optional battery charging, even before
 	// an EV ramps up and in modes without an accepted optimizer plan.

@@ -32,9 +32,19 @@ events:
     # cable must not become a night of lock-screen noise.
     title: Charging stopped early
     body: "The car stopped charging before it was done."
+  - kind: update.available
+    # To owners, once per version, across restarts. Only a native box sends
+    # it, and only when an owner can install that version from the app: the
+    # box can stage it, it keeps the stored data as it is, it has not failed
+    # here before, and nobody skipped it. Nothing installs by itself; the
+    # owner starts every update.
+    title: A newer FTW is ready
+    body: "{version} is ready for your box. Open FTW to see what is new and update."
   - kind: update.installed
-    title: Your box updated itself
-    body: "Now running {version}. Everything came back on its own."
+    # On the first start of a new version. The owner started the update,
+    # so this says that it finished, not that the box chose to update.
+    title: FTW is updated
+    body: "Your box now runs {version}. Everything came back after the restart."
   - kind: driver.offline
     # After the box's own threshold: ten minutes of silence from a driver
     # that had been reporting. A blip must not become a lock-screen.

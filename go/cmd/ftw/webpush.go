@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/srcfl/ftw/go/internal/apiauth"
 	"github.com/srcfl/ftw/go/internal/appenroll"
 	"github.com/srcfl/ftw/go/internal/notifications"
 	"github.com/srcfl/ftw/go/internal/state"
@@ -36,6 +37,19 @@ func (p pushSubscriptionSource) PushSubscriptions() ([]notifications.PushSubscri
 
 func (p pushSubscriptionSource) DeletePushSubscription(id string) error {
 	return p.st.DeletePushSubscription(id)
+}
+
+// ownerByDevice says whether a paired phone is an owner now, read from the
+// roster on each ask so a role changed a moment ago counts.
+func ownerByDevice(enroll *appenroll.Identity) func(deviceID string) bool {
+	return func(deviceID string) bool {
+		for _, d := range enroll.Devices() {
+			if d.ID == deviceID {
+				return d.Role == apiauth.RoleOwner
+			}
+		}
+		return false
+	}
 }
 
 // webPushFromState renders and encrypts the box.unreachable farewell, one

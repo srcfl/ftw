@@ -119,6 +119,23 @@ func importHourCapsW(slots []Slot, p Params) (caps, carCaps []float64) {
 	return caps, carCaps
 }
 
+// carImportLimitW is the import a charging car shares with the house in slot
+// t: the slot's limit and the hour's caps, whichever is lowest. 0 means no
+// limit, as in PowerLimits. A cap with no room for a car stops it elsewhere.
+func carImportLimitW(slot Slot, caps, carCaps []float64, t int) float64 {
+	limit := math.Inf(1)
+	if slot.Limits.MaxImportW > 0 {
+		limit = slot.Limits.MaxImportW
+	}
+	if caps != nil {
+		limit = min(limit, caps[t], carCaps[t])
+	}
+	if math.IsInf(limit, 1) || limit <= 0 {
+		return 0
+	}
+	return limit
+}
+
 // evAverageRoomW is the most mean EV power a slot holds under capW of mean
 // import, with baseW the rest of its grid flow and the car pulsing at
 // peakW. A pulse imports while it runs even when the slot exports between.

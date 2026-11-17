@@ -671,6 +671,12 @@ func validatePlan(slots []Slot, p Params, plan *Plan, vehicleRules bool) error {
 			if vehicleRules && lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEV(a.BatteryW, powerW, slot.LoadW, effectivePVW) {
 				return fmt.Errorf("slot %d battery discharge feeds loadpoint %s", i, lp.ID)
 			}
+			// The cars together must fit the import limit beside the house
+			// with the battery idle, or the discharge made their room.
+			if vehicleRules && lp.blocksBatteryToEV() && powerW > solverZeroPowerToleranceW &&
+				loadpoint.BatteryDischargeFeedsEVUnderImport(a.BatteryW, totalLoadpointW, slot.LoadW, effectivePVW, slot.Limits.MaxImportW) {
+				return fmt.Errorf("slot %d battery discharge makes the import room for loadpoint %s", i, lp.ID)
+			}
 		}
 		if surplusOnlyExceedsHousePV(totalSurplusOnlyW, slot.LoadW, effectivePVW) {
 			return fmt.Errorf("slot %d surplus-only EVs exceed shared leftover PV", i)

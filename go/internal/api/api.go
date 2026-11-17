@@ -591,7 +591,10 @@ func (s *Server) routes() {
 	s.handle("POST /api/pv/manual_hold", Actuate, s.handlePVManualHold)
 	s.handle("DELETE /api/pv/manual_hold", Actuate, s.handlePVManualHoldClear)
 	s.handle("GET  /api/pv/manual_hold", Read, s.handlePVManualHoldGet)
-	s.handle("GET  /api/version/check", Configure, s.handleVersionCheck)
+	// Owner, since ?force=1 asks GitHub on the box's behalf. NoStepUp: a
+	// phone reads it to say whether a newer Core exists, and Face ID is the
+	// wrong cost for a question. The update itself keeps its ceremony.
+	s.handle("GET  /api/version/check", Configure, s.handleVersionCheck, NoStepUp)
 	s.handle("POST /api/version/channel", Configure, s.handleVersionChannel)
 	s.handle("POST /api/version/skip", Configure, s.handleVersionSkip)
 	s.handle("POST /api/version/unskip", Configure, s.handleVersionUnskip)
