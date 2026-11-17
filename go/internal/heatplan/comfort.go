@@ -34,17 +34,17 @@ type PriceComfort struct {
 	// raised by all of RaiseK. NormalPrice is where the target is the
 	// owner's own, and DearPrice the mean at or above which it is lowered by
 	// all of LowerK. Between them the shift is linear, never a step.
-	CheapPrice  float64 `json:"cheap_price"`
-	NormalPrice float64 `json:"normal_price"`
-	DearPrice   float64 `json:"dear_price"`
+	CheapPrice  float64 `yaml:"cheap_price" json:"cheap_price"`
+	NormalPrice float64 `yaml:"normal_price" json:"normal_price"`
+	DearPrice   float64 `yaml:"dear_price" json:"dear_price"`
 	// RaiseK and LowerK are how far the target moves, in kelvin. Zero turns
 	// that direction off: a floor may follow cheap days up while the room
 	// air only follows dear days down.
-	RaiseK float64 `json:"raise_k"`
-	LowerK float64 `json:"lower_k"`
+	RaiseK float64 `yaml:"raise_k" json:"raise_k"`
+	LowerK float64 `yaml:"lower_k" json:"lower_k"`
 	// StepK rounds the shift to the control's step, halves away from zero.
 	// Zero leaves it unrounded.
-	StepK float64 `json:"step_k,omitempty"`
+	StepK float64 `yaml:"step_k,omitempty" json:"step_k,omitempty"`
 }
 
 // Enabled reports whether the rule moves anything.
@@ -162,11 +162,11 @@ func (p Plan) Saving() float64 {
 type SavingsGate struct {
 	// MinPerDay is what the plans must save together in a day, in the unit
 	// of Request.Price times kWh. Zero or less opens the gate always.
-	MinPerDay float64 `json:"min_per_day"`
+	MinPerDay float64 `yaml:"min_per_day" json:"min_per_day"`
 	// KeepShare is the share of MinPerDay below which an open gate closes
 	// again, so that a saving near the limit does not open and close it
 	// every slot. From above 0 to 1; zero means 1, no hysteresis.
-	KeepShare float64 `json:"keep_share,omitempty"`
+	KeepShare float64 `yaml:"keep_share,omitempty" json:"keep_share,omitempty"`
 }
 
 // Validate refuses a gate that cannot be read one way.
@@ -222,13 +222,13 @@ func (g SavingsGate) Open(plans []Plan, horizonH float64, wasOpen bool) (open bo
 type PeakRelief struct {
 	// MinPrice is the price below which no slot is a peak, in the unit of
 	// Request.Price.
-	MinPrice float64 `json:"min_price"`
+	MinPrice float64 `yaml:"min_price" json:"min_price"`
 	// Factor is how many times the window's lowest price a peak costs. Above 1.
-	Factor float64 `json:"factor"`
+	Factor float64 `yaml:"factor" json:"factor"`
 	// WindowH is how far ahead the lowest price is looked for, in hours.
-	WindowH float64 `json:"window_h"`
+	WindowH float64 `yaml:"window_h" json:"window_h"`
 	// MaxHours is the longest relief in one peak.
-	MaxHours float64 `json:"max_hours"`
+	MaxHours float64 `yaml:"max_hours" json:"max_hours"`
 }
 
 // Enabled reports whether the rule relieves anything.
