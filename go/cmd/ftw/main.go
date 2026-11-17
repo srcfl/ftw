@@ -1667,6 +1667,10 @@ func main() {
 	} else {
 		defer forecastTrackerSvc.Stop()
 	}
+	// The long-term archive copies the 30-day tables on its own. It starts
+	// even when the tracker did not, and it never shares the tracker's queue.
+	forecastLongArchiveSvc := startForecastLongArchive(ctx, st)
+	defer forecastLongArchiveSvc.Stop()
 
 	// A small live-identity poll also protects legacy learners when MPC is off.
 	// Config/schema/script work stays in Configure; this only reads host identity.

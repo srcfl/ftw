@@ -791,6 +791,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.deps.State != nil {
 		storage := map[string]any{"state": "ok", "cache": "ok", "history": "ok"}
 		for _, ev := range s.deps.State.HealEvents() {
+			if ev.Tier == "forecast_archive" {
+				continue // shown in forecast_archive; it must not replace a boot event
+			}
 			storage[ev.Tier] = ev.Action // "rebuilt" | "restored"
 			storage["last_event_ms"] = ev.AtMs
 			storage["detail"] = ev.Detail
@@ -802,6 +805,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		writer := s.deps.State.HistoryWriterStatus()
 		if writer.LastError != "" || writer.MaintenanceError != "" || s.deps.State.HistoryMaintenanceStatus().LastError != "" || (writer.LastRejectMS > 0 && time.Now().UnixMilli()-writer.LastRejectMS < time.Minute.Milliseconds()) {
 			resp["status"] = "degraded"
+		}
+		// The long-term forecast archive is informational. A full disk or a
+		// rebuilt file must not mark the box degraded.
+		if archive, ok := s.deps.State.ForecastLongArchiveStatus(); ok {
+			resp["forecast_archive"] = archive
 		}
 	}
 	writeJSON(w, 200, resp)
