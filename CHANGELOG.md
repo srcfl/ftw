@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.165.0
+
+### Minor Changes
+
+- 39a1805: FTW in Docker now updates itself as a native install does. The container runs `ftw-launcher` with its releases in a volume of their own, so **Update FTW** on the box page and in the app, `ftw update` and `ftw rollback` work in Docker, and a release that does not become ready falls back to the one before it. A rebuild with a newer `FTW_VERSION` still updates, through the same trial; an older one changes nothing.
+  
+  An existing Docker project moves over once: take `Dockerfile` and `compose.yaml` from this release and rebuild. Its `data` stays. Run `ftw update` and `ftw rollback` with `docker compose run --rm --entrypoint ftw ftw …`, since Core's restart ends commands started with `exec`. Balena deployments keep running Core from the image.
+- 2c337e1: Owners' phones now get a notice when a newer FTW is ready to install from the app: once per version, also after a restart, never for a skipped version, and only when the box can take it. Nothing installs by itself. The notice after an update no longer says the box updated itself.
+
+### Patch Changes
+
+- 68292a2: A home battery that may not cover the car no longer makes room for it under
+  the fuse or the import limit. Before, a plan could discharge the battery to
+  cover the house while the car charged against the fuse; the room that freed
+  went to the car, so battery energy charged the car although the battery
+  should cover only the house. The car now gets the room the grid gives beside
+  the house with the battery idle, in Core's planner, its reserve plan, the
+  check of every worker plan and the charger's fuse limit. A battery boost, or
+  the old site-wide battery cover, still lets the battery help the car; a
+  boosted car may also start on the battery's room before it draws.
+- 4b8d65e: Bundle heishamon 0.8.1. FTW no longer resets a Panasonic Aquarea's heat
+  curve offset at every start and watchdog trip unless FTW itself set it, so an
+  offset set from Home Assistant now stays.
+- 5e410d8: The bundled Energyplan worker now keeps a battery that may not cover the car
+  out of the car's import room, as Core requires. Until now Core rejected such a
+  plan: a site with one battery and one car got Core's own plan, and a site with
+  several batteries or cars got the worker's plan with a warning. The worker's
+  plan now passes without one.
+- acdc584: A site Core cannot plan itself, such as one with two home batteries, again
+  gets Energyplan's plan when the battery covers the house while a car the
+  battery may not cover charges under the fuse. Since the car-room fix, Core
+  rejected such a plan and kept the previous one. The plan now goes out with a
+  warning. The charger still leaves the battery's discharge out of the car's
+  room, so battery energy does not reach the car.
+- 52cd9e6: Keep issued forecasts and quarter-hour load and PV measurements in a local archive for up to two years, separate from planning. The archive keeps every run for 30 days, then one run per hour, and drops its oldest days to stay under 1 GiB.
+  
+  The archive is informational. A problem in it does not mark the box degraded, and a full backup stores a consistent copy rather than the live file.
+- 12dde0f: The help report reads the clock again after it loads the week. On a
+  Raspberry Pi that load can take most of a minute. A device that was fine then
+  showed `no_contact` with `readings_lost` and a negative "last reading" age.
+- 092269f: The notice that a newer FTW is ready now comes once per version also when the
+  owner switches between beta and stable, and stays away when the disk has no
+  room for the download.
+- d25ba28: An owner's phone can now ask the box whether a newer Core exists
+  (`GET /api/version/check`) without Face ID, so the app can show the newer
+  version and its notes. Installing it (`POST /api/version/update`) still asks
+  for Face ID, and a viewer still cannot read the check.
+
 ## 0.164.0
 
 ### Minor Changes
