@@ -88,12 +88,16 @@ func TestUpdateAvailableSaysWhetherTheAppCanInstallIt(t *testing.T) {
 		body  string
 		slots bool
 		fail  bool
+		full  bool
 		want  bool
 	}{
 		{name: "ready", body: "<!-- ftw-state-schema-v2:7 -->", slots: true, want: true},
 		{name: "changes stored data", body: "<!-- ftw-state-schema-v2:8 -->", slots: true},
 		{name: "release slots not ready", body: "<!-- ftw-state-schema-v2:7 -->"},
 		{name: "failed here before", body: "<!-- ftw-state-schema-v2:7 -->", slots: true, fail: true},
+		// TriggerUpdate refuses a download that would fill the disk, so the
+		// owners must not hear that a version is ready to install.
+		{name: "too little disk space", body: "<!-- ftw-state-schema-v2:7 -->", slots: true, full: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -112,6 +116,9 @@ func TestUpdateAvailableSaysWhetherTheAppCanInstallIt(t *testing.T) {
 			if tc.fail {
 				// What the slots say after a failed trial, read on each check.
 				markFailed(t, root, "v0.165.0-beta.1")
+			}
+			if tc.full {
+				fillDisk(t, root, current)
 			}
 			if _, err := c.Check(context.Background(), true); err != nil {
 				t.Fatal(err)
@@ -164,6 +171,72 @@ func TestUpdateAvailableSkipsSkippedVersionsAndSurvivesAChannelSwitch(t *testing
 	}
 	if evs := got(); len(evs) != 1 {
 		t.Fatalf("announced %d times, want once after unskip: %+v", len(evs), evs)
+	}
+}
+
+// Each version is news once, whichever channel found it. The box used to
+// keep only the last version it announced, so beta, then stable, then beta
+// again told the owners about the same beta twice, also after a restart.
+func TestUpdateAvailableIsAnnouncedOncePerVersionAcrossChannels(t *testing.T) {
+	root := t.TempDir()
+	current := "v0.164.0-beta.1"
+	nativeCurrentSlot(t, root, current)
+	if err := (nativeupdate.Manager{Root: root}).Init(current); err != nil {
+		t.Fatal(err)
+	}
+	rls := fakeReleasesServer(t, nil,
+		fakeRelease{tag: "v0.165.0-beta.1", body: "<!-- ftw-state-schema-v2:7 -->", published: time.Now(), prerelease: true},
+		fakeRelease{tag: "v0.164.0", body: "<!-- ftw-state-schema-v2:7 -->", published: time.Now().Add(-time.Hour)},
+	)
+	bus := events.NewBus()
+	got := collectAvailable(bus)
+	st := newMemStore()
+	check := func(c *Checker) {
+		t.Helper()
+		if _, err := c.Check(context.Background(), true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setChannel := func(c *Checker, ch Channel) {
+		t.Helper()
+		if err := c.SetChannel(ch); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c := readyChecker(t, root, current, rls.URL, bus, st)
+	check(c) // beta: v0.165.0-beta.1
+	setChannel(c, ChannelStable)
+	check(c) // stable: v0.164.0
+	setChannel(c, ChannelBeta)
+	check(c) // beta again: nothing new
+	again := readyChecker(t, root, current, rls.URL, bus, st)
+	check(again)
+	setChannel(again, ChannelStable)
+	check(again)
+
+	var versions []string
+	for _, ev := range got() {
+		versions = append(versions, ev.Version)
+	}
+	want := []string{"v0.165.0-beta.1", "v0.164.0"}
+	if len(versions) != len(want) || versions[0] != want[0] || versions[1] != want[1] {
+		t.Fatalf("announced %v, want %v", versions, want)
+	}
+}
+
+// fillDisk makes the current release look larger than this disk can hold
+// three times, as TestCheckSpaceRefusesWhenTheNextReleaseWouldNotFit does.
+// The file is sparse, so it takes no space.
+func fillDisk(t *testing.T, root, current string) {
+	t.Helper()
+	f, err := os.Create(filepath.Join(root, "releases", current, "ftw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := f.Truncate(1 << 43); err != nil {
+		t.Fatal(err)
 	}
 }
 
