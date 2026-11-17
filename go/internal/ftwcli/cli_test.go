@@ -410,6 +410,14 @@ func TestStatusShowsReleaseLastRunAndHealth(t *testing.T) {
 	if code, out, _ := runCLI(t, container, "status", "--url", srv.URL); code != exitFailed || !strings.Contains(out, "not answering") || strings.Contains(out, "ftw-launcher") {
 		t.Fatalf("container down: %d %s", code, out)
 	}
+	// The way back through systemd and /opt/ftw/ftw-launcher is a native
+	// host's; a container's launcher sits elsewhere and Docker restarts it.
+	if code, _, errOut := runCLI(t, testEnv(), "update", "--url", srv.URL); code != exitFailed || !strings.Contains(errOut, "systemctl restart ftw") {
+		t.Fatalf("update down: %d %s", code, errOut)
+	}
+	if code, _, errOut := runCLI(t, container, "update", "--url", srv.URL); code != exitFailed || !strings.Contains(errOut, "not answering") || strings.Contains(errOut, "systemctl") {
+		t.Fatalf("container update down: %d %s", code, errOut)
+	}
 }
 
 func TestBackupCopiesOnlyAVerifiedMatch(t *testing.T) {

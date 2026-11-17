@@ -129,6 +129,9 @@ func (c *client) nativeInfo(ctx context.Context) (versionInfo, error) {
 		if selfUpdateOff(err) {
 			return info, errors.New(notNative)
 		}
+		if !c.env.systemd {
+			return info, fmt.Errorf("Core is not answering at %s: %w", c.base, err)
+		}
 		return info, fmt.Errorf("Core is not answering at %s: %w; %s", c.base, err, offlineRollback)
 	}
 	if !info.Native {

@@ -2414,10 +2414,11 @@ func main() {
 
 	// ---- Self-update checker ----
 	// Probes the GitHub Releases API in the background; the ftw command and
-	// the UI read the cached result via /api/version/check. Only a native
-	// install, started by the launcher from its release slots, updates
-	// itself (ADR 0007). Docker changes FTW_VERSION and rebuilds, and the
-	// Home Assistant app follows Supervisor. Deps.SelfUpdate stays nil there,
+	// the UI read the cached result via /api/version/check. Only Core started
+	// by the launcher from its release slots updates itself (ADR 0007): a
+	// native install, or Docker from deploy/docker. Balena changes
+	// FTW_VERSION and redeploys, and the Home Assistant app follows
+	// Supervisor. Deps.SelfUpdate stays nil there,
 	// which makes every /api/version/* handler return 503; the UI then says
 	// who updates FTW instead of offering an update.
 	var selfUpdater *selfupdate.Checker

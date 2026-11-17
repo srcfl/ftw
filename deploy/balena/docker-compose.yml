@@ -17,6 +17,9 @@ services:
       context: ./ftw
       args:
         FTW_VERSION: v0.154.1-beta.1
+    # Core from the image, not through the launcher that the Dockerfile
+    # starts: the release is the one deployed here.
+    entrypoint: ["/app/ftw", "-config", "/app/data/config.yaml", "-web", "/app/web", "-drivers", "/app/drivers", "-user-drivers", "/app/data/drivers"]
     restart: unless-stopped
     # Core saves its state on a clean stop.
     stop_grace_period: 60s

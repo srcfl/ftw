@@ -133,6 +133,61 @@ fi''')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('docker compose up -d --build', calls)
 
+    def run_move(self, failure='', tag='v0.170.0-beta.1'):
+        """Run the block that moves an existing Docker project to the launcher."""
+        block = recipe(EN, "grep -v '^FTW_VERSION='").replace('v0.X.Y-beta.N', tag)
+        self.env['FTW_TEST_FAIL'] = failure
+        result = subprocess.run(['bash', '-c', block], cwd=self.project, env=self.env,
+                                capture_output=True, text=True)
+        calls = self.log.read_text() if self.log.exists() else ''
+        return result, calls
+
+    def old_project(self):
+        (self.project / 'data').mkdir(parents=True)
+        (self.project / 'data/state.db').write_text('household record\n')
+        (self.project / 'compose.yaml').write_text('old compose\n')
+        (self.project / 'Dockerfile').write_text('old Dockerfile\n')
+        (self.project / '.env').write_text('COMPOSE_PROFILES=x\nFTW_VERSION=v0.150.0-beta.1\n')
+
+    def test_docker_move_replaces_files_and_version_only(self):
+        self.old_project()
+        result, calls = self.run_move()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('/v0.170.0-beta.1/deploy/docker/compose.yaml', calls)
+        for name in ('compose.yaml', 'Dockerfile'):
+            self.assertIn('INSTALL', (self.project / name).read_text())
+        self.assertEqual((self.project / '.env').read_text(),
+                         'COMPOSE_PROFILES=x\nFTW_VERSION=v0.170.0-beta.1\n')
+        self.assertEqual((self.project / 'data/state.db').read_text(), 'household record\n')
+        # It only prepares the files; the owner rebuilds as the next step.
+        self.assertFalse([c for c in calls.splitlines() if c.startswith('docker ')])
+        for call in calls.splitlines():
+            self.assertFalse(Path(shlex.split(call)[-1]).parent.exists())
+
+    def test_docker_move_failure_leaves_the_project(self):
+        for failure in ('download', 'dockerfile'):
+            with self.subTest(failure=failure):
+                if self.project.exists():
+                    for path in sorted(self.project.rglob('*'), reverse=True):
+                        path.unlink() if path.is_file() else path.rmdir()
+                self.old_project()
+                result, _ = self.run_move(failure)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((self.project / 'compose.yaml').read_text(), 'old compose\n')
+                self.assertEqual((self.project / 'Dockerfile').read_text(), 'old Dockerfile\n')
+                self.assertIn('FTW_VERSION=v0.150.0-beta.1', (self.project / '.env').read_text())
+
+    def test_docker_move_refuses_a_bad_tag_or_another_directory(self):
+        self.old_project()
+        result, calls = self.run_move(tag='v0.X.Y-beta.N')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, '')
+        (self.project / '.env').unlink()
+        result, calls = self.run_move()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('STOP: run this in the Compose project', result.stderr)
+        self.assertEqual(calls, '')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -42,7 +42,7 @@ Välj **en** av följande vägar. De är alternativ, inte steg efter varandra:
 | Docker 3.x, inklusive 3.x-beta | Samma väg som från äldre Docker. Ingen mellanversion behövs. | Följ metoden för den nya installationen. |
 | SD-kort med den gamla färdiga FTW-imagen | Använd ett nytt kort med Raspberry Pi OS Lite 64-bit. Behåll det gamla kortet. Den gamla imagen innehåller Docker; den är ingen egen uppdateringskanal. | `ftw update` på den nya native-installationen. |
 | Nya 0.x med native launcher och systemd | Uppdatera den befintliga installationen. Kör inte en nyinstallation. | `ftw update`, eller `ftw update --channel beta` för att välja beta. |
-| Nya 0.x i Docker, byggd från releasepaketet | Behåll Compose-projektet och dess datakatalog. | Ändra `FTW_VERSION` i `.env`, kör `docker compose up -d --build`. |
+| Nya 0.x i Docker, byggd från releasepaketet | Behåll Compose-projektet och dess datakatalog. Ett projekt från före Docker-uppdateringen hämtar först nya `Dockerfile` och `compose.yaml`. | **Update FTW** på webbsidan eller i appen, eller `docker compose run --rm --entrypoint ftw ftw update`. |
 | Home Assistant-appen FTW (0.x beta) | Uppdatera och ta backup via Home Assistant. | Följ [appguiden](home-assistant-sv.md). Kör inte `ftw update`. |
 | Äldre native-installation utan release slots | Identifiera tjänsten och datavägarna. Ny installation på separat värd/kort, eller en särskilt kontrollerad flytt. | Det befintliga `migrate-native`-verktyget är en pilot, inte en allmän migrationsguide. |
 | Home Assistant-app på gamla serien | Installera appen **FTW (0.x beta)** (pilot, [FTW på Home Assistant](home-assistant-sv.md)) eller nya FTW på en separat Linux-värd. Stoppa först gamla appens Core, Start on boot och Watchdog. Installera inte 3.x-beta. | Supervisor hanterar den gamla appen. |
@@ -242,20 +242,33 @@ fi
 Om filen redan finns, kontrollera att den utesluter `data` och `.env` från
 bygget. Behåll datafilernas rättigheter.
 
-Öppna `.env` i det verifierade nya Compose-projektet och ändra `FTW_VERSION`
-till den exakta publicerade release du vill installera. Behåll övriga rader.
-Kör sedan i samma projekt:
+Docker kör Core genom samma launcher som native. Uppdatera på samma sätt:
+**More → Version → Update FTW** på webbsidan, i FTW-appen, eller i projektet:
 
 ```bash
-docker compose up -d --build
-docker compose ps
 docker compose exec ftw ftw status
+docker compose run --rm --entrypoint ftw ftw update
+docker compose ps
 ```
 
-Kontrollera även mätvärden och plan. `ftw update` och `ftw rollback` gäller
-inte den här Docker-installationen. Återgång sker genom att välja föregående
-kompatibla `FTW_VERSION` och köra Compose igen. Docker har ingen automatisk
-återgång till föregående version.
+`ftw update` och `ftw rollback` körs i en egen container. Core startar om sin
+container för att byta release, och det stoppar allt som
+`docker compose exec` startade där.
+
+Den nya releasen körs först en gång på prov. Blir den inte klar, eller
+stannar den upprepade gånger under första timmen, startar launchern
+föregående release igen. `docker compose run --rm --entrypoint ftw ftw rollback`
+återgår till föregående release när båda läser samma data. Kontrollera även
+mätvärden och plan.
+
+Att bygga om fungerar också: en nyare `FTW_VERSION` i `.env` och
+`docker compose up -d --build` installerar den releasen en gång, på samma
+sätt. En äldre `FTW_VERSION` ändrar inget, eftersom boxen kan ha uppdaterat
+sig förbi den. Ett projekt från före Docker-uppdateringen kör Core utan
+launcher; hämta nya filer en gång enligt
+[den engelska guiden](../native-beta.md#update-new-docker) och bygg om.
+Releaserna ligger i volymen `ftw-local_releases`, skild från `data`, och
+behöver ingen backup.
 
 ## För agenter som hjälper till
 
