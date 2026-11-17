@@ -501,6 +501,9 @@ func validatePlan(slots []Slot, p Params, plan *Plan, vehicleRules bool) error {
 	for _, lp := range activeLoadpoints {
 		evSoC[lp.ID] = lp.InitialSoC
 	}
+	// The first slot where the battery makes a car's import room. The plan
+	// is still checked against every other rule (planOverrun).
+	var carRoom error
 	totalCost := 0.0
 	for i, slot := range slots {
 		a := plan.Actions[i]
@@ -673,9 +676,9 @@ func validatePlan(slots []Slot, p Params, plan *Plan, vehicleRules bool) error {
 			}
 			// The cars together must fit the import limit beside the house
 			// with the battery idle, or the discharge made their room.
-			if vehicleRules && lp.blocksBatteryToEV() && powerW > solverZeroPowerToleranceW &&
+			if vehicleRules && carRoom == nil && lp.blocksBatteryToEV() && powerW > solverZeroPowerToleranceW &&
 				loadpoint.BatteryDischargeFeedsEVUnderImport(a.BatteryW, totalLoadpointW, slot.LoadW, effectivePVW, slot.Limits.MaxImportW) {
-				return fmt.Errorf("slot %d battery discharge makes the import room for loadpoint %s", i, lp.ID)
+				carRoom = fmt.Errorf("slot %d battery discharge makes the import room for loadpoint %s", i, lp.ID)
 			}
 		}
 		if surplusOnlyExceedsHousePV(totalSurplusOnlyW, slot.LoadW, effectivePVW) {
@@ -690,7 +693,11 @@ func validatePlan(slots []Slot, p Params, plan *Plan, vehicleRules bool) error {
 			(slot.Limits.MaxExportW > 0 && a.GridW < -slot.Limits.MaxExportW-solverGridLimitToleranceW) {
 			return fmt.Errorf("slot %d grid_w %.3f violates grid limits", i, a.GridW)
 		}
-		if err := validateEVPulse(slot, p, a, effectivePVW, vehicleRules); err != nil {
+		if err := validateEVPulse(slot, p, a, effectivePVW, vehicleRules); errors.Is(err, errPulseCarRoom) {
+			if carRoom == nil {
+				carRoom = fmt.Errorf("slot %d: %w", i, err)
+			}
+		} else if err != nil {
 			return fmt.Errorf("slot %d: %w", i, err)
 		}
 		wantCost := reserveSlotCost(slot, p, a)
@@ -704,9 +711,10 @@ func validatePlan(slots []Slot, p Params, plan *Plan, vehicleRules bool) error {
 	if math.Abs(plan.TotalCostOre-totalCost) > 0.1 {
 		return fmt.Errorf("total cost %.4f, want %.4f", plan.TotalCostOre, totalCost)
 	}
-	// Last, so an overrun hour is the only rule the plan breaks.
-	if err := validateImportHours(slots, p, plan.Actions); err != nil {
-		return &importHourOverrun{plan: *plan, err: err}
+	// Last, so an overrun hour and the car's room are the only rules the
+	// plan breaks.
+	if hours := validateImportHours(slots, p, plan.Actions); hours != nil || carRoom != nil {
+		return &planOverrun{plan: *plan, hours: hours, carRoom: carRoom}
 	}
 	return nil
 }

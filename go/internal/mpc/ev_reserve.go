@@ -2,6 +2,7 @@ package mpc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"slices"
@@ -278,6 +279,7 @@ func validateEVPulse(slot Slot, p Params, a Action, pvW float64, vehicleRules bo
 		return fmt.Errorf("EV pulse must retain every loadpoint")
 	}
 	minEV, maxEV, solarPeak := 0.0, 0.0, 0.0
+	var carRoom error
 	for i, lp := range loads {
 		peak, ok := a.LoadpointMaxPowerW[lp.ID]
 		average, hasAverage := a.LoadpointPowerW[lp.ID]
@@ -303,8 +305,13 @@ func validateEVPulse(slot Slot, p Params, a Action, pvW float64, vehicleRules bo
 		if lp.SurplusOnly {
 			solarPeak += peak
 		}
-		if vehicleRules && peak > 0 && lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEVUnderImport(a.BatteryW, peak, slot.LoadW, pvW, slot.Limits.MaxImportW) {
-			return fmt.Errorf("battery discharge feeds EV pulse")
+		if vehicleRules && peak > 0 && lp.blocksBatteryToEV() {
+			if loadpoint.BatteryDischargeFeedsEV(a.BatteryW, peak, slot.LoadW, pvW) {
+				return fmt.Errorf("battery discharge feeds EV pulse")
+			}
+			if loadpoint.BatteryDischargeFeedsEVUnderImport(a.BatteryW, peak, slot.LoadW, pvW, slot.Limits.MaxImportW) {
+				carRoom = errPulseCarRoom
+			}
 		}
 	}
 	if surplusOnlyExceedsHousePV(solarPeak, slot.LoadW, pvW) {
@@ -323,5 +330,10 @@ func validateEVPulse(slot Slot, p Params, a Action, pvW float64, vehicleRules bo
 			return fmt.Errorf("EV pulse charges during battery export")
 		}
 	}
-	return nil
+	return carRoom
 }
+
+// errPulseCarRoom is an EV pulse that keeps every rule but one: the battery
+// covers only the house, yet the pulse fits the import limit only beside
+// that discharge. validatePlan counts it as a planOverrun.
+var errPulseCarRoom = errors.New("battery discharge makes the import room for an EV pulse")
