@@ -325,7 +325,7 @@
       // What to do, not what to tap. The button that takes this code lives in
       // the app, in another repository, and a label quoted here would go on
       // being quoted long after the app renamed it.
-      how.textContent = "In FTW for iPhone, choose Enter pairing code while on your home Wi-Fi. " +
+      how.textContent = "In FTW on your phone, choose Enter pairing code while on your home Wi-Fi. " +
         "Enter this code and the box address shown below. " + expiryText(pairing) + " Five wrong tries and it " +
         "stops working, so ask for a new one rather than guessing.";
       slot.appendChild(how);
@@ -348,7 +348,7 @@
       open.href = pairing.url;
       open.rel = "noreferrer";
       open.className = "btn-send";
-      open.textContent = "Open in FTW on this iPhone";
+      open.textContent = "Open in FTW on this phone";
       slot.appendChild(open);
       copyButton(slot, "Copy pairing link", pairing.url);
     }
@@ -587,10 +587,10 @@
         "once and expires in a few minutes, so ask for a new one when you need it. " +
         "Everything the app needs is in the code itself, which is why the app can " +
         "be sure it is talking to this box.</p>" +
-        '<p class="hint">Only one iPhone? Open the pairing link on this phone, ' +
-        "or choose Use a pairing code and enter it in the iPhone app while on your home Wi-Fi. " +
+        '<p class="hint">Only one phone? Open the pairing link on this phone, ' +
+        "or choose Use a pairing code and enter it in the FTW app while on your home Wi-Fi. " +
         "If you set a house password, the app asks for it too. You can also choose a screenshot " +
-        "of the QR in the iPhone app. Only one code works at a time; making a new code cancels the last one.</p>" +
+        "of the QR in the FTW app. Only one code works at a time; making a new code cancels the last one.</p>" +
         "</fieldset>" +
         fleetPanel(ctx)
       );
