@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.165.1
+
+### Patch Changes
+
+- 570b060: Bundle Energyplan 0.7.1. A battery that starts below its lowest allowed
+  charge, with a car in the plan, now gets its cheap night charge from
+  Energyplan as well, instead of an idle plan.
+- 8b3bd59: A battery that sits below its lowest allowed charge, or above its highest,
+  gets a plan again. Core now gives Energyplan the nearest allowed charge, as it
+  already did for its own planner. With a car in the plan, Energyplan had kept
+  such a battery idle for a whole day, even when cheap night power made
+  charging pay. If Energyplan fails in that state, Core now plans from that
+  charge, where its own planner can model the site, instead of keeping an old
+  plan.
+
 ## 0.165.0
 
 ### Minor Changes
