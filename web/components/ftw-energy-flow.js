@@ -1703,7 +1703,8 @@ function aggregateGroups(groups) {
     } else if (first.role === "pv") {
       sub = idle ? "idle" : "generating";
     } else if (first.role === "ev") {
-      sub = idle ? "idle" : "charging";
+      sub = group.every(p => p.sub === "not connected") ? "not connected"
+        : idle ? "idle" : "charging";
     }
     // SoC: simple mean across reporters. Real weighting needs per-
     // battery capacity, which the component doesn't have here — the
