@@ -67,6 +67,8 @@ func TestPilotAwareDriverFeedback(t *testing.T) {
 		{"future confirmation cannot explain power", 8850, 13, at13, false, -time.Minute, "not_following", "power_below_target", "warning"},
 		{"zero delivery stays visible", 0, 13, at13, false, 5 * time.Second, "not_following", "no_power_response", "warning"},
 		{"zero pilot cannot explain ongoing draw", 8850, 0, at13, false, 5 * time.Second, "not_following", "power_below_target", "warning"},
+		{"zero pilot under load balancing that holds the start", 0, 0, `,"current_limit_a":0,"current_limited_by":"load_balancer"`, false, 5 * time.Second, "waiting", "load_balancer_wait", "info"},
+		{"a pilot the car could start on is not a hold", 0, 6, `,"current_limit_a":0,"current_limited_by":"load_balancer"`, false, 5 * time.Second, "not_following", "no_power_response", "warning"},
 		{"delivery below effective pilot stays visible", 4000, 13, at13, false, 5 * time.Second, "not_following", "power_below_target", "warning"},
 		{"pilot above the order", 8850, 20, at13, false, 5 * time.Second, "limited", "offered_current_lower", "warning"},
 		{"pilot above the limit", 8850, 14.2, at13, false, 5 * time.Second, "limited", "offered_current_lower", "warning"},

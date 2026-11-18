@@ -32,6 +32,25 @@ test('the status line follows the charger through every state', () => {
   assert.match(statusText, /m\.since_ms/);
 });
 
+// srcfl/ftw#1948: the charger held 12 A while its load balancing allowed
+// 0 A. The line names the load balancing instead of blaming the car.
+test('a start held by load balancing names it, then reports the failure', () => {
+  const fn = new Function('formatW', 'evFmtElapsed', 'evIsPaused', statusText + '; return manualStatusText;')(
+    w => `${(w / 1000).toFixed(1)} kW`, () => '3 min', () => false);
+  const lp = {manual_active: true, manual: {active: true, state: 'accepted', requested_a: 12, commanded_a: 12, since_ms: 1,
+    load_balancer_a: 0, charger_reason: 'limited by dynamic charger current'}};
+  assert.equal(fn(lp), 'The charger holds 12 A, but its load balancing allows 0 A, too little for the car to start (3 min). ' +
+    'It raises the current slowly once the home uses less, which can take up to 15 minutes. ' +
+    'Continues until the car stops drawing, you return to the plan, or unplug.');
+  const failed = {...lp, manual: {...lp.manual, state: 'not_drawing'}};
+  assert.equal(fn(failed), 'The charger’s load balancing still allows only 0 A, so the car has not started (3 min). ' +
+    'Compare its settings with FTW’s main fuse setting.');
+  // Without that report the words stay as they were.
+  const plain = {...failed, manual: {...failed.manual, load_balancer_a: undefined}};
+  assert.match(fn(plain), /^Charger offers 12 A but the car is not drawing \(3 min\)\. Charger reports:/);
+  assert.match(fn({...lp, manual: {...lp.manual, load_balancer_a: null}}), /^Charger reports a 12 A limit\./);
+});
+
 test('the manual controls follow every poll', () => {
   assert.match(manual, /return \{ el: box, update: update \};/);
   assert.match(source, /manual\.update\(nextLp, d\);/);

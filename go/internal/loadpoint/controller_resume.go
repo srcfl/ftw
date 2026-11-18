@@ -16,6 +16,9 @@ type resumeOffer struct {
 	deliverySince, deliveryAt time.Time
 	zeroOffer                 bool
 	noDrawSince, noDrawAt     time.Time
+	// holdSince is when the driver first reported, in this run without
+	// draw, that the charger's own load balancing holds the start.
+	holdSince time.Time
 }
 
 // Allow a missed five-second tick and ordinary cloud poll jitter. Repeating
@@ -127,6 +130,11 @@ func (c *Controller) recoverOfferedCharge(ctx context.Context, cfg Config, sampl
 		return // Already drawing: observe it rather than sending another resume.
 	}
 	previous.deliverySince, previous.deliveryAt = time.Time{}, time.Time{}
+	if !sample.LoadBalancerHold {
+		previous.holdSince = time.Time{}
+	} else if previous.holdSince.IsZero() {
+		previous.holdSince = now
+	}
 	if !previous.zeroOffer {
 		if previous.noDrawSince.IsZero() || observedAt.Before(previous.noDrawAt) ||
 			(!previous.noDrawAt.IsZero() && observedAt.Sub(previous.noDrawAt) > resumeObservationGap) {
@@ -141,8 +149,12 @@ func (c *Controller) recoverOfferedCharge(ctx context.Context, cfg Config, sampl
 		return
 	}
 	if previous.acknowledgedAttempts >= 3 {
-		if previous.acknowledgedAttempts == 3 {
-			slog.Warn("loadpoint resume acknowledged but no charge observed", "lp", cfg.ID, "driver", cfg.DriverName)
+		// The charger's own load balancing may hold a start for up to
+		// LoadBalancerRaiseWait. A start still missing after that, or one
+		// with no such hold, has failed.
+		if previous.acknowledgedAttempts == 3 && (previous.holdSince.IsZero() || now.Sub(previous.holdSince) >= LoadBalancerRaiseWait) {
+			slog.Warn("loadpoint resume acknowledged but no charge observed", "lp", cfg.ID, "driver", cfg.DriverName,
+				"load_balancer_hold", !previous.holdSince.IsZero())
 			previous.acknowledgedAttempts++
 		}
 		return
@@ -159,7 +171,8 @@ func (c *Controller) recoverOfferedCharge(ctx context.Context, cfg Config, sampl
 	// three acknowledged attempts. Only observed delivery clears the proof.
 	previous.acknowledgedAttempts++
 	slog.Info("loadpoint resume acknowledged; waiting for measured charge", "lp", cfg.ID, "driver", cfg.DriverName,
-		"attempt", previous.acknowledgedAttempts, "offer_w", offerW, "observed_w", sample.PowerW, "power_at", sample.PowerAt)
+		"attempt", previous.acknowledgedAttempts, "offer_w", offerW, "observed_w", sample.PowerW, "power_at", sample.PowerAt,
+		"load_balancer_hold", sample.LoadBalancerHold)
 	previous.nextAttempt = now.Add(30 * time.Second)
 	previous.retryDelay = 0
 }
