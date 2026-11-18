@@ -465,9 +465,9 @@ describe("the code on screen", () => {
     );
   });
 
-  it("explains first pairing on one iPhone, with the local code and house password", () => {
+  it("explains first pairing on one phone, with the local code and house password", () => {
     const { html } = load({ devices: [{ id: "aaaa1111", role: "owner" }] });
-    assert.match(html, /Only one iPhone/);
+    assert.match(html, /Only one phone/);
     assert.match(html, /home Wi-Fi/);
     assert.match(html, /house password/);
     assert.doesNotMatch(html, /never seen this box has to scan/i);
@@ -489,7 +489,7 @@ describe("the code on screen", () => {
   });
 });
 
-describe("pairing and restart on one iPhone", () => {
+describe("pairing and restart on one phone", () => {
   it("opens the full pairing link and copies it only on request", async () => {
     const link = "https://app.ftw.energy/p#v3.box.code.hint.secret.home";
     const { el, copied } = load({ pairing: { url: link, expires_at_ms: Date.now() + 600000 } });
