@@ -62,12 +62,28 @@ type SlotOutcome struct {
 	StartC *float64 `json:"start_c,omitempty"`
 	EndC   *float64 `json:"end_c,omitempty"`
 	// InputKWh is the heat input integrated over the slot, from the same
-	// "<driver>/<metric>" the twin learns against. It is whatever that
-	// metric is: a heat pump's electric draw, or a floor's estimated load.
+	// "<driver>/<metric>" the twin learns against: a heat pump's space heat,
+	// or a floor's estimated load.
 	InputKWh *float64 `json:"input_kwh,omitempty"`
 	// InputCoverage is the share of the slot covered by fresh samples. A
 	// slot well below 1 says too little to judge.
 	InputCoverage float64 `json:"input_coverage"`
+
+	// ModelEndC is where the planner's model of the zone, as it stood at
+	// the slot's start, puts the zone at its end given the heat that
+	// actually went in. Set against EndC it tests the model FTW plans with,
+	// whoever controlled the device, so it holds in shadow while another
+	// controller runs the zone and with heat.write on alike.
+	ModelEndC *float64 `json:"model_end_c,omitempty"`
+
+	// ElecKWh is the electricity over the slot. For direct electric heat it
+	// is the heat input itself. For a heat pump it is the pump's
+	// "<driver>/hp_power_w", the whole pump, hot water included, as the
+	// driver does not split its draw. ActualCost is ElecKWh at the slot's
+	// price, set only when the samples cover most of the slot.
+	ElecKWh      *float64 `json:"elec_kwh,omitempty"`
+	ElecCoverage float64  `json:"elec_coverage"`
+	ActualCost   *float64 `json:"actual_cost,omitempty"`
 }
 
 // ShadowRecord is one zone at one slot boundary.
@@ -102,6 +118,29 @@ type ShadowSink interface {
 // the time since the last one.
 const inputFreshFor = 5 * time.Minute
 
+// judgeCoverage is the share of a slot the samples must cover before the
+// slot's energy is turned into a model temperature or a cost.
+const judgeCoverage = 0.9
+
+// meter integrates one "<driver>/<metric>" in W over a slot.
+type meter struct {
+	key     string
+	wh      float64
+	covered time.Duration
+}
+
+// zoneModel is the planner's zone as one slot's plan saw it.
+type zoneModel struct {
+	tauH, capKWhPerK, gainKPerH, boundaryC float64
+}
+
+// endC is the zone after h hours at a steady heat of kw, as the planner
+// steps it: towards the equilibrium the heat holds, at the zone's inertia.
+func (m zoneModel) endC(startC, kw, h float64) float64 {
+	eq := m.boundaryC + (kw/m.capKWhPerK+m.gainKPerH)*m.tauH
+	return eq + (startC-eq)*math.Exp(-h/m.tauH)
+}
+
 // slotTrack is one zone's slot in progress.
 type slotTrack struct {
 	start    time.Time
@@ -109,9 +148,24 @@ type slotTrack struct {
 	price    *float64
 	startC   *float64
 	input    string
-	wh       float64
-	covered  time.Duration
+	heat     *meter
+	elec     *meter // nil when the heat input is the electricity
+	model    *zoneModel
 	sampleAt time.Time
+}
+
+// elecKey is what measures the zone's electricity: the heat input itself
+// for direct electric heat and for a pump whose input already is its draw,
+// otherwise the input driver's own heat power.
+func elecKey(zc config.HeatZone, input string) string {
+	if input == "" || zc.Source != config.HeatSourceHeatPump {
+		return ""
+	}
+	driver, metric := splitKey(input)
+	if metric == thermaltwin.HeatPowerMetric {
+		return ""
+	}
+	return driver + "/" + thermaltwin.HeatPowerMetric
 }
 
 func fptr(v float64) *float64 { return &v }
@@ -139,9 +193,6 @@ func (s *Service) sampleLocked(now time.Time) {
 		return
 	}
 	for _, tr := range s.tracks {
-		if tr.input == "" {
-			continue
-		}
 		prev := tr.sampleAt
 		tr.sampleAt = now
 		if prev.IsZero() || !now.After(prev) {
@@ -151,19 +202,33 @@ func (s *Service) sampleLocked(now time.Time) {
 		if dt > inputFreshFor {
 			continue
 		}
-		driver, metric := splitKey(tr.input)
-		w, at, ok := s.in.Latest(driver, metric)
-		if !ok || now.Sub(at) > inputFreshFor || w < 0 {
-			continue
+		for _, m := range []*meter{tr.heat, tr.elec} {
+			if m == nil {
+				continue
+			}
+			driver, metric := splitKey(m.key)
+			w, at, ok := s.in.Latest(driver, metric)
+			if !ok || now.Sub(at) > inputFreshFor || w < 0 {
+				continue
+			}
+			m.wh += w * dt.Hours()
+			m.covered += dt
 		}
-		tr.wh += w * dt.Hours()
-		tr.covered += dt
 	}
+}
+
+// coverage is the share of span the meter's samples cover, at most one:
+// a sample a few seconds past the boundary still counts toward the slot.
+func (m *meter) coverage(span time.Duration) float64 {
+	if m == nil || span <= 0 {
+		return 0
+	}
+	return math.Min(1, m.covered.Seconds()/span.Seconds())
 }
 
 // shadowLocked closes the slot that just ended for every zone and opens the
 // one starting at start. It runs at Tick, after the plans.
-func (s *Service) shadowLocked(cfg *config.Heat, zones []ZonePlan, plans map[int]heatplan.Plan, twins map[string]thermaltwin.ZoneStatus, price []float64, start, now time.Time, writeOn, gateOpen bool) {
+func (s *Service) shadowLocked(cfg *config.Heat, zones []ZonePlan, plans map[int]heatplan.Plan, reqs []*heatplan.Request, twins map[string]thermaltwin.ZoneStatus, price []float64, start, now time.Time, writeOn, gateOpen bool) {
 	if s.tracks == nil {
 		s.tracks = map[string]*slotTrack{}
 	}
@@ -216,27 +281,54 @@ func (s *Service) shadowLocked(cfg *config.Heat, zones []ZonePlan, plans map[int
 			if tr.start.Add(slot).Equal(start) {
 				out.Forecast = tr.forecast
 			}
-			if tr.input != "" {
-				span := start.Sub(tr.start)
-				if span > slot {
-					span = slot
+			span := start.Sub(tr.start)
+			if span > slot {
+				span = slot
+			}
+			if tr.heat != nil {
+				out.InputCoverage = tr.heat.coverage(span)
+				if tr.heat.covered > 0 {
+					out.InputKWh = fptr(tr.heat.wh / 1000)
 				}
-				if span > 0 {
-					// Samples a few seconds past the boundary still count
-					// toward this slot, so the share can pass 1 by a hair.
-					out.InputCoverage = math.Min(1, tr.covered.Seconds()/span.Seconds())
+				// Only a whole slot from where it started: after a gap the
+				// start temperature is not this slot's.
+				if tr.model != nil && tr.startC != nil && span == slot && tr.start.Add(slot).Equal(start) &&
+					out.InputCoverage >= judgeCoverage {
+					kw := tr.heat.wh / 1000 / tr.heat.covered.Hours()
+					out.ModelEndC = fptr(tr.model.endC(*tr.startC, kw, span.Hours()))
 				}
-				if tr.covered > 0 {
-					out.InputKWh = fptr(tr.wh / 1000)
+			}
+			elec := tr.elec
+			if elec == nil {
+				elec = tr.heat
+			}
+			if elec != nil {
+				out.ElecCoverage = elec.coverage(span)
+				if elec.covered > 0 {
+					out.ElecKWh = fptr(elec.wh / 1000)
+					if tr.price != nil && out.ElecCoverage >= judgeCoverage {
+						out.ActualCost = fptr(*out.ElecKWh * *tr.price)
+					}
 				}
 			}
 			rec.Last = out
 		}
 		if tr, ok := s.tracks[zc.Name]; !ok || tr.start.Before(start) {
-			s.tracks[zc.Name] = &slotTrack{
+			nt := &slotTrack{
 				start: start, forecast: rec.Next, price: priceNow, startC: nowC,
 				input: rec.HeatInput, sampleAt: now,
 			}
+			if rec.HeatInput != "" {
+				nt.heat = &meter{key: rec.HeatInput}
+				if k := elecKey(zc, rec.HeatInput); k != "" {
+					nt.elec = &meter{key: k}
+				}
+			}
+			if i < len(reqs) && reqs[i] != nil && len(reqs[i].Zone.BoundaryC) > 0 {
+				z := reqs[i].Zone
+				nt.model = &zoneModel{tauH: z.TauH, capKWhPerK: z.CapacityKWhPerK, gainKPerH: z.OtherGainKPerH, boundaryC: z.BoundaryC[0]}
+			}
+			s.tracks[zc.Name] = nt
 		}
 		seen[zc.Name] = true
 		records = append(records, rec)

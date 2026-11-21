@@ -174,3 +174,84 @@ func TestJSONLLogAppendsLinesAndRotates(t *testing.T) {
 		}
 	}
 }
+
+// When the heat that went in is the heat the plan asked for, the model
+// temperature is the plan's own: the log tests the very model FTW plans
+// with, not another one.
+func TestShadowLogModelTemperatureIsThePlannersModel(t *testing.T) {
+	h, s, sink, watts := shadowHouse()
+	s.Tick(t0ctx)
+	next := sink.recs[0].Next
+	if next == nil {
+		t.Fatal("no plan")
+	}
+	if next.PlanHeatKWh <= 0 {
+		t.Fatalf("the plan heats nothing in its first slot, so the test would prove nothing: %+v", next)
+	}
+	*watts = next.PlanHeatKWh / SlotH * 1000
+	h.runSlot(s)
+	s.Tick(t0ctx)
+	last := sink.recs[len(sink.recs)-1].Last
+	if last == nil || last.ModelEndC == nil {
+		t.Fatalf("no model temperature: %+v", last)
+	}
+	if math.Abs(*last.ModelEndC-next.PlanTempC) > 1e-6 {
+		t.Fatalf("model end %.6f, plan said %.6f for the same heat", *last.ModelEndC, next.PlanTempC)
+	}
+	// Direct electric: the electricity is the heat, and costs the price.
+	if last.ElecKWh == nil || *last.ElecKWh != *last.InputKWh {
+		t.Fatalf("elec %v, want the heat input %v", deref(last.ElecKWh), deref(last.InputKWh))
+	}
+	if last.ActualCost == nil || math.Abs(*last.ActualCost-*last.ElecKWh**last.Price) > 1e-9 {
+		t.Fatalf("cost %v, want elec x price", deref(last.ActualCost))
+	}
+}
+
+// A heat pump zone learns against its space heat, but what it costs is the
+// pump's draw: the log integrates the two apart.
+func TestShadowLogHeatPumpCostsTheDrawNotTheHeat(t *testing.T) {
+	h, s, sink, _ := shadowHouse()
+	h.cfg.Zones[0].Source = "heat_pump"
+	h.cfg.Zones[0].HeatInput = "CTC/space_heat_w"
+	inner := s.in.Latest
+	s.in.Latest = func(driver, metric string) (float64, time.Time, bool) {
+		if driver == "CTC" {
+			switch metric {
+			case "space_heat_w":
+				return 4000, h.now, true
+			case "hp_power_w":
+				return 1000, h.now, true
+			}
+		}
+		return inner(driver, metric)
+	}
+	s.Tick(t0ctx)
+	h.runSlot(s)
+	s.Tick(t0ctx)
+	last := sink.recs[len(sink.recs)-1].Last
+	if last == nil || last.InputKWh == nil || math.Abs(*last.InputKWh-1.0) > 1e-9 {
+		t.Fatalf("heat %v kWh, want 1.0 (4 kW for a quarter)", deref(last.InputKWh))
+	}
+	if last.ElecKWh == nil || math.Abs(*last.ElecKWh-0.25) > 1e-9 {
+		t.Fatalf("elec %v kWh, want 0.25 (1 kW for a quarter)", deref(last.ElecKWh))
+	}
+	if last.ActualCost == nil || math.Abs(*last.ActualCost-0.25**last.Price) > 1e-9 {
+		t.Fatalf("cost %v, want the draw at the price", deref(last.ActualCost))
+	}
+}
+
+// Half a slot of samples is too little to turn into a temperature or a cost.
+func TestShadowLogJudgesNothingFromAThinSlot(t *testing.T) {
+	h, s, sink, _ := shadowHouse()
+	s.Tick(t0ctx)
+	s.in.Latest = staleAfter(s.in.Latest, h, h.now.Add(slot/2))
+	h.runSlot(s)
+	s.Tick(t0ctx)
+	last := sink.recs[len(sink.recs)-1].Last
+	if last == nil || last.InputKWh == nil {
+		t.Fatalf("no input at all: %+v", last)
+	}
+	if last.ModelEndC != nil || last.ActualCost != nil {
+		t.Fatalf("judged a half-covered slot: model %v, cost %v", deref(last.ModelEndC), deref(last.ActualCost))
+	}
+}

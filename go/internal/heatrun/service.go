@@ -342,7 +342,7 @@ func (s *Service) Tick(ctx context.Context) {
 	}
 	snap.Zones = zones
 	s.last = snap
-	s.shadowLocked(cfg, zones, byZone, twins, price, start, now, snap.Write, open)
+	s.shadowLocked(cfg, zones, byZone, reqs, twins, price, start, now, snap.Write, open)
 }
 
 // horizon is the price per slot from start, as far as prices run unbroken.

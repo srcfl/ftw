@@ -29,5 +29,9 @@ quarter starting, and how the quarter that ended came out against what was
 said for it, with the zone's temperature at both ends, the heat input's
 energy over the quarter and how much of it was covered by fresh readings. In
 shadow the device runs itself, so the left-alone prediction is what the
-readings can confirm before `heat.write` is trusted. The file is moved aside
-at 32 MB.
+readings can confirm before `heat.write` is trusted. Each quarter also gets
+the temperature the planner's own model gives for the heat that actually went
+in, which tests that model whoever controls the zone, and the electricity it
+took and what that cost at the quarter's price. For a heat pump that
+electricity is the whole pump's draw, hot water included. The file is moved
+aside at 32 MB.
