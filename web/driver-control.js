@@ -10,39 +10,44 @@
 (function () {
   'use strict';
 
-  // Kinds an owner expects FTW to steer, with the word for each. A battery
-  // usually sits behind an inverter or a gateway such as Zap, so it is "this
-  // device". A meter or a solar inverter that FTW only reads is complete, so
-  // it gets no note.
+  // Kinds an owner expects FTW to steer, with the word for each. A meter, a
+  // solar inverter, or a gateway or hybrid inverter that also reads a
+  // battery (Zap, SMA, Fronius) is complete when FTW only reads it, so it
+  // gets no note. A battery counts only when it is the driver's main job:
+  // the driver reads no solar.
   var KINDS = [
     ['ev', 'charger'],
     ['v2x_charger', 'charger'],
     ['vehicle', 'car'],
     ['heatpump', 'heat pump'],
-    ['battery', 'device'],
   ];
+
+  function kindWord(caps) {
+    for (var i = 0; i < KINDS.length; i++) {
+      if (caps.indexOf(KINDS[i][0]) >= 0) return KINDS[i][1];
+    }
+    if (caps.indexOf('battery') >= 0 && caps.indexOf('pv') < 0) return 'battery';
+    return null;
+  }
 
   // {label, text, reason} for a read-only driver of a kind FTW would
   // otherwise control; null for everything else.
   function readOnlyNote(entry) {
     if (!entry || entry.read_only !== true) return null;
-    var caps = entry.capabilities || [];
-    for (var i = 0; i < KINDS.length; i++) {
-      if (caps.indexOf(KINDS[i][0]) >= 0) {
-        return {
-          label: 'reads only',
-          text: 'FTW reads this ' + KINDS[i][1] + ' but cannot control it.',
-          reason: typeof entry.read_only_reason === 'string' ? entry.read_only_reason.trim() : '',
-        };
-      }
-    }
-    return null;
+    var word = kindWord(entry.capabilities || []);
+    if (!word) return null;
+    return {
+      label: 'reads only',
+      text: 'FTW reads this ' + word + ' but cannot control it.',
+      reason: typeof entry.read_only_reason === 'string' ? entry.read_only_reason.trim() : '',
+    };
   }
 
-  // The note as one line of text, the driver's own reason last.
+  // The note as one line of text, the driver's own reason after it. Core
+  // has already dropped a reason that only repeats the note.
   function sentence(note) {
     if (!note) return '';
-    return note.reason ? note.text + ' Its driver says: ' + note.reason : note.text;
+    return note.reason ? note.text + ' ' + note.reason : note.text;
   }
 
   // A loadpoint carries the facts under its own names; it is always a charger.

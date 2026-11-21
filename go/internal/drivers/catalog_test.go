@@ -1,6 +1,7 @@
 package drivers
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,22 +197,32 @@ func TestCatalogMyUplinkDeclaresAuthPostPath(t *testing.T) {
 	t.Fatal("myuplink missing from catalog")
 }
 
-// A read-only driver's description is its reason only when it says why. The
-// Zaptec Cloud description names the product, so it gives none; a Huawei
-// description that explains the held-back command keeps that sentence.
+// A read-only driver's description is its reason only when it says why, and
+// without a lead-in that repeats the note the owner already reads. The
+// descriptions are the drivers' own at srcfl/device-drivers c4c39af.
 func TestLoadCatalogReadOnlyReason(t *testing.T) {
 	dir := t.TempDir()
+	driver := func(id, caps string, readOnly bool, description string) string {
+		return fmt.Sprintf("DRIVER = {\n  id = %q,\n  capabilities = { %s },\n  read_only = %t,\n  description = %q,\n}\n",
+			id, caps, readOnly, description)
+	}
 	files := map[string]string{
-		"zaptec_cloud.lua": "DRIVER = {\n  id = \"zaptec_cloud\",\n  read_only = true,\n" +
-			"  description = \"Zaptec Go / Go 2 / Pro via Zaptec Cloud. Email + password; optional charger serial.\",\n}\n",
-		"huawei.lua": "DRIVER = {\n  id = \"huawei\",\n  read_only = true,\n" +
-			"  description = \"Huawei SUN2000 via Modbus TCP. Read-only until a held-zero command is verified on hardware.\",\n}\n",
-		"wall.lua": "DRIVER = {\n  id = \"wall\",\n  read_only = true,\n" +
-			"  description = \"Tesla Wall Connector Gen 3 on the LAN. Observation only; no cloud account.\",\n}\n",
+		"tesla_wall_connector.lua": driver("tesla_wall_connector", `"ev"`, true,
+			"Reads a Tesla Wall Connector Gen 3 on your network. FTW can read it but not control it: Tesla offers no way for another system to set its current. Control goes through the car (tesla_vehicle) or a charger FTW can control, such as one on OCPP."),
+		"tesla_cloud.lua": driver("tesla_cloud", `"vehicle"`, true,
+			"Reads a Tesla's charge level, limit, charging state and cable from Tesla's Fleet API. Read-only: Tesla accepts a command only when it is signed with a key paired to the car, and this driver cannot sign. Use tesla_vehicle (BLE) to start the car's charge, or a charger FTW can control."),
+		"sonnen.lua": driver("sonnen", `"battery"`, true,
+			"sonnenBatterie local JSON API v2: SoC + charge/discharge power. Read-only."),
+		"zap.lua": driver("zap", `"meter", "pv", "battery"`, true,
+			"P1/HAN site meter from a Sourceful Zap. Optionally read PV and battery telemetry from devices Zap already talks to. Prefer a native driver; use this when Zap is the only reader. The driver never writes."),
+		"zaptec_cloud.lua": driver("zaptec_cloud", `"ev"`, true,
+			"Zaptec Go / Go 2 / Pro via Zaptec Cloud. Email + password; optional charger serial."),
+		"huawei.lua": driver("huawei", `"battery", "meter", "pv"`, true,
+			"Huawei SUN2000 via Modbus TCP. Read-only until a held-zero command is verified on hardware."),
 		// A controlling driver never carries a read-only reason, whatever its
 		// description says.
-		"easee_cloud.lua": "DRIVER = {\n  id = \"easee_cloud\",\n" +
-			"  description = \"Easee via Cloud. Controls the charging current.\",\n}\n",
+		"easee_cloud.lua": driver("easee_cloud", `"ev"`, false,
+			"Easee via Cloud. Read-only: this sentence must never reach the owner."),
 	}
 	for name, src := range files {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0644); err != nil {
@@ -223,21 +234,27 @@ func TestLoadCatalogReadOnlyReason(t *testing.T) {
 		t.Fatalf("LoadCatalog: %v", err)
 	}
 	want := map[string]string{
-		"zaptec_cloud": "",
-		"huawei":       "Read-only until a held-zero command is verified on hardware.",
-		"wall":         "Observation only; no cloud account.",
-		"easee_cloud":  "",
+		"tesla_wall_connector": "Tesla offers no way for another system to set its current. Control goes through the car (tesla_vehicle) or a charger FTW can control, such as one on OCPP.",
+		"tesla_cloud":          "Tesla accepts a command only when it is signed with a key paired to the car, and this driver cannot sign. Use tesla_vehicle (BLE) to start the car's charge, or a charger FTW can control.",
+		"sonnen":               "",
+		"zap":                  "",
+		"zaptec_cloud":         "",
+		"huawei":               "Read-only until a held-zero command is verified on hardware.",
+		"easee_cloud":          "",
 	}
 	for _, e := range entries {
 		if got := e.ReadOnlyReason; got != want[e.ID] {
 			t.Errorf("%s ReadOnlyReason = %q, want %q", e.ID, got, want[e.ID])
 		}
 	}
-	zaptec, ok := FindCatalogEntry(entries, "drivers/zaptec_cloud.lua")
-	if !ok || !zaptec.ReadOnly {
-		t.Fatalf("FindCatalogEntry(zaptec_cloud) = %+v, %v; want the read-only entry", zaptec, ok)
+	if got := readOnlyReason("Reads a car. read-only: the car takes no commands from this driver at all."); got != "The car takes no commands from this driver at all." {
+		t.Errorf("a lowercase reason must start with a capital, got %q", got)
 	}
-	if !IsReadOnlyDriver(entries, "zaptec_cloud.lua") || IsReadOnlyDriver(entries, "easee_cloud.lua") {
+	wall, ok := FindCatalogEntry(entries, "drivers/tesla_wall_connector.lua")
+	if !ok || !wall.ReadOnly {
+		t.Fatalf("FindCatalogEntry(tesla_wall_connector) = %+v, %v; want the read-only entry", wall, ok)
+	}
+	if !IsReadOnlyDriver(entries, "sonnen.lua") || IsReadOnlyDriver(entries, "easee_cloud.lua") {
 		t.Error("IsReadOnlyDriver must follow FindCatalogEntry")
 	}
 	if _, ok := FindCatalogEntry(entries, ""); ok {

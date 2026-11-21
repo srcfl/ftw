@@ -17,15 +17,31 @@ const S = window.FTWSettings;
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
 const escHtml = s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 
+// Reasons as Core serves them for drivers at srcfl/device-drivers c4c39af:
+// the lead-in that repeats the note is gone, and sonnen and zap give none.
+const WALL_REASON = 'Tesla offers no way for another system to set its current. Control goes through the car (tesla_vehicle) or a charger FTW can control, such as one on OCPP.';
+const TESLA_CLOUD_REASON = "Tesla accepts a command only when it is signed with a key paired to the car, and this driver cannot sign. Use tesla_vehicle (BLE) to start the car's charge, or a charger FTW can control.";
+
 describe('the words for a read-only driver', () => {
   it('names a charger, a car and a heat pump, and gives the driver its own reason', () => {
     const zaptec = words.readOnlyNote({ read_only: true, capabilities: ['ev'] });
     assert.equal(words.sentence(zaptec), 'FTW reads this charger but cannot control it.');
-    const wall = words.readOnlyNote({ read_only: true, capabilities: ['ev'], read_only_reason: 'Observation only; no cloud account.' });
-    assert.equal(words.sentence(wall), 'FTW reads this charger but cannot control it. Its driver says: Observation only; no cloud account.');
-    assert.match(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['vehicle'] })), /reads this car/);
+    const wall = words.readOnlyNote({ read_only: true, capabilities: ['ev'], read_only_reason: WALL_REASON });
+    assert.equal(words.sentence(wall), 'FTW reads this charger but cannot control it. ' + WALL_REASON);
+    const car = words.readOnlyNote({ read_only: true, capabilities: ['vehicle'], read_only_reason: TESLA_CLOUD_REASON });
+    assert.equal(words.sentence(car), 'FTW reads this car but cannot control it. ' + TESLA_CLOUD_REASON);
     assert.match(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['heatpump'] })), /reads this heat pump/);
-    assert.match(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['meter', 'pv', 'battery'] })), /reads this device/);
+  });
+
+  it('names a battery only when the battery is the driver\'s main job', () => {
+    // sonnen at c4c39af: battery only, and no reason left after "Read-only.".
+    assert.equal(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['battery'], read_only_reason: '' })),
+      'FTW reads this battery but cannot control it.');
+    assert.match(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['battery', 'meter'] })), /reads this battery/);
+    // Zap, SMA and Fronius read a battery beside solar and the meter. FTW
+    // reading them is no surprise, so they carry no note.
+    assert.equal(words.readOnlyNote({ read_only: true, capabilities: ['meter', 'pv', 'battery'] }), null);
+    assert.equal(words.readOnlyNote({ read_only: true, capabilities: ['battery', 'meter', 'pv'] }), null);
   });
 
   it('says nothing for a driver that controls, or a meter or solar inverter that is only read', () => {
@@ -40,8 +56,10 @@ describe('the words for a read-only driver', () => {
   it('reads a loadpoint by its own field names', () => {
     assert.equal(words.loadpointNote({ driver_read_only: false }), null);
     assert.equal(words.loadpointNote(null), null);
-    assert.equal(words.sentence(words.loadpointNote({ driver_read_only: true, driver_read_only_reason: 'Read-only.' })),
-      'FTW reads this charger but cannot control it. Its driver says: Read-only.');
+    assert.equal(words.sentence(words.loadpointNote({ driver_read_only: true, driver_read_only_reason: WALL_REASON })),
+      'FTW reads this charger but cannot control it. ' + WALL_REASON);
+    assert.equal(words.sentence(words.loadpointNote({ driver_read_only: true })),
+      'FTW reads this charger but cannot control it.');
   });
 });
 
@@ -74,7 +92,7 @@ describe('Settings → Chargers', () => {
       'drivers/easee_cloud.lua': { capabilities: ['ev'] },
     };
     const html = render(config());
-    assert.match(html, /Its driver says: &lt;b&gt;held back&lt;\/b&gt;/);
+    assert.match(html, /cannot control it\. &lt;b&gt;held back&lt;\/b&gt;/);
     assert.doesNotMatch(html, /<b>held back/);
   });
 });

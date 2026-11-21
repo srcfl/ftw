@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // CatalogEntry describes one available driver discovered in the drivers
@@ -320,14 +322,24 @@ func FindCatalogEntry(catalog []CatalogEntry, luaPath string) (CatalogEntry, boo
 
 // readOnlyWords are the words a description uses when it says why a driver
 // does not control: "Read-only until a held-zero command is verified on
-// hardware", "Observation only", "Does not wake or command the car". The
-// device catalog page in srcfl/device-drivers uses the same words.
+// hardware", "Tesla offers no way ... to set its current", "sends nothing
+// back". The driver catalog page does the same in read_only_reason in
+// tools/generate_site.py in srcfl/device-drivers; change the two together.
 var readOnlyWords = regexp.MustCompile(`(?i)read[- ]?only|observ|\bcontrol(s|led|ling)?\b|\bcommand(s|ed)?\b|\bwrites?\b`)
 
+// readOnlyLeadIn is an opening that repeats what the owner already reads
+// ("FTW reads this charger but cannot control it"), so the reason drops it.
+var readOnlyLeadIn = regexp.MustCompile(`(?i)^(ftw can read it but not control it|read-only)\s*[:.]\s*`)
+
+// minReasonWords is the least a reason must keep after its lead-in to say
+// more than "the driver never writes".
+const minReasonWords = 5
+
 // readOnlyReason keeps a description only when it talks about reading or
-// control, starting at the sentence that does. "Zaptec Go / Go 2 / Pro via
-// Zaptec Cloud" says what the device is, not why FTW cannot steer it, so it
-// gives no reason.
+// control, starting at the sentence that does, without a lead-in that
+// repeats the note, and with a capital first letter. "Zaptec Go / Go 2 / Pro
+// via Zaptec Cloud" says what the device is, and sonnen's "Read-only." or
+// zap's "The driver never writes." add nothing, so they give no reason.
 func readOnlyReason(description string) string {
 	loc := readOnlyWords.FindStringIndex(description)
 	if loc == nil {
@@ -336,7 +348,12 @@ func readOnlyReason(description string) string {
 	if i := strings.LastIndex(description[:loc[0]], ". "); i >= 0 {
 		description = description[i+2:]
 	}
-	return strings.TrimSpace(description)
+	reason := readOnlyLeadIn.ReplaceAllString(strings.TrimSpace(description), "")
+	if len(strings.Fields(reason)) < minReasonWords {
+		return ""
+	}
+	r, size := utf8.DecodeRuneInString(reason)
+	return string(unicode.ToUpper(r)) + reason[size:]
 }
 
 // normalizeVerificationStatus coerces the Lua string into one of the

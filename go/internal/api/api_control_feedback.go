@@ -759,7 +759,7 @@ func (s *Server) loadpointsWithFeedback(states []loadpoint.State) []loadpointFee
 		view := loadpointFeedbackView{State: st, ControlFeedback: byDriver[st.DriverName]}
 		if e, ok := readOnly[st.DriverName]; ok {
 			view.DriverReadOnly = true
-			view.DriverReadOnlyReason = e.ReadOnlyReason
+			view.DriverReadOnlyReason = e.Reason
 		}
 		if !st.SoCUnknown {
 			level := st.CurrentSoC

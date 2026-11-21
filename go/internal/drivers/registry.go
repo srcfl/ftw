@@ -1479,6 +1479,20 @@ func (r *Registry) CanControl(name string) bool {
 	return ok && !rd.readOnly && !rd.cfg.ObserveOnly
 }
 
+// DeclaresReadOnly reports whether the loaded driver named name declares
+// read_only = true in its DRIVER table. loaded is false when no driver of
+// that name runs, so a caller can tell "reads only" from "not running";
+// CanControl answers false for both.
+func (r *Registry) DeclaresReadOnly(name string) (readOnly, loaded bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rd, ok := r.rec[name]
+	if !ok {
+		return false, false
+	}
+	return rd.readOnly, true
+}
+
 // ControlStatus returns the command safety state for the current driver
 // generation without creating or changing any state.
 func (r *Registry) ControlStatus(name string) (DriverControlStatus, bool) {
