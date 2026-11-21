@@ -187,7 +187,8 @@ jobs:
           PY
           python3 "${RUNNER_TEMP}/write-native-release-notes.py" \
             "${RUNNER_TEMP}/native-release/ftw-native-release.json" CHANGELOG.md \
-            "${RUNNER_TEMP}/native-release/notes.md" --repo "${GITHUB_REPOSITORY}"
+            "${RUNNER_TEMP}/native-release/notes.md" --repo "${GITHUB_REPOSITORY}" \
+            --published "${RUNNER_TEMP}/native-release-pages.json"
       - name: Anchor immutable tag and publish the selected channel
         id: publication
         if: ${{ !inputs.dry_run }}
