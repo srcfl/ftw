@@ -2290,6 +2290,15 @@ body.ftw-app .drv-version-detail {
   color: var(--fg-muted);
   font-size: 0.75rem;
 }
+/* FTW reads this device but cannot control it. A plain sentence, set apart
+   so it is read before anyone relies on the device. */
+body.ftw-app .read-only-note {
+  border-left: 2px solid var(--accent-e, var(--fg-muted));
+  color: var(--fg);
+  font-size: 0.8rem;
+  margin: 6px 0 10px;
+  padding: 2px 0 2px 8px;
+}
 /* What changed in a version: a quiet link beside the prose, not a button. */
 body.ftw-app .drv-version-changes {
   color: var(--accent-e, var(--fg-muted));

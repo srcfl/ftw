@@ -195,3 +195,52 @@ func TestCatalogMyUplinkDeclaresAuthPostPath(t *testing.T) {
 	}
 	t.Fatal("myuplink missing from catalog")
 }
+
+// A read-only driver's description is its reason only when it says why. The
+// Zaptec Cloud description names the product, so it gives none; a Huawei
+// description that explains the held-back command keeps that sentence.
+func TestLoadCatalogReadOnlyReason(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"zaptec_cloud.lua": "DRIVER = {\n  id = \"zaptec_cloud\",\n  read_only = true,\n" +
+			"  description = \"Zaptec Go / Go 2 / Pro via Zaptec Cloud. Email + password; optional charger serial.\",\n}\n",
+		"huawei.lua": "DRIVER = {\n  id = \"huawei\",\n  read_only = true,\n" +
+			"  description = \"Huawei SUN2000 via Modbus TCP. Read-only until a held-zero command is verified on hardware.\",\n}\n",
+		"wall.lua": "DRIVER = {\n  id = \"wall\",\n  read_only = true,\n" +
+			"  description = \"Tesla Wall Connector Gen 3 on the LAN. Observation only; no cloud account.\",\n}\n",
+		// A controlling driver never carries a read-only reason, whatever its
+		// description says.
+		"easee_cloud.lua": "DRIVER = {\n  id = \"easee_cloud\",\n" +
+			"  description = \"Easee via Cloud. Controls the charging current.\",\n}\n",
+	}
+	for name, src := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(src), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	entries, err := LoadCatalog(dir)
+	if err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+	want := map[string]string{
+		"zaptec_cloud": "",
+		"huawei":       "Read-only until a held-zero command is verified on hardware.",
+		"wall":         "Observation only; no cloud account.",
+		"easee_cloud":  "",
+	}
+	for _, e := range entries {
+		if got := e.ReadOnlyReason; got != want[e.ID] {
+			t.Errorf("%s ReadOnlyReason = %q, want %q", e.ID, got, want[e.ID])
+		}
+	}
+	zaptec, ok := FindCatalogEntry(entries, "drivers/zaptec_cloud.lua")
+	if !ok || !zaptec.ReadOnly {
+		t.Fatalf("FindCatalogEntry(zaptec_cloud) = %+v, %v; want the read-only entry", zaptec, ok)
+	}
+	if !IsReadOnlyDriver(entries, "zaptec_cloud.lua") || IsReadOnlyDriver(entries, "easee_cloud.lua") {
+		t.Error("IsReadOnlyDriver must follow FindCatalogEntry")
+	}
+	if _, ok := FindCatalogEntry(entries, ""); ok {
+		t.Error("an empty lua path must match nothing")
+	}
+}

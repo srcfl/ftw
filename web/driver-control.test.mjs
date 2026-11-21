@@ -1,0 +1,106 @@
+// node --test web/driver-control.test.mjs
+//
+// Whether FTW can control a device, said where people choose and look at it.
+// A new owner added a Zaptec Go through a read-only driver; FTW accepted the
+// charger, never controlled it and never said why.
+
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { describe, it } from 'node:test';
+
+globalThis.window = {};
+await import('./driver-control.js');
+await import('./settings/tabs/loadpoints.js');
+const words = window.FTWDriverControl;
+const S = window.FTWSettings;
+
+const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
+const escHtml = s => String(s).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+
+describe('the words for a read-only driver', () => {
+  it('names a charger, a car and a heat pump, and gives the driver its own reason', () => {
+    const zaptec = words.readOnlyNote({ read_only: true, capabilities: ['ev'] });
+    assert.equal(words.sentence(zaptec), 'FTW reads this charger but cannot control it.');
+    const wall = words.readOnlyNote({ read_only: true, capabilities: ['ev'], read_only_reason: 'Observation only; no cloud account.' });
+    assert.equal(words.sentence(wall), 'FTW reads this charger but cannot control it. Its driver says: Observation only; no cloud account.');
+    assert.match(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['vehicle'] })), /reads this car/);
+    assert.match(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['heatpump'] })), /reads this heat pump/);
+    assert.match(words.sentence(words.readOnlyNote({ read_only: true, capabilities: ['meter', 'pv', 'battery'] })), /reads this device/);
+  });
+
+  it('says nothing for a driver that controls, or a meter or solar inverter that is only read', () => {
+    assert.equal(words.readOnlyNote({ read_only: false, capabilities: ['ev'] }), null);
+    assert.equal(words.readOnlyNote({ capabilities: ['ev'] }), null);
+    assert.equal(words.readOnlyNote({ read_only: true, capabilities: ['meter'] }), null);
+    assert.equal(words.readOnlyNote({ read_only: true, capabilities: ['meter', 'pv'] }), null);
+    assert.equal(words.readOnlyNote(null), null);
+    assert.equal(words.sentence(null), '');
+  });
+
+  it('reads a loadpoint by its own field names', () => {
+    assert.equal(words.loadpointNote({ driver_read_only: false }), null);
+    assert.equal(words.loadpointNote(null), null);
+    assert.equal(words.sentence(words.loadpointNote({ driver_read_only: true, driver_read_only_reason: 'Read-only.' })),
+      'FTW reads this charger but cannot control it. Its driver says: Read-only.');
+  });
+});
+
+describe('Settings → Chargers', () => {
+  const render = config => S.tabs.loadpoints.render({ config, escHtml, help: () => '' });
+  const config = () => ({
+    drivers: [
+      { name: 'zaptec', lua: 'drivers/zaptec_cloud.lua' },
+      { name: 'easee', lua: 'drivers/easee_cloud.lua' },
+    ],
+    loadpoints: [{ id: 'drive', driver_name: 'zaptec' }, { id: 'street', driver_name: 'easee' }],
+  });
+
+  it('says on the charger card, and in the charger list, that FTW cannot control a read-only charger', () => {
+    S.ocppStatus = { enabled: false, chargers: [] };
+    S.catalogByLua = {
+      'drivers/zaptec_cloud.lua': { capabilities: ['ev'], read_only: true },
+      'drivers/easee_cloud.lua': { capabilities: ['ev'] },
+    };
+    const html = render(config());
+    assert.match(html, /data-charger-read-only="0" role="note">FTW reads this charger but cannot control it\.</);
+    assert.doesNotMatch(html, /data-charger-read-only="1"/);
+    assert.match(html, /<option value="zaptec" selected>zaptec \(reads only\)<\/option>/);
+    assert.match(html, /<option value="easee">easee<\/option>/);
+  });
+
+  it('escapes the driver reason', () => {
+    S.catalogByLua = {
+      'drivers/zaptec_cloud.lua': { capabilities: ['ev'], read_only: true, read_only_reason: '<b>held back</b>' },
+      'drivers/easee_cloud.lua': { capabilities: ['ev'] },
+    };
+    const html = render(config());
+    assert.match(html, /Its driver says: &lt;b&gt;held back&lt;\/b&gt;/);
+    assert.doesNotMatch(html, /<b>held back/);
+  });
+});
+
+describe('the other places the owner looks', () => {
+  it('loads the shared words before every view that uses them', () => {
+    const index = read('./index.html');
+    const at = name => index.indexOf(name);
+    assert.ok(at('/driver-control.js') > 0 && at('/driver-control.js') < at('/app.js'));
+    assert.ok(at('/driver-control.js') < at('/settings/tabs/devices.js'));
+    const setup = read('./setup.html');
+    assert.ok(setup.indexOf('/driver-control.js') > 0 && setup.indexOf('/driver-control.js') < setup.indexOf('/setup.js'));
+  });
+
+  it('shows the note on the device row, the catalog card, setup and the EV card', () => {
+    const devices = read('./settings/tabs/devices.js');
+    assert.match(devices, /class="drv-module-readonly-note read-only-note" role="note"/);
+    assert.match(devices, /opts\.readOnlyNoteEl\.textContent = readOnlySentence\(note\)/,
+      'a version switch must update the note with the badge');
+    assert.match(devices, /readOnlyTag\.textContent = "reads only, no control"/);
+    const setup = read('./setup.js');
+    assert.match(setup, /if \(readOnly\) lines\.push\(readOnly\.text\)/);
+    assert.match(setup, /label \+= ' — reads only'/);
+    const app = read('./app.js');
+    assert.match(app, /window\.FTWDriverControl\.loadpointNote\(matched\)/);
+    assert.match(app, /readOnlyNote\.className = "ev-read-only-note read-only-note"/);
+    assert.match(read('./loadpoints.js'), /lp\.driver_read_only \? ' · reads only, FTW cannot control it'/);
+  });
+});

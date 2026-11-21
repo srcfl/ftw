@@ -3184,6 +3184,21 @@
       } else if (setupNote) {
         setupNote.remove();
       }
+      // A charger whose driver only reads it: the plan and the charge buttons
+      // below cannot move it, so the modal says so first.
+      var readOnlyNote = evModalBody.querySelector(".ev-read-only-note");
+      var readOnly = window.FTWDriverControl ? window.FTWDriverControl.loadpointNote(matched) : null;
+      if (readOnly) {
+        if (!readOnlyNote) {
+          readOnlyNote = document.createElement("p");
+          readOnlyNote.className = "ev-read-only-note read-only-note";
+          readOnlyNote.setAttribute("role", "status");
+          evModalBody.insertBefore(readOnlyNote, evModalBody.firstChild);
+        }
+        readOnlyNote.textContent = window.FTWDriverControl.sentence(readOnly);
+      } else if (readOnlyNote) {
+        readOnlyNote.remove();
+      }
       // Plan view: what the box will do with this car (one sentence +
       // the planned windows on a 24 h track) and the car's charge level,
       // which the plan is built from. Mounted once per loadpoint so the

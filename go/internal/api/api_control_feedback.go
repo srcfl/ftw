@@ -739,9 +739,14 @@ type loadpointFeedbackView struct {
 	// level, and the box does not guess one (docs/cars.md).
 	Level           *float64         `json:"current_soc,omitempty"`
 	ControlFeedback *ControlFeedback `json:"control_feedback,omitempty"`
+	// DriverReadOnly says the charger's driver reads it but cannot control
+	// it; DriverReadOnlyReason is the driver's own reason when it gives one.
+	DriverReadOnly       bool   `json:"driver_read_only,omitempty"`
+	DriverReadOnlyReason string `json:"driver_read_only_reason,omitempty"`
 }
 
 func (s *Server) loadpointsWithFeedback(states []loadpoint.State) []loadpointFeedbackView {
+	readOnly := s.readOnlyDrivers()
 	feedback := s.controlFeedback(time.Now())
 	byDriver := map[string]*ControlFeedback{}
 	for i := range feedback {
@@ -752,6 +757,10 @@ func (s *Server) loadpointsWithFeedback(states []loadpoint.State) []loadpointFee
 	out := make([]loadpointFeedbackView, 0, len(states))
 	for _, st := range states {
 		view := loadpointFeedbackView{State: st, ControlFeedback: byDriver[st.DriverName]}
+		if e, ok := readOnly[st.DriverName]; ok {
+			view.DriverReadOnly = true
+			view.DriverReadOnlyReason = e.ReadOnlyReason
+		}
 		if !st.SoCUnknown {
 			level := st.CurrentSoC
 			view.Level = &level

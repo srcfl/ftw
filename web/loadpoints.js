@@ -170,7 +170,8 @@
       if (lp.plugged_in) soc += '<span class="lp-cfg-hint">Set in the EV card on the dashboard.</span>';
     }
     const rows = [
-      ['Driver',       lp.driver_name ? escapeHtml(lp.driver_name) : '—'],
+      ['Driver',       lp.driver_name ? escapeHtml(lp.driver_name) +
+        (lp.driver_read_only ? ' · reads only, FTW cannot control it' : '') : '—'],
       ['Plugged in',   badge(lp.plugged_in ? 'YES' : 'NO', lp.plugged_in)],
       ['Surplus only', badge(lp.surplus_only ? 'ON' : 'OFF', lp.surplus_only)],
       ['Live power',   fmtW(lp.current_power_w)],
