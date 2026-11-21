@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.165.3
+
+### Patch Changes
+
+- 063d824: History reads now return at most 2000 rows. `/api/history` and
+  `/api/series` cut a larger `points` value down to 2000 instead of failing
+  or building a huge reply, and they refuse a `points` value that is not a
+  whole number, or is below 0, with a 400. The dashboard's own reads are
+  unchanged.
+- fe1a68a: Setup and Settings no longer let a quote in a value break the page. The
+  setup wizard builds each driver secret field as page elements instead of
+  HTML text, and Settings now escapes quotes. Before, a value with a quote,
+  such as an MQTT username or a charger's reported features, was cut short
+  in its field and could add markup to the page.
+
 ## 0.165.2
 
 ### Patch Changes
