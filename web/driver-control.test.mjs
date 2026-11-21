@@ -101,6 +101,48 @@ describe('the other places the owner looks', () => {
     const app = read('./app.js');
     assert.match(app, /window\.FTWDriverControl\.loadpointNote\(matched\)/);
     assert.match(app, /readOnlyNote\.className = "ev-read-only-note read-only-note"/);
+    // No Charge now or Pause charging for a charger FTW only reads, unless a
+    // hold from before still needs returning to the plan.
+    assert.match(app, /var readOnlyIdle = nextLp\.driver_read_only === true && !nextLp\.manual_active &&\s+!nextLp\.manual_restore_unconfirmed;/);
+    assert.match(app, /manual\.el\.hidden = !nextLp\.plugged_in \|\| readOnlyIdle;/);
     assert.match(read('./loadpoints.js'), /lp\.driver_read_only \? ' · reads only, FTW cannot control it'/);
+  });
+});
+
+describe('the EV card for a charger FTW only reads', () => {
+  const app = read('./app.js');
+  const evControls = app.slice(app.indexOf('function buildEvControls'), app.indexOf('// The ready time as "HH:MM"'));
+  const fake = () => ({
+    style: {}, dataset: {}, children: [], hidden: false, textContent: '',
+    appendChild(child) { this.children.push(child); return child; },
+    setAttribute() {},
+  });
+  const build = new Function('document', 'buildManualChargeSection', 'buildScheduleSection', 'buildPVModeSection',
+    'readyHHMM', 'evIsPaused', evControls + '; return buildEvControls;');
+  const manual = { el: fake(), update() {} };
+  const buildEvControls = build(
+    { createElement: fake },
+    () => manual,
+    () => Object.assign(fake(), { update() {} }),
+    () => null,
+    () => '06:00',
+    () => false,
+  );
+  const lp = extra => Object.assign({ id: 'drive', plugged_in: true, schedule: {} }, extra);
+
+  it('offers no Charge now or Pause charging', () => {
+    const controls = buildEvControls(lp({ driver_read_only: true }), false, true);
+    assert.equal(manual.el.hidden, true);
+    controls.update(lp({ driver_read_only: false }), null);
+    assert.equal(manual.el.hidden, false, 'a charger FTW controls keeps its buttons');
+  });
+
+  it('still lets a hold from before return to the plan', () => {
+    const controls = buildEvControls(lp({ driver_read_only: true, manual_active: true }), false, true);
+    assert.equal(manual.el.hidden, false);
+    controls.update(lp({ driver_read_only: true, manual_restore_unconfirmed: true }), null);
+    assert.equal(manual.el.hidden, false);
+    controls.update(lp({ driver_read_only: true, plugged_in: false }), null);
+    assert.equal(manual.el.hidden, true);
   });
 });

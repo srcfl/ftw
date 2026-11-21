@@ -4698,7 +4698,13 @@
     container.appendChild(goal);
 
     container.update = function (nextLp, d) {
-      manual.el.hidden = !nextLp.plugged_in;
+      // A charger FTW only reads gets no Charge now or Pause charging: they
+      // cannot work, and showing them says FTW controls it. The note at the
+      // top of the sheet says why. A hold left from before still shows, so
+      // it can be returned to the plan.
+      var readOnlyIdle = nextLp.driver_read_only === true && !nextLp.manual_active &&
+        !nextLp.manual_restore_unconfirmed;
+      manual.el.hidden = !nextLp.plugged_in || readOnlyIdle;
       manual.update(nextLp, d);
       retentionError.hidden = nextLp.goal_retention !== "error";
       var s = nextLp.schedule;

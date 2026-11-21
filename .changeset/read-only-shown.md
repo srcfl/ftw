@@ -12,5 +12,7 @@ cards when adding one, the setup wizard and the advanced charger panel say
 "FTW reads this charger but cannot control it", with the driver's own reason
 when its description gives one. `/api/drivers/catalog` entries carry
 `read_only_reason`, and `/api/loadpoints` carries `driver_read_only` and
-`driver_read_only_reason`. Meters and solar inverters, where control is not
-expected, get no note. No setting changes.
+`driver_read_only_reason`. On the EV card such a charger no longer offers
+Charge now or Pause charging, which could not work; a hold set before still
+shows so it can be returned to the plan. Meters and solar inverters, where
+control is not expected, get no note. No setting changes.
