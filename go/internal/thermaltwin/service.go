@@ -245,10 +245,15 @@ func (s *Service) powerSourceLocked(z Zone, now time.Time) string {
 	if z.HeatInput != "" {
 		// The owner named it: that one or none, never a guess.
 		driver, metric := powerRef(z.HeatInput)
-		if _, _, ok := s.read(driver, metric, now); ok {
-			return z.HeatInput
+		if _, _, ok := s.read(driver, metric, now); !ok {
+			return ""
 		}
-		return ""
+		// A driver's own heat power has one name, the bare driver, so a
+		// twin found from it keeps learning when the owner names it too.
+		if metric == HeatPowerMetric {
+			return driver
+		}
+		return z.HeatInput
 	}
 	if _, _, ok := s.read(z.SensorDriver, HeatPowerMetric, now); ok {
 		return z.SensorDriver
