@@ -1314,7 +1314,7 @@ func ComputeDispatch(
 		for name := range driverCapacities {
 			if r := store.Get(name, telemetry.DerBattery); r != nil {
 				h := store.DriverHealth(name)
-				if h != nil && h.IsOnline() {
+				if h != nil && h.CanControl() {
 					liveBatTotal += r.SmoothedW
 				}
 			}
@@ -1612,7 +1612,7 @@ func ComputeDispatch(
 			capacityWh:       cap,
 			currentW:         r.SmoothedW,
 			soc:              soc,
-			online:           h.IsOnline(),
+			online:           h.CanControl(),
 			group:            state.InverterGroups[name],
 			maxChargeW:       lim.MaxChargeW,
 			maxDischargeW:    lim.MaxDischargeW,
@@ -2857,7 +2857,7 @@ func protectiveCurtailLimitW(state *State, store *telemetry.Store) (float64, boo
 	var sumSoCWh, totalCap float64
 	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
 		h := store.DriverHealth(r.Driver)
-		if h == nil || !h.IsOnline() || r.SoC == nil {
+		if h == nil || !h.CanControl() || r.SoC == nil {
 			continue
 		}
 		// Capacity must come from the per-driver map passed into
@@ -3240,7 +3240,7 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 	var batW float64
 	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
 		h := store.DriverHealth(r.Driver)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.CanControl() {
 			continue
 		}
 		batW += r.RawW
@@ -3262,7 +3262,7 @@ func liveCurtailLimitW(state *State, store *telemetry.Store) (float64, bool) {
 	var batHeadroomW float64
 	for _, r := range store.ReadingsByType(telemetry.DerBattery) {
 		h := store.DriverHealth(r.Driver)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.CanControl() {
 			continue
 		}
 		if r.SoC == nil || *r.SoC >= pvCurtailBatterySoCMax {
@@ -3900,7 +3900,7 @@ func chargeAll(store *telemetry.Store, capacities map[string]float64, limits map
 	out := make([]DispatchTarget, 0)
 	for name := range capacities {
 		h := store.DriverHealth(name)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.CanControl() {
 			continue
 		}
 		target := limits[name].chargeCap()
@@ -4842,7 +4842,7 @@ func holdFleetAtZero(store *telemetry.Store, capacities map[string]float64) []Di
 	out := make([]DispatchTarget, 0, len(capacities))
 	for name := range capacities {
 		h := store.DriverHealth(name)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.CanControl() {
 			continue
 		}
 		if r := store.Get(name, telemetry.DerBattery); r == nil {
@@ -4889,7 +4889,7 @@ func fleetAtLivePower(
 	readings = make(map[string]*telemetry.DerReading, len(capacities))
 	for name := range capacities {
 		h := store.DriverHealth(name)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.CanControl() {
 			continue
 		}
 		r := store.Get(name, telemetry.DerBattery)
@@ -5131,7 +5131,7 @@ func fuseSnapshotStillCurrent(
 	for driver, captured := range batteryReadings {
 		r := store.Get(driver, telemetry.DerBattery)
 		h := store.DriverHealth(driver)
-		if captured == nil || r == nil || h == nil || !h.IsOnline() || !r.UpdatedAt.Equal(captured.UpdatedAt) {
+		if captured == nil || r == nil || h == nil || !h.CanControl() || !r.UpdatedAt.Equal(captured.UpdatedAt) {
 			return false
 		}
 		fresh[driver] = r

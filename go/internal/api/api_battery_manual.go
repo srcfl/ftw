@@ -31,11 +31,12 @@ type batteryManualHoldRequest struct {
 // batteryManualHoldResponse mirrors the active hold so the operator
 // can confirm what's installed.
 type batteryManualHoldResponse struct {
-	Active      bool    `json:"active"`
-	Direction   string  `json:"direction,omitempty"`
-	PowerW      float64 `json:"power_w,omitempty"`
-	Driver      string  `json:"driver,omitempty"`
-	ExpiresAtMs int64   `json:"expires_at_ms,omitempty"`
+	Active             bool     `json:"active"`
+	Direction          string   `json:"direction,omitempty"`
+	PowerW             float64  `json:"power_w,omitempty"`
+	Driver             string   `json:"driver,omitempty"`
+	ExpiresAtMs        int64    `json:"expires_at_ms,omitempty"`
+	CalibratingDrivers []string `json:"calibrating_drivers,omitempty"`
 }
 
 // maxBatteryManualHoldS bounds the hold duration. 30 minutes matches
@@ -117,8 +118,11 @@ func (s *Server) resolveBatteryManualHoldTarget(driver string) (string, int, err
 		return "", http.StatusServiceUnavailable, apiError("battery control state not available")
 	}
 	health := s.deps.Tel.DriverHealth(driver)
+	if health != nil && health.IsOnline() && health.Calibrating {
+		return "", http.StatusConflict, apiError("Manual override is unavailable while this battery is calibrating.")
+	}
 	reading := s.deps.Tel.Get(driver, telemetry.DerBattery)
-	if health == nil || !health.IsOnline() || reading == nil || reading.SoC == nil {
+	if health == nil || !health.CanControl() || reading == nil || reading.SoC == nil {
 		return "", http.StatusConflict, apiError("battery driver is not ready for a scoped hold")
 	}
 	deviceID, ok := s.deps.BatteryIdentity(driver)
@@ -148,7 +152,15 @@ func (s *Server) handleBatteryManualHoldGet(w http.ResponseWriter, r *http.Reque
 	s.deps.CtrlMu.Lock()
 	h, active := s.deps.Ctrl.GetBatteryManualHold(time.Now())
 	s.deps.CtrlMu.Unlock()
-	writeJSON(w, 200, batteryManualHoldResponseFrom(h, active))
+	resp := batteryManualHoldResponseFrom(h, active)
+	if s.deps.Tel != nil {
+		for name, health := range s.deps.Tel.AllHealth() {
+			if health.IsOnline() && health.Calibrating {
+				resp.CalibratingDrivers = append(resp.CalibratingDrivers, name)
+			}
+		}
+	}
+	writeJSON(w, 200, resp)
 }
 
 // signedPowerForDirection converts the wire format (direction + magnitude)

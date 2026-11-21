@@ -48,7 +48,7 @@ func (s *State) yieldBatteryBeforeEVCut(store *telemetry.Store, meter *telemetry
 	var available, commanded float64
 	for driver, log := range s.batteryCommands {
 		h := store.DriverHealth(driver)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.CanControl() {
 			continue
 		}
 		_, high, latest, ok := log.span(s.now())

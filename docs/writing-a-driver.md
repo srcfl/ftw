@@ -36,7 +36,7 @@ current host API and the source of truth for it. Today it registers:
 |---|---|
 | Telemetry | `emit`, `emit_metric` |
 | Identity and nameplate | `set_make`, `set_sn`, `set_model`, `set_rated_w` |
-| Driver control | `set_poll_interval`, `set_warmup_s`, `set_watchdog_timeout_s`, `set_device_fault` |
+| Driver control | `set_poll_interval`, `set_warmup_s`, `set_watchdog_timeout_s`, `set_device_fault`, `set_calibrating` |
 | Helpers | `log`, `sleep`, `millis`, `now_ms`, `unix_ms`, `json_encode`, `json_decode`, `persist_secret` |
 | Vehicle | `reserve_vehicle_wake`, `site_location` |
 | Decoding | `decode_string`, `decode_i16`, `decode_i32_be`, `decode_i32_le`, `decode_u32_be`, `decode_u32_le` |

@@ -211,6 +211,8 @@ class FtwBatteryControl extends FtwElement {
   constructor() {
     super();
     this._refreshTimer = null;
+    this._calibratingDrivers = [];
+    this._installing = false;
     this._formState = { direction: "charge", holdS: 900, scopeDriver: "", scopeMode: "pool" };
   }
 
@@ -296,6 +298,7 @@ class FtwBatteryControl extends FtwElement {
         </div>
 
         <div class="error hidden" data-error></div>
+          <p class="hidden" data-calibration role="status"></p>
           <button type="button" class="install-btn" data-install>Install hold</button>
         </details>
       </ftw-modal>
@@ -351,6 +354,7 @@ class FtwBatteryControl extends FtwElement {
       button.classList.toggle("active", on);
       button.setAttribute("aria-checked", on ? "true" : "false");
     });
+    this._renderInstallAvailability();
     this.dispatchEvent(new CustomEvent('ftw-battery-scope', {bubbles:true, composed:true,
       detail:{driver:mode === 'driver' ? this._formState.scopeDriver : ''}}));
   }
@@ -422,10 +426,28 @@ class FtwBatteryControl extends FtwElement {
     stopBtn.disabled = false;
   }
 
+  _renderInstallAvailability() {
+    const driver = this._formState.scopeMode === "driver" ? this._formState.scopeDriver : "";
+    const blocked = !!driver && this._calibratingDrivers.includes(driver);
+    const message = blocked
+      ? "Manual override is unavailable while this battery is calibrating."
+      : !driver && this._calibratingDrivers.length
+        ? "This override skips batteries that are calibrating."
+        : "";
+    const notice = this.shadowRoot.querySelector("[data-calibration]");
+    notice.textContent = message;
+    notice.classList.toggle("hidden", !message);
+    this.shadowRoot.querySelector("[data-install]").disabled = blocked || this._installing;
+  }
+
   _refresh() {
     apiFetch("/api/battery/manual_hold")
       .then((r) => r.json())
-      .then((d) => this._renderActive(d))
+      .then((d) => {
+        this._calibratingDrivers = d.calibrating_drivers || [];
+        this._renderInstallAvailability();
+        this._renderActive(d);
+      })
       .catch(() => { /* network blip — leave previous state */ });
   }
 
@@ -434,6 +456,7 @@ class FtwBatteryControl extends FtwElement {
     const dir = this._formState.direction;
     const holdS = this._formState.holdS;
     const installBtn = this.shadowRoot.querySelector("[data-install]");
+    if (installBtn.disabled) return;
     let powerW = 0;
     if (dir !== "idle") {
       const input = this.shadowRoot.querySelector("[data-power-input]");
@@ -447,7 +470,8 @@ class FtwBatteryControl extends FtwElement {
     if (this._formState.scopeMode === "driver" && this._formState.scopeDriver) {
       body.driver = this._formState.scopeDriver;
     }
-    installBtn.disabled = true;
+    this._installing = true;
+    this._renderInstallAvailability();
     apiFetch("/api/battery/manual_hold", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -463,7 +487,10 @@ class FtwBatteryControl extends FtwElement {
       })
       .then((d) => this._renderActive(d))
       .catch((err) => this._showError(err.message || "Failed to install hold"))
-      .finally(() => { installBtn.disabled = false; });
+      .finally(() => {
+        this._installing = false;
+        this._renderInstallAvailability();
+      });
   }
 
   _stop() {
