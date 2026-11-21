@@ -2,6 +2,7 @@ package appproto
 
 import (
 	"context"
+	"errors"
 	"math"
 	"time"
 
@@ -307,15 +308,22 @@ func (h *Handler) loadpointBoost(cmd Cmd, uptimeMs int64) error {
 
 	if err := lp.Boost(id, lease, now); err != nil {
 		// Live state cannot safely honour the lease — the HTTP route's 409,
-		// reported rather than swallowed, like control refusing a mode.
+		// reported rather than swallowed, like control refusing a mode. A
+		// refusal with a reason names it in the stop reasons' vocabulary, so
+		// the app can say the battery is too low rather than only no.
 		h.log.Warn("battery boost refused by loadpoint control", "loadpoint", id, "err", err)
+		args := map[string]any{"op": cmd.Op}
+		var refusal *loadpoint.BatteryBoostRefusal
+		if errors.As(err, &refusal) && refusal.Reason != "" {
+			args["reason"] = string(refusal.Reason)
+		}
 		return h.settleAndReport(cmd.CmdID, CmdResult{
 			CmdID: cmd.CmdID,
 			State: CmdRejected,
 			Error: &ErrorBody{
 				Code:      ErrUnavailable,
 				Retryable: ErrorRetryable[ErrUnavailable],
-				Args:      map[string]any{"op": cmd.Op},
+				Args:      args,
 			},
 		})
 	}
