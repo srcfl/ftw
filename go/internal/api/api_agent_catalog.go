@@ -34,13 +34,13 @@ var agentAPIHints = []protocol.AgentAPIRoute{
 	{Path: "/api/mpc/diagnose", Description: "Current planner inputs, constraints and result"},
 	{Path: "/api/mpc/diagnose/history", Description: "Recorded planning decisions", Query: map[string]string{"since": "Unix milliseconds", "until": "Unix milliseconds", "limit": "Maximum snapshots, up to 5000"}},
 	{Path: "/api/mpc/diagnose/at", Description: "The planning snapshot active at an incident", Query: map[string]string{"ts": "Required incident time, Unix milliseconds"}},
-	{Path: "/api/history", Description: "Recorded site measurements", Query: map[string]string{"range": "Time back, such as 1h", "points": "Maximum rows"}},
+	{Path: "/api/history", Description: "Recorded site measurements", Query: map[string]string{"range": "Time back, such as 1h", "points": "Maximum rows, up to 2000"}},
 	{Path: "/api/energy/daily", Description: "Daily measured energy and costs", Query: map[string]string{"days": "Number of days"}},
 	{Path: "/api/energy/assets", Description: "Energy-ledger assets by configured name"},
 	{Path: "/api/energy/history", Description: "Energy-ledger entries in Wh, including flow, source, quality, provenance and sample count", Query: map[string]string{"scope": "system or asset", "asset_id": "Asset id from /api/energy/assets", "since": "Unix milliseconds", "until": "Unix milliseconds", "bucket": "Bucket duration, at least 5m", "limit": "Maximum buckets, up to 5000"}},
 	{Path: "/api/savings/daily", Description: "Daily cost comparison and coverage", Query: map[string]string{"days": "Number of days"}},
 	{Path: "/api/series/catalog", Description: "Stored drivers, metric names and units"},
-	{Path: "/api/series", Description: "One driver's measured series with min, max, sample count, resolution and bounds", Query: map[string]string{"driver": "Required driver name from /api/series/catalog", "metric": "Required metric name or comma-separated names from the catalogue", "range": "Time back, such as 6h", "since": "Unix milliseconds", "until": "Unix milliseconds", "points": "Maximum points per metric"}},
+	{Path: "/api/series", Description: "One driver's measured series with min, max, sample count, resolution and bounds", Query: map[string]string{"driver": "Required driver name from /api/series/catalog", "metric": "Required metric name or comma-separated names from the catalogue", "range": "Time back, such as 6h", "since": "Unix milliseconds", "until": "Unix milliseconds", "points": "Maximum points per metric, up to 2000"}},
 }
 
 // These GET handlers return diagnostic data despite their Local tier for
@@ -109,7 +109,7 @@ var agentAPIQueryHints = map[string]map[string]string{
 	"/api/ev/status":                 {"driver": "Configured driver name"},
 	"/api/research/load/dump":        {"days": "Days of original observations, 1 to 365; tar.gz export"},
 	"/api/agents/audit":              {"before": "Audit sequence before which to page", "n": "Maximum audit rows"},
-	"/api/series":                    {"driver": "Configured driver name", "metric": "Metric or comma-separated metrics from /api/series/catalog", "range": "Time back, such as 6h", "since": "Unix milliseconds", "until": "Unix milliseconds", "points": "Maximum points per metric; 0 returns stored rows", "format": "json (default) or csv"},
+	"/api/series":                    {"driver": "Configured driver name", "metric": "Metric or comma-separated metrics from /api/series/catalog", "range": "Time back, such as 6h", "since": "Unix milliseconds", "until": "Unix milliseconds", "points": "Maximum points per metric, up to 2000; 0 returns stored rows", "format": "json (default) or csv"},
 	"/api/energy/history.csv":        {"scope": "system or asset", "asset_id": "Asset id from /api/energy/assets", "since": "Unix milliseconds", "until": "Unix milliseconds", "bucket": "Bucket duration, at least 5m", "limit": "Maximum buckets, up to 5000"},
 	"/api/energy/battery-return":     {"year": "Calendar year in Swedish time, 2018 to now; default last year"},
 	"/api/energy/battery-return.csv": {"year": "Calendar year in Swedish time, 2018 to now; default last year"},

@@ -2436,19 +2436,41 @@ func (s *Server) handleSelfTuneCancel(w http.ResponseWriter, r *http.Request) {
 
 // ---- /api/history ----
 
+// historyMaxPoints bounds the rows one /api/history or /api/series read
+// asks for. It is the bucket budget /api/energy/history already uses.
+const historyMaxPoints = energyHistoryMaxBuckets
+
+// parseHistoryPoints reads ?points=. Omitted gives dflt. A larger value is
+// clamped to historyMaxPoints, so a client that asks for more still gets an
+// answer, at a coarser step. A value that is not a whole number, or is
+// negative, is refused.
+func parseHistoryPoints(r *http.Request, dflt int) (int, error) {
+	raw := r.URL.Query().Get("points")
+	if raw == "" {
+		return dflt, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("points must be a whole number, 0 or more")
+	}
+	return min(n, historyMaxPoints), nil
+}
+
 // handleHistory returns time-series points from state DB.
-// Query params: range=5m|15m|1h|6h|24h|3d, points=N
+// Query params: range=5m|15m|1h|6h|24h|3d, points=N (0 or omitted: 200;
+// at most historyMaxPoints)
 func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	rangeStr := r.URL.Query().Get("range")
 	if rangeStr == "" {
 		rangeStr = "5m"
 	}
-	pointsStr := r.URL.Query().Get("points")
-	points := 200
-	if pointsStr != "" {
-		if n, err := strconv.Atoi(pointsStr); err == nil && n > 0 {
-			points = n
-		}
+	points, err := parseHistoryPoints(r, 200)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
+	}
+	if points == 0 {
+		points = 200
 	}
 
 	windowMs := parseRange(rangeStr)
@@ -3026,8 +3048,9 @@ func (s *Server) handleMPCDiagnoseAt(w http.ResponseWriter, r *http.Request) {
 //   - metric: one name, or several comma-separated (battery_w,heatsink_c)
 //   - range: relative window ending now (1h, 24h, 30d, ...), OR
 //   - since/until: absolute unix-ms bounds (until defaults to now)
-//   - points: downsampling budget; 0 = stored resolution. Aggregate points carry
-//     the bucket envelope: v = avg, min/max = extremes, n = sample count
+//   - points: downsampling budget, at most historyMaxPoints; 0 = stored
+//     resolution. Aggregate points carry the bucket envelope: v = avg,
+//     min/max = extremes, n = sample count
 //   - format=csv: long-format CSV with the same observation metadata instead
 //     of JSON — for spreadsheet / ML export
 //
@@ -3042,11 +3065,10 @@ func (s *Server) handleSeries(w http.ResponseWriter, r *http.Request) {
 	}
 	metrics := strings.Split(metricsParam, ",")
 
-	points := 0
-	if p := r.URL.Query().Get("points"); p != "" {
-		if v, err := strconv.Atoi(p); err == nil {
-			points = v
-		}
+	points, err := parseHistoryPoints(r, 0)
+	if err != nil {
+		writeJSON(w, 400, map[string]string{"error": err.Error()})
+		return
 	}
 
 	// Window: absolute since/until when given, else relative range.
