@@ -1070,13 +1070,13 @@ type HTTPCapability struct {
 	// for this driver only; when empty, standard verification against the
 	// system roots applies (unchanged for every existing HTTP driver).
 	TLSPinSHA256 string `yaml:"tls_pin_sha256,omitempty" json:"tls_pin_sha256,omitempty"`
-	// AllowWrite grants host.http_patch — the verb REST device APIs use for
-	// state-changing writes — as a separate, explicit operator decision, the
-	// HTTP twin of a read-only Modbus driver versus one allowed to write
-	// registers. Scope is exactly http_patch: http_get stays a read and
-	// http_post stays under the plain HTTP grant (existing drivers POST to
-	// query-style APIs), so granting HTTP for telemetry never implicitly
-	// grants the ability to mutate a device. Default off.
+	// AllowWrite grants host.http_patch and host.http_put — the verbs REST
+	// device APIs use for state-changing writes — as a separate, explicit
+	// operator decision, the HTTP twin of a read-only Modbus driver versus
+	// one allowed to write registers. Scope is exactly those verbs: http_get
+	// stays a read and http_post stays under the plain HTTP grant (existing
+	// drivers POST to query-style APIs), so granting HTTP for telemetry never
+	// implicitly grants the ability to mutate a device. Default off.
 	AllowWrite bool `yaml:"allow_write,omitempty" json:"allow_write,omitempty"`
 }
 

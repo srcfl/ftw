@@ -42,7 +42,7 @@ current host API and the source of truth for it. Today it registers:
 | Decoding | `decode_string`, `decode_i16`, `decode_i32_be`, `decode_i32_le`, `decode_u32_be`, `decode_u32_le` |
 | Modbus | `modbus_read`, `write`, `write_registers` (canonical); `modbus_write`, `modbus_write_multi` (legacy aliases) |
 | MQTT | `mqtt_pub`, `mqtt_sub`, `mqtt_publish`, `mqtt_subscribe`, `mqtt_messages` |
-| HTTP | `http_get`, `http_post`, `http_patch`, `http_request`, `http_cookies_clear` |
+| HTTP | `http_get`, `http_post`, `http_patch`, `http_put`, `http_request`, `http_cookies_clear` |
 | WebSocket | `ws_open`, `ws_send`, `ws_messages`, `ws_is_open`, `ws_close` |
 | Raw TCP | `tcp_open`, `tcp_recv`, `tcp_close`, `tcp_is_open` |
 | Serial | `serial_read` |
@@ -56,9 +56,11 @@ reads `W` and `SoC_nom_fract` when `w` and `soc` are absent; when both are
 present the lowercase key wins. Both spellings are correct — prefer the
 canonical one in a new driver.
 
-`http_patch` is the mutating verb and is gated twice: the plain `http` grant is
-not enough, it also needs `capabilities.http.allow_write`. It refuses to follow
-redirects, because Go re-issues a redirected `PATCH` as a body-less GET and a
+`http_patch` and `http_put` are the mutating verbs and are gated twice: the
+plain `http` grant is not enough, they also need
+`capabilities.http.allow_write`. Both send `Content-Type: application/json`
+unless the driver passes its own header. They refuse to follow redirects,
+because Go re-issues a redirected `PATCH` or `PUT` as a body-less GET and a
 device write that never landed would otherwise report success.
 
 `http_request{method, url, headers, body}` is for a driver that has to sign in
@@ -139,7 +141,7 @@ may omit the default hook because Core cannot dispatch commands to them.
 
 `driver_fingerprint(target)` is an optional passive setup probe. It must never
 reconfigure the device. The host denies mutating verbs (`modbus_write`,
-`mqtt_pub`, `http_post`, `http_patch`, and POST through `http_request`) for that VM, including bundled drivers
+`mqtt_pub`, `http_post`, `http_patch`, `http_put`, and POST through `http_request`) for that VM, including bundled drivers
 that may otherwise write.
 
 Call `host.set_make` and `host.set_sn` as soon as stable identity is known.
