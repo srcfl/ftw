@@ -181,17 +181,24 @@ export function flowReadingsFromStatus(status, opts) {
       }
     }
 
-    const evW = num(d.ev_w);
-    if (evW !== null) {
+    const disconnected = d.ev_connected === false;
+    const evW = disconnected ? 0 : num(d.ev_w);
+    if (evW !== null || typeof d.ev_connected === "boolean") {
       const active = !isIdle(evW, thresholdW);
       const planet = {
         id: `ev-${name}`, corner: "bottom-right", title: "EV CHARGER", role: "ev", name,
         kw: Math.abs(evW) / 1000, toHub: false,
         color: planetColor("ev", evW, thresholdW),
-        sub: active ? "charging" : "idle",
+        sub: disconnected ? "not connected" : active ? "charging" : "idle",
         clickable: true,
       };
-      if (online) {
+      if (online && evW === null) {
+        live.ev = true;
+        planets.push(placeholderPlanet({
+          id: planet.id, corner: planet.corner, title: planet.title,
+          role: planet.role, name, sub: "connected · no data", clickable: true,
+        }));
+      } else if (online) {
         live.ev = true;
         planets.push(planet);
       } else {
@@ -225,10 +232,21 @@ export function flowReadingsFromStatus(status, opts) {
     selfPoweredPctToday = Math.max(0, Math.min(100, (1 - importWh / loadWh) * 100));
   }
 
+  const markedPlanets = withControlMarks(planets, status?.control_feedback, opts?.live !== false);
+  for (const planet of markedPlanets) {
+    const driver = status?.drivers?.[planet.name];
+    if (planet.role !== "ev" || !driverOnline(driver) || opts?.live === false) continue;
+    if (driver?.ev_connected === false) {
+      Object.assign(planet, {placeholder: false, kw: 0, sub: "not connected"});
+    } else if (driver?.ev_connected === true && num(driver.ev_w) === null) {
+      planet.sub = "connected · no data";
+    }
+  }
+
   return {
     load: loadW === null ? null : loadW / 1000,
     loadEstimated: hasEstimate,
-    planets: withControlMarks(planets, status?.control_feedback, opts?.live !== false),
+    planets: markedPlanets,
     selfPoweredPctToday,
   };
 }
