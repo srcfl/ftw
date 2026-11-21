@@ -54,6 +54,62 @@ Read the new policy.
             with self.subTest(changelog=changelog), self.assertRaises(ValueError):
                 release_notes.build_notes(self.receipt(), changelog)
 
+    UNRELEASED = """# Changelog
+
+## 0.149.1
+### Patch Changes
+- 1111111: Escape quotes on the setup page.
+
+## 0.149.0
+### Patch Changes
+- 2222222: Bundle a faster planner.
+### Minor Changes
+- 3333333: Show why a boost was refused.
+
+## 0.148.0
+- Already shipped.
+"""
+
+    def test_beta_after_an_unreleased_version_lists_its_changes_too(self):
+        notes = release_notes.build_notes(
+            self.receipt("v0.149.1-beta.1"), self.UNRELEASED, published={"0.148.0"})
+        self.assertIn("## Changes in this beta\n\n### Patch Changes\n- Escape quotes", notes)
+        self.assertIn("## From 0.149.0, which had no release of its own\n\n"
+                      "### Patch Changes\n- Bundle a faster planner.", notes)
+        self.assertIn("### Minor Changes\n- Show why a boost was refused.", notes)
+        self.assertLess(notes.index("Escape quotes"), notes.index("From 0.149.0"))
+        self.assertNotIn("Already shipped", notes)
+        self.assertNotIn("2222222:", notes)
+
+    def test_extra_versions_need_a_known_published_base(self):
+        for published in (None, set(), {"0.140.0"}):
+            with self.subTest(published=published):
+                notes = release_notes.build_notes(
+                    self.receipt("v0.149.1-beta.1"), self.UNRELEASED, published=published)
+                self.assertIn("Escape quotes", notes)
+                self.assertNotIn("faster planner", notes)
+                self.assertNotIn("From 0.149.0", notes)
+
+    def test_stable_and_repeat_beta_keep_one_section(self):
+        stable = release_notes.build_notes(
+            self.receipt("v0.149.1", "v0.149.1-beta.1"), self.UNRELEASED, published={"0.148.0"})
+        again = release_notes.build_notes(
+            self.receipt("v0.149.1-beta.2"), self.UNRELEASED, published={"0.149.1", "0.148.0"})
+        for notes in (stable, again):
+            self.assertIn("Escape quotes", notes)
+            self.assertNotIn("faster planner", notes)
+
+    def test_published_versions_reads_release_pages(self):
+        pages = [[{"tag_name": "v0.148.0-beta.2", "draft": False},
+                  {"tag_name": "v0.147.0", "draft": False},
+                  {"tag_name": "v0.149.0-beta.1", "draft": True},
+                  {"tag_name": "v3.8.0", "draft": False}],
+                 [{"tag_name": "drivers-beta", "draft": False}]]
+        self.assertEqual(release_notes.published_versions(pages), {"0.148.0", "0.147.0"})
+        for bad in ({}, [{}], [[{"draft": False}]]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                release_notes.published_versions(bad)
+
     def test_workflow_keeps_note_writer_when_promoting_older_beta(self):
         workflow = (Path(__file__).parents[1] / ".github/workflows/native-release.yml").read_text()
         copy = workflow.index('cp scripts/write-native-release-notes.py "${RUNNER_TEMP}/write-native-release-notes.py"')
@@ -62,6 +118,10 @@ Read the new policy.
         self.assertLess(copy, checkout)
         self.assertLess(checkout, run)
         self.assertIn('--notes-file "${release_dir}/notes.md"', workflow)
+        pages = workflow.index('> "${RUNNER_TEMP}/native-release-pages.json"')
+        published = workflow.index('--published "${RUNNER_TEMP}/native-release-pages.json"')
+        self.assertLess(pages, published)
+        self.assertLess(run, published)
         self.assertNotIn('/releases/latest', workflow)
         self.assertIn('--draft=false --latest=false --verify-tag', workflow)
         self.assertNotIn('--latest=true', workflow)
