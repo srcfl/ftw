@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.165.2
+
+### Patch Changes
+
+- bf0e4fc: When the box refuses to let the home battery charge the car, it now says
+  why. The app's refusal (`E_UNAVAILABLE` for `loadpoint.boost`) carries a
+  `reason` in the same words as a stopped boost, such as
+  `battery_reserve_reached`, so the app can say that the battery is too low
+  instead of only that it cannot help.
+- bf7779b: Bundle Energyplan 0.8.0. On our test homes its plans cost less than
+  0.7.1's at the same goals, and no test home gets a plan that meets fewer
+  of its goals. The planner keeps the same time budget, and Core still
+  validates every plan.
+- f6a6b63: The box's pairing page speaks to any phone. It said "FTW for iPhone" and
+  "Open in FTW on this iPhone"; an Android app now pairs the same way, with
+  the same QR, link and short code, so the page now says "your phone" and
+  "the FTW app".
+- fb83c07: Display the vehicle state of charge as a percentage, the measurement time in the browser's local time zone, and its age in hours, minutes, and seconds in the connection test.
+
 ## 0.165.1
 
 ### Patch Changes
