@@ -422,10 +422,12 @@
       '<select data-path="' + path + '">' + opts + '</select>';
   }
 
+  // The tabs put this inside quoted attributes as well as text, and a
+  // browser's text serializer leaves quotes alone, so escape them here.
   function escHtml(s) {
     var div = document.createElement("div");
     div.textContent = s == null ? "" : String(s);
-    return div.innerHTML;
+    return div.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   function renderTab(tab) {

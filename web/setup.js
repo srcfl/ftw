@@ -490,18 +490,25 @@
 
     // Render password inputs for each catalog-declared config secret
     // (e.g. sonnen Auth-Token). Each input id is "drv-secret-<key>" and
-    // saveDriver reads them back into driver.config[<key>].
+    // saveDriver reads them back into driver.config[<key>]. The key comes
+    // from the driver's DRIVER block, so it is set as a property and never
+    // parsed as markup.
     var secretsGroup = document.getElementById('drv-secrets-group');
     secretsGroup.innerHTML = '';
     var secrets = selectedCatalog.config_secrets || [];
     secrets.forEach(function (key) {
-      var label = key.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
       var fg = document.createElement('div');
       fg.className = 'form-group';
-      fg.innerHTML =
-        '<label for="drv-secret-' + key + '">' + esc(label) + '</label>' +
-        '<input type="password" id="drv-secret-' + key + '" autocomplete="off" ' +
-        'placeholder="Paste from device web UI">';
+      var label = document.createElement('label');
+      label.htmlFor = 'drv-secret-' + key;
+      label.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+      var input = document.createElement('input');
+      input.type = 'password';
+      input.id = 'drv-secret-' + key;
+      input.setAttribute('autocomplete', 'off');
+      input.placeholder = 'Paste from device web UI';
+      fg.appendChild(label);
+      fg.appendChild(input);
       secretsGroup.appendChild(fg);
     });
   }
