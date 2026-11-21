@@ -196,7 +196,7 @@ export function flowReadingsFromStatus(status, opts) {
         live.ev = true;
         planets.push(placeholderPlanet({
           id: planet.id, corner: planet.corner, title: planet.title,
-          role: planet.role, name, sub: "connected · no power data", clickable: true,
+          role: planet.role, name, sub: "connected · no data", clickable: true,
         }));
       } else if (online) {
         live.ev = true;
@@ -239,7 +239,7 @@ export function flowReadingsFromStatus(status, opts) {
     if (driver?.ev_connected === false) {
       Object.assign(planet, {placeholder: false, kw: 0, sub: "not connected"});
     } else if (driver?.ev_connected === true && num(driver.ev_w) === null) {
-      planet.sub = "connected · no power data";
+      planet.sub = "connected · no data";
     }
   }
 

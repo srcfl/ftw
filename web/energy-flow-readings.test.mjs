@@ -260,7 +260,7 @@ it("shows an unplugged charger even without power and preserves connected idle",
 it("keeps a known connected state when charger power is unavailable", () => {
   const r = flowReadingsFromStatus({drivers:{easee:{status:"ok",ev_connected:true,ev_w:null}}});
   const ev = r.planets.find(p => p.id === "ev-easee");
-  assert.equal(ev.sub, "connected · no power data");
+  assert.equal(ev.sub, "connected · no data");
   assert.equal(ev.placeholder, true);
 });
 
@@ -274,6 +274,6 @@ it("keeps charger connection information when control feedback has no power", ()
   status.drivers.easee.ev_connected = true;
   status.control_feedback[0].reason = "telemetry_stale";
   const connected = flowReadingsFromStatus(status).planets.find(p => p.id === "ev-easee");
-  assert.equal(connected.sub, "connected · no power data");
+  assert.equal(connected.sub, "connected · no data");
   assert.equal(connected.placeholder, true);
 });
