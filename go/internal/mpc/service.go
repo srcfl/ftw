@@ -2809,7 +2809,7 @@ func currentSoC(t *telemetry.Store, fallback float64) (float64, bool) {
 	var n int
 	for _, b := range bats {
 		h := t.DriverHealth(b.Driver)
-		if (h == nil || h.IsOnline()) && freshBatterySoC(b) {
+		if (h == nil || h.CanControl()) && freshBatterySoC(b) {
 			sum += *b.SoC
 			n++
 		}
@@ -2841,7 +2841,7 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember, fuseMa
 			continue
 		}
 		h := s.Tele.DriverHealth(b.Driver)
-		if h == nil || !h.IsOnline() {
+		if h == nil || !h.CanControl() {
 			continue
 		}
 		r := s.Tele.Get(b.Driver, telemetry.DerBattery)

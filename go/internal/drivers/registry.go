@@ -1095,6 +1095,13 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					err = cancelErr
 					break
 				}
+				if action == "battery" && r.tel != nil {
+					if health := r.tel.DriverHealth(rd.cfg.Name); health != nil && health.Calibrating {
+						err = ErrCommandIneligible
+						reportOutcome = false
+						break
+					}
+				}
 				if cmd.checkEVHealth && isPhysicalEVCommand(action) && r.tel != nil {
 					health := r.tel.DriverHealth(rd.cfg.Name)
 					if health == nil || !health.IsOnline() {

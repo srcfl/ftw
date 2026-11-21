@@ -36,7 +36,7 @@ func (s *State) updateBatteryChargeFull(store *telemetry.Store, capacities map[s
 	for name := range capacities {
 		r := store.Get(name, telemetry.DerBattery)
 		h := store.DriverHealth(name)
-		if r == nil || r.SoC == nil || h == nil || !h.IsOnline() {
+		if r == nil || r.SoC == nil || h == nil || !h.CanControl() {
 			continue
 		}
 		age := s.now().Sub(r.SoCUpdatedAt)
@@ -77,7 +77,7 @@ func (s *State) stopFullBatteries(targets []DispatchTarget, store *telemetry.Sto
 			continue
 		}
 		r, h := store.Get(name, telemetry.DerBattery), store.DriverHealth(name)
-		if r == nil || h == nil || !h.IsOnline() || s.PrevTargets[name] <= 0 && r.RawW <= 100 {
+		if r == nil || h == nil || !h.CanControl() || s.PrevTargets[name] <= 0 && r.RawW <= 100 {
 			continue
 		}
 		targets = append(targets, DispatchTarget{Driver: name, TargetW: 0, Clamped: true})

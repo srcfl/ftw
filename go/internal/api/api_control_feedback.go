@@ -353,7 +353,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				case h.DeviceFault:
 					f.State, f.Reason, f.Severity = "blocked", "device_fault", "warning"
 					f.DeviceReason = h.DeviceFaultReason
-				case h.Calibrating && kind == telemetry.DerBattery:
+				case fresh && h.IsOnline() && h.Calibrating && kind == telemetry.DerBattery:
 					f.State, f.Reason, f.Severity = "waiting", "battery_calibrating", "info"
 				}
 			}

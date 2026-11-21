@@ -4685,6 +4685,25 @@ func TestBatteryManualHoldChargesAtSetpoint(t *testing.T) {
 	}
 }
 
+func TestBatteryPoolSkipsCalibratingBattery(t *testing.T) {
+	store := seedStore(500, []struct {
+		name          string
+		currentW, soc float64
+	}{
+		{"bat_a", 0, 0.5},
+		{"bat_b", 0, 0.5},
+	})
+	st := NewState(0, 50, "ferroamp")
+	st.Mode = ModeSelfConsumption
+	st.SlewRateW = 100000
+	st.SetBatteryManualHold(BatteryManualHold{PowerW: 3000, ExpiresAt: time.Now().Add(time.Minute)})
+	store.SetDriverCalibrating("bat_a", true)
+	targets := ComputeDispatch(store, st, caps(map[string]float64{"bat_a": 10000, "bat_b": 10000}), 100000)
+	if len(targets) != 1 || targets[0].Driver != "bat_b" || math.Abs(targets[0].TargetW-3000) > 1 {
+		t.Fatalf("hold should only command bat_b: %+v", targets)
+	}
+}
+
 func TestBatteryManualHoldDischargesAtSetpoint(t *testing.T) {
 	// grid = -2000 (exporting). Without hold, self-consumption would
 	// command +2000 charge. Hold installs -2500 → expect discharge.

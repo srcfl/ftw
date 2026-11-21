@@ -262,10 +262,14 @@ func (h *DriverHealth) SetCommandFault(faulted bool, reason string) {
 	h.refreshDeviceFault()
 }
 
-// IsOnline reports whether the driver is usable for control. A stale-flagged
-// driver (Status offline) OR one that cannot actuate is not.
+// IsOnline reports the driver's health for inventories and diagnostics.
 func (h *DriverHealth) IsOnline() bool {
-	return h.Status != StatusOffline && !h.DeviceFault && !h.Calibrating
+	return h.Status != StatusOffline && !h.DeviceFault
+}
+
+// CanControl also requires the device to be outside autonomous calibration.
+func (h *DriverHealth) CanControl() bool {
+	return h.IsOnline() && !h.Calibrating
 }
 
 // TelemetryLive reports whether this driver's last reading is still a
@@ -1017,6 +1021,8 @@ func (s *Store) SetDriverDeviceFault(name string, faulted bool, reason string) {
 
 // SetDriverCalibrating records a device-managed calibration. Measurements
 // remain live while the dispatcher and planner wait for control to resume.
+// The watchdog still marks a silent driver offline. Only a driver report
+// can end calibration; elapsed time alone is not permission to send commands.
 func (s *Store) SetDriverCalibrating(name string, calibrating bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -838,7 +838,7 @@ func main() {
 		}
 		health := tel.DriverHealth(name)
 		reading := tel.Get(name, telemetry.DerBattery)
-		return health != nil && health.IsOnline() && reading != nil && reading.SoC != nil
+		return health != nil && health.CanControl() && reading != nil && reading.SoC != nil
 	}
 
 	// ---- Identity bootstrap ----
@@ -2156,7 +2156,7 @@ func main() {
 					continue
 				}
 				r := tel.Get(name, telemetry.DerBattery)
-				if !h.IsOnline() || r == nil || r.SoC == nil || tel.IsStale(name, telemetry.DerBattery, watchdog) {
+				if !h.CanControl() || r == nil || r.SoC == nil || tel.IsStale(name, telemetry.DerBattery, watchdog) {
 					return loadpoint.BatteryBoostStoppedBatteryUnavailable
 				}
 				usable++

@@ -323,12 +323,28 @@ func TestCalibrationKeepsBatteryTelemetryAndSuspendsControl(t *testing.T) {
 		t.Fatalf("unexpected calibration feedback: %+v", got)
 	}
 	health := tel.DriverHealth("battery")
-	if health.IsOnline() || health.DeviceFault || !health.TelemetryLive() {
+	if !health.IsOnline() || health.CanControl() || health.DeviceFault || !health.TelemetryLive() {
 		t.Fatalf("calibration must suspend control only: %+v", health)
+	}
+	// A silent device becomes offline via the normal watchdog. Fresh
+	// telemetry alone does not end the owner's autonomous calibration.
+	tel.WatchdogScan(-time.Second)
+	health = tel.DriverHealth("battery")
+	if health.IsOnline() || health.CanControl() {
+		t.Fatalf("watchdog did not mark the calibrating battery offline: %+v", health)
+	}
+	got = srv.controlFeedback(time.Now())
+	if len(got) != 1 || got[0].Reason != "telemetry_stale" {
+		t.Fatalf("calibration masked stale feedback: %+v", got)
+	}
+	tel.RecordDriverSuccess("battery")
+	health = tel.DriverHealth("battery")
+	if !health.IsOnline() || health.CanControl() {
+		t.Fatalf("telemetry recovery re-enabled control during calibration: %+v", health)
 	}
 	tel.SetDriverCalibrating("battery", false)
 	got = srv.controlFeedback(time.Now())
-	if len(got) != 1 || got[0].Reason != "no_command" || !tel.DriverHealth("battery").IsOnline() {
+	if len(got) != 1 || got[0].Reason != "no_command" || !tel.DriverHealth("battery").CanControl() {
 		t.Fatalf("control did not become available after calibration: %+v", got)
 	}
 }

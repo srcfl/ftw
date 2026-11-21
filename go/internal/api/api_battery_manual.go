@@ -118,11 +118,11 @@ func (s *Server) resolveBatteryManualHoldTarget(driver string) (string, int, err
 		return "", http.StatusServiceUnavailable, apiError("battery control state not available")
 	}
 	health := s.deps.Tel.DriverHealth(driver)
-	if health != nil && health.Calibrating {
+	if health != nil && health.IsOnline() && health.Calibrating {
 		return "", http.StatusConflict, apiError("Manual override is unavailable while this battery is calibrating.")
 	}
 	reading := s.deps.Tel.Get(driver, telemetry.DerBattery)
-	if health == nil || !health.IsOnline() || reading == nil || reading.SoC == nil {
+	if health == nil || !health.CanControl() || reading == nil || reading.SoC == nil {
 		return "", http.StatusConflict, apiError("battery driver is not ready for a scoped hold")
 	}
 	deviceID, ok := s.deps.BatteryIdentity(driver)
@@ -155,7 +155,7 @@ func (s *Server) handleBatteryManualHoldGet(w http.ResponseWriter, r *http.Reque
 	resp := batteryManualHoldResponseFrom(h, active)
 	if s.deps.Tel != nil {
 		for name, health := range s.deps.Tel.AllHealth() {
-			if health.Calibrating {
+			if health.IsOnline() && health.Calibrating {
 				resp.CalibratingDrivers = append(resp.CalibratingDrivers, name)
 			}
 		}
