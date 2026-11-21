@@ -255,3 +255,26 @@ func TestShadowLogJudgesNothingFromAThinSlot(t *testing.T) {
 		t.Fatalf("judged a half-covered slot: model %v, cost %v", deref(last.ModelEndC), deref(last.ActualCost))
 	}
 }
+
+// A slot that opened late, as the first after Core starts, is modelled
+// from when its start temperature was read, not from the slot's start.
+func TestShadowLogModelsALateSlotFromItsFirstReading(t *testing.T) {
+	h, s, sink, _ := shadowHouse()
+	h.now = h.now.Add(time.Minute)
+	s.Tick(t0ctx)
+	first := sink.recs[0]
+	tr := s.tracks[first.Zone]
+	for i := 0; i < int((slot-time.Minute)/refreshEvery); i++ {
+		h.now = h.now.Add(refreshEvery)
+		s.Refresh(t0ctx)
+	}
+	s.Tick(t0ctx)
+	last := sink.recs[len(sink.recs)-1].Last
+	if last == nil || last.ModelEndC == nil {
+		t.Fatalf("no model temperature: %+v", last)
+	}
+	want := tr.model.endC(*tr.startC, tr.heat.wh/1000/tr.heat.covered.Hours(), (slot - time.Minute).Hours())
+	if math.Abs(*last.ModelEndC-want) > 1e-9 {
+		t.Fatalf("model end %.6f, want %.6f over the 14 minutes after the reading", *last.ModelEndC, want)
+	}
+}

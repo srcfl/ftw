@@ -147,6 +147,9 @@ type slotTrack struct {
 	forecast *SlotForecast
 	price    *float64
 	startC   *float64
+	// openedAt is when startC was read: the slot's start, or later when
+	// the slot opened late, as the first plan after Core starts.
+	openedAt time.Time
 	input    string
 	heat     *meter
 	elec     *meter // nil when the heat input is the electricity
@@ -295,7 +298,7 @@ func (s *Service) shadowLocked(cfg *config.Heat, zones []ZonePlan, plans map[int
 				if tr.model != nil && tr.startC != nil && span == slot && tr.start.Add(slot).Equal(start) &&
 					out.InputCoverage >= judgeCoverage {
 					kw := tr.heat.wh / 1000 / tr.heat.covered.Hours()
-					out.ModelEndC = fptr(tr.model.endC(*tr.startC, kw, span.Hours()))
+					out.ModelEndC = fptr(tr.model.endC(*tr.startC, kw, start.Sub(tr.openedAt).Hours()))
 				}
 			}
 			elec := tr.elec
@@ -316,7 +319,7 @@ func (s *Service) shadowLocked(cfg *config.Heat, zones []ZonePlan, plans map[int
 		if tr, ok := s.tracks[zc.Name]; !ok || tr.start.Before(start) {
 			nt := &slotTrack{
 				start: start, forecast: rec.Next, price: priceNow, startC: nowC,
-				input: rec.HeatInput, sampleAt: now,
+				openedAt: now, input: rec.HeatInput, sampleAt: now,
 			}
 			if rec.HeatInput != "" {
 				nt.heat = &meter{key: rec.HeatInput}
