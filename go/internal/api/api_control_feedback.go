@@ -607,16 +607,26 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	// more keeps its verdict. A fresh pilot names the charger as the cause
 	// only when it is below the order and is that current. A lower current
 	// whose cause the driver does not show still asks for a look.
-	if f.Kind == "ev" && commanded && cmd.Result == "accepted" && f.SentW != nil && f.RequestedW != nil && f.RequestedA != nil && f.LimitA != nil && f.ActualW != nil &&
-		*f.SentW > 100 && *f.RequestedA > 0 && *f.LimitA > 0 && *f.LimitA+0.5 < *f.RequestedA && settled {
+	//
+	// While the driver reports no limit, a fresh pilot is that current: the
+	// charger signals it to the car now. easee_cloud stops reporting its
+	// limit for up to 30 s after its order reading moves, though its pilot
+	// stays fresh (srcfl/ftw#2056). Only the driver can name the load
+	// balancing, so the pilot alone names the charger.
+	limitA := f.LimitA
+	if limitA == nil {
+		limitA = f.PilotA
+	}
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" && f.SentW != nil && f.RequestedW != nil && f.RequestedA != nil && limitA != nil && f.ActualW != nil &&
+		*f.SentW > 100 && *f.RequestedA > 0 && *limitA > 0 && *limitA+0.5 < *f.RequestedA && settled {
 		perA := *f.RequestedW / *f.RequestedA
-		limitW := *f.LimitA * perA
+		limitW := *limitA * perA
 		tolerance := telemetry.ControlToleranceW(limitW)
 		if *f.ActualW >= limitW-math.Max(tolerance, math.Min(2*perA, 0.15*limitW)) && *f.ActualW <= limitW+tolerance && *f.ActualW < *f.SentW {
 			if f.LimitedBy == "load_balancer" {
 				set("limited", "load_balancer_limit", "info")
-			} else if f.PilotA != nil && *f.PilotA+0.5 < *f.RequestedA && math.Abs(*f.PilotA-*f.LimitA) <= 0.5 {
-				if f.DeviceLimitA != nil && math.Abs(*f.LimitA-*f.DeviceLimitA) <= 0.5 {
+			} else if f.PilotA != nil && *f.PilotA+0.5 < *f.RequestedA && math.Abs(*f.PilotA-*limitA) <= 0.5 {
+				if f.DeviceLimitA != nil && math.Abs(*limitA-*f.DeviceLimitA) <= 0.5 {
 					set("limited", "device_limit", "info")
 				} else {
 					set("limited", "charger_pilot_limit", "info")

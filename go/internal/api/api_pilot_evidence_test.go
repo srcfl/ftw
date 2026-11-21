@@ -126,3 +126,85 @@ func TestPilotLimitNeverHidesCommandFailureOrPendingCommand(t *testing.T) {
 		})
 	}
 }
+
+// Field report srcfl/ftw#2056, 21 Nov 2026, v0.165.1-beta.1, Easee Cloud
+// with a test driver built on easee_cloud's pilot evidence: FTW ordered
+// 13 A on three phases (8.97 kW), the charger read back 13 A, Easee's load
+// balancing signalled 8 A and the car took 5.44 kW. Pilot confirmations
+// came a minute apart. Between them the verdict turned to Not following
+// for 15 s although the 8 A pilot was still fresh. That driver stops
+// reporting its limit for up to 30 s after its order reading moves, until
+// the pilot answers the order again. A fresh pilot still names the charger
+// as the cause, but not its load balancing, which only the driver can.
+func TestFreshPilotExplainsTheDrawWhileTheDriverWithholdsItsLimit(t *testing.T) {
+	const balanced = `,"current_limit_a":8,"current_limited_by":"load_balancer"`
+	for _, tc := range []struct {
+		name                     string
+		gapW                     float64
+		status, reason, severity string
+	}{
+		{"steady draw at the pilot", 5440, "limited", "charger_pilot_limit", "info"},
+		{"car far below the pilot", 3000, "not_following", "power_below_target", "warning"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				source := time.Now().Add(-time.Hour).Format(time.RFC3339Nano)
+				e := newEVTrace(5440)
+				read := func(confirmed time.Time, limit string) {
+					e.extra = fmt.Sprintf(`,"max_a":13,"dynamic_limit_a":13,"pilot_a":8,"pilot_observed_at":%q,"pilot_confirmed_at_ms":%d%s`, source, confirmed.UnixMilli(), limit)
+				}
+				check := func(when, status, reason, severity string) {
+					t.Helper()
+					f := e.verdict(t)
+					if f.Status != status || f.Reason != reason || f.Severity != severity {
+						t.Fatalf("%s: got %s/%s/%s want %s/%s/%s", when, f.Status, f.Reason, f.Severity, status, reason, severity)
+					}
+				}
+				// Five minutes under the balancer's 8 A, confirmed every minute.
+				for i := range 5 * 60 / 5 {
+					if i%12 == 0 {
+						read(time.Now(), balanced)
+					}
+					e.tick(8970, "plan")
+				}
+				first := time.Now()
+				read(first, balanced)
+				e.tick(8970, "plan")
+				check("first confirmation", "limited", "load_balancer_limit", "info")
+				for range 5 {
+					e.tick(8970, "plan")
+				}
+				// 30 s after the confirmation the driver reports no limit for
+				// 15 s. The pilot it confirmed stays fresh.
+				read(first, "")
+				if tc.gapW != e.drawW {
+					e.drawW, e.changedAt = tc.gapW, time.Now()
+				}
+				for range 3 {
+					e.tick(8970, "plan")
+					check(fmt.Sprintf("gap at %v", time.Since(first)), tc.status, tc.reason, tc.severity)
+				}
+				if f := e.verdict(t); f.PilotA == nil || *f.PilotA != 8 || f.LimitA != nil || f.LimitedBy != "" {
+					t.Fatalf("gap evidence: pilot %v, limit %v by %q", f.PilotA, f.LimitA, f.LimitedBy)
+				}
+				if tc.status != "limited" {
+					return
+				}
+				read(first, balanced)
+				e.tick(8970, "plan")
+				check("limit back", "limited", "load_balancer_limit", "info")
+				for range 2 {
+					e.tick(8970, "plan")
+				}
+				read(time.Now(), balanced)
+				e.tick(8970, "plan")
+				check(fmt.Sprintf("second confirmation at %v", time.Since(first)), "limited", "load_balancer_limit", "info")
+				// A second confirmation while the driver still withholds the
+				// limit keeps the charger as the cause.
+				read(time.Now(), "")
+				e.tick(8970, "plan")
+				check("second confirmation without the limit", "limited", "charger_pilot_limit", "info")
+			})
+		})
+	}
+}
