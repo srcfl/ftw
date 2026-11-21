@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.166.0
+
+### Minor Changes
+
+- eeae7c7: FTW now controls a Zaptec Go, Go 2 or Pro through Zaptec Cloud. The bundled
+  `zaptec_cloud` driver used to be read-only, so a Zaptec charger on a
+  loadpoint charged at whatever the Zaptec app set, and the car could overload
+  a phase next to the battery. FTW now sets the charging current within the
+  fuse budget, pauses and resumes. When FTW stands down, for example on a
+  restart or a stale meter, it sets the charger to 0 A and pauses it until the
+  next order, and tells Core when the charger refused; the setting is stored
+  on the charger, so if you stop using FTW,
+  set the current again in the Zaptec app. Experimental: not yet confirmed on a
+  real charger. Tesla Wall Connector, TeslaMate, Home Assistant cars and Tesla
+  Cloud now say why FTW can only read them.
+
+### Patch Changes
+
+- 5d1d93b: Say when FTW reads a charger, car, heat pump or battery but cannot control it.
+  
+  A driver that declares `read_only = true` used to show only a small
+  "telemetry only" badge in Settings, so an owner who added a Zaptec Go through
+  the read-only `zaptec_cloud` saw FTW accept the charger and never steer it,
+  with nothing to say why. Now the EV card, Settings → Devices, Settings →
+  Chargers, the device cards when adding one, the setup wizard and the advanced
+  charger panel say "FTW reads this charger but cannot control it", with the
+  driver's own reason when its description gives one. The EV card leaves out
+  Charge now and Pause charging for such a charger; a hold set before still
+  shows so it can be returned to the plan. A charger set to Observe only reads
+  the same way.
+  
+  `/api/drivers/catalog` entries carry `read_only_reason`, and `/api/loadpoints`
+  carries `driver_read_only` and `driver_read_only_reason`, taken from the
+  driver that runs. Meters, solar inverters and gateways that also read a
+  battery, such as Zap, get no note. No setting changes.
+
 ## 0.165.3
 
 ### Patch Changes
