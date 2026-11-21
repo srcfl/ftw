@@ -454,8 +454,9 @@ car; without it, profiles and `vehicle_capacity_wh` remain the whole story.
   one is served.
 - Chargers that also have a native protocol may work better through a driver.
   Easee and Zaptec have cloud drivers (`easee_cloud`, `zaptec_cloud`) that set
-  the current, pause and resume; OCPP is the option when you want the cloud
-  out of the loop. Neither vendor documents a local API.
+  the current, pause and resume; Zaptec's control is experimental until a
+  real charger confirms it. OCPP is the option when you want the cloud out of
+  the loop. FTW has no local driver for either.
 
 ## When you still need a driver
 

@@ -84,8 +84,8 @@ func TestZaptecCloudControlsThroughFTWHost(t *testing.T) {
 	}
 	raw, _ := json.Marshal(r)
 	t.Logf("ev reading: %s", raw)
-	if r.RawW != 11000 && r.SmoothedW != 11000 {
-		t.Logf("power fields: raw=%v smoothed=%v", r.RawW, r.SmoothedW)
+	if r.RawW != 11000 {
+		t.Errorf("EV W=%v, want 11000 (charging, positive)", r.RawW)
 	}
 	cmd := func(m map[string]any) error {
 		b, _ := json.Marshal(m)
