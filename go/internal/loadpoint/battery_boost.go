@@ -201,6 +201,22 @@ func (c *Controller) EnableBatteryBoost(id string, lease BatteryBoostLease, now 
 	return status, nil
 }
 
+// BatteryBoostRefusal is live state refusing a lease, with the reason in the
+// same stable vocabulary as a stopped boost, so a client can say why without
+// reading prose (xorath, 21 Nov 2026: the app said only that the battery
+// could not help, when the battery was below what it was asked to keep).
+type BatteryBoostRefusal struct {
+	Reason BatteryBoostStopReason
+	msg    string
+}
+
+func (e *BatteryBoostRefusal) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return string(e.Reason)
+}
+
 // batteryBoostLivePreflight centralises the mutable-state checks shared by a
 // fresh API enable and restart restoration. Restore requires the core safety
 // evaluator to be present: without it, battery/site health cannot be proven
@@ -211,10 +227,10 @@ func (c *Controller) batteryBoostLivePreflight(id string, lease BatteryBoostLeas
 		return BatteryBoostStoppedRestartInvalid, errors.New("loadpoint not found")
 	}
 	if !st.PluggedIn {
-		return BatteryBoostStoppedVehicleUnplugged, errors.New("vehicle is not plugged in")
+		return BatteryBoostStoppedVehicleUnplugged, &BatteryBoostRefusal{Reason: BatteryBoostStoppedVehicleUnplugged, msg: "vehicle is not plugged in"}
 	}
 	if st.SurplusOnly {
-		return BatteryBoostStoppedSurplusOnly, errors.New("surplus_only is an operator clamp")
+		return BatteryBoostStoppedSurplusOnly, &BatteryBoostRefusal{Reason: BatteryBoostStoppedSurplusOnly, msg: "surplus_only is an operator clamp"}
 	}
 	// A manual hold sets how much the car draws; a boost only lets the home
 	// battery cover that draw. They answer different questions, so Charge
@@ -228,7 +244,7 @@ func (c *Controller) batteryBoostLivePreflight(id string, lease BatteryBoostLeas
 	}
 	if safety != nil {
 		if reason := safety(id, lease); reason != "" {
-			return reason, errors.New(string(reason))
+			return reason, &BatteryBoostRefusal{Reason: reason}
 		}
 	}
 	return "", nil

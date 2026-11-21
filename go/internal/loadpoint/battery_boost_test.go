@@ -3,6 +3,7 @@ package loadpoint
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -170,8 +171,13 @@ func TestBatteryBoostSafetyAndEVTargetStop(t *testing.T) {
 	ctrl.SetBatteryBoostSafety(func(string, BatteryBoostLease) BatteryBoostStopReason {
 		return BatteryBoostStoppedBatteryReserve
 	})
-	if _, err := ctrl.EnableBatteryBoost("garage", validBatteryBoost(now), now); err == nil || err.Error() != string(BatteryBoostStoppedBatteryReserve) {
+	_, err := ctrl.EnableBatteryBoost("garage", validBatteryBoost(now), now)
+	if err == nil || err.Error() != string(BatteryBoostStoppedBatteryReserve) {
 		t.Fatalf("preflight err = %v", err)
+	}
+	var refusal *BatteryBoostRefusal
+	if !errors.As(err, &refusal) || refusal.Reason != BatteryBoostStoppedBatteryReserve {
+		t.Fatalf("preflight err = %#v, want a refusal naming the reserve", err)
 	}
 
 	ctrl.SetBatteryBoostSafety(nil)
