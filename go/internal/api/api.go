@@ -561,6 +561,7 @@ func (s *Server) routes() {
 	s.handle("POST   /api/cars", Local, s.handleCarAdd)
 	s.handle("PATCH  /api/cars/{id}", Local, s.handleCarUpdate)
 	s.handle("DELETE /api/cars/{id}", Local, s.handleCarRemove)
+	s.handle("PUT    /api/cars/{id}/goal", Local, s.handleCarGoalSet)
 	// The one tap. It changes what the charger plans for, so it is
 	// actuation; a phone sends the op.
 	s.handle("POST /api/loadpoints/{id}/car", Actuate, s.handleSessionCarSet, Via(protocol.OpSessionCarSet))

@@ -227,11 +227,13 @@ code and reason:
 | `POST /api/cars`, the op's arguments as the body | `car.add` |
 | `PATCH /api/cars/{id}`, the fields that change | `car.update` |
 | `DELETE /api/cars/{id}` | `car.remove` |
+| `PUT /api/cars/{id}/goal`, the op's arguments without `id` | `car.goal.set` for that car, plugged in or not |
 | `POST /api/loadpoints/{id}/car` with `{session, car_id}` | `session.car.set` |
 
-The first three are served only on the box's own page: a phone sends the ops,
-with their id and expiry, and the session refuses these routes. The tap is
-actuation, and a phone is told to send `session.car.set`.
+The first four are served only on the box's own page: a phone sends the ops,
+with their id and expiry, and the session refuses these routes. The goal
+route lets in a caller with the op's own scope. The tap is actuation, and a
+phone is told to send `session.car.set`.
 
 `cmd.result` carries `car`, the car's id, level, goal and surplus choice as
 the box holds them after the op, or `charger`, the charger's car after
@@ -261,9 +263,10 @@ by default: until someone taps, the car charges as a visitor.
 ## Where cars appear
 
 - The box's own page shows each car on its overview, plugged in or not,
-  with its level, source and age, its goal and the charger it is on. A
-  charger's notice asks which car it is while the box asks, and Settings
-  has a Cars tab that keeps the list.
+  with its level, source and age, its goal and the charger it is on. Each
+  car's goal and surplus-only choice can be set there, also while the car
+  is away. A charger's notice asks which car it is while the box asks, and
+  Settings has a Cars tab that keeps the list.
 - `GET /api/cars` lists the cars, as above, and `removed`.
   `GET /api/loadpoints` gives each charger `session`, `car_id`,
   `car_identified_by`, `car_corrected`, `car_corrected_from` and `choose`.

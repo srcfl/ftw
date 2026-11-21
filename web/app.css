@@ -410,6 +410,15 @@ body.ftw-app .car-tile-foot {
   gap: 10px;
   margin-top: 4px;
 }
+body.ftw-app .car-tile-facts {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+body.ftw-app .car-tile-facts .car-tile-open {
+  flex: none;
+}
 body.ftw-app .car-tile-open {
   padding: 0.3rem 0;
   border: 0;
