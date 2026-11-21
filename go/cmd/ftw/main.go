@@ -1526,6 +1526,9 @@ func main() {
 		Outdoor: heatOutdoor(st, func() int64 { return forecastSettings.Snapshot().WeatherSinceMS }),
 		Control: heatCat.control,
 		Writer:  heatrun.HoldsWriter{Holds: controlHolds},
+		// Every plan and how the slot before it came out, for checking the
+		// planner against the house before heat.write is trusted.
+		Shadow: &heatrun.JSONLLog{Path: filepath.Join(dataDir, "heat-shadow.jsonl"), MaxBytes: 32 << 20},
 		SiteFresh: func() bool {
 			cfgMu.RLock()
 			meter := cfg.SiteMeterDriver()

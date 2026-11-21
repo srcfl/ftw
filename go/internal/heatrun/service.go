@@ -83,6 +83,8 @@ type Inputs struct {
 	// data stops dispatch (AGENTS.md); nil means no meter is known, which
 	// also stops it.
 	SiteFresh func() bool
+	// Shadow receives one record per zone at every plan; nil logs nothing.
+	Shadow ShadowSink
 	// Now is time.Now unless a test sets it.
 	Now func() time.Time
 }
@@ -156,6 +158,9 @@ type Service struct {
 	gateOpen bool
 	held     map[string]held // by driver: what this service holds
 
+	tracks       map[string]*slotTrack // by zone: the slot in progress
+	shadowFailed bool
+
 	cancel context.CancelFunc
 	done   chan struct{}
 }
@@ -200,10 +205,11 @@ func (s *Service) Start(ctx context.Context) {
 func (s *Service) Refresh(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	now := s.in.Now()
+	s.sampleLocked(now)
 	if s.in.Writer == nil {
 		return
 	}
-	now := s.in.Now()
 	for driver, h := range s.held {
 		if s.in.SiteFresh == nil || !s.in.SiteFresh() {
 			s.releaseLocked(ctx, driver)
@@ -283,6 +289,7 @@ func (s *Service) Tick(ctx context.Context) {
 
 	zones := make([]ZonePlan, len(cfg.Zones))
 	plans := make([]heatplan.Plan, 0, len(cfg.Zones))
+	byZone := map[int]heatplan.Plan{}
 	reqs := make([]*heatplan.Request, len(cfg.Zones))
 	for i, zc := range cfg.Zones {
 		zp := ZonePlan{Name: zc.Name, Sensor: zc.Sensor, Control: zc.Control, TargetC: zc.TargetC, DayTargetC: zc.TargetC}
@@ -307,6 +314,7 @@ func (s *Service) Tick(ctx context.Context) {
 			zp.Value = &v
 		}
 		plans = append(plans, plan)
+		byZone[i] = plan
 		zones[i] = zp
 	}
 
@@ -334,6 +342,7 @@ func (s *Service) Tick(ctx context.Context) {
 	}
 	snap.Zones = zones
 	s.last = snap
+	s.shadowLocked(cfg, zones, byZone, twins, price, start, now, snap.Write, open)
 }
 
 // horizon is the price per slot from start, as far as prices run unbroken.

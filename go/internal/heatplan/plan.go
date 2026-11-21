@@ -206,6 +206,10 @@ type Plan struct {
 	// declared value could avoid: the device's own regulation at its lowest
 	// value, or a compressor's minimum run.
 	OverLimitKWh float64 `json:"over_limit_kwh"`
+	// Baseline is the device left alone, slot by slot, as BaselineCost
+	// weighs it. In shadow the device is left alone, so this is the
+	// prediction the meter can check.
+	Baseline []Slot `json:"baseline_slots,omitempty"`
 }
 
 // Values returns the candidates a number control offers between lo and hi
@@ -364,6 +368,7 @@ func Propose(r Request) (Plan, error) {
 	plan := s.run(false)
 	base := s.run(true)
 	plan.BaselineCost = base.Cost
+	plan.Baseline = base.Slots
 	return plan, nil
 }
 

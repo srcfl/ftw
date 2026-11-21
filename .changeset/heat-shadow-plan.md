@@ -22,3 +22,12 @@ of another, such as a heat pump's estimated space heat. A sensor named in
 A zone can be heated by a heat pump (`source: heat_pump`) with the owner's
 efficiency and heat curve, and planned through a declared curve offset with
 the owner's figures for what one unit does.
+
+Every plan is logged to `heat-shadow.jsonl` in the data directory, one line
+per zone and quarter: what the plan and the device left alone would do in the
+quarter starting, and how the quarter that ended came out against what was
+said for it, with the zone's temperature at both ends, the heat input's
+energy over the quarter and how much of it was covered by fresh readings. In
+shadow the device runs itself, so the left-alone prediction is what the
+readings can confirm before `heat.write` is trusted. The file is moved aside
+at 32 MB.
