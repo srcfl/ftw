@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
@@ -16,7 +17,11 @@ import (
 //
 // complete is false when an enabled driver has no catalog entry, so its
 // sensors are unknown rather than absent. The service then forgets no twin.
-func thermalTwinZones(cfgDrivers []config.Driver, catalog []drivers.CatalogEntry) (zones []thermaltwin.Zone, complete bool) {
+//
+// A sensor the owner names in heat.zones is learned even when its driver
+// does not declare it, as a room sensor on an underfloor gateway, and takes
+// the heat input the owner named for it.
+func thermalTwinZones(cfgDrivers []config.Driver, catalog []drivers.CatalogEntry, heat *config.Heat) (zones []thermaltwin.Zone, complete bool) {
 	var out []thermaltwin.Zone
 	complete = true
 	for _, d := range cfgDrivers {
@@ -37,6 +42,30 @@ func thermalTwinZones(cfgDrivers []config.Driver, catalog []drivers.CatalogEntry
 				SensorDriver: d.Name,
 				SensorMetric: s.Metric,
 			})
+		}
+	}
+	if heat != nil {
+		enabled := map[string]bool{}
+		for _, d := range cfgDrivers {
+			if !d.Disabled && d.Lua != "" {
+				enabled[d.Name] = true
+			}
+		}
+		index := map[string]int{}
+		for i, z := range out {
+			index[z.Key] = i
+		}
+		for _, hz := range heat.Zones {
+			driver, metric, ok := strings.Cut(hz.Sensor, "/")
+			if !ok || !enabled[driver] {
+				continue
+			}
+			if i, ok := index[hz.Sensor]; ok {
+				out[i].HeatInput = hz.HeatInput
+				continue
+			}
+			index[hz.Sensor] = len(out)
+			out = append(out, thermaltwin.Zone{Key: hz.Sensor, SensorDriver: driver, SensorMetric: metric, HeatInput: hz.HeatInput})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })

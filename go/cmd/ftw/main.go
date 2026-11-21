@@ -49,6 +49,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/currency"
 	"github.com/srcfl/ftw/go/internal/devtools"
+	"github.com/srcfl/ftw/go/internal/drivercontrol"
 	"github.com/srcfl/ftw/go/internal/driverinventory"
 	"github.com/srcfl/ftw/go/internal/driverrepo"
 	"github.com/srcfl/ftw/go/internal/drivers"
@@ -58,6 +59,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/ftwcli"
 	"github.com/srcfl/ftw/go/internal/gatewayidentity"
 	"github.com/srcfl/ftw/go/internal/ha"
+	"github.com/srcfl/ftw/go/internal/heatrun"
 	"github.com/srcfl/ftw/go/internal/journal"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -1068,6 +1070,11 @@ func main() {
 	// Likewise constructed further down; the applier hands it the zones a
 	// changed configuration or driver catalog declares.
 	var thermalTwins *thermaltwin.Service
+	heatCat := &heatCatalog{}
+	var heatSvc *heatrun.Service
+	// One set of control holds for the API and the heat control, so a
+	// planned value and an operator's hold share a lock and an expiry.
+	controlHolds := drivercontrol.New(func() drivercontrol.Registry { return reg })
 
 	// Caller holds forecastConfigMu for a live transition. Keep persisted state
 	// intact during a short unconfirmed startup; only confirmed live bindings
@@ -1198,8 +1205,9 @@ func main() {
 		observeOnly = config.ObserveOnlyDriverSet(newCfg)
 		capMu.Unlock()
 		if thermalTwins != nil {
-			thermalTwins.SetZones(thermalTwinZones(newCfg.Drivers, reloadCatalog))
+			thermalTwins.SetZones(thermalTwinZones(newCfg.Drivers, reloadCatalog, newCfg.Heat))
 		}
+		heatCat.set(newCfg.Drivers, reloadCatalog)
 		warnIfEVHasBatteryCapacity(newCfg.Drivers, newCfg.Loadpoints, reloadCatalog)
 
 		// Swap inverter-group tags (#143) and per-driver power
@@ -1490,10 +1498,50 @@ func main() {
 	}
 	thermalTwins = thermaltwin.NewService(st, tel)
 	thermalTwins.Temp = loadSvc.Temp
-	thermalTwins.SetZones(thermalTwinZones(twinDrivers(), driverCatalog))
+	thermalTwins.SetZones(thermalTwinZones(twinDrivers(), driverCatalog, func() *config.Heat { cfgMu.RLock(); defer cfgMu.RUnlock(); return cfg.Heat }()))
 	thermalTwins.PowerDrivers = func() []string { return thermalTwinPowerDrivers(twinDrivers()) }
 	thermalTwins.Start(ctx)
 	defer thermalTwins.Stop()
+
+	// ---- Heat control (docs/adr/0012) ----
+	// Plans the owner's heat.zones every quarter. It writes nothing unless
+	// heat.write is on, and then only through the shared control holds.
+	heatCat.set(twinDrivers(), driverCatalog)
+	heatSvc = heatrun.New(heatrun.Inputs{
+		Config: func() *config.Heat {
+			cfgMu.RLock()
+			defer cfgMu.RUnlock()
+			return cfg.Heat
+		},
+		Twins:  thermalTwins.Snapshot,
+		Latest: tel.LatestMetric,
+		Prices: heatPrices(st, func() string {
+			cfgMu.RLock()
+			defer cfgMu.RUnlock()
+			if cfg.Price == nil {
+				return ""
+			}
+			return cfg.Price.Zone
+		}),
+		Outdoor: heatOutdoor(st, func() int64 { return forecastSettings.Snapshot().WeatherSinceMS }),
+		Control: heatCat.control,
+		Writer:  heatrun.HoldsWriter{Holds: controlHolds},
+		// Every plan and how the slot before it came out, for checking the
+		// planner against the house before heat.write is trusted.
+		Shadow: &heatrun.JSONLLog{Path: filepath.Join(dataDir, "heat-shadow.jsonl"), MaxBytes: 32 << 20},
+		SiteFresh: func() bool {
+			cfgMu.RLock()
+			meter := cfg.SiteMeterDriver()
+			watchdog := time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+			cfgMu.RUnlock()
+			if watchdog <= 0 {
+				watchdog = 60 * time.Second
+			}
+			return meter != "" && !tel.IsStale(meter, telemetry.DerMeter, watchdog)
+		},
+	})
+	heatSvc.Start(ctx)
+	defer heatSvc.Stop()
 
 	// ---- Start OCPP 1.6J Central System (optional) ----
 	// Chargers dial us, so there is nothing to add to cfg.Drivers and no Lua
@@ -2636,6 +2684,8 @@ func main() {
 		PVModel:          pvSvc,
 		LoadModel:        loadSvc,
 		ThermalTwin:      thermalTwins,
+		HeatPlan:         heatSvc,
+		ControlHolds:     controlHolds,
 		ForecastLearning: forecastTrackerSvc,
 		Loadpoints:       lpMgr,
 		Cars:             carsRT,

@@ -39,7 +39,7 @@ func TestThermalTwinZonesFromDeclaredSensors(t *testing.T) {
 		{Name: "grid", Lua: filepath.Join(dir, "meter.lua")},
 	}
 
-	got, complete := thermalTwinZones(cfg, catalog)
+	got, complete := thermalTwinZones(cfg, catalog, nil)
 	if !complete {
 		t.Error("complete = false with every enabled driver in the catalog")
 	}
@@ -53,10 +53,27 @@ func TestThermalTwinZonesFromDeclaredSensors(t *testing.T) {
 	// A driver the catalog cannot describe has unknown sensors, not none:
 	// the list is incomplete and no twin may be forgotten on its strength.
 	missing := append(cfg, config.Driver{Name: "gone", Lua: filepath.Join(dir, "gone.lua")})
-	if got, complete := thermalTwinZones(missing, catalog); complete || !reflect.DeepEqual(got, want) {
+	if got, complete := thermalTwinZones(missing, catalog, nil); complete || !reflect.DeepEqual(got, want) {
 		t.Errorf("with an unreadable driver: zones = %+v, complete = %v; want the same zones, incomplete", got, complete)
 	}
-	if got, complete := thermalTwinZones(cfg, nil); complete || len(got) != 0 {
+	// A sensor the owner names in heat.zones is learned though its driver
+	// declares nothing, with the heat input the owner named; a declared one
+	// takes the named input too. A disabled driver's sensor is not.
+	heat := &config.Heat{Zones: []config.HeatZone{
+		{Sensor: "grid/zone_1_temp_c", HeatInput: "ctc/space_heat_w"},
+		{Sensor: "wiser/room_bed_temp_c", HeatInput: "wiser/floor_heat_w"},
+		{Sensor: "spare/room_bed_temp_c"},
+	}}
+	withHeat, _ := thermalTwinZones(cfg, catalog, heat)
+	wantHeat := []thermaltwin.Zone{
+		{Key: "grid/zone_1_temp_c", SensorDriver: "grid", SensorMetric: "zone_1_temp_c", HeatInput: "ctc/space_heat_w"},
+		{Key: "wiser/room_bed_temp_c", SensorDriver: "wiser", SensorMetric: "room_bed_temp_c", HeatInput: "wiser/floor_heat_w"},
+		{Key: "wiser/room_living_temp_c", SensorDriver: "wiser", SensorMetric: "room_living_temp_c"},
+	}
+	if !reflect.DeepEqual(withHeat, wantHeat) {
+		t.Errorf("with heat zones = %+v, want %+v", withHeat, wantHeat)
+	}
+	if got, complete := thermalTwinZones(cfg, nil, nil); complete || len(got) != 0 {
 		t.Errorf("without a catalog: zones = %+v, complete = %v; want none, incomplete", got, complete)
 	}
 	if p := thermalTwinPowerDrivers(cfg); !reflect.DeepEqual(p, []string{"wiser", "grid"}) {

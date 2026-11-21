@@ -95,6 +95,9 @@ type Source struct {
 	MaxCOP float64
 }
 
+// Validate refuses a source the planner cannot read one way.
+func (s Source) Validate() error { return s.validate() }
+
 func (s Source) validate() error {
 	switch s.Kind {
 	case SourceDirectElectric:

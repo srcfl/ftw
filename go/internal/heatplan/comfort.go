@@ -3,6 +3,7 @@ package heatplan
 import (
 	"errors"
 	"math"
+	"sort"
 )
 
 // This file holds the owner's rule for what heat is worth, beside the plan
@@ -16,9 +17,15 @@ import (
 // on the comfort that day is worth. It needs no model of the zone and holds
 // from the first day.
 //
-// There is no least saving before a plan may act. What a plan saves is shown
-// to the owner from the shadow run, and the owner decides with that number
-// in view (ADR 0012, decision 9).
+// Two more rules are the owner's own number for when a saving is worth a
+// change of comfort or a write to a device. Both are off at zero.
+//
+//   - SavingsGate: the least a day's plans must save together before they are
+//     acted on. Below it every zone stays on its target. What a plan saves is
+//     also shown to the owner from the shadow run; the gate is the owner's way
+//     to say what a saving has to be worth to them.
+//   - PeakRelief: a short, sharp price peak the owner will sit through at the
+//     bottom of the band, with how sharp and how long as the owner's numbers.
 
 // PriceComfort moves a zone's target with the day's mean price. All prices
 // are in the unit of Request.Price.
@@ -27,17 +34,17 @@ type PriceComfort struct {
 	// raised by all of RaiseK. NormalPrice is where the target is the
 	// owner's own, and DearPrice the mean at or above which it is lowered by
 	// all of LowerK. Between them the shift is linear, never a step.
-	CheapPrice  float64 `json:"cheap_price"`
-	NormalPrice float64 `json:"normal_price"`
-	DearPrice   float64 `json:"dear_price"`
+	CheapPrice  float64 `yaml:"cheap_price" json:"cheap_price"`
+	NormalPrice float64 `yaml:"normal_price" json:"normal_price"`
+	DearPrice   float64 `yaml:"dear_price" json:"dear_price"`
 	// RaiseK and LowerK are how far the target moves, in kelvin. Zero turns
 	// that direction off: a floor may follow cheap days up while the room
 	// air only follows dear days down.
-	RaiseK float64 `json:"raise_k"`
-	LowerK float64 `json:"lower_k"`
+	RaiseK float64 `yaml:"raise_k" json:"raise_k"`
+	LowerK float64 `yaml:"lower_k" json:"lower_k"`
 	// StepK rounds the shift to the control's step, halves away from zero.
 	// Zero leaves it unrounded.
-	StepK float64 `json:"step_k,omitempty"`
+	StepK float64 `yaml:"step_k,omitempty" json:"step_k,omitempty"`
 }
 
 // Enabled reports whether the rule moves anything.
@@ -147,4 +154,174 @@ func (p Plan) Saving() float64 {
 		return 0
 	}
 	return math.Max(0, p.BaselineCost-p.Cost)
+}
+
+// SavingsGate is the owner's least saving for planned heat to be acted on.
+// It is a choice about what a saving is worth to this household, so it has
+// no default: zero opens the gate always.
+type SavingsGate struct {
+	// MinPerDay is what the plans must save together in a day, in the unit
+	// of Request.Price times kWh. Zero or less opens the gate always.
+	MinPerDay float64 `yaml:"min_per_day" json:"min_per_day"`
+	// KeepShare is the share of MinPerDay below which an open gate closes
+	// again, so that a saving near the limit does not open and close it
+	// every slot. From above 0 to 1; zero means 1, no hysteresis.
+	KeepShare float64 `yaml:"keep_share,omitempty" json:"keep_share,omitempty"`
+}
+
+// Validate refuses a gate that cannot be read one way.
+func (g SavingsGate) Validate() error {
+	if !finite(g.MinPerDay, g.KeepShare) || g.KeepShare < 0 || g.KeepShare > 1 {
+		return errors.New("heatplan: the savings gate keeps a share of 0 to 1 of a finite limit")
+	}
+	return nil
+}
+
+// Open reports whether the plans together save enough to act on, and what
+// they save scaled to a day. horizonH is the horizon the plans cover; a
+// horizon longer than a day is scaled down and a shorter one up, since a
+// morning with half a day of prices would otherwise never reach a daily
+// limit. wasOpen is the gate's last answer.
+//
+// The plans passed in are the plans of every zone the gate covers, each
+// counted once: a limit is the household's, and a limit compared with one
+// room's saving would read as never reached.
+//
+// A closed gate means every zone is left on its target, which with
+// PriceComfort is the target that day is worth. An invalid gate, or a
+// horizon that is not a length of time, is closed: the devices then run
+// themselves, which is always safe.
+func (g SavingsGate) Open(plans []Plan, horizonH float64, wasOpen bool) (open bool, perDay float64) {
+	if g.Validate() != nil || !(horizonH > 0) || !finite(horizonH) {
+		return false, 0
+	}
+	var saved float64
+	for _, p := range plans {
+		saved += p.Saving()
+	}
+	perDay = saved * 24 / horizonH
+	if g.MinPerDay <= 0 {
+		return true, perDay
+	}
+	limit := g.MinPerDay
+	if wasOpen && g.KeepShare > 0 {
+		limit *= g.KeepShare
+	}
+	return perDay >= limit, perDay
+}
+
+// PeakRelief lets a zone sit at the bottom of its band through a short price
+// peak. A slot is in a peak when its price is at least MinPrice and at least
+// Factor times the lowest price in the WindowH hours from it, itself
+// included. Of every unbroken stretch of such slots only the dearest
+// MaxHours are relieved, so a long dear period is not one peak: its
+// beginning is left to the plan. With a price that is zero or negative
+// somewhere in the window, the ratio holds for any slot at or above MinPrice.
+//
+// It is the owner's rule and has no default: MaxHours zero turns it off.
+type PeakRelief struct {
+	// MinPrice is the price below which no slot is a peak, in the unit of
+	// Request.Price.
+	MinPrice float64 `yaml:"min_price" json:"min_price"`
+	// Factor is how many times the window's lowest price a peak costs. Above 1.
+	Factor float64 `yaml:"factor" json:"factor"`
+	// WindowH is how far ahead the lowest price is looked for, in hours.
+	WindowH float64 `yaml:"window_h" json:"window_h"`
+	// MaxHours is the longest relief in one peak.
+	MaxHours float64 `yaml:"max_hours" json:"max_hours"`
+}
+
+// Enabled reports whether the rule relieves anything.
+func (r PeakRelief) Enabled() bool { return r.MaxHours > 0 }
+
+// Validate refuses a rule that cannot be read one way. A rule that is off
+// needs no other number.
+func (r PeakRelief) Validate() error {
+	if !finite(r.MinPrice, r.Factor, r.WindowH, r.MaxHours) || r.MaxHours < 0 {
+		return errors.New("heatplan: peak relief must be finite, and its longest relief not negative")
+	}
+	if r.MaxHours == 0 {
+		return nil
+	}
+	if r.MaxHours > 24 || !(r.Factor > 1) || !(r.WindowH > 0) || r.WindowH > 48 {
+		return errors.New("heatplan: peak relief needs a factor above 1, a window of up to 48 hours and a longest relief of up to 24 hours")
+	}
+	return nil
+}
+
+// Slots marks the slots of price that the rule relieves. An invalid or
+// disabled rule, or a price that is not finite, marks none.
+func (r PeakRelief) Slots(price []float64, slotH float64) []bool {
+	out := make([]bool, len(price))
+	if !r.Enabled() || r.Validate() != nil || !(slotH > 0) || !finite(slotH) {
+		return out
+	}
+	for _, p := range price {
+		if !finite(p) {
+			return out
+		}
+	}
+	window := int(math.Ceil(r.WindowH/slotH - 1e-9))
+	keep := int(math.Floor(r.MaxHours/slotH + 1e-9))
+	if window < 1 || keep < 1 {
+		return out
+	}
+	n := len(price)
+	peak := make([]bool, n)
+	for k, p := range price {
+		if p < r.MinPrice {
+			continue
+		}
+		end := min(n, k+window)
+		low := price[k]
+		for _, q := range price[k:end] {
+			low = math.Min(low, q)
+		}
+		peak[k] = low <= 0 || p >= r.Factor*low
+	}
+	for k := 0; k < n; {
+		if !peak[k] {
+			k++
+			continue
+		}
+		j := k
+		for j < n && peak[j] {
+			j++
+		}
+		// The dearest slots of the stretch; the earlier one wins a tie.
+		idx := make([]int, 0, j-k)
+		for i := k; i < j; i++ {
+			idx = append(idx, i)
+		}
+		sort.SliceStable(idx, func(a, b int) bool { return price[idx[a]] > price[idx[b]] })
+		for rank, i := range idx {
+			if rank < keep {
+				out[i] = true
+			}
+		}
+		k = j
+	}
+	return out
+}
+
+// Apply returns the zone with its target let down to the bottom of its band
+// in the relieved slots. The band is the owner's hard limit and stays where
+// it is. Apply it after PriceComfort, which moves the target for the day.
+// The zone passed in is not changed.
+func (r PeakRelief) Apply(z Zone, price []float64, slotH float64) Zone {
+	relieved := r.Slots(price, slotH)
+	changed := false
+	target := make([]float64, len(z.TargetC))
+	copy(target, z.TargetC)
+	for i := range target {
+		if i < len(relieved) && relieved[i] && i < len(z.MinC) && z.MinC[i] < target[i] {
+			target[i] = z.MinC[i]
+			changed = true
+		}
+	}
+	if !changed {
+		return z
+	}
+	z.TargetC = target
+	return z
 }

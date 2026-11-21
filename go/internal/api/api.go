@@ -48,6 +48,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/fleetping"
 	"github.com/srcfl/ftw/go/internal/forecast"
 	"github.com/srcfl/ftw/go/internal/ha"
+	"github.com/srcfl/ftw/go/internal/heatrun"
 	"github.com/srcfl/ftw/go/internal/loadmodel"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/localzone"
@@ -178,7 +179,13 @@ type Deps struct {
 	// Optional: load digital-twin self-learner.
 	LoadModel *loadmodel.Service
 	// Optional: shadow thermal twins of declared room sensors.
-	ThermalTwin      *thermaltwin.Service
+	ThermalTwin *thermaltwin.Service
+	// HeatPlan is the heat zones' plan; nil when Core runs none.
+	HeatPlan *heatrun.Service
+	// ControlHolds, when set, is shared with Core's heat control so planned
+	// values and an operator's hold go through one lock. Nil gives the API
+	// holds of its own.
+	ControlHolds     *drivercontrol.Holds
 	ForecastLearning ForecastLearning
 
 	// Optional: EV loadpoint state consumed by the API and MPC.
@@ -341,7 +348,11 @@ func New(deps *Deps) *Server {
 		drafts:     newDriverDrafts(),
 		marks:      make(map[string]routeMark),
 	}
-	s.controlHolds = drivercontrol.New(s.controlRegistry)
+	if deps.ControlHolds != nil {
+		s.controlHolds = deps.ControlHolds
+	} else {
+		s.controlHolds = drivercontrol.New(s.controlRegistry)
+	}
 	s.setup = onboarding.NewWithSecrets(deps.State, s.preserveSetupSecrets, filepath.Dir(deps.ConfigPath))
 	if deps.SaveConfigWithValues == nil && deps.State != nil {
 		deps.SaveConfigWithValues = func(path string, cfg *config.Config, values map[string]string, reviewedJSON []byte, beforeSave func() error) error {
@@ -540,6 +551,7 @@ func (s *Server) routes() {
 	s.handle("POST /api/pvmodel/reset", Configure, s.handlePVModelReset)
 	s.handle("GET  /api/loadmodel", Read, s.handleLoadModel)
 	s.handle("GET  /api/thermal/twins", Read, s.handleThermalTwins)
+	s.handle("GET  /api/heat/plan", Read, s.handleHeatPlan)
 	s.handle("POST /api/loadmodel/profile", Configure, s.handleLoadModelProfile)
 	s.handle("POST /api/loadmodel/reset", Configure, s.handleLoadModelReset)
 	s.handle("GET  /api/research/load/dump", Read, s.handleLoadResearchDump)
