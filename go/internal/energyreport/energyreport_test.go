@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/state"
+	"github.com/srcfl/ftw/go/internal/statsrelay"
 	"github.com/srcfl/ftw/go/internal/statsrelay/statsrelaytest"
 )
 
@@ -95,22 +96,26 @@ func TestNothingIsSentWithoutTheOwnersAnswer(t *testing.T) {
 	}
 }
 
-// Without a relay and a gateway key, Run returns and never reads the ledger.
-func TestWithoutARelayRunSendsNothing(t *testing.T) {
-	l := &countingLedger{}
-	s := newSender(t, Options{Ledger: l, Enabled: func() bool { return true }})
-	done := make(chan struct{})
-	go func() { s.Run(context.Background()); close(done) }()
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Run waited with nowhere to send")
+// Without a relay the report goes straight to FTW Cloud, and Settings says
+// where.
+func TestWithoutARelayTheReportGoesStraightToFTWCloud(t *testing.T) {
+	s := newSender(t, Options{Enabled: func() bool { return true }})
+	if statsrelay.Pinned() == nil {
+		if p := s.Preview(context.Background()); p.Relay != "" || p.Endpoint != statsrelay.DirectURL || !p.Sending || p.Day == "" {
+			t.Fatalf("preview %+v", p)
+		}
 	}
-	if l.n != 0 {
-		t.Fatal("read the ledger with nowhere to send")
+
+	client, cloud := statsrelaytest.NewDirect(t, day.Add(30*time.Hour))
+	kv := memKV{}
+	s = newSender(t, Options{Ledger: whole(t), KV: kv, Relay: client, Enabled: func() bool { return true },
+		Now: func() time.Time { return day.Add(30 * time.Hour) }})
+	s.send(context.Background(), day)
+	if got := cloud.Energy(); len(got) != 1 || got[0].Date != "2026-10-23" || got[0].GridImport != 24 {
+		t.Fatalf("FTW Cloud got %+v", got)
 	}
-	if p := s.Preview(context.Background()); p.Relay != "" || p.Day == "" {
-		t.Fatalf("preview %+v", p)
+	if kv[lastDayKey] != "2026-10-23" {
+		t.Fatalf("kv %v", kv)
 	}
 }
 

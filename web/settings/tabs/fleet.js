@@ -150,21 +150,28 @@
   }
 
   // energyLine is whereLine for the energy report. It follows the box's own
-  // answer, and says so when this release has no relay to send through.
+  // answer, and says whether the report goes through a relay or straight to
+  // FTW Cloud.
   //
   // Without a report to show, it does not point at one.
   function energyLine(energy) {
     var shown = !!(energy && energy.payload);
-    if (!energy || !energy.relay) {
-      return "This release has no relay yet, so no energy report is sent." +
+    if (!energy || !(energy.relay || energy.endpoint)) {
+      return "This box has nowhere to send an energy report, so none is sent." +
         (shown ? " This is the report it would send." : "");
     }
-    var how = " The relay sees this box's address but not the report. FTW Cloud reads the report but not the address, adds it to that day's totals and keeps nothing of it.";
+    var relayed = !!energy.relay;
+    var where = relayed
+      ? "through " + energy.relay + ", an independent relay,"
+      : "straight to FTW Cloud at " + energy.endpoint + ",";
+    var how = relayed
+      ? " The relay sees this box's address but not the report. FTW Cloud reads the report but not the address, adds it to that day's totals and keeps nothing of it."
+      : " FTW Cloud sees this box's address while the request is open, the way any website does. It adds the report to that day's totals and keeps neither the report nor the address.";
     if (energy.sending) {
-      return "Sent through " + energy.relay + ", an independent relay, once a day, 1 to 12 hours after the UTC day ends." + how;
+      return "Sent " + where + " once a day, 1 to 12 hours after the UTC day ends." + how;
     }
-    return "Nothing is sent. " + (shown ? "This is the report that would go" : "A report would go") + " through " +
-      energy.relay + ", an independent relay, once a day, if sharing were on." + how;
+    return "Nothing is sent. " + (shown ? "This is the report that would go" : "A report would go") + " " +
+      where + " once a day, if sharing were on." + how;
   }
 
   function row(label, value) {
@@ -363,10 +370,12 @@
         "nothing from the fleet report, and leaves at its own time, so the two " +
         "cannot be matched. They never travel together: device kinds and a price " +
         "zone can point at one home, and the energy beside them would then be " +
-        "that home's. It goes through an independent relay, so FTW Cloud reads " +
-        "the numbers without this box's address, and the relay sees the address " +
-        "without the numbers. Sealed with it go a random number, drawn new for " +
-        "each report so FTW Cloud counts it once, and the UTC day it was sent. " +
+        "that home's. Once FTW names an independent relay, the report goes " +
+        "through it, so FTW Cloud reads the numbers without this box's address. " +
+        "Until then it goes straight to FTW Cloud, which sees the address while " +
+        "the request is open and keeps neither the address nor the report. With " +
+        "it go a random number, drawn new for each report so FTW Cloud counts it " +
+        "once, and the UTC day it was sent. " +
         "A day with a gap in the energy record is skipped.</p>" +
         '<div id="fleet-energy-payload"></div>' +
         "</fieldset>"

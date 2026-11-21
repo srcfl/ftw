@@ -327,9 +327,19 @@ describe("the daily energy report", () => {
     assert.ok(extra, "an unexpected field was silently dropped");
   });
 
-  it("says nothing is sent from a release without a relay", () => {
-    const line = energyLine({ relay: "", sending: false, day: "2026-10-23", payload: energy });
-    assert.match(line, /no relay yet/i);
+  it("says a release without a relay sends straight to FTW Cloud", () => {
+    const endpoint = "https://cloud.ftw.energy/v1/energy";
+    const on = energyLine({ relay: "", endpoint, sending: true, day: "2026-10-23", payload: energy });
+    assert.match(on, /^Sent straight to FTW Cloud at https:\/\/cloud\.ftw\.energy\/v1\/energy/);
+    assert.match(on, /sees this box's address while the request is open/);
+    assert.match(on, /keeps neither the report nor the address/);
+    assert.doesNotMatch(on, /independent relay/);
+    assert.match(energyLine({ relay: "", endpoint, sending: false, payload: energy }), /^Nothing is sent/);
+  });
+
+  it("says nothing is sent when the box has nowhere to send", () => {
+    const line = energyLine({ relay: "", endpoint: "", sending: true, day: "2026-10-23", payload: energy });
+    assert.match(line, /nowhere to send/i);
     assert.doesNotMatch(line, /^Sent/);
   });
 
@@ -340,7 +350,7 @@ describe("the daily energy report", () => {
 
   it("says who sees what while it is sent, and nothing is sent while it is off", () => {
     const relay = "https://relay.example.net/ftw";
-    const on = energyLine({ relay, sending: true, payload: energy });
+    const on = energyLine({ relay, endpoint: relay, sending: true, payload: energy });
     assert.match(on, /^Sent through https:\/\/relay\.example\.net/);
     assert.match(on, /sees this box's address but not the report/);
     assert.match(on, /reads the report but not the address/);
@@ -350,7 +360,7 @@ describe("the daily energy report", () => {
   it("names the fields, the missing id and the relay in its paragraph", () => {
     const html = render({});
     assert.match(html, /id="fleet-energy-payload"/);
-    for (const want of [/solar generation/i, /grid import and export/i, /battery charge/i, /vehicle charge/i, /whole kWh/i, /no box id/i, /independent relay/i, /skipped/i]) {
+    for (const want of [/solar generation/i, /grid import and export/i, /battery charge/i, /vehicle charge/i, /whole kWh/i, /no box id/i, /independent relay/i, /straight to FTW Cloud/i, /skipped/i]) {
       assert.match(html, want, `the paragraph does not say ${want}`);
     }
   });

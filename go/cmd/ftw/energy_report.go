@@ -17,7 +17,7 @@ import (
 
 // startEnergyReport builds the sender and starts its schedule. It is built
 // even when nothing may be sent, so Settings can show the report this box
-// would send. A build with no relay or gateway key sends nothing at all.
+// would send. A build with no relay sends it straight to FTW Cloud.
 func startEnergyReport(ctx context.Context, cfg *config.Config, cfgMu *sync.RWMutex, st *state.Store, answer statsAnswer) *energyreport.Sender {
 	if st == nil {
 		return nil

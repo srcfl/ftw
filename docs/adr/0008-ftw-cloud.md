@@ -431,6 +431,19 @@ build with the relay sends the fleet report to FTW Cloud only through it.
 release after the first that pins the relay. A collector the household set
 in `fleet_ping.endpoint` is still posted to directly.
 
+**Amended 8 and 12 November 2026.** No relay exists yet. On 8 November
+Fredrik decided that every box that shares sends its fleet report straight to
+`/v1/fleet`, not only one that said yes. On 12 November he decided the same
+for the energy report, so that stats.ftw.energy can show energy: a build
+without a relay posts it to `POST /v1/energy` (`statsrelay.DirectURL`). That
+route takes the same padded inner request, unsealed, checks its id and day
+the same way and adds it to the same totals. FTW Cloud then sees the box's
+address while the request is open. It writes no request log and keeps
+neither the address nor the report, but until a relay exists Sourceful alone
+could match an energy report to a fleet report by address and time; that is
+a rule in code. Once a release pins a relay, both reports go through it as
+described above.
+
 **Who sees what.** The relay sees the box's address, the time and a
 ciphertext of fixed length, never a report. Cloudflare's relay, if chosen,
 keeps those logs for about 124 days. The gateway sees each report, the
