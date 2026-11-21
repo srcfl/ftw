@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"sync"
 	"time"
@@ -221,7 +222,9 @@ func (s *Service) shadowLocked(cfg *config.Heat, zones []ZonePlan, plans map[int
 					span = slot
 				}
 				if span > 0 {
-					out.InputCoverage = tr.covered.Seconds() / span.Seconds()
+					// Samples a few seconds past the boundary still count
+					// toward this slot, so the share can pass 1 by a hair.
+					out.InputCoverage = math.Min(1, tr.covered.Seconds()/span.Seconds())
 				}
 				if tr.covered > 0 {
 					out.InputKWh = fptr(tr.wh / 1000)
