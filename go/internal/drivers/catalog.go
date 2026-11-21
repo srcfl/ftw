@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // CatalogEntry describes one available driver discovered in the drivers
@@ -54,6 +56,10 @@ type CatalogEntry struct {
 	// ReadOnly means the driver never accepts dispatch commands. The catalog
 	// UI uses it to avoid presenting battery capacity as a control opt-in.
 	ReadOnly bool `json:"read_only,omitempty"`
+	// ReadOnlyReason is why a read-only driver does not control, in the words
+	// of its own description. Empty when the description only says what the
+	// device is. See readOnlyReason.
+	ReadOnlyReason string `json:"read_only_reason,omitempty"`
 	// ReadOnlyDeclared distinguishes an explicit false value from old metadata
 	// that did not state whether the driver can control hardware.
 	ReadOnlyDeclared bool `json:"-"`
@@ -232,6 +238,9 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 	e.WSHosts = pickList(block, "ws_hosts")
 	e.ConnectionDefaults = pickKVBlock(block, "connection_defaults")
 	e.ReadOnly, e.ReadOnlyDeclared = pickOptionalBool(block, "read_only")
+	if e.ReadOnly {
+		e.ReadOnlyReason = readOnlyReason(e.Description)
+	}
 	e.VerificationStatus = normalizeVerificationStatus(pickString(block, "verification_status"))
 	e.VerifiedBy = pickList(block, "verified_by")
 	e.VerifiedAt = pickString(block, "verified_at")
@@ -290,17 +299,61 @@ func IsEVOrVehicleDriver(catalog []CatalogEntry, luaPath string) bool {
 // declares read_only=true. Control-pool construction uses this as a safety
 // boundary for read-only telemetry drivers such as Sourceful Zap.
 func IsReadOnlyDriver(catalog []CatalogEntry, luaPath string) bool {
+	e, ok := FindCatalogEntry(catalog, luaPath)
+	return ok && e.ReadOnly
+}
+
+// FindCatalogEntry returns the catalog entry a configured lua path runs,
+// matched by portable path first and then by file name, as
+// IsEVOrVehicleDriver does.
+func FindCatalogEntry(catalog []CatalogEntry, luaPath string) (CatalogEntry, bool) {
 	if luaPath == "" {
-		return false
+		return CatalogEntry{}, false
 	}
 	wantPath := filepath.ToSlash(luaPath)
 	wantFilename := filepath.Base(wantPath)
 	for _, e := range catalog {
 		if strings.EqualFold(e.Path, wantPath) || strings.EqualFold(e.Filename, wantFilename) {
-			return e.ReadOnly
+			return e, true
 		}
 	}
-	return false
+	return CatalogEntry{}, false
+}
+
+// readOnlyWords are the words a description uses when it says why a driver
+// does not control: "Read-only until a held-zero command is verified on
+// hardware", "Tesla offers no way ... to set its current", "sends nothing
+// back". The driver catalog page does the same in read_only_reason in
+// tools/generate_site.py in srcfl/device-drivers; change the two together.
+var readOnlyWords = regexp.MustCompile(`(?i)read[- ]?only|observ|\bcontrol(s|led|ling)?\b|\bcommand(s|ed)?\b|\bwrites?\b`)
+
+// readOnlyLeadIn is an opening that repeats what the owner already reads
+// ("FTW reads this charger but cannot control it"), so the reason drops it.
+var readOnlyLeadIn = regexp.MustCompile(`(?i)^(ftw can read it but not control it|read-only)\s*[:.]\s*`)
+
+// minReasonWords is the least a reason must keep after its lead-in to say
+// more than "the driver never writes".
+const minReasonWords = 5
+
+// readOnlyReason keeps a description only when it talks about reading or
+// control, starting at the sentence that does, without a lead-in that
+// repeats the note, and with a capital first letter. "Zaptec Go / Go 2 / Pro
+// via Zaptec Cloud" says what the device is, and sonnen's "Read-only." or
+// zap's "The driver never writes." add nothing, so they give no reason.
+func readOnlyReason(description string) string {
+	loc := readOnlyWords.FindStringIndex(description)
+	if loc == nil {
+		return ""
+	}
+	if i := strings.LastIndex(description[:loc[0]], ". "); i >= 0 {
+		description = description[i+2:]
+	}
+	reason := readOnlyLeadIn.ReplaceAllString(strings.TrimSpace(description), "")
+	if len(strings.Fields(reason)) < minReasonWords {
+		return ""
+	}
+	r, size := utf8.DecodeRuneInString(reason)
+	return string(unicode.ToUpper(r)) + reason[size:]
 }
 
 // normalizeVerificationStatus coerces the Lua string into one of the

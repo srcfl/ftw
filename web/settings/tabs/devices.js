@@ -19,6 +19,17 @@
     return caps.indexOf(capability) >= 0;
   }
 
+  // Whether FTW can control a driver's device, in the shared words of
+  // driver-control.js. Nothing when that file is missing.
+  function readOnlyNote(entry) {
+    var words = window.FTWDriverControl;
+    return words ? words.readOnlyNote(entry) : null;
+  }
+  function readOnlySentence(note) {
+    var words = window.FTWDriverControl;
+    return words && note ? words.sentence(note) : "";
+  }
+
   // ---- Opt-in write path -------------------------------------------------
   //
   // Drivers read. One can also write, and only where its own catalog entry
@@ -663,6 +674,11 @@
         badge.textContent = summary.headline;
         if (opts.detailEl) opts.detailEl.textContent = summary.detail;
         if (opts.readOnlyEl) opts.readOnlyEl.style.display = entry.read_only ? "" : "none";
+        if (opts.readOnlyNoteEl) {
+          var note = readOnlyNote(entry);
+          opts.readOnlyNoteEl.hidden = !note;
+          opts.readOnlyNoteEl.textContent = readOnlySentence(note);
+        }
       })
       .catch(function () { /* the switch itself already reported its result */ });
   }
@@ -1440,6 +1456,7 @@
           headlineEl: slot.querySelector(".drv-module-headline"),
           detailEl: slot.querySelector(".drv-module-detail"),
           readOnlyEl: slot.querySelector(".drv-module-readonly"),
+          readOnlyNoteEl: slot.querySelector(".drv-module-readonly-note"),
           onPathChanged: function (previous, next) {
             config.drivers.forEach(function (driver, idx) {
               if (driver.name !== slot.dataset.driverName || driver.lua !== previous) return;
@@ -1647,6 +1664,16 @@
           badge.textContent = usage;
           tags.appendChild(badge);
         }
+        // Said before it is added, not found out after: a charger this
+        // driver only reads is one FTW will never steer.
+        var readOnly = readOnlyNote(e);
+        if (readOnly) {
+          var readOnlyTag = document.createElement("span");
+          readOnlyTag.className = "drv-catalog-tag drv-catalog-unproven";
+          readOnlyTag.textContent = "reads only, no control";
+          readOnlyTag.title = readOnlySentence(readOnly);
+          tags.appendChild(readOnlyTag);
+        }
         card.appendChild(tags);
 
         // The models this has actually been run against — the thing an
@@ -1698,7 +1725,7 @@
           // show or hide it: whether a driver may control anything differs
           // between versions of the same driver.
           html += ' <span class="creds-badge drv-module-readonly"' +
-            (entry.read_only ? '' : ' style="display:none"') + '>telemetry only</span>';
+            (entry.read_only ? '' : ' style="display:none"') + '>reads only</span>';
           // Versions is the one place a driver version is seen and changed.
           // Nothing here announces a newer one: a new driver does not light
           // up, the owner looks when they want to and picks.
@@ -1711,6 +1738,12 @@
           html += ' <button class="btn-add drv-module-source" type="button" data-driver-id="' +
             escHtml(entry.id) + '">Source</button>';
           html += ' <span class="drv-module-action"></span>';
+          // A charger, battery, car or heat pump that FTW only reads says so
+          // in words, with the driver's own reason. Present but hidden for
+          // other drivers, so a version switch can show it.
+          var readOnly = readOnlyNote(entry);
+          html += '<p class="drv-module-readonly-note read-only-note" role="note"' + (readOnly ? '' : ' hidden') + '>' +
+            escHtml(readOnlySentence(readOnly)) + '</p>';
           html += '<div class="drv-module-versions-panel" style="display:none;margin-top:6px"></div>';
           html += '<div class="drv-module-source-panel" style="display:none;margin-top:6px"></div>';
           slot.innerHTML = html;
