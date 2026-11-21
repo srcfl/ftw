@@ -237,6 +237,36 @@ test('the plan and what happens now, in words', () => {
   assert.equal(planNowWords({...morning, planned_battery_w: -3000, battery_w: -1000, why: 'less_home'}).then, 'The battery gives only what the home needs.');
 });
 
+// Field report, 12 Nov 2026 (srcfl/ftw#1948): FTW asked for 12 A, Easee's
+// load balancing allowed 0 A on all three phases, the car did not start.
+test('a start held by load balancing waits calmly, then names the cause', () => {
+  const hold = {kind: 'ev', mode: 'plan', status: 'waiting', reason: 'load_balancer_wait', severity: 'info', make: 'Easee',
+    sent_w: 8280, actual_w: 0, requested_a: 12, offered_a: 12, pilot_a: 0, limit_a: 0, limited_by: 'load_balancer',
+    device_reason: 'limited by dynamic charger current'};
+  const wait = controlStatus(row(hold));
+  assert.equal(wait.title, 'Waiting for load balancing');
+  assert.equal(wait.text, 'Easee’s load balancing allows 0 A, too little for the car to start. FTW asked for 12 A.');
+  assert.equal(wait.next, 'It raises the current slowly once the home uses less, which can take up to 15 minutes. FTW reports a problem if the car has not started by then.');
+  assert.equal(wait.tone, 'neutral');
+  assert.equal(controlStatus(row({...hold, make: undefined})).text.split(',')[0], 'The charger’s load balancing allows 0 A');
+  assert.deepEqual(controlNumbers(row(hold)).filter(([label]) => /current|allows/i.test(label)), [
+    ['Requested current', '12 A'], ['Actual pilot current', '0 A'], ['Reported current setting', '12 A'], ['Load balancing allows', '0 A']]);
+  // The words name Core's own wait.
+  const go = readFileSync(new URL('../go/internal/loadpoint/load_balancer.go', import.meta.url), 'utf8');
+  assert.match(go, /LoadBalancerRaiseWait = 15 \* time\.Minute/);
+  assert.match(go, /MinStartCurrentA = 6\.0/);
+  // Past the wait Core reports no power; the step names the load balancing.
+  const failed = {...hold, status: 'not_following', reason: 'no_power_response', severity: 'warning'};
+  const stuck = controlStatus(row(failed));
+  assert.equal(stuck.title, 'Not following');
+  assert.equal(stuck.tone, 'warning');
+  assert.equal(stuck.next, 'Easee’s load balancing still allows only 0 A. Compare its settings with FTW’s main fuse setting.');
+  // Without that evidence the step stays as it was.
+  for (const other of [{limited_by: undefined}, {limit_a: 6}, {pilot_a: 6}, {offered_a: 10}, {limit_a: null}]) {
+    assert.equal(controlStatus(row({...failed, ...other})).next, 'The charger reports: limited by dynamic charger current.', JSON.stringify(other));
+  }
+});
+
 test('EV shortfalls show the reported reason without changing the verdict', () => {
   for (const reason of ['no_power_response', 'power_below_target', 'offered_current_lower', 'device_limit']) {
     const ev = row({kind: 'ev', reason, status: 'not_following', severity: 'warning', sent_w: 3680,

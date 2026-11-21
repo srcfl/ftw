@@ -42,6 +42,11 @@ type ManualStatus struct {
 	// LimitReason names the clamp behind ManualLimited: "fuse_limit",
 	// "import_limit", "fuse_cooldown" or "site_meter_stale".
 	LimitReason string `json:"limit_reason,omitempty"`
+	// LoadBalancerA is the current the charger's own load balancing lets the
+	// car take, when its driver reports that this is too little to start.
+	// While it holds the start, the hold stays ManualAccepted for up to
+	// LoadBalancerRaiseWait before it is ManualNotDrawing.
+	LoadBalancerA *float64 `json:"load_balancer_a,omitempty"`
 }
 
 const (
@@ -88,6 +93,8 @@ type ChargerReading struct {
 	Charging    bool
 	Reason      string
 	Stalled     bool
+	// BalancerA: see ManualStatus.LoadBalancerA. Nil without that report.
+	BalancerA *float64
 }
 
 const (
@@ -136,6 +143,7 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 		ChargerLimitA:     ch.LimitA,
 		ChargerLimitKnown: ch.Known && ch.LimitKnown,
 		ChargerReason:     ch.Reason,
+		LoadBalancerA:     ch.BalancerA,
 	}
 	if !ch.UpdatedAt.IsZero() {
 		m.ChargerUpdatedAtMs = ch.UpdatedAt.UnixMilli()
@@ -190,6 +198,9 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 		m.LimitReason = st.CommandedReason
 	}
 	limitMatches := m.ChargerLimitKnown && m.CommandedA >= 0 && math.Abs(ch.LimitA-m.CommandedA) < 1
+	// The charger holds the order, but its own load balancing does not let
+	// the car start yet. That is not a car that declines, for a while.
+	balancerWait := ch.BalancerA != nil && *ch.BalancerA+0.5 < m.CommandedA && elapsed < LoadBalancerRaiseWait
 	switch {
 	case ch.Unavailable || st.PowerUnavailable:
 		m.State = ManualUnavailable
@@ -205,11 +216,11 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 		m.State = ManualSent
 	case st.CurrentPowerW >= manualChargingFloorW:
 		m.State = ManualCharging
-	case limitMatches && m.CommandedW >= manualChargingFloorW && elapsed >= manualAcceptGrace:
+	case limitMatches && m.CommandedW >= manualChargingFloorW && elapsed >= manualAcceptGrace && !balancerWait:
 		m.State = ManualNotDrawing
 	case clamp:
 		m.State = ManualLimited
-	case limitMatches && elapsed >= manualAcceptGrace:
+	case limitMatches && elapsed >= manualAcceptGrace && !balancerWait:
 		m.State = ManualNotDrawing
 	case limitMatches:
 		m.State = ManualAccepted
