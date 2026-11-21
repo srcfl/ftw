@@ -443,7 +443,10 @@ class FtwEnergyFlow extends FtwElement {
       .sv-hub-label  { font-size: 11px; }
       .sv-hub-sub    { font-size: 10px; }
     }
+    .sv-ev-status-compact { display: none; }
     @media (max-width: 600px) {
+      .sv-ev-status-wide { display: none; }
+      .sv-ev-status-compact { display: inline; }
       svg { height: calc(var(--efl-h-factor, 1) * 460px); }
       :host([embedded]) .ef-toggle {
         bottom: 30px;
@@ -1596,6 +1599,14 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
   // stroke/fill in the icon SVG.
   const iconSvg = ROLE_ICON[role] || ROLE_ICON.unknown;
   const iconScale = r * 0.45 / 10;
+  const splitEVStatus = role === "ev" && sub === "connected · no data";
+  const compactEVStatus = splitEVStatus
+    ? `<text x="${x}" y="${y + subY - 9}" text-anchor="middle"
+             fill="var(--hero-sub-text)" class="sv-node-sub sv-ev-status-compact" aria-label="${escapeXml(sub)}">
+         <tspan x="${x}">connected</tspan>
+         <tspan x="${x}" dy="1em">no data</tspan>
+       </text>`
+    : "";
   return `
     <g${groupAttrs} style="color:${color}">
       <circle cx="${x}" cy="${y}" r="${r}"
@@ -1614,9 +1625,10 @@ function renderCircleNode({ pos, title, nameLabel, value, sub, color, soc,
         ${hasParts ? renderDailyParts(dailyKwhParts) : escapeXml(dailyKwh)}
       </text>` : ""}
       <text x="${x}" y="${y + subY}" text-anchor="middle"
-            fill="var(--hero-sub-text)" class="sv-node-sub">
+            fill="var(--hero-sub-text)" class="sv-node-sub${splitEVStatus ? " sv-ev-status-wide" : ""}">
         ${escapeXml(sub)}
       </text>
+      ${compactEVStatus}
       ${socText}
     </g>`;
 }
