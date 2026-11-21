@@ -1500,7 +1500,27 @@
         if (metrics.length) {
           html += '<div class="driver-test-metrics">';
           metrics.slice(0, 12).forEach(function (m) {
-            html += '<span>' + escHtml(m.name) + '</span><strong>' + escHtml(fmtNum(m.value)) + '</strong>';
+            var label = m.name;
+            var value = fmtNum(m.value);
+            if (m.name === "vehicle_soc_pct") {
+              label = "Vehicle SoC";
+              if (Number.isFinite(m.value)) value = m.value + " %";
+            } else if (m.name === "vehicle_soc_measured_at_unix_s") {
+              label = "SoC measured at";
+              var measuredAt = new Date(m.value * 1000);
+              if (Number.isFinite(m.value) && Number.isFinite(measuredAt.getTime())) {
+                value = measuredAt.toLocaleString();
+              }
+            } else if (m.name === "vehicle_soc_age_s") {
+              label = "SoC age at test";
+              if (Number.isFinite(m.value)) {
+                var seconds = Math.floor(Math.max(0, m.value));
+                var hours = Math.floor(seconds / 3600);
+                var minutes = Math.floor((seconds % 3600) / 60);
+                value = hours + " h " + minutes + " min " + (seconds % 60) + " s";
+              }
+            }
+            html += '<span>' + escHtml(label) + '</span><strong>' + escHtml(value) + '</strong>';
           });
           if (metrics.length > 12) {
             html += '<span>more</span><strong>' + escHtml(String(metrics.length - 12)) + '</strong>';
