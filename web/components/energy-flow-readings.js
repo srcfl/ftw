@@ -182,6 +182,7 @@ export function flowReadingsFromStatus(status, opts) {
     }
 
     const disconnected = d.ev_connected === false;
+    // An explicit disconnect takes precedence over any lingering power reading.
     const evW = disconnected ? 0 : num(d.ev_w);
     if (evW !== null || typeof d.ev_connected === "boolean") {
       const active = !isIdle(evW, thresholdW);
