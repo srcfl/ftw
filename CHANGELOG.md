@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.167.0
+
+### Minor Changes
+
+- 1584f59: Judge a battery against what it can do now, not only against FTW's order.
+  
+  A home box with a Sungrow hybrid sent 23 "not following" notices in two
+  weeks, though its battery did all it could. At night the inverter held grid
+  import at about 4.3 kW, so the battery took 4.3 kW less the house load; on
+  discharge the battery gave a flat 22 A.
+  
+  Core now learns these limits per battery from its own control journal. When
+  a battery falls short of its order in the right direction and the grid
+  import, grid export, battery current or battery power stays flat, Core keeps
+  that run. Once the same level shows at least three times on two days, a
+  shortfall at that level reads "At its usual limit", with words such as "The
+  inverter takes at most 4.3 kW from the grid. FTW has seen this 14 times since
+  8 Nov." A battery that gives well below its limit still warns, and so does
+  one that gives less than half of its order, however often: a broken battery
+  never becomes normal. So a cold battery whose BMS lets it give, say, 46 % of
+  the order also stays a warning, unless its driver reports that limit. A grid limit counts only while the battery moves and
+  the meter shows live, changing readings, so a meter driver that resends a
+  cached value teaches nothing. A new, lower limit becomes normal only after it
+  repeats on two days, and the old one stays on record. Limits are kept per
+  temperature band when the battery reports its temperature.
+  
+  A battery whose driver reports `available_charge_W` or
+  `available_discharge_W` reads "Limited by the battery" at once when it gives
+  that much. A battery whose driver reports `device_state` standby or starting
+  still warns, now with that reason. These verdicts change the words and the
+  status only; dispatch, the fuse guard and commands do not read them. GET
+  /api/battery_models shows the learned limits, and POST
+  /api/battery_models/reset forgets them along with the rest of the model.
+  Limited verdicts never send the "not following" notice.
+- 0014493: Bundle the drivers that report what a battery can do now. Sungrow (1.7.0), Huawei, Kostal, Sigenergy, GoodWe, Solis, SolaX, SAJ, Deye, FoxESS, victron_mqtt and the Solis C&I and Konja drivers report the battery's temperature and, where the device documents one, its live charge and discharge limit; Sungrow also says when the inverter is on standby. No driver sends a battery temperature of 0 when the read fails any more. The bundle also carries the charger control from srcfl/device-drivers (go-e, OpenEVSE, Hardy Barth, Etrel, KEBA, Schrack; refused stand-downs for Alfen, ABB and Mennekes) that has so far been only in the drivers-beta channel. None of it is verified on hardware yet.
+
+### Patch Changes
+
+- e015cbe: Keep a charge under the charger's load balancing at Limited when the driver
+  briefly stops reporting its limit (srcfl/ftw#2056).
+  
+  An Easee charger read back FTW's 13 A order while its load balancing
+  signalled 8 A to the car, which took 5.44 kW. The EV status said "Limited by
+  the charger's load balancing", then "Not following" for 15 s, then Limited
+  again, though the 8 A pilot reading was still fresh. The test driver, built
+  on the open pilot change in srcfl/device-drivers#200, stops reporting its
+  limit for up to 30 s after its order reading moves. Core now lets a fresh
+  pilot below the order explain a draw that matches it. The status stays
+  Limited and reads "Limited by the charger" with the pilot current, because
+  only the driver can name the load balancing. A car that takes far less than
+  the pilot is still Not following.
+- 989dd07: Stop one late poll from reading as "Lost control".
+  
+  A home box with a Sungrow hybrid logged 341 "Lost control" alarms for its
+  battery in two weeks, each one 5 s journal sample long. The journal samples
+  at its timer's time, and the status page takes its clock before it waits
+  for the controller. A battery poll stored in between looked newer than the
+  clock, so Core called the reading stale, and a stale reading became lost
+  readings at once. A charger that said it was offline for one poll did the
+  same. Core now judges a device at the latest of its own clock and the
+  store's stamps on what it read. Readings count as lost once neither
+  measured power nor a new order has come for 30 s, or 2 min for a charger,
+  the same grace a new order gets. A reading over a minute old, or a driver
+  the watchdog gave up on, is still lost at once. Dispatch and the stale site
+  meter stop are unchanged.
+
 ## 0.166.0
 
 ### Minor Changes
