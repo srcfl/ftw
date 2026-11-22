@@ -187,14 +187,7 @@ func (s *Server) siteGridW(driver, meter, blocked string, charge bool, now time.
 	if meter == "" || blocked != "" || !s.separateMeterSource(driver, meter) {
 		return nil, time.Time{}
 	}
-	if h := s.deps.Tel.DriverHealth(meter); h == nil || !h.TelemetryLive() || h.DeviceFault {
-		return nil, time.Time{}
-	}
-	rd := s.deps.Tel.Get(meter, telemetry.DerMeter)
-	if rd == nil {
-		return nil, time.Time{}
-	}
-	obs, ok := telemetry.ControlPowerObservation(rd.RawW, rd.Data, rd.UpdatedAt)
+	obs, ok := s.deps.Tel.LiveMeterPower(meter)
 	if !ok || now.Sub(obs.Seen()) > siteGridMaxAge {
 		return nil, time.Time{}
 	}
