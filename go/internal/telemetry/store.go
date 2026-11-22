@@ -908,13 +908,29 @@ func (s *Store) PollsLastDay(now time.Time) (polls, errors uint64, covered time.
 // A battery's outstanding order bound survives until raw power confirms its
 // replacement. Historical TS-DB samples stay queryable.
 func (s *Store) Remove(driver string) {
+	s.remove(driver, false)
+}
+
+// RemoveForReplacement drops the old driver's readings and health counters
+// but keeps a known calibration until the replacement reports its state.
+func (s *Store) RemoveForReplacement(driver string) {
+	s.remove(driver, true)
+}
+
+func (s *Store) remove(driver string, replacing bool) {
 	s.mu.Lock()
 	for _, t := range allDerTypes {
 		k := key(driver, t)
 		delete(s.readings, k)
 		delete(s.filters, k)
 	}
-	delete(s.health, driver)
+	if old := s.health[driver]; replacing && old != nil && old.Calibrating {
+		s.health[driver] = &DriverHealth{
+			Name: driver, StartedAt: time.Now(), Status: StatusOffline, Calibrating: true,
+		}
+	} else {
+		delete(s.health, driver)
+	}
 	for _, kind := range allDerTypes {
 		delete(s.controlObservations, key(driver, kind))
 	}

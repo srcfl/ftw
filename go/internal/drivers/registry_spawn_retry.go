@@ -91,7 +91,7 @@ func (r *Registry) retrySpawn(name string, e *spawnRetry) {
 	}
 	if closed {
 		// Shutdown began while this attempt ran and may have missed it.
-		r.removeLocked(name, false)
+		r.removeLocked(name, false, false)
 		return
 	}
 	slog.Info("driver started on retry", "name", name)
