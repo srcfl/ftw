@@ -86,7 +86,8 @@ type ControlFeedback struct {
 	// the limit in W and, under a grid limit, the battery's room, both
 	// positive in the order's direction; where it comes from ("device" or
 	// "learned"), what holds it ("grid_import", "grid_export",
-	// "battery_current", "battery_power" or "battery_reported"), how many
+	// "battery_current", "battery_power", "battery_reported",
+	// "inverter_import" or "inverter_export"), how many
 	// runs showed it, since when, and the learned limit it replaced.
 	LimitW        *float64 `json:"limit_w,omitempty"`
 	LimitRoomW    *float64 `json:"limit_room_w,omitempty"`

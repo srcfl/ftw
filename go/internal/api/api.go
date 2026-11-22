@@ -1157,6 +1157,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		// The inverter stream is a battery or hybrid's AC stage. It sits
+		// beside the driver's readings and is never added to them.
+		if inv, ok := s.deps.Tel.Inverter(name); ok {
+			if inv.W != nil {
+				d["inverter_w"] = *inv.W
+			}
+			if inv.AvailableImportW != nil {
+				d["inverter_available_import_w"] = *inv.AvailableImportW
+			}
+			if inv.AvailableExportW != nil {
+				d["inverter_available_export_w"] = *inv.AvailableExportW
+			}
+		}
 		drivers[name] = d
 	}
 	// Merge config drivers that aren't in the registry so the UI can

@@ -588,6 +588,8 @@ func (h *HostEnv) setPollInterval(ms int32) {
 //
 //	{"type": "meter"|"pv"|"battery"|"ev"|"v2x_charger"|"vehicle", "w": 123.4, "soc": 0.5 (optional), ...}
 //
+// "inverter" is a stream, not a DER, and goes to emitInverter.
+//
 // Extra fields are preserved in the reading's Data payload so the UI/API can
 // surface them verbatim.
 func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
@@ -607,6 +609,9 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	}
 	if err := json.Unmarshal(rawJSON, &env); err != nil {
 		return fmt.Errorf("emit_telemetry: invalid json: %w", err)
+	}
+	if env.Type == "inverter" {
+		return h.emitInverter(rawJSON)
 	}
 	t, err := telemetry.ParseDerType(env.Type)
 	if err != nil {
@@ -672,6 +677,24 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	// Successful emit counts as a tick for health
 	if h.Telemetry != nil {
 		h.Telemetry.RecordDriverSuccess(h.DriverName)
+	}
+	return nil
+}
+
+// emitInverter keeps a driver's inverter stream: the AC stage of its battery
+// or hybrid inverter, which is not a DER (telemetry/inverter.go). It follows
+// the poll rules of a DER emit, so a poll whose reads failed drops it, but it
+// is no sign of life: a driver that sends only this goes stale.
+func (h *HostEnv) emitInverter(rawJSON []byte) error {
+	r, err := telemetry.ParseInverterReading(rawJSON)
+	if err != nil {
+		return fmt.Errorf("emit_telemetry: %w", err)
+	}
+	if h.bufferPollTelemetry(rawJSON) {
+		return nil
+	}
+	if h.Telemetry != nil {
+		h.Telemetry.UpdateInverter(h.DriverName, r)
 	}
 	return nil
 }

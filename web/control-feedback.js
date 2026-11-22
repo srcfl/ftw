@@ -99,9 +99,7 @@ function sentence(row) {
     case 'battery_full': return `FTW paused charging at ${percent(row.battery_soc)}. Charging resumes at ${percent(row.charge_resume_soc)} or lower; discharging works as normal.`;
     case 'battery_nearly_full': return `Taking ${controlPower(actual)} of ${controlPower(row.sent_w)} at ${percent(row.battery_soc)}. A battery charges slower when it is nearly full.`;
     case 'battery_nearly_empty': return `Giving ${controlPower(actual)} of ${controlPower(row.sent_w)} at ${percent(row.battery_soc)}. A battery limits discharge when it is nearly empty.`;
-    case 'battery_limit': return !num(row.limit_w) ? `The battery reports a limit below the ${target(row)} FTW asked for.`
-      : row.limit_w < 1 ? `The battery reports that it cannot ${takes(row)} power now. FTW asked for ${target(row)}.`
-      : `The battery reports that it can ${takes(row)} at most ${controlPower(row.limit_w)} now. FTW asked for ${target(row)}.`;
+    case 'battery_limit': return batteryLimit(row);
     case 'learned_limit': return learnedLimit(row);
     case 'device_standby': return `Asked for ${target(row)}, but the ${name} reports that it is on standby or starting up.`;
     case 'core_limit': return `FTW’s safety limits set the target to ${target(row)}.`;
@@ -144,6 +142,20 @@ function sentence(row) {
 const takes = row => num(row.sent_w) && row.sent_w < 0 ? 'give' : 'take';
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const day = ms => num(ms) && ms > 0 ? `${new Date(ms).getDate()} ${MONTHS[new Date(ms).getMonth()]}` : '';
+
+// A limit the device reports now: the battery's own, or its inverter's grid
+// headroom in the order's direction (limit_w is the headroom left).
+const inverterLimit = row => row.reason === 'battery_limit' && (row.limit_kind === 'inverter_import' || row.limit_kind === 'inverter_export');
+function batteryLimit(row) {
+  if (inverterLimit(row)) {
+    const more = num(row.limit_w) && row.limit_w >= 1 ? `only ${controlPower(row.limit_w)} more` : 'no more';
+    const grid = row.limit_kind === 'inverter_import' ? `take ${more} from the grid` : `send ${more} to the grid`;
+    return `The inverter reports that it can ${grid} now. FTW asked for ${target(row)}.`;
+  }
+  return !num(row.limit_w) ? `The battery reports a limit below the ${target(row)} FTW asked for.`
+    : row.limit_w < 1 ? `The battery reports that it cannot ${takes(row)} power now. FTW asked for ${target(row)}.`
+    : `The battery reports that it can ${takes(row)} at most ${controlPower(row.limit_w)} now. FTW asked for ${target(row)}.`;
+}
 
 // A limit the battery has shown on more than one day, so its shortfall is
 // what it does, not a fault. Core says what holds it.
@@ -243,7 +255,7 @@ export function planNowWords(value) {
 
 export function controlStatus(row, live = true) {
   if (!live) return {title: 'Status not current', text: 'FTW has not reported for a while.', proof: '', next: 'Waiting for a fresh report.', tone: 'stale'};
-  const title = REASON_TITLES[row.reason] || STATUS_TITLES[row.status] || 'Checking';
+  const title = (inverterLimit(row) && 'Limited by the inverter') || REASON_TITLES[row.reason] || STATUS_TITLES[row.status] || 'Checking';
   const tone = row.severity === 'alarm' ? 'alarm' : row.severity === 'warning' ? 'warning' : row.status === 'following' ? 'ok' : 'neutral';
   return {title, text: sentence(row), proof: proofLine(row), next: nextStep(row), tone};
 }

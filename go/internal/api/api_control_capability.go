@@ -11,8 +11,9 @@ import (
 
 // A battery that gives 4.3 kW of a 5 kW order because that is all it can do
 // now is limited, not out of control. This file judges a battery's shortfall
-// against what it can do now: what its driver reports, and the limits it has
-// shown before (battery.Plateaus). It changes the verdict and nothing else;
+// against what it can do now: what its driver reports for the battery and
+// for its inverter's grid headroom, and the limits it has shown before
+// (battery.Plateaus). It changes the verdict and nothing else;
 // dispatch, fuse protection, clamps and commands never read it.
 
 // batteryNow is what a battery's driver reports it can do now
@@ -96,6 +97,12 @@ func (b batteryNow) standby() bool { return b.DeviceState == "standby" || b.Devi
 //     so the words can say why;
 //   - a reported available_*_W below the order that the battery delivers,
 //     within the control tolerance, is limited / battery_limit;
+//   - the battery's inverter reporting, in the same poll, no more grid
+//     headroom in the order's direction (available_import_W while charging,
+//     available_export_W while discharging, at most Core's smallest control
+//     tolerance) is limited / battery_limit, limit_kind inverter_import or
+//     inverter_export. This explains a zero response too, but only while
+//     the headroom is about 0;
 //   - a trusted learned plateau the shortfall sits on is limited /
 //     learned_limit.
 //
@@ -124,6 +131,13 @@ func (s *Server) explainBatteryShortfall(f *ControlFeedback, data json.RawMessag
 		math.Abs(math.Abs(actual)-*limit) <= telemetry.ControlToleranceW(*limit) {
 		f.State, f.Reason, f.Severity = "limited", "battery_limit", "info"
 		f.LimitW, f.LimitSource, f.LimitKind = watts(*limit), "device", "battery_reported"
+		return
+	}
+	// The inverter takes no more from the grid, or gives no more to it, so
+	// the battery can get or give no more through it.
+	if room, kind := s.inverterRoom(f.Driver, charge); room != nil && *room <= telemetry.ControlToleranceW(0) {
+		f.State, f.Reason, f.Severity = "limited", "battery_limit", "info"
+		f.LimitW, f.LimitSource, f.LimitKind = watts(*room), "device", kind
 		return
 	}
 	if f.shortfall == nil {
@@ -158,6 +172,23 @@ func (s *Server) explainBatteryShortfall(f *ControlFeedback, data json.RawMessag
 	if g := f.shortfall.GridW; g != nil && (known.Kind == battery.LimitGridImport || known.Kind == battery.LimitGridExport) {
 		f.LimitRoomW = watts(math.Max(0, known.Value-*g+math.Abs(actual)))
 	}
+}
+
+// inverterRoom is how much more the battery's own inverter reports it will
+// take from the grid while charging, or give to it while discharging, from
+// the inverter stream of the battery reading's poll. Nil when the driver
+// sends no such headroom, its inverter read failed, or the driver is stale,
+// offline or faulted.
+func (s *Server) inverterRoom(driver string, charge bool) (*float64, string) {
+	inv, ok := s.deps.Tel.LiveBatteryInverter(driver)
+	if !ok {
+		return nil, ""
+	}
+	kind := "inverter_export"
+	if charge {
+		kind = "inverter_import"
+	}
+	return inv.Headroom(charge), kind
 }
 
 func (s *Server) learnedLimit(driver string, sample battery.ShortfallSample) (battery.Plateau, bool) {

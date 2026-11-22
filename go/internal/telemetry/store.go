@@ -306,6 +306,9 @@ type Store struct {
 	health              map[string]*DriverHealth
 	commands            map[string]CommandEvidence
 	controlObservations map[string][]ControlObservation
+	// inverters holds each driver's latest inverter stream reading, apart
+	// from readings so no site sum can include it (inverter.go).
+	inverters map[string]InverterReading
 
 	processNoise     float64
 	measurementNoise float64
@@ -352,6 +355,7 @@ func NewStore() *Store {
 		readings:         make(map[string]*DerReading),
 		filters:          make(map[string]*KalmanFilter1D),
 		health:           make(map[string]*DriverHealth),
+		inverters:        make(map[string]InverterReading),
 		latestMetric:     make(map[string]metricSnap),
 		born:             time.Now(),
 		processNoise:     100, // W of expected change between samples
@@ -929,6 +933,7 @@ func (s *Store) Remove(driver string) {
 		delete(s.filters, k)
 	}
 	delete(s.health, driver)
+	delete(s.inverters, driver)
 	for _, kind := range allDerTypes {
 		delete(s.controlObservations, key(driver, kind))
 	}

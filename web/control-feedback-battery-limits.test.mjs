@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
 import {controlStatus} from './control-feedback.js';
 
 // Core's verdict when a battery gives less than ordered because that is what
@@ -43,6 +44,33 @@ test('a limit the battery reports explains itself', () => {
     'The battery reports that it cannot take power now. FTW asked for 5.0 kW charge.');
 });
 
+test('an inverter with no grid headroom left names the inverter', () => {
+  const shown = controlStatus(row({reason: 'battery_limit', limit_source: 'device', limit_kind: 'inverter_import', limit_w: 0}));
+  assert.equal(shown.title, 'Limited by the inverter');
+  assert.equal(shown.text, 'The inverter reports that it can take no more from the grid now. FTW asked for 5.0 kW charge.');
+  assert.equal(shown.next, '');
+  assert.equal(shown.tone, 'neutral');
+  const discharge = {sent_w: -5000, requested_w: -5000, actual_w: -3150, reason: 'battery_limit', limit_source: 'device', limit_kind: 'inverter_export'};
+  assert.equal(controlStatus(row({...discharge, limit_w: 0})).text,
+    'The inverter reports that it can send no more to the grid now. FTW asked for 5.0 kW discharge.');
+  assert.equal(controlStatus(row({...discharge, limit_w: 60})).text,
+    'The inverter reports that it can send only 60 W more to the grid now. FTW asked for 5.0 kW discharge.');
+  // The battery's own report keeps the battery's words.
+  assert.equal(controlStatus(row({reason: 'battery_limit', limit_kind: 'battery_reported', limit_w: 3600})).title, 'Limited by the battery');
+});
+
+// Core names each inverter limit it sets; each one has the inverter's words.
+test('every inverter limit Core sets has words', () => {
+  const go = readFileSync(new URL('../go/internal/api/api_control_capability.go', import.meta.url), 'utf8');
+  const kinds = [...new Set([...go.matchAll(/"(inverter_[a-z]+)"/g)].map(m => m[1]))].sort();
+  assert.deepEqual(kinds, ['inverter_export', 'inverter_import']);
+  for (const limit_kind of kinds) {
+    const shown = controlStatus(row({reason: 'battery_limit', limit_kind, limit_w: 0}));
+    assert.equal(shown.title, 'Limited by the inverter', limit_kind);
+    assert.match(shown.text, /^The inverter reports that it can (take|send) no more /, limit_kind);
+  }
+});
+
 test('a battery on standby still asks for a look', () => {
   const shown = controlStatus(row({status: 'not_following', severity: 'warning', reason: 'device_standby', sent_w: -5000, actual_w: 0}));
   assert.equal(shown.title, 'On standby');
@@ -55,7 +83,8 @@ test('limit words never show codes or invent numbers', () => {
   assert.equal(controlStatus(row({reason: 'learned_limit', limit_kind: 'grid_import'})).text, 'The battery is at a limit it has shown before.');
   assert.equal(controlStatus(row({reason: 'battery_limit'})).text, 'The battery reports a limit below the 5.0 kW charge FTW asked for.');
   for (const extra of [{reason: 'learned_limit'}, {reason: 'learned_limit', limit_kind: 'grid_import'}, {reason: 'battery_limit'},
-    {reason: 'learned_limit', limit_kind: 'battery_current', limit_seen: 4}, {reason: 'device_standby', sent_w: undefined}]) {
+    {reason: 'learned_limit', limit_kind: 'battery_current', limit_seen: 4}, {reason: 'device_standby', sent_w: undefined},
+    {reason: 'battery_limit', limit_kind: 'inverter_import'}, {reason: 'battery_limit', limit_kind: 'inverter_export', sent_w: undefined}]) {
     const shown = controlStatus(row(extra));
     const text = [shown.title, shown.text, shown.next].join(' ');
     assert.doesNotMatch(text, /_|undefined|NaN|null|cannot describe/, JSON.stringify(extra));
