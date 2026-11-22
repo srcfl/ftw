@@ -272,7 +272,7 @@ type StorageAssetSpec struct {
 	ChargeEfficiency    float64
 	DischargeEfficiency float64
 	// Learned is what this battery has shown it can do. Both planners plan
-	// each slot within it (slotLimitsW); it never raises the limits above.
+	// each slot within it (slotLimits); it never raises the limits above.
 	Learned LearnedLimits
 }
 

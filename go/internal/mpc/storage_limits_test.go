@@ -86,15 +86,49 @@ func TestSlotLimitsFollowTheSlotsLoadAndPV(t *testing.T) {
 		{1000, -3000, 5000}, // PV gives the battery its full power
 		{5000, 0, 0},        // the house alone takes the import limit
 	} {
-		charge, discharge := s.slotLimitsW(Slot{LoadW: c.loadW, PVW: c.pvW})
-		if charge != c.charge || discharge != 4200 {
+		charge, discharge := slotLimits([]Slot{{LoadW: c.loadW, PVW: c.pvW}}, []StorageAssetSpec{s})
+		if charge[0][0] != c.charge || discharge[0][0] != 4200 {
 			t.Fatalf("load %v pv %v: %v / %v, want %v / 4200", c.loadW, c.pvW, charge, discharge, c.charge)
 		}
 	}
 	// A learned limit never raises the configured one.
 	s.MaxDischargeW, s.Learned.ChargeW = 3000, 9000
-	if charge, discharge := s.slotLimitsW(Slot{PVW: -9000}); charge != 5000 || discharge != 3000 {
+	if charge, discharge := slotLimits([]Slot{{PVW: -9000}}, []StorageAssetSpec{s}); charge[0][0] != 5000 || discharge[0][0] != 3000 {
 		t.Fatalf("raised: %v / %v", charge, discharge)
+	}
+}
+
+// Two batteries behind one site that both learned its grid hold share the
+// hold's room by their configured charge limits; together they never get
+// more than the room. A battery without a hold keeps its own limits.
+func TestBatteriesShareTheSitesGridHold(t *testing.T) {
+	storages := []StorageAssetSpec{
+		{ID: "a", MaxChargeW: 5000, MaxDischargeW: 5000, Learned: LearnedLimits{GridImportW: 4320}},
+		{ID: "b", MaxChargeW: 3000, MaxDischargeW: 3000, Learned: LearnedLimits{GridImportW: 4400}},
+		{ID: "c", MaxChargeW: 2000, MaxDischargeW: 2000},
+	}
+	slots := []Slot{{LoadW: 1000}, {LoadW: 600, PVW: -4000}, {LoadW: 5000}}
+	charge, _ := slotLimits(slots, storages)
+	// The room is the least hold, 4320 W, less the house: 3320 W, then
+	// 7720 W with PV, then nothing.
+	for i, room := range []float64{3320, 7720, 0} {
+		a, b := charge[0][i], charge[1][i]
+		if math.Abs(a-min(5000, room*5/8)) > 1e-9 || math.Abs(b-min(3000, room*3/8)) > 1e-9 || a+b > room+1e-9 {
+			t.Fatalf("slot %d: a %v b %v, room %v", i, a, b, room)
+		}
+		if charge[2][i] != 2000 {
+			t.Fatalf("slot %d: the battery without a hold got %v", i, charge[2][i])
+		}
+	}
+	// The fleet's limit for Core's own planner is the shared room too.
+	fleet, _ := fleetSlotLimitsW(slots, Params{MaxChargeW: 10000, MaxDischargeW: 10000, Storages: storages})
+	if math.Abs(fleet[0]-(3320+2000)) > 1e-9 {
+		t.Fatalf("fleet night charge %v, want the room plus the third battery", fleet[0])
+	}
+	// One battery gets the whole room, exactly.
+	one, _ := slotLimits(slots[:1], storages[:1])
+	if one[0][0] != 3320 {
+		t.Fatalf("one battery: %v", one[0][0])
 	}
 }
 
@@ -253,8 +287,9 @@ func checkHomeBoxNight(t *testing.T, slots []Slot, p Params, plan Plan, limited 
 	}
 	hours, nightWh := 0, 0.0
 	powers := make([]float64, len(plan.Actions))
+	limitsC, limitsD := slotLimits(slots, p.Storages)
 	for i, a := range plan.Actions {
-		charge, discharge := p.Storages[0].slotLimitsW(slots[i])
+		charge, discharge := limitsC[0][i], limitsD[0][i]
 		if limited && (a.BatteryW > charge+2 || a.BatteryW < -discharge-2) {
 			t.Fatalf("slot %d: battery %.0f W outside -%.0f..%.0f W", i, a.BatteryW, discharge, charge)
 		}
@@ -290,8 +325,9 @@ func TestCoreDPPlansTheHomeBoxNightWithinItsLearnedLimits(t *testing.T) {
 }
 
 func planExceedsLearnedLimits(slots []Slot, p Params, plan Plan) bool {
+	limitsC, limitsD := slotLimits(slots, p.Storages)
 	for i, a := range plan.Actions {
-		charge, discharge := p.Storages[0].slotLimitsW(slots[i])
+		charge, discharge := limitsC[0][i], limitsD[0][i]
 		if a.BatteryW > charge+2 || a.BatteryW < -discharge-2 {
 			return true
 		}
@@ -346,5 +382,133 @@ func TestNativeEnergyplanPlansTheHomeBoxNightWithinItsLearnedLimits(t *testing.T
 	hours := checkHomeBoxNight(t, slots, learned, limited, true)
 	if hours <= freeHours || !planExceedsLearnedLimits(slots, learned, free) {
 		t.Fatalf("charges in %d night hours with the limits, %d without", hours, freeHours)
+	}
+}
+
+// A car charging in the same night slot takes import the battery then cannot
+// get, and the slot limits leave the car out. That makes the plan
+// optimistic for the battery only: the plan still keeps the site's import
+// limit and the owner's hourly import ceiling, which ValidatePlan holds it to.
+func TestACarBesideTheGridHoldKeepsCoresImportLimits(t *testing.T) {
+	slots, p := homeBoxNight()
+	for i := range slots {
+		slots[i].Limits.MaxImportW = 11000
+	}
+	p.Storages[0].Learned = LearnedLimits{GridImportW: 4320, DischargeW: 4200}
+	p.Loadpoint = &LoadpointSpec{ID: "car", CapacityWh: 60000, Levels: 21, SoCMax: 1, InitialSoC: .3, PluggedIn: true,
+		TargetSoC: .5, TargetSlotIdx: 7, MaxChargeW: 11000, AllowedStepsW: []float64{0, 4140, 6900}, ChargeEfficiency: .9}
+	p.ImportMeanW = 9000
+	for _, s := range slots {
+		p.ImportHours = append(p.ImportHours, ImportHour{StartMs: s.StartMs, EndMs: s.StartMs + 3600000})
+	}
+	plan := Optimize(slots, p)
+	if err := ValidatePlan(slots, p, &plan); err != nil {
+		t.Fatalf("Core's limits rejected the plan: %v", err)
+	}
+	charge, discharge := slotLimits(slots, p.Storages)
+	both := 0
+	for i, a := range plan.Actions {
+		if a.BatteryW > charge[0][i]+2 || a.BatteryW < -discharge[0][i]-2 {
+			t.Fatalf("slot %d: battery %.0f W outside its slot limits", i, a.BatteryW)
+		}
+		if a.GridW > slots[i].Limits.MaxImportW+solverGridLimitToleranceW || a.GridW > p.ImportMeanW+solverGridLimitToleranceW {
+			t.Fatalf("slot %d: grid %.0f W past the import limits", i, a.GridW)
+		}
+		if a.BatteryW > 1 && a.LoadpointW > 1 {
+			both++
+		}
+	}
+	t.Logf("%d night slots charge the car and the battery together; battery W %v", both, func() []float64 {
+		out := make([]float64, len(plan.Actions))
+		for i, a := range plan.Actions {
+			out[i] = math.Round(a.BatteryW)
+		}
+		return out
+	}())
+	if both == 0 {
+		t.Fatal("no slot charges the car and the battery together: the case is not covered")
+	}
+	if plan.Actions[7].LoadpointSoC+1e-9 < .5 {
+		t.Fatalf("the car missed its goal: %.3f", plan.Actions[7].LoadpointSoC)
+	}
+}
+
+// failingWorker announces storage_slot_limits, keeps each request and
+// answers it with an error code.
+type failingWorker struct {
+	code     string
+	requests []externalRequest
+}
+
+func (f *failingWorker) RoundTrip(_ context.Context, payload []byte) ([]byte, error) {
+	var head struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(payload, &head)
+	if head.Type == "handshake" {
+		return json.Marshal(map[string]any{"name": "ftw-solver", "version": "test", "protocol_version": 1,
+			"features": []string{"champion", "ev_duty", "published_prices", "storage_slot_limits"}})
+	}
+	var request externalRequest
+	if err := json.Unmarshal(payload, &request); err != nil {
+		return nil, err
+	}
+	f.requests = append(f.requests, request)
+	return json.Marshal(map[string]any{"schema_version": 1, "request_id": request.RequestID, "ok": false,
+		"error": map[string]string{"code": f.code, "message": "test"}})
+}
+func (*failingWorker) Close() error { return nil }
+
+// When the worker fails on a request with slot limits, Core's own planner
+// takes over within the same limits: the battery never gets a plan the
+// worker was told it cannot do.
+func TestWorkerFailureFallsBackWithinTheSameSlotLimits(t *testing.T) {
+	for _, code := range []string{"numerical_failure", "deadline_exceeded"} {
+		t.Run(code, func(t *testing.T) {
+			svc := shadowTestService(t)
+			svc.Defaults.Mode = ModeArbitrage
+			svc.Defaults.SoCLevels, svc.Defaults.ActionLevels = 21, 21
+			svc.UpdateBatteryFleet([]BatteryFleetMember{{Driver: "battery", CapacityWh: 10000, MaxChargeW: 5000, MaxDischargeW: 5000}}, 10000, 5000, 5000)
+			svc.Tele = telemetry.NewStore()
+			soc := .2
+			svc.Tele.Update("battery", telemetry.DerBattery, 0, &soc, json.RawMessage(`{"V":190}`))
+			svc.Tele.DriverHealthMut("battery").RecordSuccess()
+			svc.LearnedBatteryLimits = func(string, *float64) []battery.Plateau {
+				return []battery.Plateau{
+					{Direction: "charge", Kind: battery.LimitGridImport, Value: 2000, Unit: "W"},
+					{Direction: "discharge", Kind: battery.LimitBatteryCurrent, Value: 12, Unit: "A"},
+				}
+			}
+			worker := &failingWorker{code: code}
+			external := &ExternalOptimizer{cfg: ExternalOptimizerConfig{Timeout: 2 * time.Second}, transport: worker, timeBudget: energyplanTimeBudget}
+			o := &EnergyplanOptimizer{ExternalOptimizer: external}
+			external.prepareRequest = o.prepareEnergyplanRequest
+			svc.Optimizer = o
+			plan := svc.Replan(context.Background())
+			if plan == nil || plan.Solver == nil || !plan.Solver.Fallback {
+				t.Fatalf("no Core fallback: %+v", plan)
+			}
+			if len(worker.requests) != 1 || len(worker.requests[0].Storages[0].MaxChargeWBySlot) == 0 ||
+				len(worker.requests[0].Storages[0].MaxDischargeWBySlot) == 0 {
+				t.Fatalf("the worker got no slot limits: %+v", worker.requests)
+			}
+			sent := worker.requests[0].Storages[0]
+			if err := ValidatePlan(svc.lastSlots, svc.lastParams, plan); err != nil {
+				t.Fatal(err)
+			}
+			atLimit := false
+			for i, a := range plan.Actions {
+				if a.BatteryW > sent.MaxChargeWBySlot[i]+2 || a.BatteryW < -sent.MaxDischargeWBySlot[i]-2 {
+					t.Fatalf("slot %d: fallback battery %.0f W outside the limits sent, -%.0f..%.0f W",
+						i, a.BatteryW, sent.MaxDischargeWBySlot[i], sent.MaxChargeWBySlot[i])
+				}
+				atLimit = atLimit || math.Abs(a.BatteryW-sent.MaxChargeWBySlot[i]) < 2 && a.BatteryW > 1 ||
+					math.Abs(a.BatteryW+sent.MaxDischargeWBySlot[i]) < 2 && a.BatteryW < -1
+			}
+			if !atLimit {
+				t.Fatalf("the fallback never reached a slot limit, so the case shows nothing: %+v", plan.Actions)
+			}
+			svc.shadowWG.Wait()
+		})
 	}
 }
