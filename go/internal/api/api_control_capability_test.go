@@ -605,3 +605,42 @@ func TestCalibratingBatteryIsNeverRelabelled(t *testing.T) {
 		}
 	}
 }
+
+// A battery power or current limit below half the order is never learned:
+// a failing battery must keep warning. So a cold BMS that lets the battery
+// give 2.28 of 5 kW (46 %) stays not following, night after night, until
+// its driver reports that limit.
+func TestLowShareLimitNeedsTheDriversReport(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		rng := rand.New(rand.NewSource(17))
+		s := newSungrowTrace()
+		s.houseW = 800
+		start := time.Now()
+		extra := `,"temp_c":-3`
+		s.battery = func() (float64, float64, float64, string) {
+			a := 12 + rng.NormFloat64()*0.2
+			return -a * 190, a, 190, extra
+		}
+		var third tally
+		for d := range 3 {
+			battery := s.battery
+			third = tally{}
+			s.run(3*time.Hour, -5000, func(f ControlFeedback) {
+				if f.Status != "waiting" {
+					third.add(f)
+				}
+			})
+			s.idle(start.Add(time.Duration(d+1) * 24 * time.Hour))
+			s.battery = battery
+		}
+		if got := third.share("not_following/power_below_target/warning"); got < 0.95 {
+			t.Fatalf("third night: %v", third.hits)
+		}
+		extra = `,"temp_c":-3,"available_discharge_W":2300`
+		var last ControlFeedback
+		s.run(90*time.Second, -5000, func(f ControlFeedback) { last = f })
+		if last.Status != "limited" || last.Reason != "battery_limit" || last.LimitSource != "device" || last.LimitW == nil || *last.LimitW != 2300 {
+			t.Fatalf("reported limit: %s", jsonOf(last))
+		}
+	})
+}

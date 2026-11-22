@@ -17,7 +17,8 @@ shortfall at that level reads "At its usual limit", with words such as "The
 inverter takes at most 4.3 kW from the grid. FTW has seen this 14 times since
 8 Nov." A battery that gives well below its limit still warns, and so does
 one that gives less than half of its order, however often: a broken battery
-never becomes normal. A grid limit counts only while the battery moves and
+never becomes normal. So a cold battery whose BMS lets it give, say, 46 % of
+the order also stays a warning, unless its driver reports that limit. A grid limit counts only while the battery moves and
 the meter shows live, changing readings, so a meter driver that resends a
 cached value teaches nothing. A new, lower limit becomes normal only after it
 repeats on two days, and the old one stays on record. Limits are kept per

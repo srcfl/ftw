@@ -298,6 +298,12 @@ func TestFrozenMeterMakesNoGridPlateau(t *testing.T) {
 	}{
 		{"live meter under a cap", func(i int) float64 { return 4316 + 40*math.Sin(float64(i)*1.7) }, func(at time.Time) time.Time { return at }, false, true},
 		{"cached value resent", func(int) float64 { return 4316 }, func(at time.Time) time.Time { return at }, false, false},
+		// A slower meter than the journal: a new measurement every 10 s or
+		// 15 s, its value held in between. Still a live cap.
+		{"meter every 10 s", func(i int) float64 { return 4316 + 40*math.Sin(float64(i/2)*1.7) }, slowMeter(10 * time.Second), false, true},
+		{"meter every 15 s", func(i int) float64 { return 4316 + 40*math.Sin(float64(i/3)*1.7) }, slowMeter(15 * time.Second), false, true},
+		{"meter every 20 s", func(i int) float64 { return 4316 + 40*math.Sin(float64(i/4)*1.7) }, slowMeter(20 * time.Second), false, true},
+		{"meter every 60 s", func(i int) float64 { return 4316 + 40*math.Sin(float64(i/12)*1.7) }, slowMeter(time.Minute), false, false},
 		{"meter's own time stands still", func(i int) float64 { return 4316 + 40*math.Sin(float64(i)*1.7) }, func(time.Time) time.Time { return day0 }, false, false},
 		{"steady battery under a steady grid", func(i int) float64 { return 2600 + 40*math.Sin(float64(i)*1.7) }, func(at time.Time) time.Time { return at }, true, false},
 	} {
@@ -321,5 +327,33 @@ func TestFrozenMeterMakesNoGridPlateau(t *testing.T) {
 				t.Fatalf("grid run kept %v, want %v: %+v", got, tc.want, p.Series)
 			}
 		})
+	}
+}
+
+// slowMeter is a meter that measures once per every, from day0.
+func slowMeter(every time.Duration) func(time.Time) time.Time {
+	return func(at time.Time) time.Time { return day0.Add(at.Sub(day0).Truncate(every)) }
+}
+
+// A slow meter still makes a trusted cap over three nights.
+func TestSlowMeterCapIsTrusted(t *testing.T) {
+	for _, every := range []time.Duration{10 * time.Second, 15 * time.Second} {
+		p := &Plateaus{}
+		for d := range 3 {
+			at := day0.Add(time.Duration(d) * 24 * time.Hour)
+			start := at
+			for i := range 720 {
+				meterAt := start.Add(at.Sub(start).Truncate(every))
+				battery := 4316 - 300 - 2700*(0.5+0.5*math.Sin(float64(i)/7))
+				grid := 4316 + 40*math.Sin(float64(meterAt.Unix()))
+				p.Tick(at, &ShortfallSample{At: at, Charge: true, OrderW: 5000, BatteryW: battery, GridW: f(grid), GridAt: meterAt})
+				at = at.Add(5 * time.Second)
+			}
+			p.Tick(at.Add(time.Minute), nil)
+		}
+		known, ok := p.Explain(ShortfallSample{Charge: true, OrderW: 5000, BatteryW: 2500, GridW: f(4320)})
+		if !ok || known.Kind != LimitGridImport {
+			t.Fatalf("a meter every %v: %+v ok=%v, series %+v", every, known, ok, p.Series)
+		}
 	}
 }

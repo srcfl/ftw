@@ -78,6 +78,12 @@ const (
 // when the house takes 3 kW.
 const plateauMinShare = 0.5
 
+// plateauMeterEvery is the slowest site meter a grid run accepts: one that
+// measures at least every 20 s on average. That is also about the slowest
+// whose readings stay inside the 15 s the verdict allows a grid reading,
+// sampled every 5 s.
+const plateauMeterEvery = 20 * time.Second
+
 // ShortfallSample is one settled journal sample of a battery short of its
 // order in the right direction. Amounts are positive: watts or amps in the
 // order's direction. GridW is grid import while charging or export while
@@ -200,22 +206,22 @@ func gridKind(charge bool) string {
 // not a meter that stopped. The battery must move while the grid holds: a
 // steady house with a steady battery says nothing about the inverter, and a
 // failing battery would look the same. The meter must also be live: its own
-// measurement time moves on in at least a third of the samples (a slower
-// meter than the journal repeats some), and no single value makes up half
-// of them. A driver that resends a cached value repeats it exactly; a real
-// cap jitters (the home Sungrow's 4.32 kW cap had a 41 W spread).
+// measurement time moves on at least once per plateauMeterEvery on average
+// over the run, and no single value makes up half of the samples. A driver
+// that resends a cached value repeats it exactly; a real cap jitters (the
+// home Sungrow's 4.32 kW cap had a 41 W spread).
 func (o *plateauRun) liveCap(grid []float64) bool {
 	median, iqr := middle(o.batteryW)
 	if iqr <= math.Max(plateauFlatShare*median, plateauFloorW) {
 		return false
 	}
-	newer := 0
+	measured := 1
 	for i := 1; i < len(o.gridAt); i++ {
 		if o.gridAt[i].After(o.gridAt[i-1]) {
-			newer++
+			measured++
 		}
 	}
-	if 3*newer < len(o.gridAt) {
+	if time.Duration(measured)*plateauMeterEvery < o.last.Sub(o.start) {
 		return false
 	}
 	same := map[float64]int{}
@@ -303,7 +309,7 @@ func (p *Plateaus) Explain(s ShortfallSample) (Plateau, bool) {
 		kind  string
 		value *float64
 	}{{gridKind(s.Charge), s.GridW}, {LimitBatteryCurrent, s.BatteryA}, {LimitBatteryPower, &s.BatteryW}} {
-		if c.value == nil || !finite(*c.value) || c.kind != gridKind(s.Charge) && !s.share() {
+		if c.value == nil || !finite(*c.value) || (c.kind != gridKind(s.Charge) && !s.share()) {
 			continue
 		}
 		for i := range p.Series {
