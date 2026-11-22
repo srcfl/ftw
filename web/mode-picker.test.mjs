@@ -14,7 +14,7 @@ describe("strategy mode picker", () => {
     // used to ride that same class, so a house already on Self (manual)
     // had no selected button and no labelled way back to a planner
     // strategy until someone found ★ Advanced.
-    const strategy = html.match(/class="plan-strategy"[\s\S]*?class="plan-help"/)?.[0] || "";
+    const strategy = html.match(/class="plan-strategy"[\s\S]*?class="chart-container"/)?.[0] || "";
     assert.match(strategy, /id="mode-advanced-btn"/);
     assert.match(strategy, /id="mode-buttons"/);
     assert.doesNotMatch(strategy, /class="[^"]*advanced-only/);
@@ -38,7 +38,7 @@ describe("strategy mode picker", () => {
     // Household prefs replaced Passive/Active as the primary buttons, so a
     // house already in a manual mode had nothing left to press to start
     // planning again.
-    const strategy = html.match(/class="plan-strategy"[\s\S]*?class="plan-help"/)?.[0] || "";
+    const strategy = html.match(/class="plan-strategy"[\s\S]*?class="chart-container"/)?.[0] || "";
     assert.match(strategy, /id="plan-use-btn"/);
     assert.match(strategy, /Use the plan/);
   });

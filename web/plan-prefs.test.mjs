@@ -107,11 +107,10 @@ describe("plan lines", () => {
   it("says how much of the spare sun the plan counts on", () => {
     const m = (forecast, planned) => ({ sunBeyondKWh: forecast, plannedSunBeyondKWh: planned, sunHeldKWh: 0, useAddedKWh: 0 });
     assert.equal(sunLine(m(12.44, 3.06), "Rest of today"),
-      "Rest of today: the forecast expects 12.4 kWh more sun than your home uses. The plan counts on 3.1 kWh of it.");
-    assert.equal(sunLine(m(6.4, 6.38), "Tomorrow"),
-      "Tomorrow: the forecast expects 6.4 kWh more sun than your home uses. The plan counts on all of it.");
-    assert.equal(sunLine(m(0.01, 0), "Rest of today"),
-      "Rest of today: the forecast expects no sun beyond what your home uses.");
+      "Rest of today: the plan counts on 3.1 kWh of 12.4 kWh spare sun.");
+    // Nothing held back, or no spare sun: the line stays silent.
+    assert.equal(sunLine(m(6.4, 6.38), "Tomorrow"), null);
+    assert.equal(sunLine(m(0.01, 0), "Rest of today"), null);
     assert.equal(sunLine(null, "Rest of today"), null);
   });
 
@@ -126,8 +125,8 @@ describe("plan lines", () => {
     const slot = (start, pv, soc, cap, battery = 0) => ({ slot_start_ms: start, slot_len_min: 15,
       forecast_pv_w: pv, pv_w: pv, soc, live_pv_surplus_soc_cap: cap, battery_w: battery });
     const q = 15 * 60_000;
-    const stores = "Sun beyond what your home and the plan need goes into the battery.";
-    const exports = "Sun beyond what your home and the plan need goes to the grid.";
+    const stores = "Spare sun goes into the battery.";
+    const exports = "Spare sun goes to the grid.";
 
     it("says nothing when the box does not send either cap", () => {
       const actions = [slot(0, -3000, 0.4, 0.8)];
@@ -144,7 +143,7 @@ describe("plan lines", () => {
       assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0.6)], 0, 2 * q, 0), stores);
       assert.equal(extraSunLine([slot(0, -3000, 0.4, 0), slot(q, -2000, 0.4, 0)], 0, 2 * q, 0), exports);
       assert.equal(extraSunLine([slot(0, -3000, 0.4, 0.8), slot(q, -2000, 0.4, 0)], 0, 2 * q, 0),
-        "Sun beyond what your home and the plan need goes partly into the battery and partly to the grid.");
+        "Spare sun goes partly into the battery and partly to the grid.");
     });
 
     it("needs room above the planned charge to call it stored", () => {
@@ -198,7 +197,7 @@ describe("export sentences", () => {
     const actions = [slot(noon, 500, 200)];
     assert.equal(
       exportSentence({ actions, exportPermission: "allowed", nowMs: noon }),
-      "Battery export is allowed, but FTW found no worthwhile sale.",
+      "No worthwhile sale ahead.",
     );
   });
 
@@ -295,7 +294,7 @@ describe("Plan card markup and wiring", () => {
     assert.match(html, /<p id="plan-style-text" class="plan-style-text" aria-live="polite" hidden><\/p>/);
     assert.match(html, /Keeps more in the battery/);
     assert.match(html, /Counts more on the forecast/);
-    assert.match(html, /Safety limits are the same in every style\./);
+    assert.doesNotMatch(html, /Safety limits are the same in every style/);
     assert.match(html, /id="plan-style-settings"/);
   });
 
@@ -308,11 +307,11 @@ describe("Plan card markup and wiring", () => {
     assert.match(html, /id="plan-export-check"/);
     assert.match(
       html,
-      /Allow the battery to sell to the grid when the plan expects a worthwhile sale\./,
+      /Let the battery sell to the grid when it pays\./,
     );
     assert.match(
       html,
-      /Solar can still export when this is off\. Check your electricity contract\./,
+      /Solar still exports when this is off\./,
     );
     assert.match(html, /Not checked — battery export stays off\./);
     assert.match(html, /FTW used to sell from the battery on high-price hours\. Allow that to continue\?/);

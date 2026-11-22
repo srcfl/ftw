@@ -318,8 +318,10 @@ export function derivePlanBrief({
   const nextEnd = next && next.slot_start_ms + next.slot_len_min * 60_000;
 
   const clamps = (status.dispatch || []).filter((dispatch) => dispatch.clamped);
-  const cautionCopy = "FTW is using its usual forecast for solar and home use, without an extra margin for forecast errors. Battery and grid limits still apply.";
-  let constraint = cautionOff ? cautionCopy : "No active safety adjustment";
+  // Say nothing while nothing adjusts the plan; a line that reports no
+  // adjustment is one more sentence to read on every normal day.
+  const cautionCopy = "The plan uses the forecast without an extra margin for forecast errors. Battery and grid limits still apply.";
+  let constraint = cautionOff ? cautionCopy : "";
   if (clamps.length) {
     const adjusted = clamps
       .map((dispatch) => `${dispatch.driver || "device"} to ${briefPower(dispatch.target_w)}`)

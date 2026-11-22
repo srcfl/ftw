@@ -365,8 +365,8 @@ import {
       alert.id = 'plan-optimizer-fallback';
       alert.setAttribute('role', 'alert');
       alert.style.cssText = 'margin:8px 0;padding:9px 11px;border:1px solid color-mix(in srgb, var(--fg) 30%, transparent);border-radius:6px;background:color-mix(in srgb, var(--fg) 6%, transparent);font-size:12px;line-height:1.45;overflow-wrap:anywhere';
-      const help = section.querySelector('.plan-help');
-      section.insertBefore(alert, help || section.firstChild);
+      const chart = section.querySelector('.chart-container');
+      section.insertBefore(alert, chart || section.firstChild);
     }
     const reason = solver.fallback_reason ? ' ' + solver.fallback_reason : '';
     const missingWh = evShortfallWh(plan);
@@ -863,7 +863,11 @@ import {
         const hh = plan.horizon_slots * slotMin / 60;
         const cost = plan.total_cost_ore / 100;
         const costLabel = cost >= 0 ? 'expected cost' : 'expected earnings';
+        // The cost and the age of the plan are for everyone. The planner's
+        // workings (mode, horizon, slots, solver, DP shadow, start SoC) show
+        // in the Advanced view.
         const parts = [];
+        const expert = [];
         // The /api/mpc/plan response carries the INTERNAL mpc.Mode (e.g.
         // "self_consumption", "passive_arbitrage", "arbitrage"). Map to the
         // operator-facing label so the badge matches the Strategy button
@@ -877,15 +881,15 @@ import {
           arbitrage: 'Active arbitrage',
         };
         const modeLabel = PLAN_MODE_LABEL[plan.mode] || plan.mode;
-        parts.push(
+        expert.push(
           `<span title="Active planner strategy — choose from the Mode picker">` +
           `<span class="s-value">${modeLabel}</span></span>`
         );
-        parts.push(
+        expert.push(
           `<span title="How far ahead the planner is optimising">` +
           `<span class="s-value">${hh.toFixed(0)}h horizon</span></span>`
         );
-        parts.push(
+        expert.push(
           `<span title="Number of ${slotMin}-minute slots inside the horizon">` +
           `<span class="s-value">${plan.horizon_slots} slots</span></span>`
         );
@@ -897,7 +901,7 @@ import {
           const solverTitle = solver.fallback
             ? `Reserve plan: ${solver.fallback_reason || 'price optimisation unavailable'}`
             : `Solver status: ${solver.status || 'unknown'}; formulation: ${solver.formulation || 'unknown'}; solve: ${(solver.solve_ms || 0).toFixed(1)} ms`;
-          parts.push(
+          expert.push(
             `<span title="${escapeHTML(solverTitle)}"><span class="s-label">solver </span>` +
             `<span class="s-value">${escapeHTML(solverLabel)}</span></span>`
           );
@@ -918,14 +922,14 @@ import {
             `mean battery difference ${(shadow.mean_abs_battery_delta_w || 0).toFixed(0)} W; ` +
             `direction disagreements ${shadow.direction_disagreements || 0}; ` +
             `basis: ${shadow.forecast_basis || 'unknown'}. DP does not drive dispatch.`;
-          parts.push(
+          expert.push(
             `<span title="${escapeHTML(shadowTitle)}"><span class="s-label">DP shadow </span>` +
             `<span class="s-value">${escapeHTML(comparison)}</span></span>`
           );
         }
         const startSoc = socPercent(plan.initial_soc);
         if (startSoc != null) {
-          parts.push(
+          expert.push(
             `<span title="Battery state of charge right now — the plan starts from here">` +
             `<span class="s-label">start SoC </span>` +
             `<span class="s-value">${startSoc.toFixed(0)}%</span></span>`
@@ -953,7 +957,9 @@ import {
             `<span class="s-value">Replanning…</span></span>`
           );
         }
-        summary.innerHTML = parts.join('<span class="s-sep">·</span>');
+        summary.innerHTML =
+          expert.map((part) => `<span class="advanced-only">${part}<span class="s-sep">·</span></span>`).join('') +
+          parts.join('<span class="s-sep">·</span>');
         summary.classList.toggle('is-replanning', replanPending);
       }
     }

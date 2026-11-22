@@ -21,7 +21,7 @@ export const PLAN_STYLES = Object.freeze([
     key: "very_careful",
     name: "Very careful",
     k: 1,
-    text: "Plans for a poor day: much less sun and more use than forecast. Keeps the most in the battery.",
+    text: "Plans for much less sun and more use than forecast.",
   },
   {
     key: "careful",
@@ -33,7 +33,7 @@ export const PLAN_STYLES = Object.freeze([
     key: "balanced",
     name: "Balanced",
     k: 0.3,
-    text: "Plans for a little less sun and a little more use than forecast. A good start for most homes.",
+    text: "Plans for a little less sun and a little more use than forecast.",
   },
   {
     key: "bold",
@@ -45,7 +45,7 @@ export const PLAN_STYLES = Object.freeze([
     key: "very_bold",
     name: "Very bold",
     k: 0,
-    text: "Plans on the forecast as it is. Earns the most when it is right and costs more when it is wrong.",
+    text: "Plans on the forecast as it is.",
   },
 ]);
 
@@ -115,16 +115,14 @@ export function sunWindowLabel(horizon, untilMs, tomorrowStartMs) {
 }
 
 // sunLine answers "why is the plan not filling the battery from the sun?"
-// with the two numbers that decide it.
+// with the two numbers that decide it. It speaks only while the plan holds
+// some spare sun back; a plan that counts on all of it, or a day without
+// spare sun, needs no sentence.
 export function sunLine(margins, label) {
-  if (!margins) return null;
-  if (margins.sunBeyondKWh < KWH_EPS) {
-    return `${label}: the forecast expects no sun beyond what your home uses.`;
-  }
-  const head = `${label}: the forecast expects ${kwh(margins.sunBeyondKWh)} more sun than your home uses.`;
+  if (!margins || margins.sunBeyondKWh < KWH_EPS) return null;
   const counted = Math.min(margins.plannedSunBeyondKWh, margins.sunBeyondKWh);
-  if (counted >= margins.sunBeyondKWh - KWH_EPS) return `${head} The plan counts on all of it.`;
-  return `${head} The plan counts on ${kwh(counted)} of it.`;
+  if (counted >= margins.sunBeyondKWh - KWH_EPS) return null;
+  return `${label}: the plan counts on ${kwh(counted)} of ${kwh(margins.sunBeyondKWh)} spare sun.`;
 }
 
 // marginSplitLine is the expert view in Settings → Planner: the same margin
@@ -164,9 +162,9 @@ export function extraSunLine(actions, from, until, operatorCap) {
     if (!discharging && cap > (Number(a.soc) || 0) + 0.005) stored++;
   }
   if (!sunny) return null;
-  if (stored === sunny) return "Sun beyond what your home and the plan need goes into the battery.";
-  if (stored === 0) return "Sun beyond what your home and the plan need goes to the grid.";
-  return "Sun beyond what your home and the plan need goes partly into the battery and partly to the grid.";
+  if (stored === sunny) return "Spare sun goes into the battery.";
+  if (stored === 0) return "Spare sun goes to the grid.";
+  return "Spare sun goes partly into the battery and partly to the grid.";
 }
 
 export function isBatterySale(action) {
@@ -237,7 +235,7 @@ export function exportSentence({
     return "Solar export only; the battery is not selling.";
   }
   if (exportPermission === "allowed") {
-    return "Battery export is allowed, but FTW found no worthwhile sale.";
+    return "No worthwhile sale ahead.";
   }
   return "Battery sale blocked: permission is off or not checked.";
 }
