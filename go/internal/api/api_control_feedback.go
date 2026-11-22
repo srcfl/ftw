@@ -178,6 +178,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	for _, kind := range []telemetry.DerType{telemetry.DerBattery, telemetry.DerEV, telemetry.DerPV, telemetry.DerV2X} {
 		for _, rd := range s.deps.Tel.ReadingsByType(kind) {
 			cmd, commanded := s.deps.Tel.CommandEvidence(rd.Driver, kind.String())
+			now := rowClock(now, rd.UpdatedAt, cmd.LastObservation)
 			_, loadpointOwned := lps[rd.Driver]
 			manualBattery := held && kind == telemetry.DerBattery && (hold.Driver == "" || hold.Driver == rd.Driver)
 			// Measurements inform the site comparison, but only controlled
@@ -482,6 +483,10 @@ func evAwayIdle(lp loadpoint.State, requestedW *float64) bool {
 	return !lp.PluggedIn && !lp.ManualActive && (requestedW == nil || *requestedW <= 0)
 }
 
+// controlVerificationLost reports readings lost once neither measured power
+// nor a new order has come for the grace a new order gets: 30 s, or 2 min
+// for a charger, whose cloud may re-read once a minute. Stale readings get
+// the same grace as missing power: one odd poll is not lost control.
 func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, now time.Time) bool {
 	// Failed or released calls have their own status. They do not by themselves
 	// mean that a previously measured device stopped supplying power readings.
@@ -492,14 +497,26 @@ func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, n
 	case "observe_only", "disabled", "device_control", "not_connected", "idle", "no_command":
 		return false
 	}
-	if f.Reason == "telemetry_stale" {
-		return true
-	}
 	grace := 30 * time.Second
 	if f.Kind == "ev" {
 		grace = 2 * time.Minute
 	}
 	return !cmd.Since.IsZero() && now.Sub(cmd.Since) >= grace && now.Sub(cmd.LastMeasuredAt) >= grace
+}
+
+// rowClock judges one device at the latest of the caller's clock and the
+// store's own stamps on what it read. The journal samples at its ticker's
+// time, and GET /api/status takes its clock before it waits for the
+// controller's lock; a driver can store a poll in between. The store stamps
+// with the box's clock, so such a reading is the newest there is, not one
+// from the future. The result never runs ahead of the present.
+func rowClock(now time.Time, stamps ...time.Time) time.Time {
+	for _, t := range stamps {
+		if t.After(now) {
+			now = t
+		}
+	}
+	return now
 }
 
 // evMismatchWait is how long a charger's fresh readings must disagree with
