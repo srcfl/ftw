@@ -115,8 +115,9 @@ func (s *Server) explainBatteryShortfall(f *ControlFeedback, data json.RawMessag
 		return
 	}
 	if f.Reason == "power_below_target" && math.Abs(actual) >= battery.PlateauMinShortfallW {
-		f.shortfall = &battery.ShortfallSample{At: now, Charge: charge, BatteryW: math.Abs(actual), BatteryA: b.currentA(),
-			GridW: s.siteGridW(f.Driver, meter, blocked, charge, now), TempC: b.tempC()}
+		grid, gridAt := s.siteGridW(f.Driver, meter, blocked, charge, now)
+		f.shortfall = &battery.ShortfallSample{At: now, Charge: charge, OrderW: math.Abs(sent), BatteryW: math.Abs(actual),
+			BatteryA: b.currentA(), GridW: grid, GridAt: gridAt, TempC: b.tempC()}
 	}
 	// 0 means the device allows nothing now, as when charging below 0 °C.
 	if limit := b.available(charge); limit != nil && *limit < math.Abs(sent) &&
@@ -180,29 +181,31 @@ const siteGridMaxAge = 15 * time.Second
 // import while charging, export while discharging, as positive W. It comes
 // only from a site meter Core trusts for site evidence: a sensor separate
 // from the battery, live, without a fault, fresh, and while dispatch is free.
-func (s *Server) siteGridW(driver, meter, blocked string, charge bool, now time.Time) *float64 {
+// It also gives when the meter measured it, by its own clock where it
+// reports one; the learner asks a run's readings to show a live meter.
+func (s *Server) siteGridW(driver, meter, blocked string, charge bool, now time.Time) (*float64, time.Time) {
 	if meter == "" || blocked != "" || !s.separateMeterSource(driver, meter) {
-		return nil
+		return nil, time.Time{}
 	}
 	if h := s.deps.Tel.DriverHealth(meter); h == nil || !h.TelemetryLive() || h.DeviceFault {
-		return nil
+		return nil, time.Time{}
 	}
 	rd := s.deps.Tel.Get(meter, telemetry.DerMeter)
 	if rd == nil {
-		return nil
+		return nil, time.Time{}
 	}
 	obs, ok := telemetry.ControlPowerObservation(rd.RawW, rd.Data, rd.UpdatedAt)
 	if !ok || now.Sub(obs.Seen()) > siteGridMaxAge {
-		return nil
+		return nil, time.Time{}
 	}
 	w := obs.PowerW
 	if !charge {
 		w = -w
 	}
 	if w <= 0 {
-		return nil
+		return nil, time.Time{}
 	}
-	return &w
+	return &w, obs.At
 }
 
 // learnBatteryLimits feeds each battery's limit learner one sample. The

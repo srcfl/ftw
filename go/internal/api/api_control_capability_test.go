@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -14,6 +15,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
+	"github.com/srcfl/ftw/go/internal/selftune"
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
@@ -33,6 +35,9 @@ type sungrowTrace struct {
 	// current and the extra fields of its emit.
 	battery func() (w, a, v float64, extra string)
 	houseW  float64
+	// frozenMeterW, when set, is the one grid value a driver keeps resending
+	// from its cache.
+	frozenMeterW *float64
 }
 
 func newSungrowTrace() *sungrowTrace {
@@ -53,7 +58,11 @@ func (s *sungrowTrace) order(w float64) {
 
 func (s *sungrowTrace) poll() {
 	w, a, v, extra := s.battery()
-	s.tel.Update("sungrow", telemetry.DerMeter, s.houseW+w, nil, []byte(`{"power_origin":"external_meter"}`))
+	grid := s.houseW + w
+	if s.frozenMeterW != nil {
+		grid = *s.frozenMeterW
+	}
+	s.tel.Update("sungrow", telemetry.DerMeter, grid, nil, []byte(`{"power_origin":"external_meter"}`))
 	soc := 0.5
 	s.tel.Update("sungrow", telemetry.DerBattery, w, &soc, []byte(fmt.Sprintf(`{"setpoint_w":%g,"a":%.1f,"v":%.1f%s}`, s.cmdW, a, v, extra)))
 	s.tel.RecordDriverSuccess("sungrow")
@@ -330,12 +339,12 @@ func TestColdPlateauDoesNotExplainWarmShortfall(t *testing.T) {
 		}
 		for d := range 3 {
 			discharge(-5 + 4*rng.Float64())
-			s.run(3*time.Hour, -5000, nil)
+			s.run(3*time.Hour, -4000, nil)
 			s.idle(start.Add(time.Duration(d+1) * 24 * time.Hour))
 		}
 		var cold, warm tally
 		discharge(-3)
-		s.run(10*time.Minute, -5000, func(f ControlFeedback) {
+		s.run(10*time.Minute, -4000, func(f ControlFeedback) {
 			if f.Status != "waiting" {
 				cold.add(f)
 			}
@@ -344,7 +353,7 @@ func TestColdPlateauDoesNotExplainWarmShortfall(t *testing.T) {
 			t.Fatalf("cold shortfall not explained: %v", cold.hits)
 		}
 		discharge(15)
-		s.run(10*time.Minute, -5000, func(f ControlFeedback) {
+		s.run(10*time.Minute, -4000, func(f ControlFeedback) {
 			if f.Status != "waiting" {
 				warm.add(f)
 			}
@@ -435,11 +444,164 @@ func TestShortfallGridComesFromATrustedMeter(t *testing.T) {
 					s.tel.SetDriverDeviceFault("sungrow", true, "test")
 				}
 				time.Sleep(tc.age)
-				got := s.srv.siteGridW("sungrow", "sungrow", tc.blocked, tc.charge, time.Now())
+				got, _ := s.srv.siteGridW("sungrow", "sungrow", tc.blocked, tc.charge, time.Now())
 				if (got == nil) != (tc.want == nil) || got != nil && *got != *tc.want {
 					t.Fatalf("grid %v, want %v", got, tc.want)
 				}
 			})
 		})
+	}
+}
+
+// A battery that breaks and gives a steady 0.7 kW against a 5 kW order for
+// three nights is failing. Neither its own steady power nor a grid that sits
+// still under a steady house makes that normal. A meter driver that resends
+// one cached value looks like an import cap; it is not one either.
+func TestFailureAndFrozenMeterAreNeverLearnedAsNormal(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(s *sungrowTrace, rng *rand.Rand)
+	}{
+		{"failing battery, steady house", func(s *sungrowTrace, rng *rand.Rand) {
+			s.houseW = 600
+			s.battery = func() (float64, float64, float64, string) {
+				w := 700 + rng.NormFloat64()*10
+				return w, w / 190, 190, ""
+			}
+		}},
+		{"failing battery, moving house", func(s *sungrowTrace, rng *rand.Rand) {
+			s.battery = func() (float64, float64, float64, string) {
+				s.houseW = math.Max(300, math.Min(3000, s.houseW+rng.NormFloat64()*150))
+				w := 700 + rng.NormFloat64()*10
+				return w, w / 190, 190, ""
+			}
+		}},
+		{"frozen meter under a moving battery", func(s *sungrowTrace, rng *rand.Rand) {
+			frozen := 4316.0
+			s.frozenMeterW = &frozen
+			s.gridCharge(rng, importCap(rng))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				rng := rand.New(rand.NewSource(13))
+				s := newSungrowTrace()
+				s.houseW = 1000
+				start := time.Now()
+				var last tally
+				for n := range 3 {
+					tc.setup(s, rng)
+					last = tally{}
+					s.run(5*time.Hour, 5000, func(f ControlFeedback) {
+						if f.Status != "waiting" {
+							last.add(f)
+						}
+					})
+					s.idle(start.Add(time.Duration(n+1) * 24 * time.Hour))
+				}
+				if got := last.share("not_following/power_below_target/warning"); got < 0.95 {
+					t.Fatalf("third night: %v", last.hits)
+				}
+				if known := s.models["sungrow"].Plateaus.Known(); len(known) != 0 {
+					t.Fatalf("learned as normal: %s", jsonOf(known))
+				}
+			})
+		})
+	}
+}
+
+// seedLimits gives a battery trusted plateaus at 2 kW and 10.5 A both ways,
+// seen on three days, so any verdict that asked would find one.
+func seedLimits(m *battery.Model, start time.Time) {
+	m.Plateaus = &battery.Plateaus{}
+	for _, dir := range []string{"charge", "discharge"} {
+		for kind, value := range map[string]float64{battery.LimitBatteryPower: 2000, battery.LimitBatteryCurrent: 2000 / 190.0} {
+			series := battery.PlateauSeries{Direction: dir, Kind: kind}
+			for d := range 3 {
+				at := start.Add(time.Duration(d-3) * 24 * time.Hour)
+				series.Runs = append(series.Runs, battery.PlateauRun{StartMs: at.UnixMilli(), EndMs: at.Add(time.Hour).UnixMilli(), Median: value, Samples: 720})
+			}
+			m.Plateaus.Series = append(m.Plateaus.Series, series)
+		}
+	}
+}
+
+// Learned and reported limits explain only a shortfall in the right
+// direction. Every other verdict keeps its own reason, and nothing is
+// learned from it, nor from anything while self-tune runs.
+func TestLimitsNeverExplainOtherVerdicts(t *testing.T) {
+	const limits = `,"available_charge_W":2000,"available_discharge_W":2000`
+	for _, tc := range []struct {
+		name, extra string
+		orderW      float64
+		// before runs ahead of the ten minutes under the order, then after.
+		before, then func(s *sungrowTrace)
+		reasons      []string // any of these
+	}{
+		{"setpoint changed", `,"setpoint_w":-2000`, -3000, nil, nil, []string{"setpoint_changed"}},
+		{"power above target", "", -1500, nil, nil, []string{"power_above_target"}},
+		{"power while idle", "", 0, nil, nil, []string{"power_while_idle"}},
+		{"wrong direction", "", 3000, nil, nil, []string{"power_wrong_direction"}},
+		{"device fault", "", -3000, func(s *sungrowTrace) { s.tel.SetDriverDeviceFault("sungrow", true, "test fault") }, nil, []string{"device_fault"}},
+		// It follows its order, then its readings stop.
+		{"readings lost", "", -2000, nil, func(s *sungrowTrace) {
+			for range 24 {
+				time.Sleep(5 * time.Second)
+				s.srv.JournalVerdicts(time.Now())
+			}
+		}, []string{"readings_lost"}},
+		{"driver says offline", `,"is_online":false`, -3000, nil, nil, []string{"telemetry_stale", "readings_lost"}},
+		{"self-tune runs", "", -3000, nil, nil, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				s := newSungrowTrace()
+				s.houseW = 800
+				seedLimits(s.models["sungrow"], time.Now())
+				before := runsOf(s.models["sungrow"])
+				if tc.reasons == nil {
+					s.srv.deps.SelfTune = selftune.NewCoordinator()
+					if err := s.srv.deps.SelfTune.Start([]string{"sungrow"}, s.models, 5); err != nil {
+						t.Fatal(err)
+					}
+				}
+				s.battery = func() (float64, float64, float64, string) { return -2000, 2000 / 190.0, 190, limits + tc.extra }
+				if tc.before != nil {
+					tc.before(s)
+				}
+				var last ControlFeedback
+				s.run(10*time.Minute, tc.orderW, func(f ControlFeedback) { last = f })
+				if tc.then != nil {
+					tc.then(s)
+					last = s.batteryRow(time.Now())
+				}
+				s.idle(time.Now().Add(10 * time.Minute))
+				if got := runsOf(s.models["sungrow"]); got != before {
+					t.Fatalf("learned %d runs from it", got-before)
+				}
+				if tc.reasons == nil {
+					return
+				}
+				if !slices.Contains(tc.reasons, last.Reason) || last.LimitSource != "" || last.LimitW != nil || last.Status == "limited" {
+					t.Fatalf("got %s/%s/%s %s, want one of %v and no limit", last.Status, last.Reason, last.Severity, jsonOf(last), tc.reasons)
+				}
+			})
+		})
+	}
+}
+
+// srcfl/ftw#2017 (open) adds battery_calibrating, set before this step. Only
+// power_below_target and no_power_response are ever relabelled or sampled,
+// so a calibrating battery keeps its reason and teaches nothing.
+func TestCalibratingBatteryIsNeverRelabelled(t *testing.T) {
+	s := newSungrowTrace()
+	seedLimits(s.models["sungrow"], time.Now())
+	for _, reason := range []string{"battery_calibrating", "battery_nearly_full", "battery_nearly_empty", "core_limit", "site_meter_stale", "observe_only"} {
+		f := ControlFeedback{Kind: "battery", Driver: "sungrow", State: "waiting", Reason: reason, Severity: "info", SentW: watts(-3000), ActualW: watts(-2000)}
+		want := f
+		s.srv.explainBatteryShortfall(&f, []byte(`{"available_discharge_W":2000,"device_state":"standby","a":10.5,"v":190}`), "sungrow", "", time.Now())
+		if f.Reason != want.Reason || f.State != want.State || f.Severity != want.Severity || f.LimitW != nil || f.shortfall != nil {
+			t.Fatalf("%s relabelled: %s", reason, jsonOf(f))
+		}
 	}
 }

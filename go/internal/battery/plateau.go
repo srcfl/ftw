@@ -69,17 +69,35 @@ const (
 	plateauFloorA    = 0.5
 )
 
+// plateauMinShare is the least share of the order a battery power or
+// current plateau may stand for. A limit inside the battery still gives
+// most of an order: the home Sungrow's discharge cap gave 4.3 of 5 kW
+// (86 %). A battery that gives a steady 0.4-1 kW of 5 kW (8-20 %) is
+// failing, and must keep warning however often it does so. A grid limit has
+// no such floor: under the import cap the battery's share falls to 30 %
+// when the house takes 3 kW.
+const plateauMinShare = 0.5
+
 // ShortfallSample is one settled journal sample of a battery short of its
 // order in the right direction. Amounts are positive: watts or amps in the
 // order's direction. GridW is grid import while charging or export while
-// discharging, from a site meter Core trusts; nil when it has none.
+// discharging, from a site meter Core trusts; nil when it has none. GridAt
+// is when the meter measured it, by its own clock where it reports one.
 type ShortfallSample struct {
 	At       time.Time
 	Charge   bool
+	OrderW   float64
 	BatteryW float64
 	BatteryA *float64
 	GridW    *float64
+	GridAt   time.Time
 	TempC    *float64
+}
+
+// share reports whether the battery gives enough of its order for a battery
+// power or current plateau to stand for it (see plateauMinShare).
+func (s ShortfallSample) share() bool {
+	return s.OrderW > 0 && s.BatteryW >= plateauMinShare*s.OrderW
 }
 
 // PlateauRun is one flat run: the median of the flat amount and when it held.
@@ -121,6 +139,10 @@ type plateauRun struct {
 	start, last time.Time
 	n           int
 	values      map[string][]float64
+	// batteryW is every sample's battery power and gridAt each grid
+	// value's measurement time: what a grid run must show to be a cap.
+	batteryW []float64
+	gridAt   []time.Time
 }
 
 // Tick feeds one journal sample; s is nil when the battery is not short of
@@ -150,18 +172,60 @@ func (p *Plateaus) Tick(now time.Time, s *ShortfallSample) {
 	o := p.open
 	o.n++
 	o.last = s.At
-	add := func(kind string, v *float64) {
+	add := func(kind string, v *float64) bool {
 		if v != nil && finite(*v) && *v > 0 {
 			o.values[kind] = append(o.values[kind], *v)
+			return true
+		}
+		return false
+	}
+	o.batteryW = append(o.batteryW, s.BatteryW)
+	if add(gridKind(s.Charge), s.GridW) {
+		o.gridAt = append(o.gridAt, s.GridAt)
+	}
+	if s.share() {
+		add(LimitBatteryCurrent, s.BatteryA)
+		add(LimitBatteryPower, &s.BatteryW)
+	}
+}
+
+func gridKind(charge bool) string {
+	if charge {
+		return LimitGridImport
+	}
+	return LimitGridExport
+}
+
+// liveCap reports whether a flat grid run shows a cap the inverter holds,
+// not a meter that stopped. The battery must move while the grid holds: a
+// steady house with a steady battery says nothing about the inverter, and a
+// failing battery would look the same. The meter must also be live: its own
+// measurement time moves on in at least a third of the samples (a slower
+// meter than the journal repeats some), and no single value makes up half
+// of them. A driver that resends a cached value repeats it exactly; a real
+// cap jitters (the home Sungrow's 4.32 kW cap had a 41 W spread).
+func (o *plateauRun) liveCap(grid []float64) bool {
+	median, iqr := middle(o.batteryW)
+	if iqr <= math.Max(plateauFlatShare*median, plateauFloorW) {
+		return false
+	}
+	newer := 0
+	for i := 1; i < len(o.gridAt); i++ {
+		if o.gridAt[i].After(o.gridAt[i-1]) {
+			newer++
 		}
 	}
-	grid := LimitGridImport
-	if !s.Charge {
-		grid = LimitGridExport
+	if 3*newer < len(o.gridAt) {
+		return false
 	}
-	add(grid, s.GridW)
-	add(LimitBatteryCurrent, s.BatteryA)
-	add(LimitBatteryPower, &s.BatteryW)
+	same := map[float64]int{}
+	for _, v := range grid {
+		same[v]++
+		if 2*same[v] >= len(grid) {
+			return false
+		}
+	}
+	return true
 }
 
 // close keeps each amount that stayed flat over the open run. An amount
@@ -180,6 +244,9 @@ func (p *Plateaus) close() {
 		}
 		median, iqr := middle(v)
 		if iqr > math.Max(plateauFlatShare*median, floor(kind)) {
+			continue
+		}
+		if (kind == LimitGridImport || kind == LimitGridExport) && !o.liveCap(v) {
 			continue
 		}
 		run := PlateauRun{StartMs: o.start.UnixMilli(), EndMs: o.last.UnixMilli(), Median: median, Samples: len(v)}
@@ -224,21 +291,19 @@ func (p *Plateaus) series(direction, kind string, band *int) *PlateauSeries {
 
 // Explain returns the trusted plateau a shortfall sits on, if any: grid first,
 // since it is the outer limit, then DC current, then battery power. A sample
-// well below its plateau sits on none and keeps its warning.
+// well below its plateau sits on none and keeps its warning, and a battery
+// power or current plateau never explains a battery that gives less than
+// plateauMinShare of its order.
 func (p *Plateaus) Explain(s ShortfallSample) (Plateau, bool) {
 	if p == nil || !finite(s.BatteryW) || s.BatteryW < PlateauMinShortfallW {
 		return Plateau{}, false
-	}
-	grid := LimitGridImport
-	if !s.Charge {
-		grid = LimitGridExport
 	}
 	band := tempBand(s.TempC)
 	for _, c := range []struct {
 		kind  string
 		value *float64
-	}{{grid, s.GridW}, {LimitBatteryCurrent, s.BatteryA}, {LimitBatteryPower, &s.BatteryW}} {
-		if c.value == nil || !finite(*c.value) {
+	}{{gridKind(s.Charge), s.GridW}, {LimitBatteryCurrent, s.BatteryA}, {LimitBatteryPower, &s.BatteryW}} {
+		if c.value == nil || !finite(*c.value) || c.kind != gridKind(s.Charge) && !s.share() {
 			continue
 		}
 		for i := range p.Series {
