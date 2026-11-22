@@ -3,6 +3,7 @@ package heatrun
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -253,9 +254,11 @@ func (s *Service) shadowLocked(cfg *config.Heat, zones []ZonePlan, plans map[int
 			GateOK: gateOpen, Price: priceNow,
 		}
 		var nowC *float64
-		if zp.StartC != 0 || zp.Planned {
+		// A planned zone read its sensor this tick; any other zone reads it
+		// here, so a 0.0 °C start is never mistaken for a missing one.
+		if zp.Planned {
 			nowC = fptr(zp.StartC)
-		} else if v, err := s.reading(zc.Sensor, now); err == nil {
+		} else if v, err := s.reading(zc.Sensor, now); err == nil && !math.IsNaN(v) && !math.IsInf(v, 0) {
 			nowC = fptr(v)
 		}
 		if plan, ok := plans[i]; ok && len(plan.Slots) > 0 {
@@ -363,15 +366,24 @@ type JSONLLog struct {
 }
 
 // Append writes records and rotates when the file has grown past MaxBytes.
+// A record that cannot be encoded, such as one holding NaN, is left out and
+// reported; the other zones' records are still written.
 func (l *JSONLLog) Append(records []ShadowRecord) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
+	var bad []error
 	for _, r := range records {
-		if err := enc.Encode(r); err != nil {
-			return fmt.Errorf("encode %s: %w", r.Zone, err)
+		line, err := json.Marshal(r)
+		if err != nil {
+			bad = append(bad, fmt.Errorf("encode %s: %w", r.Zone, err))
+			continue
 		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+	}
+	if buf.Len() == 0 {
+		return errors.Join(bad...)
 	}
 	if l.MaxBytes > 0 {
 		if fi, err := os.Stat(l.Path); err == nil && fi.Size()+int64(buf.Len()) > l.MaxBytes {
@@ -388,5 +400,8 @@ func (l *JSONLLog) Append(records []ShadowRecord) error {
 		f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return errors.Join(bad...)
 }

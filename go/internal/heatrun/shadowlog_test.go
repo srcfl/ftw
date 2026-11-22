@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/thermaltwin"
 )
 
 type memSink struct{ recs []ShadowRecord }
@@ -276,5 +278,48 @@ func TestShadowLogModelsALateSlotFromItsFirstReading(t *testing.T) {
 	want := tr.model.endC(*tr.startC, tr.heat.wh/1000/tr.heat.covered.Hours(), (slot - time.Minute).Hours())
 	if math.Abs(*last.ModelEndC-want) > 1e-9 {
 		t.Fatalf("model end %.6f, want %.6f over the 14 minutes after the reading", *last.ModelEndC, want)
+	}
+}
+
+// A zone without a plan still logs its sensor, and 0.0 °C is a reading,
+// not a missing one.
+func TestShadowLogKeepsAZeroReadingOfAnUnplannedZone(t *testing.T) {
+	h, s, sink, _ := shadowHouse()
+	h.floor = 0
+	s.in.Twins = func() []thermaltwin.ZoneStatus {
+		return []thermaltwin.ZoneStatus{{
+			Zone:   thermaltwin.Zone{Key: "wiser_7/floor_temp_c"},
+			Status: thermaltwin.StatusLearning,
+		}}
+	}
+	s.Tick(t0ctx)
+	if sink.recs[0].Planned {
+		t.Fatal("a twin without a physical model was planned")
+	}
+	h.runSlot(s)
+	s.Tick(t0ctx)
+	last := sink.recs[len(sink.recs)-1].Last
+	if last == nil || last.StartC == nil || *last.StartC != 0 || last.EndC == nil || *last.EndC != 0 {
+		t.Fatalf("temperatures %+v, want 0 -> 0", last)
+	}
+}
+
+// A record that cannot be encoded is reported and left out; the other
+// zones' records for the tick are still written.
+func TestJSONLLogWritesTheOthersWhenOneCannotBeEncoded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "heat-shadow.jsonl")
+	l := &JSONLLog{Path: path}
+	good := ShadowRecord{At: time.Unix(0, 0).UTC(), Zone: "entre"}
+	bad := ShadowRecord{At: time.Unix(0, 0).UTC(), Zone: "badrum", Price: fptr(math.NaN())}
+	if err := l.Append([]ShadowRecord{bad, good}); err == nil {
+		t.Fatal("a NaN record was encoded without an error")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got ShadowRecord
+	if err := json.Unmarshal(b, &got); err != nil || got.Zone != "entre" {
+		t.Fatalf("file %q, want only the entre record", b)
 	}
 }
