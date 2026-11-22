@@ -610,6 +610,25 @@ func (s *Store) Get(driver string, t DerType) *DerReading {
 	return nil
 }
 
+// LiveMeterPower returns a driver's measured meter power, with when it was
+// measured, only while that driver is live and its device reports no fault.
+// A cached reading survives its driver going stale, offline or faulted, so
+// callers that judge the site from the meter ask here instead of reading the
+// cache directly.
+func (s *Store) LiveMeterPower(driver string) (ControlObservation, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	h, ok := s.health[driver]
+	if !ok || !h.TelemetryLive() || h.DeviceFault {
+		return ControlObservation{}, false
+	}
+	r := s.readings[key(driver, DerMeter)]
+	if r == nil {
+		return ControlObservation{}, false
+	}
+	return ControlPowerObservation(r.RawW, r.Data, r.UpdatedAt)
+}
+
 // ReadingsByType returns all readings of a given type (e.g. all batteries).
 func (s *Store) ReadingsByType(t DerType) []*DerReading {
 	s.mu.RLock()

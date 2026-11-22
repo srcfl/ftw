@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -81,6 +82,21 @@ type ControlFeedback struct {
 	// VehicleDeclined is Core's debounced record that the car refused its
 	// offer. The reason carries the result.
 	VehicleDeclined bool `json:"-"`
+	// A battery limit that explains a shortfall (api_control_capability.go):
+	// the limit in W and, under a grid limit, the battery's room, both
+	// positive in the order's direction; where it comes from ("device" or
+	// "learned"), what holds it ("grid_import", "grid_export",
+	// "battery_current", "battery_power" or "battery_reported"), how many
+	// runs showed it, since when, and the learned limit it replaced.
+	LimitW        *float64 `json:"limit_w,omitempty"`
+	LimitRoomW    *float64 `json:"limit_room_w,omitempty"`
+	LimitSource   string   `json:"limit_source,omitempty"`
+	LimitKind     string   `json:"limit_kind,omitempty"`
+	LimitSeen     int      `json:"limit_seen,omitempty"`
+	LimitSinceMs  int64    `json:"limit_since_ms,omitempty"`
+	LimitEarlierW *float64 `json:"limit_earlier_w,omitempty"`
+	// shortfall is the sample the battery limit learner may take.
+	shortfall *battery.ShortfallSample
 }
 
 type feedbackReading struct {
@@ -377,6 +393,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if f.VerificationLost {
 				f.Reason = "readings_lost"
 			}
+			if kind == telemetry.DerBattery && commanded && cmd.Result == "accepted" && fresh {
+				s.explainBatteryShortfall(&f, rd.Data, meter, blocked, now)
+			}
 			f.ReadingsFresh = fresh
 			out = append(out, f)
 		}
@@ -433,6 +452,10 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 func setControlStatus(f *ControlFeedback) {
 	status, severity := "waiting", "info"
 	switch f.Reason {
+	case "battery_limit", "learned_limit":
+		status = "limited"
+	case "device_standby":
+		status, severity = "not_following", "warning"
 	case "power_observed", "solar_below_ceiling", "idle", "plan", "manual_hold", "pv_surplus",
 		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
 		status = "following"
