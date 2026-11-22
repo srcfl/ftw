@@ -373,7 +373,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				f.SiteDeltaW, f.DeviceDeltaW, f.SiteBeforeW, f.SiteAfterW = nil, nil, nil, nil
 				f.SiteBeforeAtMs, f.SiteAfterAtMs = 0, 0
 			}
-			f.VerificationLost = controlVerificationLost(f, cmd, lastHeard(cmd, s.deps.Tel.DriverHealth(rd.Driver)), now)
+			f.VerificationLost = controlVerificationLost(f, cmd, now)
 			if f.VerificationLost {
 				f.Reason = "readings_lost"
 			}
@@ -483,11 +483,11 @@ func evAwayIdle(lp loadpoint.State, requestedW *float64) bool {
 	return !lp.PluggedIn && !lp.ManualActive && (requestedW == nil || *requestedW <= 0)
 }
 
-// controlVerificationLost reports readings lost once no measured power has
-// come for the grace a new order gets: 30 s, or 2 min for a charger, whose
-// cloud may re-read once a minute. One odd poll is not lost control. heard
-// is when the box last heard the device (see lastHeard).
-func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, heard, now time.Time) bool {
+// controlVerificationLost reports readings lost once neither measured power
+// nor a new order has come for the grace a new order gets: 30 s, or 2 min
+// for a charger, whose cloud may re-read once a minute. Stale readings get
+// the same grace as missing power: one odd poll is not lost control.
+func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, now time.Time) bool {
 	// Failed or released calls have their own status. They do not by themselves
 	// mean that a previously measured device stopped supplying power readings.
 	if cmd.Result != "accepted" || cmd.LastMeasuredAt.IsZero() || f.VerificationTier != nil && *f.VerificationTier >= 1 {
@@ -501,22 +501,7 @@ func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, h
 	if f.Kind == "ev" {
 		grace = 2 * time.Minute
 	}
-	// Stale readings say nothing about the order, only about the device.
-	if f.Reason == "telemetry_stale" {
-		return now.Sub(heard) >= grace
-	}
 	return !cmd.Since.IsZero() && now.Sub(cmd.Since) >= grace && now.Sub(cmd.LastMeasuredAt) >= grace
-}
-
-// lastHeard is when the box last measured the device's power, but no later
-// than its driver's last good poll: a driver the watchdog gave up on may go
-// on storing cached values, and those are not news from the device.
-func lastHeard(cmd telemetry.CommandEvidence, h *telemetry.DriverHealth) time.Time {
-	heard := cmd.LastMeasuredAt
-	if h != nil && h.LastSuccess != nil && h.LastSuccess.Before(heard) {
-		heard = *h.LastSuccess
-	}
-	return heard
 }
 
 // rowClock judges one device at the latest of the caller's clock and the

@@ -139,7 +139,7 @@ func TestControlVerificationLossAlarm(t *testing.T) {
 		{"new command settling", "waiting_response", "battery", &zero, time.Minute, 5 * time.Second, false},
 		{"lost measured response", "waiting_response", "battery", &zero, time.Minute, time.Minute, true},
 		{"one stale sample", "telemetry_stale", "battery", &zero, 5 * time.Second, time.Minute, false},
-		{"stale under a new order", "telemetry_stale", "battery", &zero, 40 * time.Second, 5 * time.Second, true},
+		{"stale just after a new step waits for its grace", "telemetry_stale", "battery", &zero, 40 * time.Second, 5 * time.Second, false},
 		{"device offline", "telemetry_stale", "battery", &zero, 40 * time.Second, time.Minute, true},
 		{"charger stale within its grace", "telemetry_stale", "ev", &zero, time.Minute, 3 * time.Minute, false},
 		{"charger offline", "telemetry_stale", "ev", &zero, 3 * time.Minute, 3 * time.Minute, true},
@@ -155,7 +155,7 @@ func TestControlVerificationLossAlarm(t *testing.T) {
 				cmd.LastMeasuredAt = now.Add(-tc.verified)
 			}
 			f := ControlFeedback{Reason: tc.reason, Kind: tc.kind, VerificationTier: tc.tier}
-			if got := controlVerificationLost(f, cmd, cmd.LastMeasuredAt, now); got != tc.want {
+			if got := controlVerificationLost(f, cmd, now); got != tc.want {
 				t.Fatalf("alarm=%v want %v", got, tc.want)
 			}
 		})
@@ -251,7 +251,7 @@ func TestFailedCallIsNotLostMeasurement(t *testing.T) {
 	now := time.Now()
 	for _, result := range []string{"failed", "unconfirmed", "default_failed", "pending", "released"} {
 		cmd := telemetry.CommandEvidence{Result: result, Since: now.Add(-time.Minute), LastMeasuredAt: now.Add(-time.Minute)}
-		if controlVerificationLost(ControlFeedback{Reason: "command_failed", ActualW: watts(-4400)}, cmd, cmd.LastMeasuredAt, now) {
+		if controlVerificationLost(ControlFeedback{Reason: "command_failed", ActualW: watts(-4400)}, cmd, now) {
 			t.Fatalf("%s call was relabelled as lost measurements", result)
 		}
 	}

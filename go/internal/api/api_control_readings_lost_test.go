@@ -92,9 +92,13 @@ func TestSustainedGapIsReadingsLost(t *testing.T) {
 		lostBy time.Duration
 	}{
 		{"driver stores nothing", func(h *hybridTrace) {}, 31 * time.Second},
-		// The watchdog gives up after 60 s without a good poll. Cached values
-		// the driver keeps storing do not hold off the alarm after that.
-		{"driver stores cached values only", func(h *hybridTrace) { h.poll() }, 61 * time.Second},
+		// Every emit counts as a good poll (drivers.HostEnv.emitTelemetry),
+		// so the watchdog never gives up on this one; its readings stop
+		// being measurements, and that is lost after the same grace.
+		{"driver says offline on every poll", func(h *hybridTrace) {
+			h.tel.Update("hybrid", telemetry.DerBattery, h.batW, nil, []byte(`{"control_power_available":false,"is_online":false}`))
+			h.tel.RecordDriverSuccess("hybrid")
+		}, 31 * time.Second},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -152,6 +156,69 @@ func TestCloudChargerOfflineIsLostAfterItsGrace(t *testing.T) {
 			time.Sleep(5 * time.Second)
 		}
 	})
+}
+
+// Measured proof needs 10 s of distinct fresh readings, and a reading
+// without power, or a new step of 500 W or more, starts that window again.
+// So the last measured proof can lag well behind healthy readings. Gaps that
+// keep coming, alone or under a target that steps every few seconds, are
+// still not lost readings.
+func TestRepeatedOnePollGapsAreNotReadingsLost(t *testing.T) {
+	gaps := []func(h *hybridTrace) time.Time{
+		func(h *hybridTrace) time.Time { now := time.Now(); time.Sleep(time.Millisecond); h.poll(); return now },
+		func(h *hybridTrace) time.Time {
+			h.tel.RecordDriverError("hybrid", "modbus: i/o timeout")
+			return time.Now()
+		},
+		func(h *hybridTrace) time.Time {
+			h.tel.Update("hybrid", telemetry.DerBattery, h.batW, nil, []byte(`{"control_power_available":false}`))
+			return time.Now()
+		},
+		func(h *hybridTrace) time.Time {
+			h.tel.Update("hybrid", telemetry.DerBattery, h.batW, nil, []byte(fmt.Sprintf(`{"setpoint_w":%g,"is_online":false}`, h.cmdW)))
+			return time.Now()
+		},
+	}
+	for _, tc := range []struct {
+		name        string
+		every, step time.Duration
+	}{
+		{"a gap every 25 s", 25 * time.Second, 0},
+		{"a gap every 8 s", 8 * time.Second, 0},
+		{"a gap every 12 s under 600 W steps every 4 s", 12 * time.Second, 4 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				h := newHybridTrace()
+				h.houseW, h.batW = 600, -3000
+				h.command(-3000)
+				for range 90 {
+					time.Sleep(time.Second)
+					h.poll()
+				}
+				for sec := 1; sec <= 5*60; sec++ {
+					time.Sleep(time.Second)
+					if tc.step > 0 && sec%int(tc.step.Seconds()) == 0 {
+						target := -3000.0
+						if h.cmdW == -3000 {
+							target = -3600
+						}
+						h.command(target)
+						h.batW = target
+					}
+					at := time.Now()
+					if sec%int(tc.every.Seconds()) == 0 {
+						at = gaps[(sec/int(tc.every.Seconds()))%len(gaps)](h)
+					} else {
+						h.poll()
+					}
+					if f := h.battery(at); f.Reason == "readings_lost" || f.Severity == "alarm" {
+						t.Fatalf("%d s: %s/%s/%s", sec, f.Status, f.Reason, f.Severity)
+					}
+				}
+			})
+		})
+	}
 }
 
 // battery is the battery row of the verdict at now.
