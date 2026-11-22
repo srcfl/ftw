@@ -604,6 +604,12 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	//              since stale_after_s — UI should de-emphasize).
 	//              w is unused for vehicle readings (charger's DerEV owns
 	//              the power number).
+	//   inverter -> a stream, not a DER: a battery or hybrid driver's AC
+	//              stage. W (AC power, site convention), VA, Hz, L1_V…L3_W,
+	//              rated_W, available_import_W / available_export_W (how
+	//              much more it takes from / gives to the grid now, 0 to
+	//              100 kW). Core keeps the latest reading per driver for
+	//              the verdict and the driver views; no site sum reads it.
 	host.RawSetString("emit", L.NewFunction(func(L *lua.LState) int {
 		typ := L.CheckString(1)
 		tbl := L.CheckTable(2)
@@ -612,6 +618,9 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			m = map[string]any{}
 		}
 		m["type"] = typ
+		if typ == "inverter" {
+			dropNonFinite(m)
+		}
 		blob, err := json.Marshal(m)
 		if err != nil {
 			L.Push(lua.LString("encode failed: " + err.Error()))
