@@ -23,7 +23,7 @@ var watchedPaths = []string{
 	"go/internal/control/", "go/internal/loadpoint/", "go/internal/ocpp/", "go/internal/telemetry/",
 	"go/internal/drivers/", "go/internal/mdnsresolve/", // driver host, command deadlines
 	"go/internal/mpc/", "go/internal/optimizercontract/", // plans
-	"go/internal/gridcost/", "go/internal/forecasting/", "go/internal/sunpos/", // plan inputs
+	"go/internal/battery/", "go/internal/gridcost/", "go/internal/forecasting/", "go/internal/sunpos/", // plan inputs
 	"go/internal/config/", "go/internal/configreload/", // limits
 	"go/internal/units/",     // charge steps
 	"go/internal/localzone/", // household clock: goal deadlines, import hour
