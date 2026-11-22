@@ -152,7 +152,7 @@ function batteryLimit(row) {
     const grid = row.limit_kind === 'inverter_import' ? `take ${more} from the grid` : `send ${more} to the grid`;
     return `The inverter reports that it can ${grid} now. FTW asked for ${target(row)}.`;
   }
-  return !num(row.limit_w) ? `The battery reports a limit below the ${target(row)} FTW asked for.`
+  return !num(row.limit_w) ? `The battery reports a limit below ${num(row.sent_w) ? `the ${target(row)}` : 'what'} FTW asked for.`
     : row.limit_w < 1 ? `The battery reports that it cannot ${takes(row)} power now. FTW asked for ${target(row)}.`
     : `The battery reports that it can ${takes(row)} at most ${controlPower(row.limit_w)} now. FTW asked for ${target(row)}.`;
 }
@@ -332,7 +332,9 @@ export function controlNumbers(row, live = true) {
   if (num(row.dynamic_limit_a)) values.push(['Dynamic current setting', amps(row.dynamic_limit_a)]);
   else if (num(row.offered_a)) values.push(['Reported current setting', amps(row.offered_a)]);
   if (num(row.device_limit_a)) values.push(['Charger limit', amps(row.device_limit_a)]);
-  if (num(row.limit_a)) values.push([row.limited_by === 'load_balancer' ? 'Load balancing allows' : 'Charger lets the car take', amps(row.limit_a)]);
+  // limit_a is a charger's limit, or a battery's learned current limit.
+  if (num(row.limit_a)) values.push([row.kind === 'battery' ? 'Battery current limit'
+    : row.limited_by === 'load_balancer' ? 'Load balancing allows' : 'Charger lets the car take', amps(row.limit_a)]);
   const e = row.site_evidence;
   if (e && typeof e === 'object') {
     for (const [label, key] of [['Grid before', 'grid_before_w'], ['Grid after', 'grid_after_w']]) {

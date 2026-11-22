@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {controlStatus} from './control-feedback.js';
+import {controlNumbers, controlStatus} from './control-feedback.js';
 
 // Core's verdict when a battery gives less than ordered because that is what
 // it can do now (go/internal/api/api_control_capability.go).
@@ -79,14 +79,30 @@ test('a battery on standby still asks for a look', () => {
   assert.equal(shown.tone, 'warning');
 });
 
+// srcfl/ftw-webapp#144 found both; the box keeps the app's words.
+test('a reported limit without a target says what FTW asked for once', () => {
+  assert.equal(controlStatus(row({reason: 'battery_limit', sent_w: undefined, requested_w: undefined})).text,
+    'The battery reports a limit below what FTW asked for.');
+  assert.equal(controlStatus(row({reason: 'battery_limit'})).text, 'The battery reports a limit below the 5.0 kW charge FTW asked for.');
+});
+
+test('a battery current limit is the battery\'s, not a charger\'s', () => {
+  const numbers = controlNumbers(row({reason: 'learned_limit', limit_kind: 'battery_current', limit_a: 22.4, sent_w: -5000}));
+  assert.deepEqual(numbers.find(([label]) => label === 'Battery current limit'), ['Battery current limit', '22 A']);
+  assert.ok(!numbers.some(([label]) => /Charger|car/.test(label)), JSON.stringify(numbers));
+  const charger = controlNumbers({driver: 'easee', kind: 'ev', status: 'limited', reason: 'offered_current_lower', limit_a: 10});
+  assert.deepEqual(charger.find(([, value]) => value === '10 A'), ['Charger lets the car take', '10 A']);
+});
+
 test('limit words never show codes or invent numbers', () => {
   assert.equal(controlStatus(row({reason: 'learned_limit', limit_kind: 'grid_import'})).text, 'The battery is at a limit it has shown before.');
   assert.equal(controlStatus(row({reason: 'battery_limit'})).text, 'The battery reports a limit below the 5.0 kW charge FTW asked for.');
   for (const extra of [{reason: 'learned_limit'}, {reason: 'learned_limit', limit_kind: 'grid_import'}, {reason: 'battery_limit'},
     {reason: 'learned_limit', limit_kind: 'battery_current', limit_seen: 4}, {reason: 'device_standby', sent_w: undefined},
-    {reason: 'battery_limit', limit_kind: 'inverter_import'}, {reason: 'battery_limit', limit_kind: 'inverter_export', sent_w: undefined}]) {
+    {reason: 'battery_limit', limit_kind: 'inverter_import'}, {reason: 'battery_limit', limit_kind: 'inverter_export', sent_w: undefined},
+    {reason: 'battery_limit', sent_w: undefined}]) {
     const shown = controlStatus(row(extra));
     const text = [shown.title, shown.text, shown.next].join(' ');
-    assert.doesNotMatch(text, /_|undefined|NaN|null|cannot describe/, JSON.stringify(extra));
+    assert.doesNotMatch(text, /_|undefined|NaN|null|cannot describe|\bthe the\b/, JSON.stringify(extra));
   }
 });
