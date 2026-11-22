@@ -2288,6 +2288,8 @@ func (s *Server) handleGetModels(w http.ResponseWriter, r *http.Request) {
 			"max_discharge_curve":   m.MaxDischargeCurve,
 			"a":                     m.A,
 			"b":                     m.B,
+			// What the battery has shown it can do when short of an order.
+			"plateaus": m.Plateaus.View(),
 		}
 	}
 	writeJSON(w, 200, out)
