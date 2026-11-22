@@ -36,8 +36,9 @@ def loadpoint():
 
 
 def snapshot(lp):
-    ev = read("/api/ev/status?driver=easee-cloud")
+    ev = read(f"/api/ev/status?driver={DRIVER}")
     diag = ev.get("charger_diagnostics", {})
+    # This setup uses Pixii as the grid meter. Without it, grid phase currents are missing.
     meter = read("/api/drivers/pixii")
     return {
         "recorded_at_ms": time.time_ns() // 1_000_000,
