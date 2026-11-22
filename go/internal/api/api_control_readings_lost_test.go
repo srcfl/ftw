@@ -221,6 +221,54 @@ func TestRepeatedOnePollGapsAreNotReadingsLost(t *testing.T) {
 	}
 }
 
+// A driver that has died while Core keeps stepping its order by 600 W
+// every 10 s. Readings lost waits for 30 s without a new step as well as
+// without measured power, so it is late here by design: each step restarts
+// the response wait. The stale readings still show as no contact, a
+// warning, the whole time, and the alarm comes 30 s after the steps stop.
+// In the field the 60 s watchdog hands such a battery back to its own
+// control, so the steps stop.
+func TestDeadDriverUnderSteppingOrders(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		h := newHybridTrace()
+		h.houseW, h.batW = 600, -3000
+		h.command(-3000)
+		for range 90 {
+			time.Sleep(time.Second)
+			h.poll()
+		}
+		died := time.Now()
+		for sec := 1; sec <= 4*60; sec++ {
+			time.Sleep(time.Second)
+			if sec%10 == 0 {
+				target := -3000.0
+				if h.cmdW == -3000 {
+					target = -3600
+				}
+				h.command(target)
+			}
+			f, gap := h.battery(time.Now()), time.Since(died)
+			if f.Severity == "alarm" || f.Reason == "readings_lost" {
+				t.Fatalf("%v after the driver died, under steps: %s/%s/%s", gap, f.Status, f.Reason, f.Severity)
+			}
+			if gap > 61*time.Second && (f.Status != "no_contact" || f.Reason != "telemetry_stale" || f.Severity != "warning") {
+				t.Fatalf("%v after the driver died: %s/%s/%s, want no_contact/telemetry_stale/warning", gap, f.Status, f.Reason, f.Severity)
+			}
+		}
+		stopped := time.Now()
+		for time.Since(stopped) < 40*time.Second {
+			time.Sleep(time.Second)
+			f, quiet := h.battery(time.Now()), time.Since(stopped)
+			if quiet < 30*time.Second && f.Reason != "telemetry_stale" {
+				t.Fatalf("%v after the last step: %s/%s/%s", quiet, f.Status, f.Reason, f.Severity)
+			}
+			if quiet >= 30*time.Second && (f.Reason != "readings_lost" || f.Severity != "alarm") {
+				t.Fatalf("%v after the last step: %s/%s/%s, want readings_lost alarm", quiet, f.Status, f.Reason, f.Severity)
+			}
+		}
+	})
+}
+
 // battery is the battery row of the verdict at now.
 func (h *hybridTrace) battery(now time.Time) ControlFeedback {
 	for _, f := range h.srv.controlFeedback(now) {
