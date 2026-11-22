@@ -852,7 +852,7 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			L.Push(lua.LString("no mqtt capability"))
 			return 1
 		}
-		if err := env.allowWrite("mqtt.publish"); err != nil {
+		if err := env.allowMQTTPublish(topic, len(payload)); err != nil {
 			L.Push(lua.LString(err.Error()))
 			return 1
 		}

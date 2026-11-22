@@ -77,6 +77,18 @@ A read-only driver may POST only to the sign-in paths its `DRIVER` block
 declares: `auth_post_path` for one path, or `auth_post_paths` when the login
 posts more than one form. The host matches each exactly.
 
+A read-only MQTT driver installed from the signed channel may publish only to
+the read-request topics its signed policy declares. These are for a device
+that reports only while a client asks: Victron's Venus OS publishes while it
+receives `R/<portal ID>/keepalive`. The channel takes the topics from the
+driver's catalog manifest (`mqtt_read_request_topics`). They need
+`mqtt.subscribe` and no write permission; `mqtt.publish` stays refused. A topic
+must start with `R/`, Venus's read-request namespace; `+` stands for one whole
+level, and `#` is refused. Each request carries at most 1 KiB, and a driver may
+send six a minute. Setup measurement mode and fingerprint probes hold read
+requests as they hold writes. A bundled or local driver runs without a policy
+and publishes as before.
+
 A driver with an opt-in write path names it in its `DRIVER` block —
 `write_capabilities = { "solar_pv" }` for a driver that feeds a heat pump's
 own solar-surplus input. The Settings UI offers a switch for a path it
