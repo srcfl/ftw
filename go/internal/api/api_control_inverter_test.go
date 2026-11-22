@@ -18,8 +18,9 @@ import (
 )
 
 // A hybrid's inverter reports on its inverter stream how much more it will
-// take from or give to the grid now. A battery short of its order while
-// that headroom is gone is limited by the inverter, not out of control.
+// take from or give to the grid now. A battery that gives part of its order
+// while that headroom is gone is limited by the inverter, not out of
+// control. A battery that gives nothing keeps its warning.
 func TestInverterHeadroomExplainsAShortfall(t *testing.T) {
 	for _, tc := range []struct {
 		name, battery, inverter string
@@ -30,7 +31,11 @@ func TestInverterHeadroomExplainsAShortfall(t *testing.T) {
 		{"no import room while charging", "", `{"W":4300,"available_import_W":0,"available_export_W":5000}`, 5000, 3600, "limited", "battery_limit", "inverter_import", 0},
 		{"import room within the tolerance", "", `{"W":4300,"available_import_W":60}`, 5000, 3600, "limited", "battery_limit", "inverter_import", 60},
 		{"no export room while discharging", "", `{"W":-3200,"available_export_W":0}`, -5000, -3150, "limited", "battery_limit", "inverter_export", 0},
-		{"no response, no import room", "", `{"W":800,"available_import_W":0}`, 5000, 0, "limited", "battery_limit", "inverter_import", 0},
+		// A dead battery on a site that may not export sees no export
+		// headroom either: only the battery's own report explains nothing.
+		{"no response, no import room", "", `{"W":800,"available_import_W":0}`, 5000, 0, "not_following", "no_power_response", "", 0},
+		{"no response, no export room", "", `{"W":0,"available_export_W":0}`, -5000, 0, "not_following", "no_power_response", "", 0},
+		{"no response, battery reports none available", `,"available_discharge_W":0`, `{"W":0,"available_export_W":0}`, -5000, 0, "limited", "battery_limit", "battery_reported", 0},
 		{"no response, import room left", "", `{"W":800,"available_import_W":3000}`, 5000, 0, "not_following", "no_power_response", "", 0},
 		{"no response, room just above the tolerance", "", `{"available_export_W":150}`, -5000, 0, "not_following", "no_power_response", "", 0},
 		{"import room left", "", `{"W":4300,"available_import_W":1400}`, 5000, 3600, "not_following", "power_below_target", "", 0},
@@ -69,8 +74,8 @@ func TestInverterHeadroomExplainsAShortfall(t *testing.T) {
 }
 
 // Headroom from an earlier poll says nothing about now. When the inverter
-// read starts failing while the battery keeps reporting, the shortfall is
-// not following again at once.
+// read starts failing while a 1 Hz battery keeps reporting, the shortfall
+// is not following again from the next poll.
 func TestStaleInverterStreamIsIgnored(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		s := newSungrowTrace()
@@ -84,6 +89,12 @@ func TestStaleInverterStreamIsIgnored(t *testing.T) {
 			t.Fatalf("fresh headroom: %s", jsonOf(last))
 		}
 		inverter = ""
+		// The very next poll, a second later, already says not following.
+		time.Sleep(time.Second)
+		s.poll()
+		if f := s.batteryRow(time.Now()); f.Status != "not_following" || f.Reason != "power_below_target" {
+			t.Fatalf("a second-old headroom explained the next poll: %s", jsonOf(f))
+		}
 		var seen []string
 		s.run(30*time.Second, 5000, func(f ControlFeedback) { seen = append(seen, f.Status+"/"+f.Reason) })
 		for _, got := range seen {
@@ -111,6 +122,12 @@ func TestInverterHeadroomNeverExplainsOtherVerdicts(t *testing.T) {
 		{"power above target", "", -1500, nil, nil, []string{"power_above_target"}},
 		{"power while idle", "", 0, nil, nil, []string{"power_while_idle"}},
 		{"wrong direction", "", 3000, nil, nil, []string{"power_wrong_direction"}},
+		{"no response", "", -5000, func(s *sungrowTrace) {
+			s.battery = func() (float64, float64, float64, string) { return 0, 0, 190, "" }
+		}, nil, []string{"no_power_response"}},
+		{"no response while charging", "", 5000, func(s *sungrowTrace) {
+			s.battery = func() (float64, float64, float64, string) { return 0, 0, 190, "" }
+		}, nil, []string{"no_power_response"}},
 		{"device fault", "", -3000, func(s *sungrowTrace) { s.tel.SetDriverDeviceFault("sungrow", true, "test fault") }, nil, []string{"device_fault"}},
 		{"readings lost", "", -2000, nil, func(s *sungrowTrace) {
 			for range 24 {
@@ -177,7 +194,7 @@ func TestStatusShowsTheInverterStreamApartFromSitePower(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tel.UpdateInverter("solis", r)
+	tel.UpdateInverter("solis", r, 1)
 	after := status()
 	for _, key := range []string{"grid_w", "pv_w", "bat_w", "load_w", "ev_w"} {
 		if before[key] != after[key] {
@@ -188,6 +205,27 @@ func TestStatusShowsTheInverterStreamApartFromSitePower(t *testing.T) {
 	if d["inverter_w"] != -9000.0 || d["inverter_available_import_w"] != 0.0 || d["inverter_available_export_w"] != 4100.0 || d["bat_w"] == nil {
 		t.Fatalf("driver status %v", d)
 	}
+	stored, _ := tel.Inverter("solis")
+	if at, _ := d["inverter_updated_at_ms"].(float64); int64(at) != stored.UpdatedAt.UnixMilli() {
+		t.Fatalf("reading time %v, want %d", d["inverter_updated_at_ms"], stored.UpdatedAt.UnixMilli())
+	}
+	// A stale or faulted driver's cached values never show as live.
+	for name, setup := range map[string]func(){
+		"offline": func() { tel.DriverHealthMut("solis").SetOffline() },
+		"fault":   func() { tel.SetDriverDeviceFault("solis", true, "test") },
+	} {
+		tel.RecordDriverSuccess("solis")
+		tel.SetDriverDeviceFault("solis", false, "")
+		setup()
+		d, _ := status()["drivers"].(map[string]any)["solis"].(map[string]any)
+		for _, key := range []string{"inverter_w", "inverter_available_import_w", "inverter_available_export_w", "inverter_updated_at_ms"} {
+			if _, shown := d[key]; shown {
+				t.Fatalf("%s driver shows %s: %v", name, key, d)
+			}
+		}
+	}
+	tel.SetDriverDeviceFault("solis", false, "")
+	tel.RecordDriverSuccess("solis")
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/drivers/solis", nil)

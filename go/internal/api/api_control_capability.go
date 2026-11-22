@@ -97,12 +97,14 @@ func (b batteryNow) standby() bool { return b.DeviceState == "standby" || b.Devi
 //     so the words can say why;
 //   - a reported available_*_W below the order that the battery delivers,
 //     within the control tolerance, is limited / battery_limit;
-//   - the battery's inverter reporting, in the same poll, no more grid
-//     headroom in the order's direction (available_import_W while charging,
-//     available_export_W while discharging, at most Core's smallest control
-//     tolerance) is limited / battery_limit, limit_kind inverter_import or
-//     inverter_export. This explains a zero response too, but only while
-//     the headroom is about 0;
+//   - a battery that gives part of its order while its inverter reports,
+//     in the same driver poll, no more grid headroom in the order's
+//     direction (available_import_W while charging, available_export_W
+//     while discharging, at most Core's smallest control tolerance) is
+//     limited / battery_limit, limit_kind inverter_import or
+//     inverter_export. A zero response keeps its warning: a dead battery
+//     on a site that may not export also sees no export headroom. Only the
+//     battery's own report of 0 available explains it;
 //   - a trusted learned plateau the shortfall sits on is limited /
 //     learned_limit.
 //
@@ -134,8 +136,9 @@ func (s *Server) explainBatteryShortfall(f *ControlFeedback, data json.RawMessag
 		return
 	}
 	// The inverter takes no more from the grid, or gives no more to it, so
-	// the battery can get or give no more through it.
-	if room, kind := s.inverterRoom(f.Driver, charge); room != nil && *room <= telemetry.ControlToleranceW(0) {
+	// the battery can get or give no more through it. That explains less
+	// power, never none.
+	if room, kind := s.inverterRoom(f.Driver, charge); f.Reason == "power_below_target" && room != nil && *room <= telemetry.ControlToleranceW(0) {
 		f.State, f.Reason, f.Severity = "limited", "battery_limit", "info"
 		f.LimitW, f.LimitSource, f.LimitKind = watts(*room), "device", kind
 		return

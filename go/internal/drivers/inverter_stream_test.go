@@ -71,8 +71,12 @@ func TestInverterStreamFollowsThePollRules(t *testing.T) {
 	if _, ok := tel.Inverter("solis"); !ok {
 		t.Fatal("inverter reading not kept")
 	}
-	if err := env.emitTelemetry([]byte(`{"type":"inverter","W":"high"}`)); err == nil {
-		t.Fatal("a malformed inverter emit was accepted")
+	// One bad field is left out; the rest of the emit is kept.
+	if err := env.emitTelemetry([]byte(`{"type":"inverter","W":"high","available_import_W":0}`)); err != nil {
+		t.Fatalf("one bad field failed the emit: %v", err)
+	}
+	if r, _ := tel.Inverter("solis"); r.W != nil || r.AvailableImportW == nil || *r.AvailableImportW != 0 {
+		t.Fatalf("bad power field: %+v", r)
 	}
 
 	tel = telemetry.NewStore()
@@ -87,5 +91,67 @@ func TestInverterStreamFollowsThePollRules(t *testing.T) {
 	}
 	if _, ok := tel.Inverter("solis"); ok {
 		t.Fatal("an inverter reading from a failed poll was kept")
+	}
+
+	// A good poll lands both, held until it ends, as one poll.
+	env.BatteryCapacityWh = 100000
+	env.beginPollEvidence()
+	env.recordPollModbusRead(nil)
+	for _, blob := range []string{`{"type":"battery","W":3600,"SoC_nom_fract":0.5}`, `{"type":"inverter","W":4000,"available_import_W":0}`} {
+		if err := env.emitTelemetry([]byte(blob)); err != nil {
+			t.Fatalf("emit: %v", err)
+		}
+	}
+	if _, ok := tel.Inverter("solis"); ok {
+		t.Fatal("stored before the poll ended")
+	}
+	if _, _, err := env.endPollEvidence(true); err != nil {
+		t.Fatalf("end poll: %v", err)
+	}
+	if inv, ok := tel.LiveBatteryInverter("solis"); !ok || inv.Poll == 0 {
+		t.Fatalf("held poll did not pair: %+v %v", inv, ok)
+	}
+}
+
+// A driver polled back to back that reads its inverter every other poll:
+// the battery reading pairs with headroom only on the polls that read it,
+// however close in time the polls are. A failed register (NaN) is left out
+// and the rest of the emit kept.
+func TestInverterStreamPairsByPoll(t *testing.T) {
+	path := writeLua(t, `
+local n = 0
+function driver_init(config) end
+function driver_poll()
+    n = n + 1
+    host.emit("battery", { W = 3600, SoC_nom_fract = 0.5 })
+    if n % 2 == 0 then
+        local err = host.emit("inverter", { W = 0/0, available_import_W = 0, rated_W = 1/0 })
+        assert(err == nil, "inverter emit refused: " .. tostring(err))
+    end
+    return 1000
+end
+`)
+	tel := telemetry.NewStore()
+	env := NewHostEnv("solis", tel)
+	env.BatteryCapacityWh = 100000
+	d, err := NewLuaDriver(path, env)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	defer d.Cleanup()
+	if err := d.Init(context.Background(), nil); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	for n := 1; n <= 4; n++ {
+		if _, err := d.Poll(context.Background()); err != nil {
+			t.Fatalf("poll %d: %v", n, err)
+		}
+		inv, ok := tel.LiveBatteryInverter("solis")
+		if ok != (n%2 == 0) {
+			t.Fatalf("poll %d: paired %v", n, ok)
+		}
+		if ok && (inv.W != nil || inv.AvailableImportW == nil || *inv.AvailableImportW != 0 || strings.Contains(string(inv.Data), "rated_W")) {
+			t.Fatalf("poll %d: %+v %s", n, inv, inv.Data)
+		}
 	}
 }

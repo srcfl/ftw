@@ -41,6 +41,8 @@ type sungrowTrace struct {
 	// inverter, when set, gives the inverter stream emit of this poll, or
 	// "" when the inverter read failed.
 	inverter func() string
+	// polls numbers the driver's polls, as the driver host does.
+	polls uint64
 }
 
 func newSungrowTrace() *sungrowTrace {
@@ -67,14 +69,15 @@ func (s *sungrowTrace) poll() {
 	}
 	s.tel.Update("sungrow", telemetry.DerMeter, grid, nil, []byte(`{"power_origin":"external_meter"}`))
 	soc := 0.5
-	s.tel.Update("sungrow", telemetry.DerBattery, w, &soc, []byte(fmt.Sprintf(`{"setpoint_w":%g,"a":%.1f,"v":%.1f%s}`, s.cmdW, a, v, extra)))
+	s.polls++
+	s.tel.UpdateFromPoll("sungrow", telemetry.DerBattery, w, &soc, []byte(fmt.Sprintf(`{"setpoint_w":%g,"a":%.1f,"v":%.1f%s}`, s.cmdW, a, v, extra)), s.polls)
 	if s.inverter != nil {
 		if data := s.inverter(); data != "" {
 			r, err := telemetry.ParseInverterReading([]byte(data))
 			if err != nil {
 				panic(err)
 			}
-			s.tel.UpdateInverter("sungrow", r)
+			s.tel.UpdateInverter("sungrow", r, s.polls)
 		}
 	}
 	s.tel.RecordDriverSuccess("sungrow")

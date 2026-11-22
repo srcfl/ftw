@@ -25,16 +25,25 @@ func TestParseInverterReadingKeepsWhatTheDeviceReports(t *testing.T) {
 	if r := inverterOf(t, `{"w":1200}`); r.W == nil || *r.W != 1200 || r.AvailableImportW != nil || r.AvailableExportW != nil {
 		t.Fatalf("catalog spelling: %+v", r)
 	}
-	// The driver guide drops a power outside 0 to 100 kW; a missing field
-	// stays missing, never 0.
+	// The driver guide drops a power outside 0 to 100 kW. A missing,
+	// null or misspelt field stays missing, never 0, and Blixt's exact
+	// names are the only ones read.
 	for _, data := range []string{
 		`{"W":0,"available_import_W":-50,"available_export_W":100001}`,
 		`{"W":0}`,
-		`{"W":0,"available_import_W":null}`,
-		`{"W":0,"available_import_W":"0"}`,
+		`{"W":0,"available_import_W":null,"available_export_W":null}`,
+		`{"W":0,"available_import_W":"0","available_export_W":true}`,
+		`{"W":0,"available_import_w":0,"Available_Export_W":0}`,
+		`{"W":0,"available_import_W":1e999}`,
 	} {
-		if r, err := ParseInverterReading([]byte(data)); err == nil && (r.AvailableImportW != nil || r.AvailableExportW != nil) {
+		if r := inverterOf(t, data); r.AvailableImportW != nil || r.AvailableExportW != nil {
 			t.Fatalf("%s kept headroom %+v", data, r)
+		}
+	}
+	// One bad field never costs the others.
+	for _, data := range []string{`{"W":"high","available_import_W":0}`, `{"W":1e999,"available_import_W":0}`, `{"W":null,"available_import_W":0}`} {
+		if r := inverterOf(t, data); r.W != nil || r.AvailableImportW == nil || *r.AvailableImportW != 0 {
+			t.Fatalf("%s: %+v", data, r)
 		}
 	}
 	if _, err := ParseInverterReading([]byte(`[1]`)); err == nil {
@@ -62,7 +71,7 @@ func TestInverterReadingNeverChangesSitePower(t *testing.T) {
 		return s
 	}
 	plain, with := seed(), seed()
-	with.UpdateInverter("hybrid", inverterOf(t, `{"W":-9000,"available_import_W":0,"available_export_W":0,"L1_W":-3000}`))
+	with.UpdateInverter("hybrid", inverterOf(t, `{"W":-9000,"available_import_W":0,"available_export_W":0,"L1_W":-3000}`), 1)
 
 	opts := ForecastOptions{}
 	if a, b := plain.LiveMeasurementNow("meter", opts), with.LiveMeasurementNow("meter", opts); a.LoadW != b.LoadW || a.PVW != b.PVW ||
@@ -92,13 +101,20 @@ func TestInverterReadingNeverChangesSitePower(t *testing.T) {
 	}
 }
 
+// The pair is the driver poll, not a time window: a driver polled every
+// second whose inverter read fails leaves a reading a second old, and that
+// one never pairs with the new battery reading.
 func TestLiveBatteryInverterComesWithTheBatteryReading(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		soc := 0.5
-		poll := func(s *Store, inverter bool) {
-			s.Update("hybrid", DerBattery, 3600, &soc, nil)
+		headroom := inverterOf(t, `{"W":4000,"available_import_W":0}`)
+		poll := func(s *Store, n uint64, battery, inverter bool) {
+			time.Sleep(time.Second)
+			if battery {
+				s.UpdateFromPoll("hybrid", DerBattery, 3600, &soc, nil, n)
+			}
 			if inverter {
-				s.UpdateInverter("hybrid", inverterOf(t, `{"W":4000,"available_import_W":0}`))
+				s.UpdateInverter("hybrid", headroom, n)
 			}
 			s.RecordDriverSuccess("hybrid")
 		}
@@ -106,47 +122,64 @@ func TestLiveBatteryInverterComesWithTheBatteryReading(t *testing.T) {
 		if _, ok := s.LiveBatteryInverter("hybrid"); ok {
 			t.Fatal("nothing emitted, yet live")
 		}
-		s.UpdateInverter("hybrid", inverterOf(t, `{"W":4000,"available_import_W":0}`))
-		s.RecordDriverSuccess("hybrid")
+		poll(s, 1, false, true)
 		if _, ok := s.LiveBatteryInverter("hybrid"); ok {
 			t.Fatal("live without a battery reading")
 		}
-		poll(s, true)
+		if _, ok := s.LiveInverter("hybrid"); !ok {
+			t.Fatal("the view lost a live driver's reading")
+		}
+		poll(s, 2, true, true)
 		r, ok := s.LiveBatteryInverter("hybrid")
-		if !ok || r.AvailableImportW == nil || *r.AvailableImportW != 0 || r.Driver != "hybrid" {
+		if !ok || r.AvailableImportW == nil || *r.AvailableImportW != 0 || r.Driver != "hybrid" || r.Poll != 2 {
 			t.Fatalf("same poll: %+v %v", r, ok)
 		}
-		if got, ok := s.Inverter("hybrid"); !ok || got.UpdatedAt != r.UpdatedAt {
-			t.Fatalf("latest reading %+v %v", got, ok)
-		}
-
-		// The next poll's inverter read fails: the battery reading moves on
-		// and the old headroom no longer counts.
-		time.Sleep(5 * time.Second)
-		poll(s, false)
+		// The next poll's inverter read fails, a second later.
+		poll(s, 3, true, false)
 		if _, ok := s.LiveBatteryInverter("hybrid"); ok {
 			t.Fatal("an inverter reading from an earlier poll counted")
 		}
-		if _, ok := s.Inverter("hybrid"); !ok {
+		if _, ok := s.LiveInverter("hybrid"); !ok {
 			t.Fatal("the last known reading went missing from the view")
 		}
-		// The battery read fails while the inverter read answers: no pair.
-		time.Sleep(5 * time.Second)
-		s.UpdateInverter("hybrid", inverterOf(t, `{"W":4000,"available_import_W":0}`))
+		// The battery read fails while the inverter read answers.
+		poll(s, 4, false, true)
 		if _, ok := s.LiveBatteryInverter("hybrid"); ok {
 			t.Fatal("an inverter reading without this poll's battery reading counted")
 		}
+		// A driver that reads its inverter every other poll pairs on those
+		// polls only.
+		for n := uint64(5); n < 11; n++ {
+			poll(s, n, true, n%2 == 0)
+			if _, ok := s.LiveBatteryInverter("hybrid"); ok != (n%2 == 0) {
+				t.Fatalf("poll %d: paired %v", n, ok)
+			}
+		}
+		// Readings from outside a poll never pair.
+		poll(s, 0, true, true)
+		if _, ok := s.LiveBatteryInverter("hybrid"); ok {
+			t.Fatal("readings from outside a poll paired")
+		}
 
-		poll(s, true)
+		poll(s, 12, true, true)
 		s.SetDriverDeviceFault("hybrid", true, "test")
 		if _, ok := s.LiveBatteryInverter("hybrid"); ok {
 			t.Fatal("live while the device reports a fault")
 		}
+		if _, ok := s.LiveInverter("hybrid"); ok {
+			t.Fatal("the view shows a faulted device's reading as live")
+		}
 		s.SetDriverDeviceFault("hybrid", false, "")
-		poll(s, true)
+		poll(s, 13, true, true)
 		s.DriverHealthMut("hybrid").SetOffline()
 		if _, ok := s.LiveBatteryInverter("hybrid"); ok {
 			t.Fatal("live while the driver is offline")
+		}
+		if _, ok := s.LiveInverter("hybrid"); ok {
+			t.Fatal("the view shows an offline driver's reading as live")
+		}
+		if _, ok := s.Inverter("hybrid"); !ok {
+			t.Fatal("the last known reading went missing")
 		}
 		s.Remove("hybrid")
 		if _, ok := s.Inverter("hybrid"); ok {

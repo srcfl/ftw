@@ -28,7 +28,7 @@ func TestInverterStreamNeverChangesDispatch(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				s.UpdateInverter(name, r)
+				s.UpdateInverter(name, r, 1)
 			}
 		}
 		return s

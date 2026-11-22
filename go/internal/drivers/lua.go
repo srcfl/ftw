@@ -618,6 +618,9 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			m = map[string]any{}
 		}
 		m["type"] = typ
+		if typ == "inverter" {
+			dropNonFinite(m)
+		}
 		blob, err := json.Marshal(m)
 		if err != nil {
 			L.Push(lua.LString("encode failed: " + err.Error()))

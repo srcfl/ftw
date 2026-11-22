@@ -1158,8 +1158,10 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		// The inverter stream is a battery or hybrid's AC stage. It sits
-		// beside the driver's readings and is never added to them.
-		if inv, ok := s.deps.Tel.Inverter(name); ok {
+		// beside the driver's readings and is never added to them. Shown
+		// only while the driver is live, with when it was read.
+		if inv, ok := s.deps.Tel.LiveInverter(name); ok {
+			d["inverter_updated_at_ms"] = inv.UpdatedAt.UnixMilli()
 			if inv.W != nil {
 				d["inverter_w"] = *inv.W
 			}

@@ -9,6 +9,7 @@ import (
 	"math"
 	net_url "net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -222,7 +223,15 @@ type HostEnv struct {
 	lastPollEvidence pollEvidence
 	pollTelemetry    [][]byte
 	pollMetrics      []pollMetric
+	// pollID numbers the poll that runs or ran last. Every reading a poll
+	// emits carries it, so the store can tell one poll's readings from an
+	// earlier poll's however close in time they arrive.
+	pollID uint64
 }
+
+// pollIDs numbers driver polls across every host in the process, so a
+// restarted host never reuses a number a stored reading still carries.
+var pollIDs atomic.Uint64
 
 type pollMetric struct {
 	name     string
@@ -314,6 +323,7 @@ func (h *HostEnv) allowWrite(permission string) error {
 func (h *HostEnv) beginPollEvidence() {
 	h.mu.Lock()
 	h.pollActive = true
+	h.pollID = pollIDs.Add(1)
 	h.pollModbusAttempts = 0
 	h.pollModbusSuccesses = 0
 	h.pollModbusTransportFailures = 0
@@ -363,6 +373,7 @@ func (h *HostEnv) endPollEvidence(commit bool) (attempts, successes int, err err
 	attempts = ev.Attempts
 	successes = ev.Successes
 	h.lastPollEvidence = ev
+	poll := h.pollID
 	fresh := commit && ev.fresh()
 	var pendingTelemetry [][]byte
 	var pendingMetrics []pollMetric
@@ -381,7 +392,7 @@ func (h *HostEnv) endPollEvidence(commit bool) (attempts, successes int, err err
 	h.mu.Unlock()
 
 	for _, rawJSON := range pendingTelemetry {
-		if emitErr := h.emitTelemetry(rawJSON); emitErr != nil {
+		if emitErr := h.emitTelemetryFrom(rawJSON, poll); emitErr != nil {
 			return attempts, successes, emitErr
 		}
 	}
@@ -593,6 +604,26 @@ func (h *HostEnv) setPollInterval(ms int32) {
 // Extra fields are preserved in the reading's Data payload so the UI/API can
 // surface them verbatim.
 func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
+	h.mu.Lock()
+	poll := uint64(0)
+	if h.pollActive {
+		poll = h.pollID
+	}
+	h.mu.Unlock()
+	return h.emitTelemetryFrom(rawJSON, poll)
+}
+
+// emitTelemetryFrom is emitTelemetry for an emit of driver poll number poll,
+// 0 outside a poll.
+func (h *HostEnv) emitTelemetryFrom(rawJSON []byte, poll uint64) error {
+	// The inverter stream is read field by field, so it is routed before
+	// the DER envelope, where one bad power value would fail the emit.
+	var stream struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(rawJSON, &stream) == nil && stream.Type == "inverter" {
+		return h.emitInverter(rawJSON, poll)
+	}
 	var env struct {
 		Type            string   `json:"type"`
 		W               *float64 `json:"w"`
@@ -609,9 +640,6 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 	}
 	if err := json.Unmarshal(rawJSON, &env); err != nil {
 		return fmt.Errorf("emit_telemetry: invalid json: %w", err)
-	}
-	if env.Type == "inverter" {
-		return h.emitInverter(rawJSON)
 	}
 	t, err := telemetry.ParseDerType(env.Type)
 	if err != nil {
@@ -672,7 +700,7 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 		return nil
 	}
 	if h.Telemetry != nil {
-		h.Telemetry.Update(h.DriverName, t, rawW, soc, rawJSON)
+		h.Telemetry.UpdateFromPoll(h.DriverName, t, rawW, soc, rawJSON, poll)
 	}
 	// Successful emit counts as a tick for health
 	if h.Telemetry != nil {
@@ -685,7 +713,7 @@ func (h *HostEnv) emitTelemetry(rawJSON []byte) error {
 // or hybrid inverter, which is not a DER (telemetry/inverter.go). It follows
 // the poll rules of a DER emit, so a poll whose reads failed drops it, but it
 // is no sign of life: a driver that sends only this goes stale.
-func (h *HostEnv) emitInverter(rawJSON []byte) error {
+func (h *HostEnv) emitInverter(rawJSON []byte, poll uint64) error {
 	r, err := telemetry.ParseInverterReading(rawJSON)
 	if err != nil {
 		return fmt.Errorf("emit_telemetry: %w", err)
@@ -694,9 +722,19 @@ func (h *HostEnv) emitInverter(rawJSON []byte) error {
 		return nil
 	}
 	if h.Telemetry != nil {
-		h.Telemetry.UpdateInverter(h.DriverName, r)
+		h.Telemetry.UpdateInverter(h.DriverName, r, poll)
 	}
 	return nil
+}
+
+// dropNonFinite leaves out the top-level numbers JSON cannot carry, NaN and
+// ±Inf, so one failed register in an inverter emit does not lose the rest.
+func dropNonFinite(fields map[string]any) {
+	for key, value := range fields {
+		if f, ok := value.(float64); ok && (math.IsNaN(f) || math.IsInf(f, 0)) {
+			delete(fields, key)
+		}
+	}
 }
 
 // emitMetric buffers a scalar diagnostic metric for the long-format TS DB.

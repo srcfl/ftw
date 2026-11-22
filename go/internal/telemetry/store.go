@@ -94,6 +94,9 @@ type DerReading struct {
 	SoCUpdatedAt time.Time // last SoC source observation (receipt time for legacy drivers)
 	Data         json.RawMessage
 	UpdatedAt    time.Time
+	// Poll is the driver poll the reading came from, as the driver host
+	// numbers them; 0 when it came outside a poll.
+	Poll uint64
 }
 
 // DriverStatus describes the health of one driver.
@@ -434,6 +437,12 @@ const BatterySoCMaxAge = 5 * time.Minute
 // Update feeds a new reading. Applies Kalman smoothing and stores both raw
 // and smoothed values.
 func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, data json.RawMessage) {
+	s.UpdateFromPoll(driver, t, rawW, soc, data, 0)
+}
+
+// UpdateFromPoll is Update for a reading from driver poll number poll, so
+// readings from one poll can be told apart from an earlier poll's.
+func (s *Store) UpdateFromPoll(driver string, t DerType, rawW float64, soc *float64, data json.RawMessage, poll uint64) {
 	if err := ValidateReading(t, rawW, soc); err != nil {
 		return
 	}
@@ -496,6 +505,7 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 		SoCUpdatedAt: socUpdatedAt,
 		Data:         data,
 		UpdatedAt:    now,
+		Poll:         poll,
 	}
 
 	s.observeCommand(driver, t, rawW, data, now)
