@@ -357,3 +357,44 @@ func TestSlowMeterCapIsTrusted(t *testing.T) {
 		}
 	}
 }
+
+// The planner plans with the limits of the band the battery is in now: a
+// cold-weather limit never holds a warm battery, and a battery that reports
+// no temperature takes only the limits learned without one.
+func TestKnownAtKeepsTheBandOfTheTemperatureNow(t *testing.T) {
+	p := &Plateaus{}
+	at := day0
+	cold, warm := f(4), f(14)
+	for day := range 3 {
+		start := day0.Add(time.Duration(day) * 24 * time.Hour)
+		at = feed(p, start, 60, shortfall{a: f(22.4), tempC: cold, batteryW: func(int) float64 { return 4300 }})
+		at = feed(p, at.Add(time.Hour), 60, shortfall{a: f(18), tempC: warm, batteryW: func(int) float64 { return 3500 }})
+		at = feed(p, at.Add(time.Hour), 60, shortfall{a: f(25), batteryW: func(int) float64 { return 4800 }})
+	}
+	p.Tick(at, nil)
+	byValue := func(known []Plateau, kind string) []float64 {
+		var out []float64
+		for _, k := range known {
+			if k.Kind == kind {
+				out = append(out, k.Value)
+			}
+		}
+		return out
+	}
+	for _, c := range []struct {
+		tempC *float64
+		want  float64
+	}{{f(7.5), 22.4}, {f(10), 18}, {f(19.9), 18}, {nil, 25}} {
+		got := byValue(p.KnownAt(c.tempC), LimitBatteryCurrent)
+		if len(got) != 1 || math.Abs(got[0]-c.want) > 0.5 {
+			t.Fatalf("at %v: current limits %v, want one near %v", c.tempC, got, c.want)
+		}
+	}
+	if got := p.KnownAt(f(31)); len(got) != 0 {
+		t.Fatalf("a band with no runs has limits: %+v", got)
+	}
+	var none *Plateaus
+	if got := none.KnownAt(cold); len(got) != 0 {
+		t.Fatalf("no model has limits: %+v", got)
+	}
+}

@@ -271,6 +271,9 @@ type StorageAssetSpec struct {
 	MaxDischargeW       float64
 	ChargeEfficiency    float64
 	DischargeEfficiency float64
+	// Learned is what this battery has shown it can do. Both planners plan
+	// each slot within it (slotLimitsW); it never raises the limits above.
+	Learned LearnedLimits
 }
 
 func (p Params) activeLoadpoints() []*LoadpointSpec {
@@ -698,7 +701,17 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 			idleActionIdx = i
 		}
 	}
-	actionAt := func(j int) float64 { return actionGrid[j] }
+	// What the batteries have shown they can do holds each slot's actions:
+	// an action past a slot's limit runs at that limit. Without learned
+	// limits every slot keeps the grid above.
+	chargeLimitW, dischargeLimitW := fleetSlotLimitsW(slots, p)
+	actionAt := func(t, j int) float64 {
+		w := actionGrid[j]
+		if chargeLimitW != nil {
+			w = max(-dischargeLimitW[t], min(w, chargeLimitW[t]))
+		}
+		return w
+	}
 
 	// EV dimensions. When no loadpoint is active, EL=EA=1 and the
 	// EV loops degenerate to a single pass that adds zero power /
@@ -786,7 +799,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 				bestV := math.Inf(1)
 				bestPolicy := 0
 				for ba := 0; ba < A; ba++ {
-					battW := actionAt(ba)
+					battW := actionAt(t, ba)
 
 					// Battery SoC transition (independent of EV).
 					dBattWh := loadpoint.BatteryEnergyDeltaWh(battW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)
@@ -1100,7 +1113,7 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 		pol := Policy[t][si][ei]
 		ba := pol / EA
 		ea := pol % EA
-		actW := clipBatteryPowerToBand(soc, actionAt(ba), dtH, p.CapacityWh,
+		actW := clipBatteryPowerToBand(soc, actionAt(t, ba), dtH, p.CapacityWh,
 			p.ChargeEfficiency, p.DischargeEfficiency, p.SoCMin, p.SoCMax)
 		evW := evActionW(ea)
 		soc2 := soc + loadpoint.BatteryEnergyDeltaWh(actW, dtH, p.ChargeEfficiency, p.DischargeEfficiency)/p.CapacityWh

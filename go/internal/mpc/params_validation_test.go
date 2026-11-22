@@ -258,6 +258,8 @@ func TestValidatePlanningParamsRejectsInvalidStoragePhysics(t *testing.T) {
 		{"initial above physical", "initial_energy_wh", func(p *Params) { p.Storages[0].InitialEnergyWh = 10001 }},
 		{"negative charge power", ".max_charge_w", func(p *Params) { p.Storages[0].MaxChargeW = -1 }},
 		{"nan discharge power", ".max_discharge_w", func(p *Params) { p.Storages[0].MaxDischargeW = math.NaN() }},
+		{"nan learned import hold", ".learned.grid_import_w", func(p *Params) { p.Storages[0].Learned.GridImportW = math.NaN() }},
+		{"negative learned discharge", ".learned.discharge_w", func(p *Params) { p.Storages[0].Learned.DischargeW = -1 }},
 		{"zero efficiency", ".charge_efficiency", func(p *Params) { p.Storages[0].ChargeEfficiency = 0 }},
 		{"nan efficiency", ".charge_efficiency", func(p *Params) { p.Storages[0].ChargeEfficiency = math.NaN() }},
 		{"high efficiency", ".discharge_efficiency", func(p *Params) { p.Storages[0].DischargeEfficiency = 1.01 }},

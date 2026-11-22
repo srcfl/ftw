@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
 	"github.com/srcfl/ftw/go/internal/state"
 	"github.com/srcfl/ftw/go/internal/telemetry"
@@ -144,7 +145,13 @@ type Service struct {
 	HourImport func() HourImport
 	// Set before Start. Called without s.mu; must not acquire the control lock.
 	PVExecutionAllowed func(PVCurtailment) bool
-	Load               LoadPredictor // optional — overrides flat BaseLoad
+	// LearnedBatteryLimits returns the trusted limits a battery's model has
+	// learned (battery.Plateaus.KnownAt) for the temperature band it is in
+	// now. Both planners plan each slot within them. Nil plans with the
+	// configured limits alone. Called without s.mu; it takes the battery
+	// models' lock.
+	LearnedBatteryLimits func(driver string, tempC *float64) []battery.Plateau
+	Load                 LoadPredictor // optional — overrides flat BaseLoad
 	// Optimizer is the external mathematical planning engine. Nil — the
 	// default since #1020 — makes the in-process Go DP the champion. When
 	// non-nil, any engine/process/validation failure falls back to the DP for
@@ -2863,6 +2870,11 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember, fuseMa
 		sumSoCWh += initialEnergyWh
 		maxCharge += b.MaxChargeW
 		maxDischarge += b.MaxDischargeW
+		var learned LearnedLimits
+		if s.LearnedBatteryLimits != nil {
+			tempC, voltageV := batteryPackNow(r.Data)
+			learned = learnedLimits(s.LearnedBatteryLimits(b.Driver, tempC), voltageV)
+		}
 		storages = append(storages, StorageAssetSpec{
 			ID:                  b.Driver,
 			CapacityWh:          b.CapacityWh,
@@ -2873,6 +2885,7 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember, fuseMa
 			MaxDischargeW:       b.MaxDischargeW,
 			ChargeEfficiency:    p.ChargeEfficiency,
 			DischargeEfficiency: p.DischargeEfficiency,
+			Learned:             learned,
 		})
 	}
 	if totalCap <= 0 {

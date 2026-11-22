@@ -1737,6 +1737,16 @@ func main() {
 			defer ctrlMu.Unlock()
 			return control.MeasuredHourImport(ctrl)
 		}
+		// The planner plans each battery within the limits its model has
+		// learned and trusts (srcfl/ftw#2068), at the temperature it has now.
+		mpcSvc.LearnedBatteryLimits = func(driver string, tempC *float64) []battery.Plateau {
+			modelsMu.Lock()
+			defer modelsMu.Unlock()
+			if m := models[driver]; m != nil {
+				return m.Plateaus.KnownAt(tempC)
+			}
+			return nil
+		}
 		// Cap planned export below the fuse when the operator set a site
 		// export ceiling, so the DP never schedules a discharge that would
 		// over-export and trip an inverter (the Ferroamp 0x8030 fault).

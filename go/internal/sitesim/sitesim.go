@@ -109,7 +109,13 @@ func (p *Plant) Step() Tick {
 	}
 	var batW [3]float64
 	if b := p.Battery; b != nil {
-		b.step(p.Now)
+		// What the rest of the site imports, for an inverter that holds
+		// grid import: the house, PV and the car's draw a second ago.
+		restW := p.HouseW[0] + p.HouseW[1] + p.HouseW[2] + p.PVW
+		if p.EVSE != nil {
+			restW += p.EVSE.DrawW
+		}
+		b.step(p.Now, restW)
 		batW = spread(b.W, b.Phases)
 	}
 	for i := range p.A {
@@ -181,8 +187,14 @@ type Battery struct {
 	MaxChargeW, MaxDischargeW float64
 	CapacityWh, SoC           float64
 	Latency                   time.Duration
-	W                         float64 // power now, positive charging
-	queue                     []timedW
+	// GridImportCapW > 0 is a hybrid inverter that holds grid import there
+	// while it charges the battery from the grid: the battery gets that
+	// import less what the rest of the site imports. The home box's Sungrow
+	// holds 4.32 kW. Discharge is not held.
+	GridImportCapW float64
+	W              float64 // power now, positive charging
+	ordered        float64 // the command in force; W follows it within the limits
+	queue          []timedW
 }
 
 // Command asks for w from now + Latency.
@@ -190,11 +202,20 @@ func (b *Battery) Command(now time.Time, w float64) {
 	b.queue = append(b.queue, timedW{now.Add(b.Latency), w})
 }
 
-func (b *Battery) step(now time.Time) {
+func (b *Battery) step(now time.Time, restW float64) {
 	for len(b.queue) > 0 && !b.queue[0].at.After(now) {
 		b.W, b.queue = b.queue[0].w, b.queue[1:]
+		b.ordered = b.W
+	}
+	if b.GridImportCapW > 0 {
+		// The inverter gives what it can of the order in force, and more
+		// as room comes back.
+		b.W = b.ordered
 	}
 	b.W = math.Max(-b.MaxDischargeW, math.Min(b.MaxChargeW, b.W))
+	if b.GridImportCapW > 0 && b.W > 0 {
+		b.W = math.Min(b.W, math.Max(0, b.GridImportCapW-restW))
+	}
 	if (b.W > 0 && b.SoC >= 1) || (b.W < 0 && b.SoC <= 0) {
 		b.W = 0
 	}

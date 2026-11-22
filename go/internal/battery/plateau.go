@@ -13,8 +13,9 @@ import (
 // A flat run that comes back on more than one day is what this device does,
 // so a later shortfall that sits on it is a limit, not lost control.
 //
-// It only explains Core's verdict. Dispatch, fuse protection, clamps and
-// commands never read it. The caller holds the model lock.
+// It explains Core's verdict, and the planner plans within the limits it
+// trusts (KnownAt). Dispatch, fuse protection, clamps and commands never
+// read it. The caller holds the model lock.
 type Plateaus struct {
 	Series []PlateauSeries `json:"series"`
 	// open is the shortfall run under way. It is not stored: a restart
@@ -333,6 +334,20 @@ func (p *Plateaus) Known() []Plateau {
 	}
 	for i := range p.Series {
 		if known, ok := p.Series[i].plateau(); ok {
+			out = append(out, known)
+		}
+	}
+	return out
+}
+
+// KnownAt lists the trusted plateaus of the temperature band tempC is in, or
+// of no band when tempC is nil, as Explain matches them. The planner reads
+// them; a battery's temperature moves slowly over a plan.
+func (p *Plateaus) KnownAt(tempC *float64) []Plateau {
+	band := tempBand(tempC)
+	out := []Plateau{}
+	for _, known := range p.Known() {
+		if sameBand(known.TempBandC, band) {
 			out = append(out, known)
 		}
 	}
