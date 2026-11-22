@@ -270,7 +270,10 @@ func (m *Manager) directManifestRuntimePolicy(
 		// is the same as having no exemption at all.
 		AuthPostPath:  matched.Metadata.AuthPostPath,
 		AuthPostPaths: append([]string(nil), matched.Metadata.AuthPostPaths...),
-		ConfigSecrets: append([]string(nil), matched.Metadata.ConfigSecrets...),
-		Capabilities:  append([]string(nil), matched.Metadata.Capabilities...),
+		// The same holds for MQTT read requests: only the topics the signed
+		// manifest names, which validate checks before the driver starts.
+		MQTTReadRequestTopics: append([]string(nil), matched.Metadata.MQTTReadRequestTopics...),
+		ConfigSecrets:         append([]string(nil), matched.Metadata.ConfigSecrets...),
+		Capabilities:          append([]string(nil), matched.Metadata.Capabilities...),
 	}, nil
 }

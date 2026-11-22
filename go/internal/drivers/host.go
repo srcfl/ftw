@@ -126,6 +126,9 @@ type HostEnv struct {
 	// RuntimePolicy is nil for bundled, local and control-capable signed
 	// drivers. A signed read-only policy denies writes in every phase.
 	RuntimePolicy *RuntimePolicy
+	// readRequests counts the declared MQTT read requests this driver sent;
+	// see allowMQTTPublish.
+	readRequests mqttReadRequestLimiter
 	// ProbeReadOnly denies every mutating host verb. Fingerprint probes set
 	// this so a buggy driver_fingerprint cannot reconfigure hardware: bundled
 	// drivers otherwise have allowWrite as a no-op.

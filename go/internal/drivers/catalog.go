@@ -53,6 +53,10 @@ type CatalogEntry struct {
 	AuthPostPath string `json:"auth_post_path,omitempty"`
 	// AuthPostPaths lists further sign-in paths for a multi-step login.
 	AuthPostPaths []string `json:"auth_post_paths,omitempty"`
+	// MQTTReadRequestTopics are the topics a read-only MQTT driver may
+	// publish read requests to, such as Victron's R/+/keepalive. Only the
+	// signed channel's metadata sets them; see RuntimePolicy.
+	MQTTReadRequestTopics []string `json:"mqtt_read_request_topics,omitempty"`
 	// ReadOnly means the driver never accepts dispatch commands. The catalog
 	// UI uses it to avoid presenting battery capacity as a control opt-in.
 	ReadOnly bool `json:"read_only,omitempty"`
