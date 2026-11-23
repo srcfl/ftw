@@ -1,5 +1,8 @@
 # Pair with one iPhone
 
+Install FTW Energy from the
+[App Store](https://apps.apple.com/app/ftw-energy/id6822024949) first.
+
 On the home Wi-Fi, open the box's dashboard in Safari and choose
 **Settings → FTW app**. Turn on **Let the FTW app connect to this box** if
 needed. Choose **Save and restart FTW** and wait for the page to return.
