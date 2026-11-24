@@ -73,11 +73,10 @@ func validateBatteryFleetMembers(fleet []BatteryFleetMember) error {
 	return nil
 }
 
-// planningParamsRequireRecovery marks states the external model represents
-// directly, with an operating-band recovery ratchet, and the discrete Go DP
-// does not: the DP snaps its initial SoC onto the operating grid, so solving
-// from an out-of-band start plans from energy the site does not have (or
-// discards energy it does have).
+// planningParamsRequireRecovery marks a start outside the operating band.
+// Replan clamps it onto the band edge for every planner: the discrete Go DP
+// snaps its initial SoC onto the operating grid, and Energyplan 0.7.0 with a
+// car kept such a battery idle for a whole horizon (#2043).
 func planningParamsRequireRecovery(p Params) bool {
 	if p.CapacityWh == 0 && len(p.Storages) == 0 {
 		return false
@@ -94,8 +93,8 @@ func planningParamsRequireRecovery(p Params) bool {
 }
 
 // clampParamsIntoOperatingBand pulls a battery that has drifted outside
-// soc_min…soc_max back onto the nearest band edge so the Core planner can plan
-// at all, and records the real reading in InitialSoCUnclamped. It reports
+// soc_min…soc_max back onto the nearest band edge so every planner can plan
+// from it, and records the real reading in InitialSoCUnclamped. It reports
 // whether anything moved, and whether the state was recoverable.
 //
 // Why clamping beats refusing, which is what a reviewer will ask. The clamp
@@ -105,9 +104,8 @@ func planningParamsRequireRecovery(p Params) bool {
 // the driver's own discharge floor, which exist because planner output is
 // never sent directly to hardware. Refusing leaves the site executing a stale
 // plan for hours and then falling back to live balancing, which is the worse
-// failure. That was tolerable only while reaching this path required a missing
-// optimizer; Core is the planner now. The field case is a Ferroamp driver
-// floor at 0.10 with the pack settling at 0.09 overnight.
+// failure. The field cases are a Ferroamp driver floor at 0.10 with the pack
+// settling at 0.09 overnight, and a Pixii settling at 0.097 (#2043).
 //
 // Non-finite or physically impossible readings — SoC outside 0..1, storage
 // energy outside 0..capacity — are broken telemetry rather than a recoverable

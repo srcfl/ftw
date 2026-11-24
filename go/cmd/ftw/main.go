@@ -1667,6 +1667,10 @@ func main() {
 	} else {
 		defer forecastTrackerSvc.Stop()
 	}
+	// The long-term archive copies the 30-day tables on its own. It starts
+	// even when the tracker did not, and it never shares the tracker's queue.
+	forecastLongArchiveSvc := startForecastLongArchive(ctx, st)
+	defer forecastLongArchiveSvc.Stop()
 
 	// A small live-identity poll also protects legacy learners when MPC is off.
 	// Config/schema/script work stays in Configure; this only reads host identity.
@@ -2410,10 +2414,11 @@ func main() {
 
 	// ---- Self-update checker ----
 	// Probes the GitHub Releases API in the background; the ftw command and
-	// the UI read the cached result via /api/version/check. Only a native
-	// install, started by the launcher from its release slots, updates
-	// itself (ADR 0007). Docker changes FTW_VERSION and rebuilds, and the
-	// Home Assistant app follows Supervisor. Deps.SelfUpdate stays nil there,
+	// the UI read the cached result via /api/version/check. Only Core started
+	// by the launcher from its release slots updates itself (ADR 0007): a
+	// native install, or Docker from deploy/docker. Balena changes
+	// FTW_VERSION and redeploys, and the Home Assistant app follows
+	// Supervisor. Deps.SelfUpdate stays nil there,
 	// which makes every /api/version/* handler return 503; the UI then says
 	// who updates FTW instead of offering an update.
 	var selfUpdater *selfupdate.Checker
@@ -2537,6 +2542,11 @@ func main() {
 			"paired_devices", appEnroll.AuthorisedCount())
 	default:
 		slog.Info("app link disabled — set app_link.enabled to turn it on")
+	}
+	// A kind only an owner may hear skips the browsers of phones that are
+	// no longer owners.
+	if webPush != nil && appEnroll != nil {
+		webPush.SetOwners(ownerByDevice(appEnroll))
 	}
 
 	// FTW Cloud: the phones' own sessions with the box, carried as
@@ -3233,6 +3243,7 @@ func main() {
 			// resume charging.
 			evCurtailHeadroomW := loadpoint.SurplusPotentialW(lpStatesSnapshot)
 			boostEVW, boostReserveSoC := activeBatteryBoostTotals(lpController, lpStatesSnapshot, tickNow)
+			boostActive := lpController != nil && lpController.HasActiveBatteryBoost(lpStatesSnapshot, tickNow)
 			var evFuseDemands []loadpoint.FuseDemand
 			if lpController != nil {
 				evFuseDemands = lpController.FuseDemands()
@@ -3248,6 +3259,7 @@ func main() {
 				ctrl.EVCurtailHeadroomW = evCurtailHeadroomW
 				ctrl.BatteryBoostEVChargingW = boostEVW
 				ctrl.BatteryBoostReserveSoC = boostReserveSoC
+				ctrl.BatteryBoostActive = boostActive
 				ctrl.SetEVCommanded(lpStatesSnapshot)
 				ctrl.SetEVFuseDemands(evFuseDemands)
 				fuseMaxW = ctrl.SiteFuseAmps * ctrl.SiteFuseVoltage * float64(ctrl.SiteFusePhases)

@@ -41,7 +41,7 @@ Choose **one** path. These are alternatives, not steps to run in order:
 | Docker 3.x, including beta | The same switch. No intermediate release and no further 3.x updates. |
 | The old ready-made FTW Raspberry Pi image | It runs old Docker. Use a second card with Raspberry Pi OS Lite 64-bit; keep the old card. |
 | New 0.x native with launcher/release slots | [Update the native box](#update-a-native-box). Do not reinstall. |
-| New 0.x Docker built from the release package | [Change `FTW_VERSION` and rebuild](#update-new-docker). `ftw update` does not apply. |
+| New 0.x Docker built from the release package | [Update new Docker](#update-new-docker) with **Update FTW** or `ftw update`, as a native box does. A project made before Docker updated itself first takes the new `Dockerfile` and `compose.yaml`. |
 | FTW (0.x beta) Home Assistant app | Update and back up through Home Assistant. See [the app guide](home-assistant-app.md). |
 | Older direct native service without release slots | Identify its unit and data paths first. Use a separate host/card, or a checked migration for that site. The [native migration pilot](self-update.md#pilot-an-older-native-systemd-site) is not a general installer. |
 | Home Assistant app on the old line | Install the **FTW (0.x beta)** app (pilot, [FTW on Home Assistant](home-assistant-app.md)) or run new FTW on another Linux host. Either way, stop the old app and its automatic start/watchdog before new Core controls the equipment. |
@@ -406,23 +406,90 @@ include it. This keeps private data and `.env` out of every build. Compose
 builds a local image from the checksummed release package; it compiles nothing.
 Open `http://<host>:8080/setup`. Data lives in `~/ftw-local/data`.
 
+Core runs through the same launcher as a native install. Its releases live in
+the `ftw-local_releases` volume, apart from the data, and Docker's restart
+policy starts Core again after an update, as systemd does on a native box.
+
 After success, use `cd ~/ftw-local` before the commands below. Use `sudo docker`
 if your login cannot access Docker without it.
 
 ```bash
 docker compose ps                            # running and healthy
 docker compose exec ftw ftw status           # the same status as a native install
+docker compose run --rm --entrypoint ftw ftw update     # install the next release
+docker compose run --rm --entrypoint ftw ftw rollback   # return to the previous release
 docker compose exec ftw ftw support --output /app/data/support.zip   # lands in ~/ftw-local/data
 docker compose logs --tail 100               # logs
 docker compose restart                       # restart
 ```
 
+`ftw update` and `ftw rollback` run in a container of their own. Core
+restarts its container to start a release. That ends anything
+`docker compose exec` started there, so `ftw` would stop before it could
+report the result.
+
 ### Update new Docker
 
 Use this only for an existing **new 0.x** project from the recipe above, not
 for old 2.x/3.x Docker. Confirm the project and data path, then `cd ~/ftw-local`.
-Before rebuilding an install made with the old instructions, create the missing
-`.dockerignore` beside its `Dockerfile`:
+
+Update it as you would a native box: **More → Version → Update FTW** on the box's web
+UI, the FTW app, or:
+
+```bash
+docker compose exec ftw ftw status
+docker compose run --rm --entrypoint ftw ftw update
+docker compose ps
+```
+
+Core downloads and checks the release, keeps it in the releases volume and
+restarts. The launcher starts the new release once, as a trial. If it does
+not become ready, or keeps stopping in its first hour, the launcher starts
+the previous release again and `ftw status` says so. `ftw rollback` returns
+to the previous release while both read the same data.
+
+Rebuilding still works. A newer `FTW_VERSION` in `.env` and
+`docker compose up -d --build` installs that release once, the same way. An
+older `FTW_VERSION` changes nothing, because the box may have updated itself
+past it; the log says which release stays. Use `ftw rollback` to go back.
+Keep `FTW_VERSION` at or after the tag you took the `Dockerfile` from. A
+release from before Docker updated itself has a launcher that cannot start
+this image: it stops with `flag provided but not defined: -image`. Set the
+version back and rebuild.
+
+A project made before Docker updated itself runs Core without the launcher.
+Take the new files once, from a published release that has them. Replace only
+`v0.X.Y-beta.N`; the block keeps `data` and every other line of `.env`:
+
+```bash
+(
+  set -eu
+  tag=v0.X.Y-beta.N
+  if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
+    echo "STOP: copy an exact published new 0.x tag from Releases." >&2
+    exit 1
+  fi
+  if [ ! -f compose.yaml ] || [ ! -f .env ] || [ ! -d data ]; then
+    echo "STOP: run this in the Compose project, normally ~/ftw-local." >&2
+    exit 1
+  fi
+  downloads=$(mktemp -d)
+  trap 'rm -rf "$downloads"' EXIT
+  base="https://raw.githubusercontent.com/srcfl/ftw/${tag}/deploy/docker"
+  curl -fSL "${base}/compose.yaml" -o "$downloads/compose.yaml"
+  curl -fSL "${base}/Dockerfile" -o "$downloads/Dockerfile"
+  grep -v '^FTW_VERSION=' .env > "$downloads/env" || true
+  printf 'FTW_VERSION=%s\n' "$tag" >> "$downloads/env"
+  cp "$downloads/compose.yaml" "$downloads/Dockerfile" .
+  cp "$downloads/env" .env
+)
+```
+
+Then rebuild with `docker compose up -d --build`. The first start installs
+that release into the new releases volume and runs it; `data` stays as it was.
+
+An install made with the old instructions may lack `.dockerignore`. Create it
+beside the `Dockerfile` before any rebuild:
 
 ```bash
 if [ ! -e .dockerignore ]; then
@@ -433,24 +500,12 @@ fi
 If a file already exists, check that it excludes `data` and `.env`. Keep private
 files private; do not change their permissions to make a build pass.
 
-To update, set the new version and rebuild. To go back, set the previous
-version. If its image is still on the host, Compose can reuse it. Going back
-works while both releases read the same data, as on a native install.
+Each rebuilt version stays as an image: `docker image ls ftw-local` lists
+them, and `docker image rm ftw-local:<version>` frees the space of one you no
+longer need. The releases volume keeps the current and previous releases.
 
-```bash
-# Edit only FTW_VERSION in .env to the chosen exact release; keep other entries.
-docker compose up -d --build
-docker compose ps
-docker compose exec ftw ftw status
-```
-
-Docker has no automatic fallback. A release that does not start keeps
-restarting until you set the previous version. Each version stays as an
-image: `docker image ls ftw-local` lists them, and
-`docker image rm ftw-local:<version>` frees the space of one you no longer
-need.
-
-Back up and restore the whole data directory while FTW is stopped:
+Back up and restore the whole data directory while FTW is stopped. The
+releases volume needs no backup:
 
 ```bash
 docker compose stop
@@ -464,8 +519,8 @@ sudo tar -xzf /media/usb/ftw/ftw-data-<date>.tar.gz
 docker compose start
 ```
 
-To remove it, run `docker compose down`, remove the `ftw-local` images and
-delete `~/ftw-local`.
+To remove it, run `docker compose down -v`, which also removes the releases
+volume, remove the `ftw-local` images and delete `~/ftw-local`.
 
 ## For an agent that runs the host
 
@@ -516,11 +571,11 @@ decisions about the site to you.
   `GET /api/version/update/status` follows it. `POST /api/version/binary-rollback`
   rolls back, `POST /api/backups` makes a backup and
   `GET /api/support/dump` returns the support file as a zip.
-- In Docker, run `ftw` inside the container:
-  `docker compose exec ftw ftw status`. `ftw update` and `ftw rollback` do
-  not apply there. Change `FTW_VERSION` in `.env` and run
-  `docker compose up -d --build` instead, and check
-  `docker compose ps` for `healthy`.
+- In Docker, run `ftw` in the container: `docker compose exec ftw ftw status`.
+  Run `ftw update` and `ftw rollback` in a container of their own,
+  `docker compose run --rm --entrypoint ftw ftw update`, so they outlive
+  Core's restart. Read logs with `docker compose logs --tail 200`. Never
+  remove the `ftw-local_releases` volume or edit files under `/opt/ftw`.
 
 ## Report
 

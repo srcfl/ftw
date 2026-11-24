@@ -103,3 +103,23 @@ func TestEVObservationDistinguishesExplicitVehicleStopFromMissingRequest(t *test
 		}
 	}
 }
+
+// The loadpoint learns that the charger's own load balancing holds the start
+// only from a named cause and a limit below what a car starts on.
+func TestEVObservationReadsALoadBalancerHold(t *testing.T) {
+	now := time.Now()
+	health := &telemetry.DriverHealth{Status: telemetry.StatusOk}
+	for body, want := range map[string]bool{
+		`{"connected":true,"current_limit_a":0,"current_limited_by":"load_balancer"}`:   true,
+		`{"connected":true,"current_limit_a":5.5,"current_limited_by":"load_balancer"}`: true,
+		`{"connected":true,"current_limit_a":6,"current_limited_by":"load_balancer"}`:   false,
+		`{"connected":true,"current_limit_a":0}`:                                        false,
+		`{"connected":true,"current_limited_by":"load_balancer"}`:                       false,
+		`{"connected":true,"current_limit_a":-1,"current_limited_by":"load_balancer"}`:  false,
+	} {
+		r := &telemetry.DerReading{UpdatedAt: now, Data: json.RawMessage(body)}
+		if s, ok := currentEVSample(r, health, time.Minute, now, false, "charger"); !ok || s.LoadBalancerHold != want {
+			t.Errorf("%s: hold %v, want %v", body, s.LoadBalancerHold, want)
+		}
+	}
+}

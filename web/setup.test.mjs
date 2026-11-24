@@ -137,7 +137,7 @@ describe("setup wizard — read-only battery gateways", () => {
   it("applies the same telemetry-only safety in Settings", () => {
     assert.match(DEVICES_JS, /entry\.read_only\s*&&\s*entryCaps\.indexOf\("battery"\)/);
     assert.match(DEVICES_JS, /driver\.battery_telemetry_only\s*=\s*true/);
-    assert.match(DEVICES_JS, /telemetry only/,
+    assert.match(DEVICES_JS, />reads only</,
       "operators should see why Zap has no battery-capacity control field");
   });
 

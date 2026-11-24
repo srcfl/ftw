@@ -1911,6 +1911,9 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		}
 	}
 	warnings := append(forecastWarnings, limitPlanningLoadpointSteps(&p)...)
+	// The worker's plan was published with the battery making the car's
+	// room, because Core cannot plan this site itself (planOverrun).
+	heldCarRoom := false
 	s.mu.Lock()
 	if request.generation == s.latestReplanGeneration {
 		s.planningWarnings = warnings
@@ -1954,11 +1957,14 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 		slog.Error("mpc: invalid optimization parameters; keeping previous plan", "err", err)
 		return fail("inputs", err.Error())
 	}
-	recoveryRequired := planningParamsRequireRecovery(p)
-	if recoveryRequired && s.Optimizer == nil {
-		// Core is the planner, so this state has to produce a plan. Clamp onto
-		// the band edge and record the real reading; the argument for clamping
-		// over refusing is in clampParamsIntoOperatingBand.
+	if planningParamsRequireRecovery(p) {
+		// A battery outside its band still needs a plan, whichever planner
+		// runs. Clamp onto the band edge and record the real reading; the
+		// argument for clamping over refusing is in
+		// clampParamsIntoOperatingBand. The worker gets the clamped state too:
+		// Energyplan 0.7.0, given a start 0.1 Wh under the floor and a car,
+		// published an idle battery for the whole horizon (#2043), and a
+		// failed worker could not fall back to Core from an out-of-band start.
 		clamped, ok := clampParamsIntoOperatingBand(&p)
 		if !ok {
 			slog.Error("mpc: battery state is not physically possible; keeping previous plan",
@@ -1976,8 +1982,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 				"soc_max", p.SoCMax)
 		}
 		// The state is inside the band now, so this is an ordinary solve:
-		// baselines and shadows apply as usual.
-		recoveryRequired = false
+		// baselines, shadows and the Core fallback apply as usual.
 	}
 
 	slog.Info("mpc: optimize params",
@@ -2082,7 +2087,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			return s.canceledReplan(request, "primary-solve")
 		}
 		if err == nil {
-			if recoveryRequired || downsidePrimary || coreDPModelError(p) != nil {
+			if downsidePrimary || coreDPModelError(p) != nil {
 				candidate.DPEvaluationShadow = nil
 				candidate.DPShadow = nil
 				candidate.Baselines = nil
@@ -2135,28 +2140,33 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			}
 
 			plan = candidate
-		} else if overrun := (*importHourOverrun)(nil); errors.As(err, &overrun) && (recoveryRequired && !downsidePrimary || coreDPModelError(p) != nil) {
+		} else if overrun := (*planOverrun)(nil); errors.As(err, &overrun) && coreDPModelError(p) != nil {
 			// Core cannot plan this site itself. The worker's plan keeps
-			// every rule but the hours, as before the hours existed; the
-			// live limit still holds each hour.
+			// every rule but the hours or the car's room. The live limit
+			// still holds each hour, and the charger's room leaves battery
+			// discharge out where the battery may not cover the car.
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
 			}
 			s.recordPlanningFailure(request, "primary_optimizer", err.Error(), slots, p, optimizerErr)
 			plan = overrun.plan
-			p.ImportHours, p.ImportMeanW = nil, 0
-			warnings = append(warnings, "Core cannot plan this site itself, so the plan may import more in an hour than the limit allows; Core still holds each hour to it: "+err.Error())
+			// planWithForecastMargin returns only a point solve's error, so
+			// this plan leaves out a caution forecast that differed.
+			if downsidePrimary && !sameForecast(baseForecastSlots, fallbackSlots) {
+				cautionOff = true
+				warnings = append(warnings, "Forecast caution gave no plan Core could publish; using the point forecast.")
+			}
+			if overrun.hours != nil {
+				p.ImportHours, p.ImportMeanW = nil, 0
+				warnings = append(warnings, "Core cannot plan this site itself, so the plan may import more in an hour than the limit allows; Core still holds each hour to it: "+overrun.hours.Error())
+			}
+			if overrun.carRoom != nil {
+				heldCarRoom = true
+				warnings = append(warnings, "Core cannot plan this site itself, so the plan lets the battery make room for the car; the charger still leaves that room out: "+overrun.carRoom.Error())
+			}
 		} else {
 			if request.wasCanceledByService() {
 				return s.canceledReplan(request, "primary-fallback")
-			}
-			if recoveryRequired && !downsidePrimary {
-				slog.Error("mpc: primary optimizer failed and Go DP cannot model operating-bound recovery; keeping previous plan",
-					"err", err,
-					"soc_start", p.InitialSoC,
-					"soc_min", p.SoCMin,
-					"soc_max", p.SoCMax)
-				return fail("core_fallback", "Optimizer failed: "+err.Error())
 			}
 			if modelErr := coreDPModelError(p); modelErr != nil {
 				slog.Error("mpc: primary failed and fallback cannot represent this site; keeping previous plan", "err", err, "fallback", modelErr)
@@ -2217,7 +2227,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 			"err", err)
 		return fail("plan_timeline", err.Error())
 	}
-	if err := ValidatePlan(slots, p, &plan); err != nil {
+	if err := ValidatePlan(slots, p, &plan); err != nil && !(heldCarRoom && onlyCarRoom(err)) {
 		engine := "go-dp"
 		if plan.Solver != nil && plan.Solver.Engine != "" {
 			engine = plan.Solver.Engine
@@ -2246,7 +2256,7 @@ func (s *Service) runReplan(request replanRequest) *Plan {
 	// self-consumption mode: the SC baseline is the plan itself, which
 	// makes the badge trivially zero and distracts from the price
 	// signal. For SC runs the UI still has the plan cost on its own.
-	if p.Mode != ModeSelfConsumption && !recoveryRequired && coreDPModelError(p) == nil && (plan.Solver == nil || (!plan.Solver.Fallback && plan.Solver.Backend != "ev_reserve")) {
+	if p.Mode != ModeSelfConsumption && coreDPModelError(p) == nil && (plan.Solver == nil || (!plan.Solver.Fallback && plan.Solver.Backend != "ev_reserve")) {
 		bl := ComputeBaselines(slots, p)
 		plan.Baselines = &bl
 	}

@@ -1735,7 +1735,9 @@ newest `live` that carried `sources`, 48 hours of tiles and a one-hour ring of
 events. For tiles that is at most five closed tiles and 16 pieces of the
 trailing tile, each as the box signed it, and at most 64 KiB per home; a
 tile that fails `cloudwire.Tiles.Check` or is over 4 KiB is dropped and
-counted. All homes together hold at most a fixed number of tile bytes, past
+counted. An envelope of any other class whose `b` is over 16 KiB, the app
+protocol's largest bulk bucket, is dropped and counted too, and the uplink
+stays. All homes together hold at most a fixed number of tile bytes, past
 which new tiles are dropped and counted. `have` in `hello_ok` names the
 closed tiles held. It writes no live readings to disk; the statistics files hold the
 only readings it stores. Its registry holds the home id, the box key, the
@@ -1832,6 +1834,7 @@ constants, so `srcfl/ftw-cloud` need not spell them by hand.
 | `box.unreachable` after | 600 s |
 | Readings served after silence | 1 hour; tiles until 48 hours after their end, or until the roster runs out |
 | Tiles | `5m`, 12-hour tiles, the last 48 hours: at most 5 closed and 16 pieces of the trailing one, 64 KiB, per home; 4 KiB an envelope |
+| Other forwarded classes | `b` at most 16 KiB |
 | Bucket counted closed | 30 s after it ends |
 | Trailing tile sent whole | At each connect, after 11 appends, and when its first bucket closes |
 | Closed tiles packed again | Every hour, sent when the etag changed |

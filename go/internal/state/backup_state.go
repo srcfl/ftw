@@ -99,6 +99,40 @@ func (s *Store) BackupCache(ctx context.Context, dstPath string) (bool, error) {
 	return true, nil
 }
 
+// BackupForecastLongArchive writes a consistent, compact copy of
+// forecast-archive.db. It reports false when the archive has not been
+// created. The caller stages that copy and leaves the live file out of the
+// archive, including its WAL.
+func (s *Store) BackupForecastLongArchive(ctx context.Context, dstPath string) (bool, error) {
+	if s == nil {
+		return false, nil
+	}
+	s.forecastLongMu.Lock()
+	arch := s.forecastLong
+	s.forecastLongMu.Unlock()
+	var db *sql.DB
+	if arch != nil {
+		db = arch.db
+	} else {
+		path := ForecastLongArchivePath(s.mainDBPath)
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		} else if err != nil {
+			return false, err
+		}
+		ro, err := sql.Open("sqlite", ReadOnlyDatabaseURI(path))
+		if err != nil {
+			return false, err
+		}
+		defer ro.Close()
+		db = ro
+	}
+	if _, err := db.ExecContext(ctx, `VACUUM INTO ?`, dstPath); err != nil {
+		return false, fmt.Errorf("backup forecast archive: %w", err)
+	}
+	return true, nil
+}
+
 // BackupSourceBytes is the on-disk size of state and history files, including
 // WAL and SHM. Used to preflight scratch space before a portable export.
 func (s *Store) BackupSourceBytes() int64 {

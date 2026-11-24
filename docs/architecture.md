@@ -149,6 +149,10 @@ SQLite history.db owns bucketed history, dashboard summaries and the energy
 ledger. A separate state.db owns goals, device identity, learned state and
 planner diagnostics. Prices and forecasts live in cache.db; full backups
 keep its past prices, which savings history needs.
+Issued forecasts and quarter-hour measurements also accumulate in
+forecast-archive.db, opened after startup and kept out of the control path.
+A full backup stores a consistent copy of that file. A problem there does
+not mark the box degraded.
 Database access stays in
 [`go/internal/state`](../go/internal/state).
 

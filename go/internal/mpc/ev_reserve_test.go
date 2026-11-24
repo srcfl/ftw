@@ -21,8 +21,11 @@ func nearTargetReserveFixture() ([]Slot, Params) {
 	p.Loadpoint = &LoadpointSpec{ID: "easee", CapacityWh: 75000, InitialSoC: .7721774800618489, SoCMin: 0, SoCMax: .8, Levels: 11, PluggedIn: true, TargetSoC: .8, TargetSlotIdx: 11, MaxChargeW: 11000, ChargeEfficiency: .9, NoBatteryToEV: true}
 	slots := make([]Slot, 193)
 	start := time.Now().UTC().Truncate(15 * time.Minute)
+	// The house and the 11 kW car fit the import limit with the battery
+	// idle: a battery that may not cover the car makes it no room
+	// (TestReservePlanKeepsTheBatteryOutOfTheCarsRoom).
 	for i := range slots {
-		slots[i] = Slot{StartMs: start.Add(time.Duration(i) * 15 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100, SpotOre: 10, LoadW: 500, Limits: PowerLimits{MaxImportW: 11040, MaxExportW: 11040}}
+		slots[i] = Slot{StartMs: start.Add(time.Duration(i) * 15 * time.Minute).UnixMilli(), LenMin: 15, PriceOre: 100, SpotOre: 10, LoadW: 500, Limits: PowerLimits{MaxImportW: 11600, MaxExportW: 11040}}
 	}
 	return slots, p
 }
@@ -125,6 +128,9 @@ func TestValidateEVPulseRejectsUnsafeOnPowerDespiteLegalAverage(t *testing.T) {
 
 func TestEVReserveUsesMinimumStepWhenHouseBlocksMaximum(t *testing.T) {
 	slots, p := nearTargetReserveFixture()
+	for i := range slots {
+		slots[i].Limits.MaxImportW = 11040 // The 500 W house leaves the 11 kW car no room.
+	}
 	p.Loadpoint.MinChargeW = 4140
 	p.InitialSoC = p.SoCMin
 	plan := mustCoreReservePlan(t, slots, p)

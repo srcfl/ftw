@@ -703,3 +703,110 @@ func (s *Store) LoadForecastErrors(ctx context.Context, since, until int64, hour
 	}
 	return out, nil
 }
+
+// ForecastIssueCopy is one row from the 30-day issue archive.
+// Err is set when the row cannot be decoded; the copier skips it and moves on.
+type ForecastIssueCopy struct {
+	Issue      forecasting.Issue
+	IssuedAtMS int64
+	ID         string
+	JSONBytes  int
+	GzipBytes  int
+	Err        error
+}
+
+// forecastIssueKeysAfter lists issues after the (issued_at_ms, id) cursor and
+// no later than untilMS, oldest first. It reads no payloads, so the long-term
+// copier can skip runs it already holds.
+func (s *Store) forecastIssueKeysAfter(ctx context.Context, after forecastLongIssueCursor, untilMS int64, limit int) ([]forecastLongIssueCursor, error) {
+	rows, err := s.db.QueryContext(ctx, forecastIssueKeysQuery, after.IssuedAtMS, after.ID, untilMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var keys []forecastLongIssueCursor
+	for rows.Next() {
+		var key forecastLongIssueCursor
+		if err := rows.Scan(&key.IssuedAtMS, &key.ID); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	return keys, rows.Err()
+}
+
+const forecastIssueKeysQuery = `SELECT issued_at_ms, id FROM forecast_issues
+ WHERE (issued_at_ms, id) > (?, ?) AND issued_at_ms <= ?
+ ORDER BY issued_at_ms, id LIMIT ?`
+
+// forecastIssueCopy reads and decodes one issue. It returns sql.ErrNoRows
+// when retention removed the row after it was listed.
+func (s *Store) forecastIssueCopy(ctx context.Context, key forecastLongIssueCursor) (ForecastIssueCopy, error) {
+	var data []byte
+	if err := s.db.QueryRowContext(ctx, `SELECT payload FROM forecast_issues WHERE id=?`, key.ID).Scan(&data); err != nil {
+		return ForecastIssueCopy{}, err
+	}
+	item := ForecastIssueCopy{IssuedAtMS: key.IssuedAtMS, ID: key.ID, GzipBytes: len(data)}
+	item.Issue, item.JSONBytes, item.Err = decodeForecastIssue(data)
+	return item, nil
+}
+
+// LoadForecastModelStateRaw returns the gzip bytes stored for a model state.
+// The long-term archive copies them unchanged.
+func (s *Store) LoadForecastModelStateRaw(ctx context.Context, stateID string) (expanded int, payload []byte, err error) {
+	decodedID, err := hex.DecodeString(stateID)
+	if err != nil || len(decodedID) != sha256.Size {
+		return 0, nil, errors.New("invalid forecast model state ID")
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT expanded_bytes, payload FROM forecast_model_states WHERE id=?`, stateID).Scan(&expanded, &payload)
+	return expanded, payload, err
+}
+
+// forecastObservationCopy is one quarter-hour row for the long-term copier.
+// Err is set when the payload cannot be read; the copier skips the row.
+type forecastObservationCopy struct {
+	Key         forecastLongObsCursor
+	Observation forecasting.Observation
+	Err         error
+}
+
+// forecastObservationsAfter lists quarter-hour truth after the cursor in
+// (available_at_ms, start_ms, end_ms, config_version) order, no later than
+// untilMS. The tracker writes rows in available_at_ms order.
+func (s *Store) forecastObservationsAfter(ctx context.Context, after forecastLongObsCursor, untilMS int64, limit int) ([]forecastObservationCopy, error) {
+	rows, err := s.db.QueryContext(ctx, forecastObservationsAfterQuery,
+		after.AvailableMS, after.StartMS, after.EndMS, after.Config, untilMS, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []forecastObservationCopy
+	for rows.Next() {
+		var row forecastObservationCopy
+		var data string
+		if err = rows.Scan(&row.Key.AvailableMS, &row.Key.StartMS, &row.Key.EndMS, &row.Key.Config, &data); err != nil {
+			return nil, err
+		}
+		row.Observation, row.Err = decodeForecastObservation(data)
+		out = append(out, row)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, rows.Close()
+}
+
+func decodeForecastObservation(data string) (forecasting.Observation, error) {
+	var observation forecasting.Observation
+	if len(data) > maxForecastRecordBytes {
+		return observation, errors.New("oversized forecast observation")
+	}
+	if err := json.Unmarshal([]byte(data), &observation); err != nil {
+		return observation, err
+	}
+	return observation, observation.Validate()
+}
+
+const forecastObservationsAfterQuery = `SELECT available_at_ms, start_ms, end_ms, config_version, payload FROM forecast_observations
+ WHERE (available_at_ms, start_ms, end_ms, config_version) > (?, ?, ?, ?) AND available_at_ms <= ?
+ ORDER BY available_at_ms, start_ms, end_ms, config_version LIMIT ?`

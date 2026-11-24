@@ -134,8 +134,8 @@ func comparePlanControlDecision(plan *mpc.Plan, slot control.SlotEnergySnapshot)
 }
 
 func (s *Server) handleSupportReport(w http.ResponseWriter, r *http.Request) {
-	now := time.Now()
-	body := hideNtfyTopic([]byte(s.buildSupportReport(r.Context(), now)), s.ntfyTopic())
+	report, _, now := s.buildSupportReport(r.Context(), time.Now, false)
+	body := hideNtfyTopic([]byte(report), s.ntfyTopic())
 	stamp := now.UTC().Format("20060102-150405")
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="ftw-help-`+stamp+`.md"`)
@@ -202,8 +202,14 @@ func (s *Server) liveNow(ctrl control.State, now time.Time) liveSnapshot {
 	return snap
 }
 
-func (s *Server) buildSupportReport(ctx context.Context, now time.Time) string {
-	return s.buildSupportReportWith(ctx, now, s.loadSupportWeek(ctx, now, false))
+// buildSupportReport reads the week, then reads the clock again for the live
+// sections. On a Raspberry Pi the week can take most of supportWeekBudget.
+// Readings that arrived meanwhile were newer than a clock read before it, so
+// a healthy device showed readings_lost and a negative age.
+func (s *Server) buildSupportReport(ctx context.Context, clock func() time.Time, allSeries bool) (report string, week *supportWeek, liveAt time.Time) {
+	week = s.loadSupportWeek(ctx, clock(), allSeries)
+	liveAt = clock()
+	return s.buildSupportReportWith(ctx, liveAt, week), week, liveAt
 }
 
 // buildSupportReportWith writes the report around a week already read, so

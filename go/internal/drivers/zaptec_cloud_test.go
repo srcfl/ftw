@@ -21,7 +21,7 @@ func zaptecCloudDriverPath(t *testing.T) string {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	return filepath.Join(filepath.Dir(thisFile), "testdata", "zaptec_cloud.lua")
+	return filepath.Join(filepath.Dir(thisFile), "..", "..", "..", "drivers", "zaptec_cloud.lua")
 }
 
 func zaptecStateJSON(opMode int, powerW, sessionKWh float64) []byte {

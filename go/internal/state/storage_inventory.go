@@ -25,10 +25,13 @@ type SQLiteFileInventory struct {
 	SHMBytes       int64 `json:"shm_bytes"`
 }
 
-// SQLiteInventory reports the two SQLite files that Core owns today.
+// SQLiteInventory reports the SQLite files Core has open. ForecastArchive is
+// set only after the long-term archive has been opened; the inventory does
+// not open it.
 type SQLiteInventory struct {
-	State SQLiteFileInventory `json:"state"`
-	Cache SQLiteFileInventory `json:"cache"`
+	State           SQLiteFileInventory  `json:"state"`
+	Cache           SQLiteFileInventory  `json:"cache"`
+	ForecastArchive *SQLiteFileInventory `json:"forecast_archive,omitempty"`
 }
 
 // SQLiteInventory reads page metadata for state.db and cache.db. It does not
@@ -50,7 +53,18 @@ func (s *Store) SQLiteInventory(ctx context.Context) (SQLiteInventory, error) {
 			return SQLiteInventory{}, fmt.Errorf("cache inventory: %w", err)
 		}
 	}
-	return SQLiteInventory{State: stateDB, Cache: cacheDB}, nil
+	out := SQLiteInventory{State: stateDB, Cache: cacheDB}
+	s.forecastLongMu.Lock()
+	arch := s.forecastLong
+	s.forecastLongMu.Unlock()
+	if arch != nil {
+		archiveDB, err := sqliteFileInventory(ctx, arch.db, arch.path)
+		if err != nil {
+			return SQLiteInventory{}, fmt.Errorf("forecast archive inventory: %w", err)
+		}
+		out.ForecastArchive = &archiveDB
+	}
+	return out, nil
 }
 
 func sqliteFileInventory(ctx context.Context, db *sql.DB, path string) (SQLiteFileInventory, error) {

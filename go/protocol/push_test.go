@@ -18,10 +18,10 @@ func TestRenderPushFillsPlaceholders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
-	if body != "Now running v1.17.0. Everything came back on its own." {
+	if body != "Your box now runs v1.17.0. Everything came back after the restart." {
 		t.Fatalf("body = %q", body)
 	}
-	if title != "Your box updated itself" {
+	if title != "FTW is updated" {
 		t.Fatalf("title = %q", title)
 	}
 

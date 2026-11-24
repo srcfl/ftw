@@ -1,5 +1,204 @@
 # Changelog
 
+## 0.167.0
+
+### Minor Changes
+
+- 1584f59: Judge a battery against what it can do now, not only against FTW's order.
+  
+  A home box with a Sungrow hybrid sent 23 "not following" notices in two
+  weeks, though its battery did all it could. At night the inverter held grid
+  import at about 4.3 kW, so the battery took 4.3 kW less the house load; on
+  discharge the battery gave a flat 22 A.
+  
+  Core now learns these limits per battery from its own control journal. When
+  a battery falls short of its order in the right direction and the grid
+  import, grid export, battery current or battery power stays flat, Core keeps
+  that run. Once the same level shows at least three times on two days, a
+  shortfall at that level reads "At its usual limit", with words such as "The
+  inverter takes at most 4.3 kW from the grid. FTW has seen this 14 times since
+  8 Nov." A battery that gives well below its limit still warns, and so does
+  one that gives less than half of its order, however often: a broken battery
+  never becomes normal. So a cold battery whose BMS lets it give, say, 46 % of
+  the order also stays a warning, unless its driver reports that limit. A grid limit counts only while the battery moves and
+  the meter shows live, changing readings, so a meter driver that resends a
+  cached value teaches nothing. A new, lower limit becomes normal only after it
+  repeats on two days, and the old one stays on record. Limits are kept per
+  temperature band when the battery reports its temperature.
+  
+  A battery whose driver reports `available_charge_W` or
+  `available_discharge_W` reads "Limited by the battery" at once when it gives
+  that much. A battery whose driver reports `device_state` standby or starting
+  still warns, now with that reason. These verdicts change the words and the
+  status only; dispatch, the fuse guard and commands do not read them. GET
+  /api/battery_models shows the learned limits, and POST
+  /api/battery_models/reset forgets them along with the rest of the model.
+  Limited verdicts never send the "not following" notice.
+- 0014493: Bundle the drivers that report what a battery can do now. Sungrow (1.7.0), Huawei, Kostal, Sigenergy, GoodWe, Solis, SolaX, SAJ, Deye, FoxESS, victron_mqtt and the Solis C&I and Konja drivers report the battery's temperature and, where the device documents one, its live charge and discharge limit; Sungrow also says when the inverter is on standby. No driver sends a battery temperature of 0 when the read fails any more. The bundle also carries the charger control from srcfl/device-drivers (go-e, OpenEVSE, Hardy Barth, Etrel, KEBA, Schrack; refused stand-downs for Alfen, ABB and Mennekes) that has so far been only in the drivers-beta channel. None of it is verified on hardware yet.
+
+### Patch Changes
+
+- e015cbe: Keep a charge under the charger's load balancing at Limited when the driver
+  briefly stops reporting its limit (srcfl/ftw#2056).
+  
+  An Easee charger read back FTW's 13 A order while its load balancing
+  signalled 8 A to the car, which took 5.44 kW. The EV status said "Limited by
+  the charger's load balancing", then "Not following" for 15 s, then Limited
+  again, though the 8 A pilot reading was still fresh. The test driver, built
+  on the open pilot change in srcfl/device-drivers#200, stops reporting its
+  limit for up to 30 s after its order reading moves. Core now lets a fresh
+  pilot below the order explain a draw that matches it. The status stays
+  Limited and reads "Limited by the charger" with the pilot current, because
+  only the driver can name the load balancing. A car that takes far less than
+  the pilot is still Not following.
+- 989dd07: Stop one late poll from reading as "Lost control".
+  
+  A home box with a Sungrow hybrid logged 341 "Lost control" alarms for its
+  battery in two weeks, each one 5 s journal sample long. The journal samples
+  at its timer's time, and the status page takes its clock before it waits
+  for the controller. A battery poll stored in between looked newer than the
+  clock, so Core called the reading stale, and a stale reading became lost
+  readings at once. A charger that said it was offline for one poll did the
+  same. Core now judges a device at the latest of its own clock and the
+  store's stamps on what it read. Readings count as lost once neither
+  measured power nor a new order has come for 30 s, or 2 min for a charger,
+  the same grace a new order gets. A reading over a minute old, or a driver
+  the watchdog gave up on, is still lost at once. Dispatch and the stale site
+  meter stop are unchanged.
+
+## 0.166.0
+
+### Minor Changes
+
+- eeae7c7: FTW now controls a Zaptec Go, Go 2 or Pro through Zaptec Cloud. The bundled
+  `zaptec_cloud` driver used to be read-only, so a Zaptec charger on a
+  loadpoint charged at whatever the Zaptec app set, and the car could overload
+  a phase next to the battery. FTW now sets the charging current within the
+  fuse budget, pauses and resumes. When FTW stands down, for example on a
+  restart or a stale meter, it sets the charger to 0 A and pauses it until the
+  next order, and tells Core when the charger refused; the setting is stored
+  on the charger, so if you stop using FTW,
+  set the current again in the Zaptec app. Experimental: not yet confirmed on a
+  real charger. Tesla Wall Connector, TeslaMate, Home Assistant cars and Tesla
+  Cloud now say why FTW can only read them.
+
+### Patch Changes
+
+- 5d1d93b: Say when FTW reads a charger, car, heat pump or battery but cannot control it.
+  
+  A driver that declares `read_only = true` used to show only a small
+  "telemetry only" badge in Settings, so an owner who added a Zaptec Go through
+  the read-only `zaptec_cloud` saw FTW accept the charger and never steer it,
+  with nothing to say why. Now the EV card, Settings → Devices, Settings →
+  Chargers, the device cards when adding one, the setup wizard and the advanced
+  charger panel say "FTW reads this charger but cannot control it", with the
+  driver's own reason when its description gives one. The EV card leaves out
+  Charge now and Pause charging for such a charger; a hold set before still
+  shows so it can be returned to the plan. A charger set to Observe only reads
+  the same way.
+  
+  `/api/drivers/catalog` entries carry `read_only_reason`, and `/api/loadpoints`
+  carries `driver_read_only` and `driver_read_only_reason`, taken from the
+  driver that runs. Meters, solar inverters and gateways that also read a
+  battery, such as Zap, get no note. No setting changes.
+
+## 0.165.3
+
+### Patch Changes
+
+- 063d824: History reads now return at most 2000 rows. `/api/history` and
+  `/api/series` cut a larger `points` value down to 2000 instead of failing
+  or building a huge reply, and they refuse a `points` value that is not a
+  whole number, or is below 0, with a 400. The dashboard's own reads are
+  unchanged.
+- fe1a68a: Setup and Settings no longer let a quote in a value break the page. The
+  setup wizard builds each driver secret field as page elements instead of
+  HTML text, and Settings now escapes quotes. Before, a value with a quote,
+  such as an MQTT username or a charger's reported features, was cut short
+  in its field and could add markup to the page.
+
+## 0.165.2
+
+### Patch Changes
+
+- bf0e4fc: When the box refuses to let the home battery charge the car, it now says
+  why. The app's refusal (`E_UNAVAILABLE` for `loadpoint.boost`) carries a
+  `reason` in the same words as a stopped boost, such as
+  `battery_reserve_reached`, so the app can say that the battery is too low
+  instead of only that it cannot help.
+- bf7779b: Bundle Energyplan 0.8.0. On our test homes its plans cost less than
+  0.7.1's at the same goals, and no test home gets a plan that meets fewer
+  of its goals. The planner keeps the same time budget, and Core still
+  validates every plan.
+- f6a6b63: The box's pairing page speaks to any phone. It said "FTW for iPhone" and
+  "Open in FTW on this iPhone"; an Android app now pairs the same way, with
+  the same QR, link and short code, so the page now says "your phone" and
+  "the FTW app".
+- fb83c07: Display the vehicle state of charge as a percentage, the measurement time in the browser's local time zone, and its age in hours, minutes, and seconds in the connection test.
+
+## 0.165.1
+
+### Patch Changes
+
+- 570b060: Bundle Energyplan 0.7.1. A battery that starts below its lowest allowed
+  charge, with a car in the plan, now gets its cheap night charge from
+  Energyplan as well, instead of an idle plan.
+- 8b3bd59: A battery that sits below its lowest allowed charge, or above its highest,
+  gets a plan again. Core now gives Energyplan the nearest allowed charge, as it
+  already did for its own planner. With a car in the plan, Energyplan had kept
+  such a battery idle for a whole day, even when cheap night power made
+  charging pay. If Energyplan fails in that state, Core now plans from that
+  charge, where its own planner can model the site, instead of keeping an old
+  plan.
+
+## 0.165.0
+
+### Minor Changes
+
+- 39a1805: FTW in Docker now updates itself as a native install does. The container runs `ftw-launcher` with its releases in a volume of their own, so **Update FTW** on the box page and in the app, `ftw update` and `ftw rollback` work in Docker, and a release that does not become ready falls back to the one before it. A rebuild with a newer `FTW_VERSION` still updates, through the same trial; an older one changes nothing.
+  
+  An existing Docker project moves over once: take `Dockerfile` and `compose.yaml` from this release and rebuild. Its `data` stays. Run `ftw update` and `ftw rollback` with `docker compose run --rm --entrypoint ftw ftw …`, since Core's restart ends commands started with `exec`. Balena deployments keep running Core from the image.
+- 2c337e1: Owners' phones now get a notice when a newer FTW is ready to install from the app: once per version, also after a restart, never for a skipped version, and only when the box can take it. Nothing installs by itself. The notice after an update no longer says the box updated itself.
+
+### Patch Changes
+
+- 68292a2: A home battery that may not cover the car no longer makes room for it under
+  the fuse or the import limit. Before, a plan could discharge the battery to
+  cover the house while the car charged against the fuse; the room that freed
+  went to the car, so battery energy charged the car although the battery
+  should cover only the house. The car now gets the room the grid gives beside
+  the house with the battery idle, in Core's planner, its reserve plan, the
+  check of every worker plan and the charger's fuse limit. A battery boost, or
+  the old site-wide battery cover, still lets the battery help the car; a
+  boosted car may also start on the battery's room before it draws.
+- 4b8d65e: Bundle heishamon 0.8.1. FTW no longer resets a Panasonic Aquarea's heat
+  curve offset at every start and watchdog trip unless FTW itself set it, so an
+  offset set from Home Assistant now stays.
+- 5e410d8: The bundled Energyplan worker now keeps a battery that may not cover the car
+  out of the car's import room, as Core requires. Until now Core rejected such a
+  plan: a site with one battery and one car got Core's own plan, and a site with
+  several batteries or cars got the worker's plan with a warning. The worker's
+  plan now passes without one.
+- acdc584: A site Core cannot plan itself, such as one with two home batteries, again
+  gets Energyplan's plan when the battery covers the house while a car the
+  battery may not cover charges under the fuse. Since the car-room fix, Core
+  rejected such a plan and kept the previous one. The plan now goes out with a
+  warning. The charger still leaves the battery's discharge out of the car's
+  room, so battery energy does not reach the car.
+- 52cd9e6: Keep issued forecasts and quarter-hour load and PV measurements in a local archive for up to two years, separate from planning. The archive keeps every run for 30 days, then one run per hour, and drops its oldest days to stay under 1 GiB.
+  
+  The archive is informational. A problem in it does not mark the box degraded, and a full backup stores a consistent copy rather than the live file.
+- 12dde0f: The help report reads the clock again after it loads the week. On a
+  Raspberry Pi that load can take most of a minute. A device that was fine then
+  showed `no_contact` with `readings_lost` and a negative "last reading" age.
+- 092269f: The notice that a newer FTW is ready now comes once per version also when the
+  owner switches between beta and stable, and stays away when the disk has no
+  room for the download.
+- d25ba28: An owner's phone can now ask the box whether a newer Core exists
+  (`GET /api/version/check`) without Face ID, so the app can show the newer
+  version and its notes. Installing it (`POST /api/version/update`) still asks
+  for Face ID, and a viewer still cannot read the check.
+
 ## 0.164.0
 
 ### Minor Changes

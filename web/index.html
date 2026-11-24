@@ -32,7 +32,7 @@
   <link rel="stylesheet" href="/components/theme.css">
   <link rel="stylesheet" href="/style.css?v=password1">
   <!-- Dashboard layout is layered on the shared base styles. -->
-  <link rel="stylesheet" href="/app.css?v=menu1">
+  <link rel="stylesheet" href="/app.css?v=readonly1">
   <!-- Three.js bare-specifier resolution. Three is vendored under
        /vendor/three/ (pinned 0.160.0) rather than pulled from a CDN
        so the dashboard has no runtime CDN dependency. The modules
@@ -150,7 +150,6 @@
       <div>
         <p class="view-kicker">Overview</p>
         <h2>Your home, right now</h2>
-        <p>Live power, today’s price and the next safe action.</p>
       </div>
       <div class="overview-health" id="overview-health" aria-live="polite">
         <span class="overview-health-dot" aria-hidden="true"></span>
@@ -237,7 +236,7 @@
         <strong class="overview-plan-action" id="overview-plan-action">Reading the current plan</strong>
         <span class="overview-plan-time" id="overview-plan-time">—</span>
         <p class="overview-plan-reason" id="overview-plan-reason">Waiting for planner state.</p>
-        <p class="overview-plan-constraint" id="overview-plan-constraint">Safety limits remain active.</p>
+        <p class="overview-plan-constraint" id="overview-plan-constraint"></p>
         <p class="overview-plan-soc" id="overview-plan-soc" hidden></p>
         <div id="overview-ev-plans" hidden></div>
         <a class="overview-detail-link" href="#plan">Open full plan <span aria-hidden="true">→</span></a>
@@ -516,7 +515,7 @@
               <span class="plan-now-label">Why</span>
               <strong id="plan-main-reason">—</strong>
             </div>
-            <small id="plan-constraint">No active limit reported</small>
+            <small id="plan-constraint"></small>
           </div>
           <dl class="plan-now-meta">
             <div>
@@ -533,7 +532,7 @@
                 <small id="plan-soc-detail">—</small>
               </dd>
             </div>
-            <div>
+            <div class="advanced-only">
               <dt>Planner</dt>
               <dd>
                 <strong id="plan-solver-state">—</strong>
@@ -571,7 +570,6 @@
             <p id="plan-style-extra" class="plan-style-extra" hidden></p>
             <p class="plan-style-note">
               <span id="plan-style-fine" hidden></span>
-              Safety limits are the same in every style.
               <button type="button" class="btn-link" id="plan-style-settings">Fine-tune in Settings</button>
             </p>
             <p id="plan-style-status" class="plan-style-status" role="status" hidden></p>
@@ -586,9 +584,9 @@
             </div>
             <label id="plan-export-row" class="plan-export-row" hidden>
               <input type="checkbox" id="plan-export-check">
-              <span>Allow the battery to sell to the grid when the plan expects a worthwhile sale.</span>
+              <span>Let the battery sell to the grid when it pays.</span>
             </label>
-            <p class="plan-export-help">Solar can still export when this is off. Check your electricity contract.</p>
+            <p class="plan-export-help">Solar still exports when this is off.</p>
             <p id="plan-export-unknown" class="plan-export-unknown" hidden>Not checked — battery export stays off.</p>
           </div>
           <p id="plan-export-sentence" class="plan-export-sentence"></p>
@@ -616,11 +614,6 @@
           </div>
           <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
         </div>
-        <p class="plan-help">
-          Schedule for the home battery and cars, as far ahead as electricity prices are published, updated every few minutes.
-          Tomorrow&rsquo;s prices usually arrive around 13:00. Each bar is a 15-minute slot.
-          Hover any slot for the full breakdown. The dashed vertical line marks &ldquo;now&rdquo;.
-        </p>
         <div class="chart-container">
           <canvas id="plan-chart" width="800" height="260"></canvas>
         </div>
@@ -636,16 +629,6 @@
           <span class="legend-item bat-only" title="Slot where the plan discharges the battery"><span class="legend-color" style="background:var(--energy-gives)"></span> Discharge</span>
           <span id="plan-sell-legend" class="legend-item bat-only" hidden title="What the battery gives that the home sells to the grid"><span class="legend-color" style="background:var(--red-e)"></span> Sell</span>
           <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100. Its line takes the colour of what the battery does, grey where it waits"><span class="legend-color" style="background:var(--fg-dim)"></span> SoC</span>
-        </div>
-        <!-- The escape hatch for "why is it doing that?". Downloads one
-             Markdown file holding the live state, the active plan slot,
-             forecast-versus-reality and any automated findings — enough
-             for someone else to answer without a screenshot round-trip. -->
-        <div class="plan-help-request">
-          <button type="button" id="plan-help-report" class="btn-link">
-            Something looks wrong? Download a help report
-          </button>
-          <small>One file describing what FTW is doing and why, with the logs behind it. Share it when asking for help.</small>
         </div>
       </section>
     </section>
@@ -702,7 +685,6 @@
     <section class="view-heading">
       <p class="view-kicker">Energy</p>
       <h2>Live energy detail</h2>
-      <p>Start with current power, then inspect today’s totals, prices and the last 24 hours.</p>
     </section>
   </main>
 
@@ -710,7 +692,6 @@
     <section class="view-heading">
       <p class="view-kicker">Plan</p>
       <h2>What FTW will do next</h2>
-      <p>The active schedule, its inputs and the limits that shape it.</p>
     </section>
   </main>
 
@@ -719,12 +700,10 @@
     <section class="view-heading">
       <p class="view-kicker">History</p>
       <h2>Your energy, day by day</h2>
-      <p>See how much the home used, produced, bought and sold.</p>
     </section>
     <section class="energy-history-header">
       <div>
         <h2 id="energy-history-period-title">Last 7 days</h2>
-        <p>Daily totals from the same readings used by Energy today.</p>
       </div>
       <div id="energy-history-range" class="energy-history-range" role="tablist" aria-label="History period">
         <button type="button" role="tab" data-range="24h" aria-selected="false">Today</button>
@@ -737,7 +716,7 @@
       <div class="energy-history-card-heading">
         <div>
           <h2 id="energy-history-ev-title">EV charging — energy and cost</h2>
-          <p>Based on FTW’s configured spot price, network tariff and VAT.</p>
+          <p>At the spot price, grid fee and VAT set in FTW.</p>
         </div>
       </div>
       <div id="energy-history-ev-cost" class="energy-history-ev-cost" aria-live="polite">
@@ -749,7 +728,6 @@
         <div class="energy-history-card-heading">
           <div>
             <h3>Energy by day</h3>
-            <p>Compare home use and solar with energy bought from or sold to the grid.</p>
           </div>
           <button id="energy-history-refresh" class="btn-quiet" type="button">Refresh</button>
         </div>
@@ -766,7 +744,6 @@
       <summary>
         <span>
           <strong>Devices, data quality and export</strong>
-          <small>Use this when checking a meter or downloading source data</small>
         </span>
         <span id="energy-history-detail-meta" class="history-disclosure-meta">Open</span>
       </summary>
@@ -823,7 +800,6 @@
       <summary>
         <span>
           <strong>Past plan decisions</strong>
-          <small>Technical detail for inspecting an earlier schedule</small>
         </span>
         <span class="history-disclosure-meta" id="diagnose-meta">Open</span>
       </summary>
@@ -867,7 +843,6 @@
     <section class="view-heading">
       <p class="view-kicker">More</p>
       <h2>Setup, settings and system</h2>
-      <p>Configure FTW, see its version or open advanced operational details.</p>
     </section>
     <section class="more-actions" aria-label="System actions">
       <button id="more-settings-btn" class="more-action" type="button">
@@ -881,6 +856,10 @@
       <button id="more-update-btn" class="more-action" type="button">
         <span class="more-action-icon" aria-hidden="true">↻</span>
         <span><strong>Version</strong><small>Running version and updates</small></span>
+      </button>
+      <button id="more-help-btn" class="more-action" type="button">
+        <span class="more-action-icon" aria-hidden="true">?</span>
+        <span><strong>Get help</strong><small id="more-help-status">One file to share when you ask for help</small></span>
       </button>
     </section>
   </main>
@@ -954,7 +933,7 @@
       </ul>
 
       <h3>Price bars (top of the chart)</h3>
-      <p>Each bar is one 15-minute slot, stacked as the three pieces of your real consumer price:</p>
+      <p>Each bar is one 15-minute slot, stacked as the three pieces of your real consumer price. Tomorrow&rsquo;s prices usually arrive around 13:00.</p>
       <ul>
         <li>
           <span class="legend-color" style="background:color-mix(in srgb, var(--fg) 50%, transparent);display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle"></span>
@@ -988,6 +967,12 @@
          supersedes them. Start pins a persistent hold at a chosen amperage
          (overriding surplus); Stop reverts to automatic / PV-surplus-only.
          The /api/ev/command endpoint stays for HA / scripts. -->
+  </ftw-modal>
+
+  <!-- One car's goal, opened from the cars card, plugged in or not. -->
+  <ftw-modal id="car-goal-modal" style="--ftw-modal-max-width:380px">
+    <span slot="title" id="car-goal-modal-title">Car</span>
+    <div id="car-goal-modal-body"></div>
   </ftw-modal>
 
   <!-- Control status for a device without its own controls. -->
@@ -1037,12 +1022,13 @@
   <script src="/project-statistics.js?v=terms2"></script>
   <script src="/lan-auth.js?v=password1"></script>
   <script type="module" src="/control-feedback-view.js"></script>
-  <script src="/app.js?v=noask1"></script>
+  <script src="/driver-control.js?v=readonly1"></script>
+  <script src="/app.js?v=readonly1"></script>
   <script src="/settings.js?v=diag3"></script>
   <script src="/settings/tabs/control.js?v=tabsplit1"></script>
   <script src="/settings/driver-editor.js?v=aceedit1"></script>
-  <script src="/settings/tabs/devices.js?v=catcards2"></script>
-  <script src="/settings/tabs/loadpoints.js?v=lp7"></script>
+  <script src="/settings/tabs/devices.js?v=readonly1"></script>
+  <script src="/settings/tabs/loadpoints.js?v=readonly1"></script>
   <script src="/settings/tabs/cars.js?v=cars1"></script>
   <script src="/settings/tabs/price.js?v=demand1"></script>
   <script src="/settings/tabs/weather.js?v=mlcov1"></script>
@@ -1060,7 +1046,7 @@
   <script type="module" src="/plan.js?v=soc2"></script>
   <script src="/twins.js?v=forecasts1"></script>
   <script src="/heating.js?v=heat13"></script>
-  <script src="/loadpoints.js?v=zones2"></script>
+  <script src="/loadpoints.js?v=readonly1"></script>
   <script src="/energy-history.js?v=story1"></script>
   <script src="/battery-return.js?v=3"></script>
   <script src="/diagnose.js?v=zones1"></script>

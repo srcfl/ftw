@@ -53,7 +53,9 @@ known-good copy.
 
 The archive leaves out other backups and old rollback points. It carries a
 consistent copy of `cache.db`: savings history is costed from its past
-prices, and a price provider sends only today and tomorrow. Managed-driver
+prices, and a price provider sends only today and tomorrow. It also carries
+a consistent copy of `forecast-archive.db`; if that copy fails its check,
+the backup goes on without it and Core logs a warning. Managed-driver
 links that point inside the persistent directory become relative links in the
 archive, so restore can move the data to another directory or machine.
 Backup never follows these

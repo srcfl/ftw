@@ -57,7 +57,7 @@ func TestNativeEnergyplanEVRecoveryFallbackFaults(t *testing.T) {
 				t.Cleanup(func() { _ = external.Close() })
 				wrapper := &EnergyplanOptimizer{ExternalOptimizer: external}
 				health, err := wrapper.Health(context.Background())
-				if err != nil || health.Version != "0.7.0" {
+				if err != nil || health.Version != "0.8.1" {
 					t.Fatalf("bundle health=%+v err=%v", health, err)
 				}
 				svc := shadowTestService(t)
@@ -74,8 +74,8 @@ func TestNativeEnergyplanEVRecoveryFallbackFaults(t *testing.T) {
 				var previousBytes []byte
 				if scenario == "infeasible_keep_previous" {
 					previous = svc.Replan(context.Background())
-					if previous == nil || previous.Solver == nil || previous.Solver.Fallback || previous.InitialSoC != measuredSoC {
-						t.Fatalf("native baseline did not publish from measured low SoC: %+v", previous)
+					if previous == nil || previous.Solver == nil || previous.Solver.Fallback || previous.InitialSoC != svc.Defaults.SoCMin {
+						t.Fatalf("native baseline did not publish from the floor: %+v", previous)
 					}
 					svc.shadowWG.Wait()
 					if err := ValidatePlan(svc.lastSlots, svc.lastParams, previous); err != nil {
@@ -101,8 +101,9 @@ func TestNativeEnergyplanEVRecoveryFallbackFaults(t *testing.T) {
 				if len(request.Storages) != 1 || len(request.FlexLoads) != 1 {
 					t.Fatalf("fault did not exercise battery+EV: storages=%d flex=%d", len(request.Storages), len(request.FlexLoads))
 				}
-				if math.Abs(request.Storages[0].InitialEnergyWh-measuredSoC*svc.Defaults.CapacityWh) > 1e-9 {
-					t.Fatalf("worker request clamped measured initial energy: %+v", request.Storages[0])
+				// A battery below its floor reaches the worker on the floor (#2043).
+				if math.Abs(request.Storages[0].InitialEnergyWh-request.Storages[0].MinEnergyWh) > 1e-9 {
+					t.Fatalf("worker request did not start on the floor: %+v", request.Storages[0])
 				}
 				if scenario != "feasible" {
 					if previous == nil {
@@ -128,8 +129,8 @@ func TestNativeEnergyplanEVRecoveryFallbackFaults(t *testing.T) {
 				if !strings.Contains(plan.Solver.FallbackReason, reason) {
 					t.Fatalf("wrong fallback reason: %+v", plan.Solver)
 				}
-				if plan.InitialSoC != measuredSoC || svc.lastParams.InitialSoC != measuredSoC || svc.lastParams.InitialSoC >= svc.lastParams.SoCMin {
-					t.Fatalf("fallback clamped recovery start: plan=%g params=%g floor=%g", plan.InitialSoC, svc.lastParams.InitialSoC, svc.lastParams.SoCMin)
+				if plan.InitialSoC != svc.lastParams.SoCMin || svc.lastParams.InitialSoCUnclamped != measuredSoC {
+					t.Fatalf("fallback start: plan=%g floor=%g real=%g", plan.InitialSoC, svc.lastParams.SoCMin, svc.lastParams.InitialSoCUnclamped)
 				}
 				if err := ValidatePlan(svc.lastSlots, svc.lastParams, plan); err != nil {
 					t.Fatalf("published fallback failed physical replay: %v", err)

@@ -43,6 +43,9 @@ type driverDetailResp struct {
 	Readings []readingDTO               `json:"readings"`
 	Metrics  []telemetry.MetricSnapshot `json:"metrics"`
 	Identity driverIdentityDTO          `json:"identity"`
+	// Inverter is the driver's inverter stream, apart from Readings
+	// because no site sum includes it. Absent until the driver sends one.
+	Inverter *inverterDTO `json:"inverter,omitempty"`
 	// Controls are what this driver says an operator may command. Absent
 	// for every driver that only reports.
 	Controls []drivers.CatalogControl `json:"controls,omitempty"`
@@ -70,6 +73,17 @@ type readingDTO struct {
 	SoC       *float64 `json:"soc,omitempty"`
 	UpdatedAt int64    `json:"updated_at_ms"`
 	Stale     bool     `json:"stale"`
+}
+
+// inverterDTO is a battery or hybrid driver's AC stage: its power, how much
+// more it takes from or gives to the grid now, and the emit as sent.
+type inverterDTO struct {
+	W                *float64        `json:"w,omitempty"`
+	AvailableImportW *float64        `json:"available_import_w,omitempty"`
+	AvailableExportW *float64        `json:"available_export_w,omitempty"`
+	Data             json.RawMessage `json:"data,omitempty"`
+	UpdatedAt        int64           `json:"updated_at_ms"`
+	Stale            bool            `json:"stale"`
 }
 
 type driverIdentityDTO struct {
@@ -119,6 +133,10 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: rd.UpdatedAt.UnixMilli(),
 			Stale:     time.Since(rd.UpdatedAt) > staleAfter,
 		})
+	}
+	if inv, ok := s.deps.Tel.Inverter(name); ok {
+		resp.Inverter = &inverterDTO{W: inv.W, AvailableImportW: inv.AvailableImportW, AvailableExportW: inv.AvailableExportW,
+			Data: inv.Data, UpdatedAt: inv.UpdatedAt.UnixMilli(), Stale: time.Since(inv.UpdatedAt) > staleAfter}
 	}
 	resp.Metrics = s.deps.Tel.LatestMetricsByDriver(name)
 	sort.Slice(resp.Metrics, func(i, j int) bool { return resp.Metrics[i].Name < resp.Metrics[j].Name })
@@ -790,8 +808,8 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// below it is what you reach for when the report does not settle the
 	// question. Shipping them together means the person asking for help
 	// sends one file and never has to pick the right one.
-	week := s.loadSupportWeek(r.Context(), now, true)
-	addFile("00-help-report.md", []byte(redactDumpLog(s.buildSupportReportWith(r.Context(), now, week))))
+	report, week, liveAt := s.buildSupportReport(r.Context(), func() time.Time { return time.Now().UTC() }, true)
+	addFile("00-help-report.md", []byte(redactDumpLog(report)))
 
 	manifest := map[string]any{
 		"generated_at": now.Format(time.RFC3339),
@@ -838,8 +856,11 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// All driver health in one file — easier to scan than one-per-driver.
 	healthBody, _ := json.MarshalIndent(s.deps.Tel.AllHealth(), "", "  ")
 	addFile("drivers.json", healthBody)
-	addFile("planner.json", supportJSON(s.supportPlanner(now)))
-	addFile("loadpoints.json", supportJSON(s.loadpointsPayload(now)))
+	// Building the report took time too; read the clock again so a reading
+	// that arrived meanwhile is not newer than these files' clock.
+	liveAt = time.Now().UTC()
+	addFile("planner.json", supportJSON(s.supportPlanner(liveAt)))
+	addFile("loadpoints.json", supportJSON(s.loadpointsPayload(liveAt)))
 
 	// Logs. Lua host.log and HTTP error bodies often carry OAuth JSON;
 	// redact before the zip leaves the house.
@@ -859,7 +880,7 @@ func (s *Server) handleSupportDump(w http.ResponseWriter, r *http.Request) {
 	// next to week/'s five-minute buckets. Only metrics the operator
 	// actually emitted in this window appear.
 	if s.deps.State != nil {
-		untilMs := now.UnixMilli()
+		untilMs := liveAt.UnixMilli()
 		sinceMs := untilMs - 3600*1000
 		drivers, _ := s.deps.State.DriverNames()
 		metrics, _ := s.deps.State.MetricNames()

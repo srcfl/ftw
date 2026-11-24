@@ -862,7 +862,10 @@ func OptimizeContext(ctx context.Context, slots []Slot, p Params) (Plan, error) 
 						// conservation check as ValidatePlan and the runtime
 						// clamp in control/dispatch.go (search CANONICAL
 						// "battery may not feed EV"): loadpoint.BatteryDischargeFeedsEV.
-						if evActive && lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEV(battW, evW, slot.LoadW, slot.PVW) {
+						// Under an import limit the car must also fit beside the
+						// house with the battery idle, as the runtime room does
+						// (control.evBatteryDischargeW).
+						if evActive && lp.blocksBatteryToEV() && loadpoint.BatteryDischargeFeedsEVUnderImport(battW, evW, slot.LoadW, slot.PVW, carImportLimitW(slot, importCaps, carImportCaps, t)) {
 							continue
 						}
 

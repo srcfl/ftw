@@ -5,6 +5,7 @@
   no update UI (decisions 2–4, 6, 9 and 10–14); amended on 2026-09-25 so
   the Lua drivers ship with the Core release; amended on 2026-10-07 to
   allow native updates from More → Version through the same Core API;
+  amended on 2026-11-17 so Docker 0.x runs the same launcher (decision 7);
   rollout pending
 - Date: 2026-09-18
 - Issue: [#1308](https://github.com/srcfl/ftw/issues/1308)
@@ -146,14 +147,26 @@ to it. No native update needs a Docker socket or Docker engine.**
    `rpi-installer` release are removed. Cards flashed from the image keep
    old Docker until their owners switch; use a second card for a new setup now.
 
-7. **New Docker packaging builds from the release package.**
-   [`deploy/docker`](../../deploy/docker) holds a Compose file with one Core
-   service and a Dockerfile that installs the same checksummed package as
-   the native installer. There is no sidecar, `update-ipc` volume, broker or
-   published image. The owner updates by setting `FTW_VERSION` and running
-   `docker compose up -d --build`. Existing sites can switch with separate
+7. **New Docker packaging builds from the release package and runs the
+   launcher.** [`deploy/docker`](../../deploy/docker) holds a Compose file
+   with one Core service and a Dockerfile that installs the same checksummed
+   package as the native installer. There is no sidecar, `update-ipc`
+   volume, broker or published image. Existing sites can switch with separate
    data now. Guided migration of old data remains a goal to prove. The old
    Home Assistant app stays on Supervisor and does not follow new 0.x.
+
+   *Amended on 2026-11-17.* Fredrik decided that FTW never updates by
+   itself, that the owner gets a notice when a release exists, and that the
+   Update button should work in Docker too if that adds nothing complex. So
+   the container runs `ftw-launcher` with its release slots in a volume of
+   their own at `/opt/ftw`, and Docker's restart policy does what systemd
+   does. Docker gets the same button, `ftw update`, trial and fallback as a
+   native box, with no Docker socket, sidecar or root on the host. The image
+   keeps the package it was built from: the first start installs it, and a
+   rebuild with a newer `FTW_VERSION` stages that release once as next. An
+   older image changes nothing, because the slots, not the image, record
+   what the box runs; `ftw rollback` goes back. Balena fleets run Core from
+   the same image without the launcher and change release by deploying.
 
 8. **Betas aim for a weekly cadence.** The owner dispatches
    `native-release.yml` after a Version Packages merge. Once the first
@@ -331,8 +344,10 @@ anything may change, and that is the true state of FTW.
   release.** That matches what the image digest gives today. Signing the
   tarball with the driver channel's key is a natural follow-up, not a
   precondition.
-- **Risk: users with customised Compose files.** They keep the plain image and
-  lose only the button.
+- **Risk: users with customised Compose files.** A file that does not keep
+  `/opt/ftw` in a volume starts again from the image's release whenever the
+  container is recreated. Docker's restart policy must stay on, or Core
+  stays stopped after it exits to restart.
 
 ## Alternatives considered
 

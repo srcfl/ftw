@@ -147,7 +147,7 @@ func TestUpdateInstalledRendersVersion(t *testing.T) {
 	if !strings.Contains(msgs[0].Body, "v1.17.0") {
 		t.Fatalf("body = %q", msgs[0].Body)
 	}
-	if msgs[0].Title != "Your box updated itself" {
+	if msgs[0].Title != "FTW is updated" {
 		t.Fatalf("title = %q", msgs[0].Title)
 	}
 }
@@ -279,4 +279,51 @@ func TestConnectedPushNeedsOptInAndKeepsChargerDestination(t *testing.T) {
 	}
 	bus.Publish(events.ChargingConnected{LoadpointID: "street", At: clk.now()})
 	waitForMsgs(t, pub, 2)
+}
+
+// A newer FTW an owner can install reaches the phones with the catalogue's
+// words and the version as its one argument, also on a box whose rules were
+// saved before the kind existed: the kind then runs at its default, on.
+func TestUpdateAvailableReachesThePhonesWhenTheAppCanInstallIt(t *testing.T) {
+	pub := &fakePub{published: make(chan struct{}, 4)}
+	svc, _ := newSvc(pushCfg(config.NotificationRule{
+		Type: PushChargingConnected, Enabled: true,
+	}), pub)
+	bus := events.NewBus()
+	svc.Subscribe(bus)
+
+	bus.Publish(events.UpdateAvailable{Version: "v0.165.0-beta.1", Installable: true, At: time.Now()})
+	msgs := waitForMsgs(t, pub, 1)
+	m := msgs[0]
+	if m.Kind != PushUpdateAvailable || m.Args["version"] != "v0.165.0-beta.1" {
+		t.Fatalf("message = %+v", m)
+	}
+	if m.Title != "A newer FTW is ready" || !strings.Contains(m.Body, "v0.165.0-beta.1") {
+		t.Fatalf("words = %q / %q", m.Title, m.Body)
+	}
+}
+
+// A version the app cannot install (it changes stored data, the box cannot
+// stage it, or it failed here) stays off the phones, and an owner who turned
+// the kind off hears nothing.
+func TestUpdateAvailableStaysQuietWhenTheAppCannotInstallIt(t *testing.T) {
+	pub := &fakePub{}
+	svc, _ := newSvc(pushCfg(), pub)
+	bus := events.NewBus()
+	svc.Subscribe(bus)
+	bus.Publish(events.UpdateAvailable{Version: "v0.165.0-beta.1", At: time.Now()})
+	settle(svc)
+	if got := pub.Messages(); len(got) != 0 {
+		t.Fatalf("not installable, yet sent: %+v", got)
+	}
+
+	off := &fakePub{}
+	svc, _ = newSvc(pushCfg(config.NotificationRule{Type: PushUpdateAvailable, Enabled: false}), off)
+	bus = events.NewBus()
+	svc.Subscribe(bus)
+	bus.Publish(events.UpdateAvailable{Version: "v0.165.0-beta.1", Installable: true, At: time.Now()})
+	settle(svc)
+	if got := off.Messages(); len(got) != 0 {
+		t.Fatalf("rule off, yet sent: %+v", got)
+	}
 }

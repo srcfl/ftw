@@ -104,6 +104,51 @@
       const badge = document.querySelector('ftw-update-badge');
       if (badge && typeof badge.open === 'function') badge.open();
     });
+    const helpShortcut = document.getElementById('more-help-btn');
+    if (helpShortcut) helpShortcut.addEventListener('click', downloadHelpReport);
+  }
+
+  // Pulls GET /api/support/dump and saves it. The archive leads with
+  // 00-help-report.md, the readable answer to "why is it doing that?" and
+  // "what happened last night?", and carries the logs, config and a week of
+  // telemetry, plans and control journal behind it. One button and one
+  // file, so a user asking for help never has to work out which download we
+  // meant. The bare report is still at /api/support/report.
+  //
+  // It sits under More with Settings, Setup and Version: asking for help is
+  // about the whole box, not one view of it.
+  function downloadHelpReport() {
+    const btn = document.getElementById('more-help-btn');
+    const status = document.getElementById('more-help-status');
+    if (!btn || btn.disabled) return;
+    const original = status ? status.textContent : '';
+    const say = text => { if (status) status.textContent = text; };
+    btn.disabled = true;
+    say('Building the file…');
+    const restore = text => {
+      say(text);
+      setTimeout(() => {
+        btn.disabled = false;
+        say(original);
+      }, 4000);
+    };
+    apiFetch('/api/support/dump')
+      .then(resp => {
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        return resp.blob().then(blob => {
+          const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = 'ftw-help-' + stamp + '.zip';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 30000);
+          restore('Downloaded');
+        });
+      })
+      .catch(err => restore('Failed: ' + (err && err.message ? err.message : String(err))));
   }
 
   function applyHash() {

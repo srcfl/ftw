@@ -105,7 +105,7 @@ describe("plan brief normalization", () => {
     assert.equal(brief.next.action, "Charge battery at 2.4 kW");
     assert.match(brief.next.time, /^Now, until /);
     assert.equal(brief.reason, "Regular schedule refresh");
-    assert.equal(brief.constraint, "No active safety adjustment");
+    assert.equal(brief.constraint, "");
     assert.equal(brief.soc.label, "48% after next step");
     assert.equal(brief.planner.label, "cvxpy / osqp");
   });

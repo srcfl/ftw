@@ -87,7 +87,7 @@ test('main History uses daily totals while raw ledger stays a troubleshooting vi
   assert.match(source, /Used at home/);
   assert.match(source, /calculateEVChargeCost/);
   assert.match(source, /total_ore_kwh/);
-  assert.match(html, /Based on FTW’s configured spot price, network tariff and VAT/);
+  assert.match(html, /At the spot price, grid fee and VAT set in FTW/);
   assert.match(source, /Made by solar/);
   assert.match(source, /Bought from grid/);
   assert.match(source, /Sent to grid/);

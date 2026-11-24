@@ -331,9 +331,11 @@ A `local` route is refused with `E_LOCAL_ONLY`, before the role and before the
 ceremony, because neither of them changes it.
 
 `configure` needs role `owner`. Most configure routes also need a `stepUp`
-flag. A few household settings — the charging schedule today — skip the
-ceremony: the session already proved who is asking, and a second Face ID is
-more friction than the table-phone risk is worth. The box names those routes
+flag. A few skip the ceremony: the charging schedule, FTW Cloud's grant and
+statistics, and `GET /api/version/check`, which tells the app whether a newer
+Core exists. The session already proved who is asking, and a second Face ID is
+more friction than the table-phone risk is worth. Installing that Core
+(`POST /api/version/update`) still needs the flag. The box names those routes
 beside the handler. The app still carries no list of tiers — it asks without
 the flag, and a route that still needs a ceremony answers `E_NEEDS_STEP_UP`.
 

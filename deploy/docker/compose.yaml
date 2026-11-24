@@ -3,7 +3,9 @@
 # file keeps private data out of the build context, including on later builds.
 # Use separate empty data; stop old Core and its updater before starting here.
 # A separate project name does not prevent two Cores controlling one site.
-# Update: change FTW_VERSION in .env and rebuild as the guide describes.
+# Update: Update FTW on the box page or in the app, or
+# `docker compose exec ftw ftw update`. A newer FTW_VERSION in .env and a
+# rebuild updates too; an older one changes nothing.
 name: ftw-local
 
 services:
@@ -13,6 +15,7 @@ services:
       args:
         FTW_VERSION: ${FTW_VERSION:?Set FTW_VERSION in .env to an exact published new 0.x tag}
     image: ftw-local:${FTW_VERSION}
+    # Core exits to restart or to start an update; this brings it back.
     restart: unless-stopped
     # Core saves its state on a clean stop.
     stop_grace_period: 60s
@@ -23,9 +26,15 @@ services:
     # does nothing.
     volumes:
       - ./data:/app/data:z
+      # The release slots. Only ftw-launcher and Core change them; removing
+      # the volume starts again from the image's release.
+      - releases:/opt/ftw
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8080/api/health"]
       interval: 10s
       timeout: 5s
       start_period: 30s
       retries: 6
+
+volumes:
+  releases:

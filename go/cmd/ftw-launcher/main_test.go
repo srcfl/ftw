@@ -1,6 +1,11 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -165,7 +170,7 @@ func TestUnknownCommandsDoNotStartCore(t *testing.T) {
 	}
 	started := false
 	for _, args := range [][]string{{"rolback"}, {"start"}, {"--help"}} {
-		err := run(root, "/data/config.yaml", "/data/drivers", args, func(string, []string, []string) error {
+		err := run(root, "/data/config.yaml", "/data/drivers", "", args, func(string, []string, []string) error {
 			started = true
 			return nil
 		})
@@ -173,7 +178,7 @@ func TestUnknownCommandsDoNotStartCore(t *testing.T) {
 			t.Fatalf("%v: err=%v started=%v", args, err, started)
 		}
 	}
-	if err := run(root, "/data/config.yaml", "/data/drivers", nil, func(binary string, _ []string, _ []string) error {
+	if err := run(root, "/data/config.yaml", "/data/drivers", "", nil, func(binary string, _ []string, _ []string) error {
 		started = binary == filepath.Join(root, "releases", "v0.131.0", "ftw")
 		return nil
 	}); err != nil || !started {
@@ -199,11 +204,11 @@ func TestRollbackCommandStagesThePreviousReleaseForTheNextStart(t *testing.T) {
 		t.Fatal(err)
 	}
 	noExec := func(string, []string, []string) error { t.Fatal("rollback must not start Core"); return nil }
-	if err := run(root, "", "", []string{"rollback"}, noExec); err != nil {
+	if err := run(root, "", "", "", []string{"rollback"}, noExec); err != nil {
 		t.Fatal(err)
 	}
 	var started string
-	if err := run(root, "/data/config.yaml", "/data/drivers", nil, func(binary string, _ []string, env []string) error {
+	if err := run(root, "/data/config.yaml", "/data/drivers", "", nil, func(binary string, _ []string, env []string) error {
 		started = binary
 		if !containsEnv(env, "FTW_NATIVE_TRIAL_TAG=v0.131.0") {
 			t.Fatal("the previous release must start as a trial")
@@ -212,7 +217,111 @@ func TestRollbackCommandStagesThePreviousReleaseForTheNextStart(t *testing.T) {
 	}); err != nil || started != filepath.Join(root, "releases", "v0.131.0", "ftw") {
 		t.Fatalf("after rollback started %q: %v", started, err)
 	}
-	if err := run(root, "", "", []string{"rollback"}, noExec); err == nil {
+	if err := run(root, "", "", "", []string{"rollback"}, noExec); err == nil {
 		t.Fatal("a second rollback while one is pending must fail")
+	}
+}
+
+// imageDir writes the package a container image carries, as the Dockerfile
+// leaves it in /app/image.
+func imageDir(t *testing.T, tag string) string {
+	t.Helper()
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	version := `{"version":"` + tag + `","arch":"` + runtime.GOARCH + `","state_schema":7}`
+	for _, f := range []struct{ name, data string }{
+		{"ftw", "binary"}, {"web/index.html", "web"}, {"drivers/BUNDLED_SOURCE.json", "{}"},
+		{"optimizer/native/bundle/manifest.json", "{}"}, {"release-version.json", version},
+	} {
+		if err := tw.WriteHeader(&tar.Header{Name: f.name, Mode: 0o755, Size: int64(len(f.data)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(f.data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	archive := filepath.Join(dir, "ftw-linux-"+runtime.GOARCH+".tar.gz")
+	sum := sha256.Sum256(buf.Bytes())
+	for path, data := range map[string][]byte{
+		archive:             buf.Bytes(),
+		archive + ".sha256": []byte(hex.EncodeToString(sum[:]) + "  " + filepath.Base(archive) + "\n"),
+		filepath.Join(dir, "release-version.json"): []byte(version),
+	} {
+		if err := os.WriteFile(path, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+func TestRunWithImageStartsAnEmptyVolumeAndTakesANewerImage(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "opt", "ftw") // a container's first start: no root yet
+	var started string
+	var trial bool
+	start := func(binary string, _ []string, env []string) error {
+		started, trial = binary, containsEnv(env, "FTW_NATIVE_TRIAL_TAG="+filepath.Base(filepath.Dir(binary)))
+		return nil
+	}
+	if err := run(root, "/data/config.yaml", "/data/drivers", imageDir(t, "v0.165.0-beta.1"), nil, start); err != nil {
+		t.Fatal(err)
+	}
+	if started != filepath.Join(root, "releases", "v0.165.0-beta.1", "ftw") || trial {
+		t.Fatalf("first start ran %s (trial %t)", started, trial)
+	}
+	// A rebuild with a newer FTW_VERSION starts it once as a trial.
+	if err := run(root, "/data/config.yaml", "/data/drivers", imageDir(t, "v0.165.0-beta.2"), nil, start); err != nil {
+		t.Fatal(err)
+	}
+	if started != filepath.Join(root, "releases", "v0.165.0-beta.2", "ftw") || !trial {
+		t.Fatalf("newer image ran %s (trial %t)", started, trial)
+	}
+	// A trial that does not commit falls back, and the same image is not
+	// tried again on the next start.
+	for range 2 {
+		if err := run(root, "/data/config.yaml", "/data/drivers", imageDir(t, "v0.165.0-beta.2"), nil, start); err != nil {
+			t.Fatal(err)
+		}
+		if started != filepath.Join(root, "releases", "v0.165.0-beta.1", "ftw") || trial {
+			t.Fatalf("after the failed trial ran %s (trial %t)", started, trial)
+		}
+	}
+	state, err := (nativeupdate.Manager{Root: root}).Read()
+	if err != nil || state.Current != "v0.165.0-beta.1" || state.LastFailed != "v0.165.0-beta.2" || state.Next != "" || state.Trial != "" {
+		t.Fatalf("slots: %+v %v", state, err)
+	}
+}
+
+func TestRunWithABrokenImageKeepsTheInstalledRelease(t *testing.T) {
+	root := t.TempDir()
+	testRelease(t, root, "v0.165.0")
+	if err := (nativeupdate.Manager{Root: root}).Init("v0.165.0"); err != nil {
+		t.Fatal(err)
+	}
+	broken := imageDir(t, "v0.166.0")
+	if err := os.WriteFile(filepath.Join(broken, "ftw-linux-"+runtime.GOARCH+".tar.gz"), []byte("damaged"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var started string
+	if err := run(root, "/data/config.yaml", "/data/drivers", broken, nil, func(binary string, _ []string, _ []string) error {
+		started = binary
+		return nil
+	}); err != nil || started != filepath.Join(root, "releases", "v0.165.0", "ftw") {
+		t.Fatalf("started %q: %v", started, err)
+	}
+	// Without slots there is nothing to run, so the start fails.
+	empty := t.TempDir()
+	if err := run(empty, "/data/config.yaml", "/data/drivers", broken, nil, func(string, []string, []string) error {
+		t.Fatal("started Core without a release")
+		return nil
+	}); err == nil || !strings.Contains(err.Error(), "image release") {
+		t.Fatalf("empty slots with a broken image: %v", err)
 	}
 }

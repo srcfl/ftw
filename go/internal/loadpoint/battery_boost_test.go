@@ -3,6 +3,7 @@ package loadpoint
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 )
@@ -170,8 +171,13 @@ func TestBatteryBoostSafetyAndEVTargetStop(t *testing.T) {
 	ctrl.SetBatteryBoostSafety(func(string, BatteryBoostLease) BatteryBoostStopReason {
 		return BatteryBoostStoppedBatteryReserve
 	})
-	if _, err := ctrl.EnableBatteryBoost("garage", validBatteryBoost(now), now); err == nil || err.Error() != string(BatteryBoostStoppedBatteryReserve) {
+	_, err := ctrl.EnableBatteryBoost("garage", validBatteryBoost(now), now)
+	if err == nil || err.Error() != string(BatteryBoostStoppedBatteryReserve) {
 		t.Fatalf("preflight err = %v", err)
+	}
+	var refusal *BatteryBoostRefusal
+	if !errors.As(err, &refusal) || refusal.Reason != BatteryBoostStoppedBatteryReserve {
+		t.Fatalf("preflight err = %#v, want a refusal naming the reserve", err)
 	}
 
 	ctrl.SetBatteryBoostSafety(nil)
@@ -319,5 +325,39 @@ func TestBatteryBoostLeaseJSONRoundTripIsFraction(t *testing.T) {
 	}
 	if overflow.MinBatterySoC != 1 {
 		t.Fatalf("1.02 overflow = %v, want 1 (not 0.0102)", overflow.MinBatterySoC)
+	}
+}
+
+// A lease counts before its car draws: the totals' live watts stay zero
+// until the car starts, and Core must still let the battery make it room.
+func TestHasActiveBatteryBoostBeforeTheCarDraws(t *testing.T) {
+	mgr := NewManager()
+	mgr.Load([]Config{{ID: "garage", DriverName: "garage"}, {ID: "street", DriverName: "street"}})
+	mgr.Observe("garage", true, 0, 0, true)
+	mgr.Observe("street", true, 0, 0, true)
+	ctrl := NewController(mgr, nil, nil, nil)
+	now := time.Now()
+	if ctrl.HasActiveBatteryBoost(mgr.States(), now) {
+		t.Fatal("active without a lease")
+	}
+	if _, err := ctrl.EnableBatteryBoost("street", validBatteryBoost(now), now); err != nil {
+		t.Fatal(err)
+	}
+	mgr.Observe("street", false, 0, 0, true)
+	if ctrl.HasActiveBatteryBoost(mgr.States(), now) {
+		t.Fatal("active for a lease on a loadpoint with no car plugged in")
+	}
+	if _, err := ctrl.EnableBatteryBoost("garage", validBatteryBoost(now), now); err != nil {
+		t.Fatal(err)
+	}
+	if !ctrl.HasActiveBatteryBoost(mgr.States(), now) {
+		t.Fatal("not active for a lease on a plugged-in car that does not draw yet")
+	}
+	if power, _ := ctrl.ActiveBatteryBoostTotals(mgr.States(), now); power != 0 {
+		t.Fatalf("live boost watts = %.0f, want 0 before the car draws", power)
+	}
+	var none *Controller
+	if none.HasActiveBatteryBoost(mgr.States(), now) {
+		t.Fatal("a nil controller reports an active boost")
 	}
 }

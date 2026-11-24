@@ -67,6 +67,10 @@ type Model struct {
 
 	LastUpdatedMs    int64   `json:"last_updated_ts_ms"`
 	ForgettingFactor float64 `json:"forgetting_factor"`
+
+	// Plateaus are the limits this battery has shown when short of an order.
+	// They explain Core's verdict only; nothing in control reads them.
+	Plateaus *Plateaus `json:"plateaus,omitempty"`
 }
 
 // SoCPoint is one (SoC, value) pair in a saturation curve.

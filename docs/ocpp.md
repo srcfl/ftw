@@ -453,8 +453,10 @@ car; without it, profiles and `vehicle_capacity_wh` remain the whole story.
   handshake instead, so the port stays open on every interface even when only
   one is served.
 - Chargers that also have a native protocol may work better through a driver.
-  Easee over Modbus and Zaptec over its cloud API already have drivers; OCPP is
-  the option when you want the cloud out of the loop.
+  Easee and Zaptec have cloud drivers (`easee_cloud`, `zaptec_cloud`) that set
+  the current, pause and resume; Zaptec's control is experimental until a
+  real charger confirms it. OCPP is the option when you want the cloud out of
+  the loop. FTW has no local driver for either.
 
 ## When you still need a driver
 

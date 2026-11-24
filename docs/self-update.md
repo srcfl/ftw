@@ -139,9 +139,9 @@ natively yet; `ftw update` stops before it changes anything.
 `ftw status` also shows free space for releases and backups, and any local
 rollback points an older Core left; native Core does not use them, so they
 can be deleted.
-On a native install, More → Version shows the running version and any newer
-release. **Update FTW** starts the same update through Core's API, with no
-separate updater. The dialog shows downloaded bytes, completed steps and
+On a native or Docker install, More → Version shows the running version and
+any newer release. **Update FTW** starts the same update through Core's API,
+with no separate updater. The dialog shows downloaded bytes, completed steps and
 connection loss during restart, then reloads and shows the result. A failed
 version needs an explicit **Try this version again** action; an unsupported
 change to stored data or an unready installation cannot start an update.
@@ -149,9 +149,26 @@ change to stored data or an unready installation cannot start an update.
 [ADR 0007](adr/0007-self-updating-binary.md) and
 [full backup and restore](backup-and-restore.md).
 
-Docker 0.x runs the same package without the launcher. Change `FTW_VERSION`
-in `.env` and run `docker compose up -d --build` to update or go back; there
-is no automatic fallback. See [Docker](native-beta.md#docker).
+Nothing updates by itself. When a newer release appears that an owner can
+install from the app, the owners' phones get one `update.available` notice
+(on by default, once per version, also across restarts and channel switches;
+never for a skipped version). A release that changes stored data, an unready
+installation, a disk without room for the download and a version that failed
+on this box get no notice; the Version row says why.
+Viewers get none. A tap opens the Version row, where the owner starts the
+update. After it, `update.installed` says which version runs.
+
+Docker 0.x from [`deploy/docker`](../deploy/docker) runs the same launcher,
+with its release slots in a volume of their own at `/opt/ftw`. It has the
+same **Update FTW** button, `ftw update`, trial and fallback. Docker's restart
+policy starts the launcher again where systemd does on a native box. Run
+`ftw update` and `ftw rollback` in a container of their own
+(`docker compose run --rm --entrypoint ftw ftw update`): Core's restart ends
+every other process in its container. The image carries one release. The
+first start installs it; a rebuild with a newer `FTW_VERSION` installs that
+release once, as a trial; an older one changes nothing. Balena runs Core
+from the image without the launcher and changes release by deploying again.
+See [Docker](native-beta.md#docker).
 
 Core, the compiled Energyplan worker and the Lua drivers pinned in
 `drivers/BUNDLED_SOURCE.json` ship in one package, so `ftw update` and

@@ -95,7 +95,7 @@ func TestNativeEnergyplanDownsideAndAsyncShadow(t *testing.T) {
 	svc := shadowTestService(t)
 	svc.Optimizer = o
 	info, err := svc.Optimizer.(*EnergyplanOptimizer).Health(context.Background())
-	if err != nil || info.Name != "ftw-solver" || info.Version != "0.7.0" {
+	if err != nil || info.Name != "ftw-solver" || info.Version != "0.8.1" {
 		t.Fatalf("bundled worker health: %+v %v", info, err)
 	}
 	start := time.Now().UTC().Truncate(time.Hour)
@@ -169,7 +169,9 @@ func TestCoreDPShadowDoesNotAttachToNewerPlan(t *testing.T) {
 	}
 }
 
-func TestNativeEnergyplanRecoveryKeepsRealBatteryEnergy(t *testing.T) {
+// A battery outside its band reaches Energyplan on the band edge, and the
+// real reading is kept beside it (#2043).
+func TestNativeEnergyplanPlansFromTheBandEdge(t *testing.T) {
 	for _, initial := range []float64{0, .025, .975, 1} {
 		t.Run(fmt.Sprint(initial), func(t *testing.T) {
 			o := nativeWorker(t, 500*time.Millisecond)
@@ -178,8 +180,10 @@ func TestNativeEnergyplanRecoveryKeepsRealBatteryEnergy(t *testing.T) {
 			svc.Defaults.InitialSoC = initial
 			svc.Optimizer = &EnergyplanOptimizer{ExternalOptimizer: o}
 			plan := svc.Replan(context.Background())
-			if plan == nil || plan.Solver.Fallback || plan.Solver.Backend != "value_curve_rust" || plan.InitialSoC != initial {
-				t.Fatalf("Energyplan must plan from real SoC without fallback: %+v", plan)
+			edge := math.Min(math.Max(initial, svc.Defaults.SoCMin), svc.Defaults.SoCMax)
+			if plan == nil || plan.Solver.Fallback || plan.Solver.Backend != "value_curve_rust" || plan.InitialSoC != edge ||
+				svc.lastParams.InitialSoCUnclamped != initial {
+				t.Fatalf("Energyplan must plan from the band edge without fallback: %+v", plan)
 			}
 			if err := ValidatePlan(svc.lastSlots, svc.lastParams, plan); err != nil {
 				t.Fatal(err)

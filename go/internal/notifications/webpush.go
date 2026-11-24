@@ -97,7 +97,25 @@ type WebPush struct {
 	mu   sync.Mutex
 	http *http.Client
 	now  func() time.Time
+	// owner says whether a paired device is an owner now. Nil until the
+	// app link is up; see SetOwners.
+	owner func(deviceID string) bool
 }
+
+// SetOwners tells the provider who is an owner, for the kinds only an owner
+// may hear (OwnersOnly). A row with no device came from the box's own page,
+// which is the owner at home. Until this is called every row hears them.
+func (w *WebPush) SetOwners(owner func(deviceID string) bool) {
+	w.mu.Lock()
+	w.owner = owner
+	w.mu.Unlock()
+}
+
+// OwnersOnly names the kinds that only an owner's phone hears: a newer FTW,
+// since only an owner can install it. A phone made a viewer after it
+// subscribed keeps its row, and FTW Cloud already sends events to owners
+// alone (viewers have no ftw.events.read).
+func OwnersOnly(kind string) bool { return kind == PushUpdateAvailable }
 
 // NewWebPush builds the provider. Both arguments are required; a nil store
 // or key is a provider nobody can use, refused at construction rather than
@@ -155,6 +173,20 @@ func (w *WebPush) Publish(ctx context.Context, m Message) error {
 	subs, err := w.store.PushSubscriptions()
 	if err != nil {
 		return fmt.Errorf("webpush: list subscriptions: %w", err)
+	}
+	if OwnersOnly(m.Kind) {
+		w.mu.Lock()
+		owner := w.owner
+		w.mu.Unlock()
+		if owner != nil {
+			kept := subs[:0]
+			for _, sub := range subs {
+				if sub.DeviceID == "" || owner(sub.DeviceID) {
+					kept = append(kept, sub)
+				}
+			}
+			subs = kept
+		}
 	}
 	if len(subs) == 0 {
 		return ErrNothingToSend

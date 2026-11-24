@@ -88,3 +88,21 @@ func TestHeishamonClampsOffsetAndDefaultModeResetsIt(t *testing.T) {
 		t.Errorf("default-mode publish = %+v, want safe offset 0", pubs[1])
 	}
 }
+
+// Core runs default mode at every start and on watchdog trips. Until FTW has
+// written an offset, neither default mode nor cleanup may touch the pump: the
+// owner may have set the offset from Home Assistant (srcfl/device-drivers#233).
+func TestHeishamonLeavesAnOffsetFTWNeverWrote(t *testing.T) {
+	var mqtt *fakeMQTT
+	// Registered first, so it runs after the driver's own cleanup.
+	t.Cleanup(func() {
+		if pubs := mqtt.Published(); len(pubs) != 0 {
+			t.Errorf("published = %v, want nothing before FTW wrote an offset", pubs)
+		}
+	})
+	var d *LuaDriver
+	d, mqtt, _ = newTestHeishamonDriver(t)
+	if err := d.DefaultMode(); err != nil {
+		t.Fatalf("default mode: %v", err)
+	}
+}
