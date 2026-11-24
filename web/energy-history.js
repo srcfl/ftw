@@ -273,7 +273,7 @@
     var comparison = totalLoad > 0 ? Math.round(totalPV / totalLoad * 100) : 0;
     target.innerHTML = '<h3>What stands out</h3>' +
       (recordingGaps(days) ? '<p>Some periods were not recorded. Totals cover recorded periods only.</p>' : '') +
-      (days.some(function (day) { return day.history_quality === 'estimated'; }) ? '<p>Home use includes estimates for brief measurement gaps or imbalances.</p>' : '') + '<ul>' +
+      (days.some(function (day) { return day.history_quality === 'estimated'; }) ? '<p>Home use includes estimates.</p>' : '') + '<ul>' +
       '<li>Solar made <strong>' + comparison + '%</strong> as much energy as the home used.</li>' +
       '<li>Best solar day was <strong>' + escapeHtml(formatDay(bestSolar.day)) + '</strong> at ' +
         formatKWh(bestSolar.pv_wh) + '.</li>' +

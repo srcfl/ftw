@@ -56,5 +56,5 @@ export function updateEnergyToday(today, root = document) {
   note.textContent = today
     ? "Gaps in today's readings. ≥ shows recorded energy only."
     : "Today's energy is not available yet.";
-  if (estimated) note.textContent = (incomplete ? note.textContent + " " : "") + "Home use includes estimates for brief balance failures.";
+  if (estimated) note.textContent = (incomplete ? note.textContent + " " : "") + "Home use includes estimates.";
 }

@@ -1095,7 +1095,7 @@
       var mismatch = qualities.indexOf("balance_mismatch") >= 0;
       var partial = mismatch || qualities.indexOf("incomplete") >= 0;
       qualityNote.hidden = !partial;
-      qualityNote.textContent = mismatch ? "Measurements do not balance. Home use is unknown for those samples." : "Some measurements are missing. Working devices keep recording; gaps are unknown.";
+      qualityNote.textContent = mismatch ? "Measurements do not balance. Home use is unknown for those samples." : "Some measurements are missing.";
     }
     // Forward-looking forecast: at least 15 minutes so the transition
     // from actual→predicted is smooth. For longer ranges, use half the
@@ -3009,7 +3009,7 @@
       text = "No charging plan yet. Set a ready time, or choose Charge now.";
       tone = "var(--text)";
     } else {
-      text = "No charge window yet for this goal. Choose Charge now if you need to charge immediately.";
+      text = "No charge window yet. Choose Charge now to charge at once.";
     }
     if (lp.plan_pending && !lp.manual_active && text && text.indexOf("Updating the charging plan") < 0) text += " Updating the charging plan…";
     if (lp.manual_save_error) text = (text ? text + " " : "") + "This choice is active now, but could not be saved for restart. FTW is retrying.";

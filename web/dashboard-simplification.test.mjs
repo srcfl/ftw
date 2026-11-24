@@ -230,10 +230,15 @@ describe("simplified dashboard overview", () => {
   });
 
   it("keeps the mobile primary answers above the fixed destination bar", () => {
-    assert.match(
-      css,
-      /\.overview-heading > div:first-child > p:last-child \{\s*display: none;/,
-    );
+    const headings = html.match(/<section class="view-heading[^"]*">[\s\S]*?<\/section>/g) || [];
+    assert.ok(headings.length >= 5, "every view keeps its heading");
+    for (const heading of headings) {
+      assert.doesNotMatch(
+        heading.replace(/<p class="view-kicker">[^<]*<\/p>/, ""),
+        /<p>/,
+        "a view heading is a title, not a paragraph explaining the page",
+      );
+    }
     assert.match(
       css,
       /\.summary-card \{[\s\S]*?min-height: 44px;[\s\S]*?padding: 3px 10px;/,

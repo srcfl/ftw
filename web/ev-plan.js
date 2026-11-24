@@ -98,15 +98,13 @@ export function createChargingTimeline(doc = document) {
   const list = node('div', 'ev-plan-windows', el);
   const more = node('details', 'ev-plan-more', el);
   const summary = node('summary', '', more), rest = node('div', 'ev-plan-windows', more);
-  const note = node('small', 'ev-timeline-note', el);
-  note.textContent = 'Planned charging · times can change as FTW replans.';
   return { el, update(lp, { start = Date.now(), end = start + 24 * 3600000, label = 'Next 24 hours' } = {}) {
     const data = chargingPlan(lp, start, end);
     title.textContent = label;
     energy.textContent = data.windows.length ? `${data.approximate ? '≈ ' : ''}${(data.wh / 1000).toFixed(1)} kWh` : '';
     message.textContent = data.message; message.hidden = !data.message;
     graphic.hidden = !data.windows.length; list.hidden = !data.windows.length;
-    note.hidden = !data.windows.length; more.hidden = data.windows.length <= 2;
+    more.hidden = data.windows.length <= 2;
     track.replaceChildren(); ticks.replaceChildren(); list.replaceChildren(); rest.replaceChildren();
     for (let i = 0; i <= 4; i++) {
       const tick = node('span', '', ticks), ts = start + (end - start) * i / 4;
