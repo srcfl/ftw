@@ -630,15 +630,6 @@
           <span id="plan-sell-legend" class="legend-item bat-only" hidden title="What the battery gives that the home sells to the grid"><span class="legend-color" style="background:var(--red-e)"></span> Sell</span>
           <span class="legend-item bat-only" title="State of charge — battery fill %, 0–100. Its line takes the colour of what the battery does, grey where it waits"><span class="legend-color" style="background:var(--fg-dim)"></span> SoC</span>
         </div>
-        <!-- The escape hatch for "why is it doing that?". Downloads one
-             Markdown file holding the live state, the active plan slot,
-             forecast-versus-reality and any automated findings — enough
-             for someone else to answer without a screenshot round-trip. -->
-        <div class="plan-help-request">
-          <button type="button" id="plan-help-report" class="btn-link">
-            Something looks wrong? Download a help report
-          </button>
-        </div>
       </section>
     </section>
 
@@ -865,6 +856,10 @@
       <button id="more-update-btn" class="more-action" type="button">
         <span class="more-action-icon" aria-hidden="true">↻</span>
         <span><strong>Version</strong><small>Running version and updates</small></span>
+      </button>
+      <button id="more-help-btn" class="more-action" type="button">
+        <span class="more-action-icon" aria-hidden="true">?</span>
+        <span><strong>Get help</strong><small id="more-help-status">One file to share when you ask for help</small></span>
       </button>
     </section>
   </main>

@@ -1564,52 +1564,6 @@ import {
         else helpModal.setAttribute('open', '');
       });
     }
-    const reportBtn = document.getElementById('plan-help-report');
-    if (reportBtn) reportBtn.addEventListener('click', downloadHelpReport);
-  }
-
-  // Pulls GET /api/support/dump and saves it. That archive leads with
-  // 00-help-report.md — the readable answer to "why is it doing that?" and
-  // "what happened last night?" — and carries the logs, config and a week
-  // of telemetry, plans and control journal behind it. One button and
-  // one file, because a user asking for help should not have to work out
-  // which of two downloads we wanted. The bare report is still at
-  // /api/support/report for anyone who wants only the text.
-  //
-  // Lives here rather than in the driver Diagnose modal because the
-  // question is asked while looking at the plan, not at a device.
-  function downloadHelpReport() {
-    const btn = document.getElementById('plan-help-report');
-    if (!btn || btn.disabled) return;
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Building report…';
-    const restore = function (text) {
-      btn.textContent = text;
-      setTimeout(function () {
-        btn.disabled = false;
-        btn.textContent = original;
-      }, 4000);
-    };
-    apiFetch('/api/support/dump')
-      .then(function (resp) {
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        return resp.blob().then(function (blob) {
-          const stamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '');
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'ftw-help-' + stamp + '.zip';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(function () { URL.revokeObjectURL(url); }, 30000);
-          restore('Downloaded');
-        });
-      })
-      .catch(function (err) {
-        restore('Failed: ' + (err && err.message ? err.message : String(err)));
-      });
   }
 
   if (document.readyState === 'loading') {
