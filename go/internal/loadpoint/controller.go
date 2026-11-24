@@ -340,6 +340,9 @@ type EVSample struct {
 	RequestActive        bool
 	DeviceID             string
 	SessionID            string
+	// LoadBalancerHold: the driver reports that the charger's own load
+	// balancing lets the car take less than it needs to start.
+	LoadBalancerHold bool
 }
 
 // PlanFunc returns the current-slot directive for now, or (_, false)

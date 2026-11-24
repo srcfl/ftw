@@ -24,6 +24,13 @@ const percent = soc => num(soc) ? `${Math.round(soc * 100)}%` : 'its current lev
 const amps = value => num(value) ? `${Math.round(value)} A` : 'the current';
 const clock = ms => num(ms) && ms > 0 ? new Date(ms).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'}) : '';
 const capital = text => text.charAt(0).toUpperCase() + text.slice(1);
+const balancer = row => row.make ? `${row.make}’s load balancing` : 'The charger’s load balancing';
+// Core's LoadBalancerRaiseWait and MinStartCurrentA (go/internal/loadpoint).
+const BALANCER_WAIT = '15 minutes', START_A = 6;
+// The driver says the charger's load balancing leaves less than a car starts
+// on, and neither the pilot nor a lower setting on the charger says otherwise.
+const balancerHolds = row => row.limited_by === 'load_balancer' && num(row.limit_a) && row.limit_a < START_A &&
+  !(num(row.pilot_a) && row.pilot_a >= START_A) && !(num(row.offered_a) && num(row.requested_a) && row.offered_a + 0.5 < row.requested_a);
 
 // Site convention: positive power is drawn into the site, so a battery or car
 // charges and solar is negative.
@@ -71,6 +78,7 @@ const REASON_TITLES = {
   import_limit: 'Limited by the hourly import limit',
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
   load_balancer_limit: 'Limited by the charger’s load balancing', charger_pilot_limit: 'Limited by the charger',
+  load_balancer_wait: 'Waiting for load balancing',
   one_phase: 'Charging on one phase',
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
   command_failed: 'Commands failing', command_unconfirmed: 'Command not confirmed', default_failed: 'Cannot hand back control',
@@ -114,6 +122,7 @@ function sentence(row) {
     case 'charger_pilot_limit': return `The charger signals ${amps(row.pilot_a)} to the car. FTW asked for ${amps(row.requested_a)}; measured charging is ${controlPower(actual)}. The internal limiting cause is unknown.`;
     case 'load_balancer_limit': return `${row.make ? `${row.make} limits the charger to ${amps(row.limit_a)} (its load balancing)`
       : `The charger’s load balancing limits it to ${amps(row.limit_a)}`}. FTW asked for ${amps(row.requested_a)}; the car takes ${controlPower(actual)}.`;
+    case 'load_balancer_wait': return `${balancer(row)} allows ${amps(row.limit_a)}, too little for the car to start. FTW asked for ${amps(row.requested_a)}.`;
     case 'one_phase': return `The car charges on ${row.charging_phase || 'one phase'} only${num(row.charging_phase_max_w) ? `, at most ${controlPower(row.charging_phase_max_w)}` : ''}. FTW plans with what it takes.`;
     case 'power_below_target': case 'power_above_target': return evPowerWarning(row) || `Asked for ${target(row)}, delivering ${controlPower(actual)}.`;
     case 'power_wrong_direction': return `Asked for ${target(row)}, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
@@ -188,7 +197,10 @@ function nextStep(row) {
     ? row.device_reason.trim() : '';
   const chargerReport = reported ? `The charger reports: ${reported}.` : '';
   switch (row.reason) {
-    case 'power_below_target': case 'no_power_response':
+    case 'no_power_response':
+      if (balancerHolds(row)) return `${balancer(row)} still allows only ${amps(row.limit_a)}. Compare its settings with FTW’s main fuse setting.`;
+      return chargerReport || `The ${name} has not said why. Check its app or display.`;
+    case 'power_below_target':
       return chargerReport || `The ${name} has not said why. Check its app or display.`;
     case 'power_above_target': case 'power_wrong_direction': case 'power_while_idle':
       return `The ${name} has not said why. Check its app or display.`;
@@ -203,6 +215,7 @@ function nextStep(row) {
     case 'offered_current_lower': return [chargerReport, 'Check the charger’s load balancing and limits.'].filter(Boolean).join(' ');
     case 'charger_pilot_limit': return 'Check Available energy in the charger’s app for the active limit.';
     case 'load_balancer_limit': return 'If this happens often, compare the charger’s load balancing settings with FTW’s main fuse setting.';
+    case 'load_balancer_wait': return `It raises the current slowly once the home uses less, which can take up to ${BALANCER_WAIT}. FTW reports a problem if the car has not started by then.`;
     case 'observe_only': return 'Turn on control in the device settings if you want FTW to steer it.';
     default: return '';
   }

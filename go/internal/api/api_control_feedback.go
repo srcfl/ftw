@@ -226,7 +226,8 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			// last reading for a minute after the driver stops sending. The
 			// driver checked its limit against the pilot when it was fresh,
 			// so only the pilot becomes unknown.
-			if d.PilotConfirmedAtMs != nil && (!pilotValid || (pilotFresh && *d.PilotA == 0)) {
+			// A zero pilot agrees with load balancing that holds the start.
+			if d.PilotConfirmedAtMs != nil && (!pilotValid || (pilotFresh && *d.PilotA == 0 && !loadpoint.LoadBalancerHoldsStart(d.LimitA, d.LimitedBy))) {
 				d.LimitA, d.LimitedBy = nil, ""
 			}
 			if d.LimitA != nil {
@@ -467,6 +468,8 @@ func setControlStatus(f *ControlFeedback) {
 		status = "limited"
 	case "device_limit", "offered_current_lower":
 		status, severity = "limited", "warning"
+	case "load_balancer_wait":
+		status = "waiting"
 	case "setpoint_changed", "power_below_target", "power_above_target", "power_wrong_direction",
 		"no_power_response", "power_while_idle":
 		status, severity = "not_following", "warning"
@@ -593,6 +596,24 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		coreReason != "fuse_limit" && coreReason != "import_limit" &&
 		f.SentW != nil && *f.SentW > 100 && f.ActualW != nil && math.Abs(*f.ActualW) < 100 {
 		set("waiting", "vehicle_declined", "info")
+		return
+	}
+	// The charger's own load balancing lets the car take too little to
+	// start. Easee raises that current slowly after household use falls, so
+	// Core waits LoadBalancerRaiseWait from the first zero reading under
+	// positive orders (a pause ends that run) before it reports no power.
+	// Safety pauses, a charger holding a lower order, a pilot the car could
+	// start on, and a run without that clock older than the wait keep their
+	// own verdicts.
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" &&
+		coreReason != "site_meter_stale" && coreReason != "site_phase_currents_stale" && coreReason != "fuse_cooldown" &&
+		f.SentW != nil && *f.SentW > 100 && f.ActualW != nil && math.Abs(*f.ActualW) < 100 &&
+		loadpoint.LoadBalancerHoldsStart(f.LimitA, f.LimitedBy) && (f.RequestedA == nil || *f.LimitA+0.5 < *f.RequestedA) &&
+		(f.OfferedA == nil || f.RequestedA == nil || *f.OfferedA+0.5 >= *f.RequestedA) &&
+		(f.PilotA == nil || *f.PilotA < loadpoint.MinStartCurrentA) &&
+		(!cmd.NoPowerSince.IsZero() && cmd.NoPowerAt.Sub(cmd.NoPowerSince) < loadpoint.LoadBalancerRaiseWait ||
+			cmd.NoPowerSince.IsZero() && now.Sub(cmd.Since) < loadpoint.LoadBalancerRaiseWait) {
+		set("waiting", "load_balancer_wait", "info")
 		return
 	}
 	// A positive clamp explains the lower offer, not prolonged zero delivery.

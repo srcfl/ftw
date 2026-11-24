@@ -331,6 +331,8 @@ func (s *Server) chargerReadings() map[string]loadpoint.ChargerReading {
 			Reason         string   `json:"reason_no_current_label"`
 			CommandStalled bool     `json:"command_stalled"`
 			Online         *bool    `json:"is_online"`
+			LimitA         *float64 `json:"current_limit_a"`
+			LimitedBy      string   `json:"current_limited_by"`
 		}
 		if len(rd.Data) > 0 {
 			_ = json.Unmarshal(rd.Data, &d)
@@ -342,6 +344,12 @@ func (s *Server) chargerReadings() map[string]loadpoint.ChargerReading {
 		if d.MaxA != nil {
 			r.LimitA = *d.MaxA
 			r.LimitKnown = true
+		}
+		if loadpoint.LoadBalancerHoldsStart(d.LimitA, d.LimitedBy) {
+			r.BalancerA = d.LimitA
+			if cmd, ok := s.deps.Tel.CommandEvidence(rd.Driver, telemetry.DerEV.String()); ok {
+				r.NoPowerSince, r.NoPowerAt = cmd.NoPowerSince, cmd.NoPowerAt
+			}
 		}
 		out[rd.Driver] = r
 	}

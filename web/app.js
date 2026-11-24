@@ -2880,6 +2880,9 @@
     var since = m.since_ms > 0 ? evFmtElapsed(Date.now() - m.since_ms) : "";
     var sinceP = since ? " (" + since + ")" : "";
     var reason = m.charger_reason ? " Charger reports: " + m.charger_reason + "." : "";
+    // The driver reports that the charger's own load balancing lets the car
+    // take too little to start; Core waits up to 15 minutes for it.
+    var balancerA = typeof m.load_balancer_a === "number" && isFinite(m.load_balancer_a) ? Math.round(m.load_balancer_a) + " A" : "";
     var end = lp.manual_release_soc > 0
       ? " Returns to the plan at the estimated " + Math.round(lp.manual_release_soc * 100) + " % target."
       : " Continues until the car stops drawing, you return to the plan, or unplug.";
@@ -2897,8 +2900,16 @@
       case "sent":
         return "FTW received " + reqA + ". Waiting for the charger to confirm the new limit." + sinceP + ((lp.current_power_w || 0) >= 100 ? " Still charging at " + formatW(lp.current_power_w) + "." : "") + end;
       case "accepted":
+        if (balancerA) {
+          return "The charger holds " + cmdA + ", but its load balancing allows " + balancerA + ", too little for the car to start" + sinceP +
+            ". It raises the current slowly once the home uses less, which can take up to 15 minutes." + end;
+        }
         return "Charger reports a " + cmdA + " limit. Waiting for the car to start drawing…" + sinceP + reason + end;
       case "not_drawing":
+        if (balancerA) {
+          return "The charger’s load balancing still allows only " + balancerA + ", so the car has not started" + sinceP +
+            ". Compare its settings with FTW’s main fuse setting.";
+        }
         return "Charger offers " + cmdA + " but the car is not drawing" + sinceP + "." +
           (reason || " It may be full, or held by its own charge limit or schedule.");
       case "stalled":
