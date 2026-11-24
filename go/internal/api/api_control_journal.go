@@ -19,6 +19,7 @@ import (
 func (s *Server) JournalVerdicts(now time.Time) []journal.Verdict {
 	var out []journal.Verdict
 	rows := s.controlFeedback(now)
+	s.learnBatteryLimits(rows, now)
 	plan := s.planNow(now, rows)
 	markOnPlan(rows, plan)
 	for _, f := range rows {

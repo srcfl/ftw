@@ -71,6 +71,16 @@
         'Select a configured charger or remove this charger.' };
   }
 
+  // The note for a charger whose driver reads it but cannot control it, in
+  // the shared words of driver-control.js. Null for an OCPP charger, a
+  // driver that controls, or before the catalog has loaded.
+  function readOnlyNote(config, name) {
+    var words = window.FTWDriverControl;
+    var driver = name && (config.drivers || []).find(function (d) { return d.name === name; });
+    var entry = driver && driver.lua ? (S.catalogByLua || {})[driver.lua] : null;
+    return words && entry ? words.readOnlyNote(entry) : null;
+  }
+
   // One human-readable state per charger. Online is the WebSocket session;
   // connected is a vehicle on the connector — a charger is usually online
   // long before anything is plugged into it.
@@ -494,10 +504,12 @@
         var connection = chargerConnection(config, lp, S.ocppStatus);
         var stepsStr = fmtStepsW(lp.allowed_steps_w);
         var driverOpts = drivers.map(function (n) {
-          var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "");
+          var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "") +
+            (readOnlyNote(config, n) ? " (reads only)" : "");
           return '<option value="' + escHtml(n) + '"' +
             (n === lp.driver_name ? " selected" : "") + ">" + escHtml(label) + "</option>";
         }).join("");
+        var readOnly = readOnlyNote(config, lp.driver_name);
         if (lp.driver_name && drivers.indexOf(lp.driver_name) < 0) {
           // Preserve the saved choice; a missing catalogue or offline OCPP
           // identity must never select a different physical charger.
@@ -511,6 +523,8 @@
           (connection ? '<p data-charger-connection-status="' + idx + '" role="' +
             (connection.kind !== 'unverified_ocpp' ? 'alert' : 'status') + '" style="color:var(--' +
             (connection.kind !== 'unverified_ocpp' ? 'amber' : 'text-dim') + ')">' + escHtml(connection.message) + '</p>' : '') +
+          (readOnly ? '<p class="read-only-note" data-charger-read-only="' + idx + '" role="note">' +
+            escHtml(window.FTWDriverControl.sentence(readOnly)) + '</p>' : '') +
 
           '<div class="field-row">' +
           '<div>' +
@@ -571,7 +585,8 @@
         '<select id="new-lp-driver">' +
         '<option value="">— choose charger —</option>' +
         drivers.map(function (n) {
-          var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "");
+          var label = n + (ocppIds.indexOf(n) >= 0 ? " (OCPP)" : "") +
+            (readOnlyNote(config, n) ? " (reads only)" : "");
           return '<option value="' + escHtml(n) + '"' + (drivers.length === 1 ? ' selected' : '') + '>' + escHtml(label) + '</option>';
         }).join('') +
         '</select>' +

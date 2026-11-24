@@ -335,6 +335,7 @@
       // How many run it: that is all FTW says about a driver.
       var usage = usageLabel(entry.run_by);
       if (usage) label += ' — ' + usage;
+      if (readOnlyNote(entry)) label += ' — reads only';
 
       var opt = document.createElement('option');
       opt.value = String(idx);
@@ -364,6 +365,13 @@
         }
       }
     }
+  }
+
+  // Whether FTW can control the driver's device, in the shared words of
+  // driver-control.js. Nothing when that file is missing.
+  function readOnlyNote(entry) {
+    var words = window.FTWDriverControl;
+    return words ? words.readOnlyNote(entry) : null;
   }
 
   function isZapCatalog(entry) {
@@ -402,6 +410,11 @@
     if (isZapCatalog(selectedCatalog)) {
       lines.push('This driver is the P1/HAN site meter by default. Add inverters, batteries and chargers as their own devices in FTW when you can. If Zap is the only reader, turn on PV or battery ingest later under Settings → Devices.');
     }
+    // Before the device is added, not after: FTW will read a charger or
+    // battery this driver only reads, and never steer it. The driver's own
+    // reason is in its description, the next line.
+    var readOnly = readOnlyNote(selectedCatalog);
+    if (readOnly) lines.push(readOnly.text);
     if (selectedCatalog.description) lines.push(selectedCatalog.description);
 
     var version = selectedCatalog.installed_version || selectedCatalog.version;
@@ -490,18 +503,25 @@
 
     // Render password inputs for each catalog-declared config secret
     // (e.g. sonnen Auth-Token). Each input id is "drv-secret-<key>" and
-    // saveDriver reads them back into driver.config[<key>].
+    // saveDriver reads them back into driver.config[<key>]. The key comes
+    // from the driver's DRIVER block, so it is set as a property and never
+    // parsed as markup.
     var secretsGroup = document.getElementById('drv-secrets-group');
     secretsGroup.innerHTML = '';
     var secrets = selectedCatalog.config_secrets || [];
     secrets.forEach(function (key) {
-      var label = key.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
       var fg = document.createElement('div');
       fg.className = 'form-group';
-      fg.innerHTML =
-        '<label for="drv-secret-' + key + '">' + esc(label) + '</label>' +
-        '<input type="password" id="drv-secret-' + key + '" autocomplete="off" ' +
-        'placeholder="Paste from device web UI">';
+      var label = document.createElement('label');
+      label.htmlFor = 'drv-secret-' + key;
+      label.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+      var input = document.createElement('input');
+      input.type = 'password';
+      input.id = 'drv-secret-' + key;
+      input.setAttribute('autocomplete', 'off');
+      input.placeholder = 'Paste from device web UI';
+      fg.appendChild(label);
+      fg.appendChild(input);
       secretsGroup.appendChild(fg);
     });
   }

@@ -605,6 +605,27 @@ func TestControlRefusingTheBoostIsReportedNotSwallowed(t *testing.T) {
 	if res.State != CmdRejected || res.Error == nil || res.Error.Code != ErrUnavailable {
 		t.Fatalf("result = %+v", res)
 	}
+	if _, named := res.Error.Args["reason"]; named {
+		t.Fatalf("args = %v: prose is no reason", res.Error.Args)
+	}
+}
+
+// A refusal with a reason names it in the stop reasons' words, so the app can
+// say the home battery is too low (xorath, 21 Nov 2026).
+func TestARefusedBoostNamesItsReason(t *testing.T) {
+	h, lp, _, rec, _ := newEVRig(t)
+	subscribe(t, h, rec)
+	lp.boostErr = &loadpoint.BatteryBoostRefusal{Reason: loadpoint.BatteryBoostStoppedBatteryReserve}
+
+	deliver(t, h, MsgCmd, nil, cmdLoadpoint(OpLoadpointBoost, "cmd-low", boostArgs(), 7, 200_000))
+
+	res := body[CmdResult](t, rec.only(t, MsgCmdResult))
+	if res.State != CmdRejected || res.Error == nil || res.Error.Code != ErrUnavailable {
+		t.Fatalf("result = %+v", res)
+	}
+	if res.Error.Args["op"] != OpLoadpointBoost || res.Error.Args["reason"] != "battery_reserve_reached" {
+		t.Fatalf("args = %v, want the op and battery_reserve_reached", res.Error.Args)
+	}
 }
 
 // Arguments are validated to the same rules the HTTP bodies enforce, and a

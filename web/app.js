@@ -3195,6 +3195,21 @@
       } else if (setupNote) {
         setupNote.remove();
       }
+      // A charger whose driver only reads it: the plan and the charge buttons
+      // below cannot move it, so the modal says so first.
+      var readOnlyNote = evModalBody.querySelector(".ev-read-only-note");
+      var readOnly = window.FTWDriverControl ? window.FTWDriverControl.loadpointNote(matched) : null;
+      if (readOnly) {
+        if (!readOnlyNote) {
+          readOnlyNote = document.createElement("p");
+          readOnlyNote.className = "ev-read-only-note read-only-note";
+          readOnlyNote.setAttribute("role", "status");
+          evModalBody.insertBefore(readOnlyNote, evModalBody.firstChild);
+        }
+        readOnlyNote.textContent = window.FTWDriverControl.sentence(readOnly);
+      } else if (readOnlyNote) {
+        readOnlyNote.remove();
+      }
       // Plan view: what the box will do with this car (one sentence +
       // the planned windows on a 24 h track) and the car's charge level,
       // which the plan is built from. Mounted once per loadpoint so the
@@ -4694,7 +4709,13 @@
     container.appendChild(goal);
 
     container.update = function (nextLp, d) {
-      manual.el.hidden = !nextLp.plugged_in;
+      // A charger FTW only reads gets no Charge now or Pause charging: they
+      // cannot work, and showing them says FTW controls it. The note at the
+      // top of the sheet says why. A hold left from before still shows, so
+      // it can be returned to the plan.
+      var readOnlyIdle = nextLp.driver_read_only === true && !nextLp.manual_active &&
+        !nextLp.manual_restore_unconfirmed;
+      manual.el.hidden = !nextLp.plugged_in || readOnlyIdle;
       manual.update(nextLp, d);
       retentionError.hidden = nextLp.goal_retention !== "error";
       var s = nextLp.schedule;

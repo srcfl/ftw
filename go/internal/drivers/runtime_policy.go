@@ -32,6 +32,14 @@ type RuntimePolicy struct {
 	// AuthPostPaths adds further exact sign-in paths, for a login that posts
 	// more than one form (an OIDC identifier step, then a password step).
 	AuthPostPaths []string
+	// MQTTReadRequestTopics are the MQTT topics a read-only driver with
+	// mqtt.subscribe may publish read requests to, because the device
+	// publishes its values only while a client asks (Victron's Venus OS wants
+	// R/<portal ID>/keepalive). They grant no write permission: mqtt.publish
+	// stays refused. Each is a pattern whose "+" stands for one whole topic
+	// level; see mqtt_read_request.go. Empty unless the signed metadata
+	// declares them.
+	MQTTReadRequestTopics []string
 	// ConfigSecrets comes from verified signed metadata. A read-only OAuth
 	// driver may persist only these keys in its own secret namespace.
 	ConfigSecrets []string
@@ -109,6 +117,14 @@ func (p *RuntimePolicy) validate() error {
 			}
 		default:
 			return fmt.Errorf("read-only runtime has write-capable permission %q", permission)
+		}
+	}
+	// Declared read requests need no write permission; mqtt.publish stays
+	// refused above. Refuse a bad pattern here, so a malformed signed entry
+	// fails at start.
+	for _, pattern := range p.MQTTReadRequestTopics {
+		if err := validMQTTReadRequestPattern(pattern); err != nil {
+			return err
 		}
 	}
 	return nil
