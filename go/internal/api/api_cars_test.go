@@ -170,6 +170,111 @@ func TestTheBoxPageTapsWhichCar(t *testing.T) {
 	}
 }
 
+// The owner sets the goal of a car that is away, and it is the goal the car
+// brings to the charger it plugs into. The charger in use meanwhile keeps
+// its own car's goal.
+func TestTheBoxPageSetsTheGoalOfACarThatIsAway(t *testing.T) {
+	srv, mgr, rt := carsServer(t)
+	if code, body := carRequest(srv, http.MethodPost, "/api/cars", `{"id":"`+carA+`","name":"Volvo","capacity_wh":69000}`); code != http.StatusOK {
+		t.Fatalf("add: %d %v", code, body)
+	}
+
+	code, body := carRequest(srv, http.MethodPut, "/api/cars/"+carA+"/goal",
+		`{"target":0.8,"ready_by_min":420,"days":31,"surplus_only":true}`)
+	car, _ := body["car"].(map[string]any)
+	goal, _ := car["goal"].(map[string]any)
+	if code != http.StatusOK || goal["target_permille"] != float64(800) || goal["ready_by_min"] != float64(420) ||
+		goal["days"] != float64(31) || car["surplus_only"] != true {
+		t.Fatalf("the goal of an unplugged car: %d %v", code, body)
+	}
+	if st, _ := mgr.State("garage"); st.Schedule.HasTarget() || st.SurplusOnly {
+		t.Fatalf("the away car's goal reached the charger it is not on: %+v", st.Schedule)
+	}
+
+	// The Volvo plugs in at the garage and is named; the charger plans for
+	// its goal and its solar choice.
+	mgr.ObserveSession("garage", true, 0, 0, true, "easee:EH1", "s1")
+	rt.Tick()
+	session := rt.ChargerCar("garage").Session
+	if code, body := carRequest(srv, http.MethodPost, "/api/loadpoints/garage/car",
+		`{"session":"`+session+`","car_id":"`+carA+`"}`); code != http.StatusOK {
+		t.Fatalf("the tap: %d %v", code, body)
+	}
+	st, _ := mgr.State("garage")
+	if min, ok := st.Schedule.TimeOfDayMin(); st.Schedule.SoC != 0.8 || !ok || min != 420 || !st.Schedule.Recurring ||
+		st.Schedule.Days != 31 || !st.SurplusOnly {
+		t.Fatalf("the charger does not plan for the Volvo's goal: %+v surplus %v", st.Schedule, st.SurplusOnly)
+	}
+
+	// What is absent stays as it was.
+	if code, body := carRequest(srv, http.MethodPut, "/api/cars/"+carA+"/goal", `{"surplus_only":false}`); code != http.StatusOK {
+		t.Fatalf("solar only off: %d %v", code, body)
+	}
+	if got, _ := rt.Car(carA); got.Goal == nil || got.Goal.TargetPermille != 800 || got.SurplusOnly {
+		t.Fatalf("after solar only off: %+v", got)
+	}
+	if st, _ := mgr.State("garage"); st.SurplusOnly || st.Schedule.SoC != 0.8 {
+		t.Fatalf("the charger did not follow the car: %+v surplus %v", st.Schedule, st.SurplusOnly)
+	}
+
+	if code, body := carRequest(srv, http.MethodPut, "/api/cars/"+carA+"/goal", `{"clear":true}`); code != http.StatusOK {
+		t.Fatalf("clear: %d %v", code, body)
+	}
+	if got, _ := rt.Car(carA); got.Goal != nil {
+		t.Fatalf("the goal stayed after clear: %+v", got.Goal)
+	}
+}
+
+// The goal route reads its body with the op's own checks and answers with
+// the op's refusals.
+func TestTheGoalRouteRefusesAsTheOpDoes(t *testing.T) {
+	srv, _, rt := carsServer(t)
+	if code, body := carRequest(srv, http.MethodPut, "/api/cars/"+carB+"/goal", `{"clear":true}`); code != http.StatusNotFound ||
+		body["code"] != protocol.ErrNotFound || body["reason"] != "car" {
+		t.Fatalf("an unknown car: %d %v", code, body)
+	}
+	if code, body := carRequest(srv, http.MethodPost, "/api/cars", `{"id":"`+carA+`","name":"Volvo","capacity_wh":69000}`); code != http.StatusOK {
+		t.Fatalf("add: %d %v", code, body)
+	}
+	for _, tc := range []struct{ body, arg string }{
+		{`{"target":1.5,"ready_by_min":420}`, "target"},
+		{`{"target":0.8,"ready_by_min":1440}`, "ready_by_min"},
+		{`{"target":0.8,"ready_by_min":420,"days":128}`, "days"},
+		{`{"target":0.8}`, "ready_by_min"},
+		{`{"clear":true,"target":0.8,"ready_by_min":420}`, "clear"},
+		{`{"surplus_only":"yes"}`, "surplus_only"},
+	} {
+		if code, body := carRequest(srv, http.MethodPut, "/api/cars/"+carA+"/goal", tc.body); code != http.StatusBadRequest ||
+			body["arg"] != tc.arg || body["code"] != protocol.ErrUnknownOp {
+			t.Errorf("%s: %d %v, want the argument %s", tc.body, code, body, tc.arg)
+		}
+	}
+	if code, body := carRequest(srv, http.MethodPut, "/api/cars/"+carA+"/goal", `["not","a","goal"]`); code != http.StatusBadRequest {
+		t.Fatalf("a body that is not an object: %d %v", code, body)
+	}
+	if got, _ := rt.Car(carA); got.Goal != nil || got.SurplusOnly {
+		t.Fatalf("a refused body changed the car: %+v", got)
+	}
+}
+
+// The goal route lets in whoever the op lets in: a viewer phone and an
+// agent are refused, the owner is not.
+func TestTheGoalRouteNeedsTheOpsScope(t *testing.T) {
+	srv, _, _ := carsServer(t)
+	if code, body := carRequest(srv, http.MethodPost, "/api/cars", `{"id":"`+carA+`","name":"Volvo","capacity_wh":69000}`); code != http.StatusOK {
+		t.Fatalf("add: %d %v", code, body)
+	}
+	goal := `{"target":0.8,"ready_by_min":420}`
+	for _, c := range []apiauth.Caller{roleCaller(apiauth.KindApp, apiauth.RoleViewer), roleCaller(apiauth.KindAgent, apiauth.RoleAgent)} {
+		if code := carsAs(srv, http.MethodPut, "/api/cars/"+carA+"/goal", goal, c); code != http.StatusForbidden {
+			t.Errorf("%s %s set a goal: %d", c.Kind, c.Role, code)
+		}
+	}
+	if code := carsAs(srv, http.MethodPut, "/api/cars/"+carA+"/goal", goal, roleCaller(apiauth.KindApp, apiauth.RoleOwner)); code != http.StatusOK {
+		t.Fatalf("the owner: %d", code)
+	}
+}
+
 // The routes that keep the list are the box page's own: a phone sends the
 // ops as cmd frames, with their id and expiry, so the passthrough refuses
 // these. The tap is actuation a phone sends as session.car.set.
@@ -183,6 +288,7 @@ func TestTheCarRoutesArePricedLikeTheOps(t *testing.T) {
 		{http.MethodPost, "/api/cars", apiauth.TierLocal, ""},
 		{http.MethodPatch, "/api/cars/" + carA, apiauth.TierLocal, ""},
 		{http.MethodDelete, "/api/cars/" + carA, apiauth.TierLocal, ""},
+		{http.MethodPut, "/api/cars/" + carA + "/goal", apiauth.TierLocal, ""},
 		{http.MethodPost, "/api/loadpoints/garage/car", apiauth.TierActuate, protocol.OpSessionCarSet},
 		{http.MethodGet, "/api/cars", apiauth.TierRead, ""},
 	} {

@@ -2144,11 +2144,35 @@
       return res;
     });
   }
+  // One car's goal, from the cars card, plugged in or not. After each save
+  // the modal reads the cars again, so it shows what the box holds.
+  function openCarGoal(ui, car) {
+    var modal = document.getElementById("car-goal-modal");
+    var title = document.getElementById("car-goal-modal-title");
+    var body = document.getElementById("car-goal-modal-body");
+    if (!modal || !title || !body) return;
+    function refresh() {
+      return fetchStatus().then(function () {
+        return lastCars.find(function (c) { return c.id === car.id; }) || null;
+      });
+    }
+    function show(c) {
+      title.textContent = c.name;
+      body.replaceChildren(buildCarGoal(ui, c, siteHasPV(lastStatusPayload), { refresh: refresh, rebuild: show }));
+    }
+    show(car);
+    modal.open();
+  }
   function updateCars() {
     carsUI.then(function (ui) {
       var host = document.getElementById("overview-cars");
       if (!ui || !host) return;
-      if (!carsCard) carsCard = ui.createCarsCard(document, host, { onOpenCharger: openChargerOf });
+      if (!carsCard) {
+        carsCard = ui.createCarsCard(document, host, {
+          onOpenCharger: openChargerOf,
+          onSetGoal: function (car) { openCarGoal(ui, car); },
+        });
+      }
       carsCard.update({
         cars: lastCars, loadpoints: chargingNoticePoints, fetchedAt: carsFetchedAt, now: Date.now(),
         fresh: !document.hidden && Date.now() - carsFetchedAt < 15000,
@@ -4118,8 +4142,10 @@
     return { el: wrap, update: update };
   }
 
-  // Solar is a rule of the plan. A manual hold overrides it.
-  function buildPVModeSection(lp) {
+  // Solar is a rule of the plan. A manual hold overrides it. io is where
+  // the choice is saved: the charger's (the default) or one car's.
+  function buildPVModeSection(lp, io) {
+    io = io || chargerGoalIO(lp);
     var soBox = document.createElement("div");
     soBox.style.marginTop = "0.7rem";
     var soWrap = document.createElement("label");
@@ -4155,15 +4181,11 @@
       failure = "";
       soCb.disabled = true;
       soStatus.textContent = "Applying solar rule…";
-      evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ surplus_only: on }),
-      }).then(function (r) {
+      io.saveSurplus(on).then(function (r) {
         if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
         soStatus.textContent = "Solar rule saved. Reading the plan…";
         // Keep it pending until the read finishes; a poll cannot undo the choice.
-        return refreshEvModalAfterWrite();
+        return io.saved();
       }).catch(function (e) {
         failure = "Solar rule not confirmed: " + e.message;
       }).finally(function () { busy = false; update(latest); });
@@ -4179,9 +4201,11 @@
   // home battery threshold for spare solar. Persisted across
   // restarts; the backend rolls the deadline forward daily when Recurring
   // is set and arms the surplus-grab when the home battery is at/above the
-  // threshold (5 pp release hysteresis).
-  function buildScheduleSection(lp, hasPV, supportsVehicleLimit) {
-    var sched = (lp && lp.schedule) || {};
+  // threshold (5 pp release hysteresis). goalIO is the goal it edits: the
+  // charger's (the default) or one car's (carGoalIO).
+  function buildScheduleSection(lp, hasPV, supportsVehicleLimit, goalIO) {
+    var io = goalIO || chargerGoalIO(lp);
+    var sched = io.schedule;
     // The ready time is on the household clock, the box's zone, wherever
     // the browser is.
     supportsVehicleLimit = supportsVehicleLimit === true;
@@ -4208,9 +4232,9 @@
     // tomorrow morning's target tonight before plugging in. Show a
     // small hint when the loadpoint isn't currently connected so saved
     // edits don't feel inert: they'll apply at the next plug-in.
-    if (lp && !lp.plugged_in) {
+    if (io.note) {
       var unpluggedHint = document.createElement("div");
-      unpluggedHint.textContent = "Car not plugged in. Edits are saved and apply at next plug-in.";
+      unpluggedHint.textContent = io.note;
       unpluggedHint.style.fontSize = "0.72rem";
       unpluggedHint.style.color = "var(--text-dim)";
       unpluggedHint.style.marginBottom = "0.5rem";
@@ -4241,7 +4265,7 @@
     surplusBestEffortHint.style.padding = "0.4rem 0.55rem";
     surplusBestEffortHint.style.borderLeft = "2px solid var(--accent-e)";
     surplusBestEffortHint.style.background = "var(--ink-raised)";
-    surplusBestEffortHint.style.display = (lp && lp.surplus_only) ? "" : "none";
+    surplusBestEffortHint.style.display = io.surplusOnly ? "" : "none";
     box.appendChild(surplusBestEffortHint);
 
     function row(labelText, controlEl) {
@@ -4525,7 +4549,7 @@
     status.style.minHeight = "1em";
     status.setAttribute("role", "status");
     status.textContent = hasSched
-      ? "Changes save as you make them; the plan above follows."
+      ? io.savesHint
       : "No goal set yet. Choose this goal, or change the level or time.";
     box.appendChild(status);
 
@@ -4582,17 +4606,13 @@
       // Complete writes in order, even when the charger or planner is slow.
       writeQueue = writeQueue.catch(function () {}).then(function () {
         if (seq !== saveSeq) return;
-        return evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }).then(function (r) {
+        return io.save(body.schedule).then(function (r) {
           if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
           if (seq !== saveSeq) return;
           hasSched = true;
           paintClear();
           status.textContent = "Schedule saved.";
-          refreshEvModalAfterWrite();
+          io.saved();
         }).catch(function (e) {
           if (seq === saveSeq) {
             chooseBtn.disabled = false;
@@ -4629,15 +4649,10 @@
       saveSeq++;
       status.textContent = "Removing…";
       writeQueue = writeQueue.catch(function () {}).then(function () {
-        return evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ schedule: null }),
-        }).then(function (r) {
+        return io.clear().then(function (r) {
           if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ("HTTP " + r.status)); });
           status.textContent = "Schedule removed.";
-          schedNeedsRebuild = true;
-          refreshEvModalAfterWrite();
+          io.cleared();
         }).catch(function (e) {
           status.textContent = "Removal not confirmed: " + e.message;
           clearBtn.disabled = false;
@@ -4657,6 +4672,29 @@
       retentionDetail.hidden = !retentionDetail.textContent;
     };
     return box;
+  }
+
+  // The charger's goal, as the EV modal edits it: the goal of the car on it,
+  // or of the car it last had (docs/cars.md, One release of overlap).
+  function chargerGoalIO(lp) {
+    function post(body) {
+      return evWrite("/api/loadpoints/" + encodeURIComponent(lp.id) + "/target", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    }
+    return {
+      schedule: (lp && lp.schedule) || {},
+      surplusOnly: !!(lp && lp.surplus_only),
+      note: lp && !lp.plugged_in ? "Car not plugged in. Edits are saved and apply at next plug-in." : "",
+      savesHint: "Changes save as you make them; the plan above follows.",
+      save: function (schedule) { return post({ schedule: schedule }); },
+      clear: function () { return post({ schedule: null }); },
+      saveSurplus: function (on) { return post({ surplus_only: on }); },
+      saved: function () { return refreshEvModalAfterWrite(); },
+      cleared: function () { schedNeedsRebuild = true; return refreshEvModalAfterWrite(); },
+    };
   }
 
   // One session view. Opening settings never changes the charging mode.
@@ -4725,6 +4763,66 @@
     };
     container.update(lp, null);
     return container;
+  }
+
+  // One car's goal, wherever the car is: car.goal.set's route
+  // (docs/cars.md). ui is cars.js, which spells the op's arguments.
+  function carGoalIO(ui, car, hooks) {
+    function put(args) {
+      return evWrite(ui.goalPath(car), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(args),
+      });
+    }
+    return {
+      schedule: ui.scheduleOfGoal(car.goal),
+      surplusOnly: !!car.surplus_only,
+      note: "Saved with the car. It applies wherever the car plugs in.",
+      savesHint: "Changes save as you make them.",
+      save: function (schedule) { return put(ui.goalArgs(schedule)); },
+      clear: function () { return put(ui.goalArgs(null)); },
+      saveSurplus: function (on) { return put(ui.surplusArgs(on)); },
+      saved: hooks.saved,
+      cleared: hooks.cleared,
+    };
+  }
+
+  // buildCarGoal is one car's goal, as the cars card opens it: the EV
+  // modal's goal editor and solar rule, saved with the car, so a car that
+  // is away gets its goal too. The site's battery rule for spare solar is
+  // the charger's and stays in the EV modal. hooks.refresh reads the cars
+  // again and gives back this car, or null; hooks.rebuild redraws it.
+  function buildCarGoal(ui, car, hasPV, hooks) {
+    var box = document.createElement("section");
+    box.className = "ev-goal";
+    box.style.cssText = "padding:0.8rem;border:1px solid var(--line);border-radius:8px";
+    var heading = document.createElement("div");
+    heading.textContent = "Your goal";
+    heading.style.cssText = "font-weight:600;font-size:0.95rem;margin-bottom:0.3rem";
+    box.appendChild(heading);
+    var summary = document.createElement("p");
+    summary.style.cssText = "margin:0;font-size:0.9rem";
+    box.appendChild(summary);
+    var io = carGoalIO(ui, car, {
+      saved: function () {
+        return hooks.refresh().then(function (next) { if (next) box.update(next); });
+      },
+      cleared: function () {
+        return hooks.refresh().then(function (next) { if (next) hooks.rebuild(next); });
+      },
+    });
+    var schedule = buildScheduleSection(null, false, true, io);
+    box.appendChild(schedule);
+    var solar = hasPV || car.surplus_only ? buildPVModeSection(car, io) : null;
+    if (solar) box.appendChild(solar);
+    box.update = function (next) {
+      summary.textContent = ui.goalText(next.goal);
+      schedule.update(next);
+      if (solar) solar.update(next);
+    };
+    box.update(car);
+    return box;
   }
 
   // The ready time as "HH:MM" on the household clock. A Core without
