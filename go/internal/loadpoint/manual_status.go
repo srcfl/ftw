@@ -95,6 +95,9 @@ type ChargerReading struct {
 	Stalled     bool
 	// BalancerA: see ManualStatus.LoadBalancerA. Nil without that report.
 	BalancerA *float64
+	// NoPowerSince and NoPowerAt bound the current run of zero delivery
+	// under positive orders, from the command evidence. Zero without one.
+	NoPowerSince, NoPowerAt time.Time
 }
 
 const (
@@ -200,7 +203,13 @@ func ManualStatusFrom(h ManualHold, held bool, st State, ch ChargerReading, now 
 	limitMatches := m.ChargerLimitKnown && m.CommandedA >= 0 && math.Abs(ch.LimitA-m.CommandedA) < 1
 	// The charger holds the order, but its own load balancing does not let
 	// the car start yet. That is not a car that declines, for a while.
-	balancerWait := ch.BalancerA != nil && *ch.BalancerA+0.5 < m.CommandedA && elapsed < LoadBalancerRaiseWait
+	// The wait runs from the start of zero delivery, so a hold that begins
+	// after a long charge gets the same wait as one at the start.
+	zeroFor := elapsed
+	if !ch.NoPowerSince.IsZero() {
+		zeroFor = ch.NoPowerAt.Sub(ch.NoPowerSince)
+	}
+	balancerWait := ch.BalancerA != nil && *ch.BalancerA+0.5 < m.CommandedA && zeroFor < LoadBalancerRaiseWait
 	switch {
 	case ch.Unavailable || st.PowerUnavailable:
 		m.State = ManualUnavailable

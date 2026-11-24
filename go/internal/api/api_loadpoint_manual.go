@@ -347,6 +347,9 @@ func (s *Server) chargerReadings() map[string]loadpoint.ChargerReading {
 		}
 		if loadpoint.LoadBalancerHoldsStart(d.LimitA, d.LimitedBy) {
 			r.BalancerA = d.LimitA
+			if cmd, ok := s.deps.Tel.CommandEvidence(rd.Driver, telemetry.DerEV.String()); ok {
+				r.NoPowerSince, r.NoPowerAt = cmd.NoPowerSince, cmd.NoPowerAt
+			}
 		}
 		out[rd.Driver] = r
 	}

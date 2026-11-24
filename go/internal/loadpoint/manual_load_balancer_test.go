@@ -46,3 +46,30 @@ func TestManualHoldWaitsOutALoadBalancerHold(t *testing.T) {
 		})
 	}
 }
+
+// Codex review on #2050: a hold that starts after a long charge gets the
+// full wait, timed from the first zero reading, not from the order.
+func TestManualHoldTimesALateLoadBalancerHoldFromZeroDelivery(t *testing.T) {
+	t0 := time.Date(2026, 11, 12, 2, 24, 52, 0, time.UTC)
+	hold := ManualHold{PowerW: 8280, Persistent: true, StartedAt: t0}
+	st := State{Phases: 3, VoltageV: 230, CommandedW: 8280, CommandedKnown: true, CommandedReason: "manual_hold", CommandedSinceMs: t0.UnixMilli()}
+	zero := 0.0
+	cut := t0.Add(20 * time.Minute)
+	for _, tc := range []struct {
+		name string
+		at   time.Duration
+		want string
+	}{
+		{"three minutes into the hold", 3 * time.Minute, ManualAccepted},
+		{"past the wait", LoadBalancerRaiseWait, ManualNotDrawing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := ChargerReading{Known: true, LimitA: 12, LimitKnown: true, BalancerA: &zero,
+				NoPowerSince: cut, NoPowerAt: cut.Add(tc.at)}
+			m := ManualStatusFrom(hold, true, st, ch, cut.Add(tc.at))
+			if m.State != tc.want {
+				t.Fatalf("state %s, want %s", m.State, tc.want)
+			}
+		})
+	}
+}
