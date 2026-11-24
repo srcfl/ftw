@@ -66,6 +66,7 @@ const REASON_TITLES = {
   vehicle_complete: 'Car is full', vehicle_limit_completion: 'Car reached its limit', vehicle_not_requesting: 'Car not taking power',
   vehicle_declined: 'Car stopped charging',
   battery_full: 'Battery full', battery_nearly_full: 'Battery nearly full', battery_nearly_empty: 'Battery nearly empty',
+  battery_limit: 'Limited by the battery', learned_limit: 'At its usual limit', device_standby: 'On standby',
   core_limit: 'Limited by FTW', fuse_limit: 'Limited by the main fuse', fuse_cooldown: 'Waiting after a site power limit',
   import_limit: 'Limited by the hourly import limit',
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
@@ -98,6 +99,9 @@ function sentence(row) {
     case 'battery_full': return `FTW paused charging at ${percent(row.battery_soc)}. Charging resumes at ${percent(row.charge_resume_soc)} or lower; discharging works as normal.`;
     case 'battery_nearly_full': return `Taking ${controlPower(actual)} of ${controlPower(row.sent_w)} at ${percent(row.battery_soc)}. A battery charges slower when it is nearly full.`;
     case 'battery_nearly_empty': return `Giving ${controlPower(actual)} of ${controlPower(row.sent_w)} at ${percent(row.battery_soc)}. A battery limits discharge when it is nearly empty.`;
+    case 'battery_limit': return batteryLimit(row);
+    case 'learned_limit': return learnedLimit(row);
+    case 'device_standby': return `Asked for ${target(row)}, but the ${name} reports that it is on standby or starting up.`;
     case 'core_limit': return `FTW’s safety limits set the target to ${target(row)}.`;
     case 'fuse_limit': return `FTW lowered the rate to ${target(row)} to protect the main fuse.`;
     case 'import_limit': return `FTW lowered the rate to ${target(row)} to keep this hour’s grid import within its limit.`;
@@ -134,6 +138,42 @@ function sentence(row) {
   }
 }
 
+// A battery takes charge and gives discharge.
+const takes = row => num(row.sent_w) && row.sent_w < 0 ? 'give' : 'take';
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const day = ms => num(ms) && ms > 0 ? `${new Date(ms).getDate()} ${MONTHS[new Date(ms).getMonth()]}` : '';
+
+// A limit the device reports now: the battery's own, or its inverter's grid
+// headroom in the order's direction (limit_w is the headroom left).
+const inverterLimit = row => row.reason === 'battery_limit' && (row.limit_kind === 'inverter_import' || row.limit_kind === 'inverter_export');
+function batteryLimit(row) {
+  if (inverterLimit(row)) {
+    const more = num(row.limit_w) && row.limit_w >= 1 ? `only ${controlPower(row.limit_w)} more` : 'no more';
+    const grid = row.limit_kind === 'inverter_import' ? `take ${more} from the grid` : `send ${more} to the grid`;
+    return `The inverter reports that it can ${grid} now. FTW asked for ${target(row)}.`;
+  }
+  return !num(row.limit_w) ? `The battery reports a limit below ${num(row.sent_w) ? `the ${target(row)}` : 'what'} FTW asked for.`
+    : row.limit_w < 1 ? `The battery reports that it cannot ${takes(row)} power now. FTW asked for ${target(row)}.`
+    : `The battery reports that it can ${takes(row)} at most ${controlPower(row.limit_w)} now. FTW asked for ${target(row)}.`;
+}
+
+// A limit the battery has shown on more than one day, so its shortfall is
+// what it does, not a fault. Core says what holds it.
+function learnedLimit(row) {
+  const seen = num(row.limit_seen) && day(row.limit_since_ms)
+    ? ` FTW has seen this ${row.limit_seen} time${row.limit_seen === 1 ? '' : 's'} since ${day(row.limit_since_ms)}.` : '';
+  const earlier = num(row.limit_earlier_w) ? ` Earlier it was ${controlPower(row.limit_earlier_w)}.` : '';
+  const room = num(row.limit_room_w) ? `, which leaves ${controlPower(row.limit_room_w)} for the battery` : '';
+  const now = num(row.limit_w) ? ` (${controlPower(row.limit_w)} now)` : '';
+  if (row.limit_kind === 'battery_current' ? !num(row.limit_a) : !num(row.limit_w)) return `The battery is at a limit it has shown before.${seen}`;
+  switch (row.limit_kind) {
+    case 'grid_import': return `The inverter takes at most ${controlPower(row.limit_w)} from the grid${room}.${seen}${earlier}`;
+    case 'grid_export': return `The inverter sends at most ${controlPower(row.limit_w)} to the grid${room}.${seen}${earlier}`;
+    case 'battery_current': return `The battery ${takes(row)}s at most ${amps(row.limit_a)}${now}.${seen}${earlier}`;
+    default: return `The battery ${takes(row)}s at most ${controlPower(row.limit_w)}.${seen}${earlier}`;
+  }
+}
+
 function evPowerWarning(row) {
   if (row.kind !== 'ev' || !row.readings_fresh ||
       !num(row.requested_a) || !num(row.pilot_a) || !num(row.actual_w)) return '';
@@ -155,6 +195,7 @@ function nextStep(row) {
     case 'vehicle_declined': return 'Check the car’s charge limit and schedule.';
     case 'setpoint_changed': return 'Another app or controller may be changing it.';
     case 'device_fault': return `Check the ${name}.`;
+    case 'device_standby': return `It usually starts again by itself. If it stays on standby, check the ${name}’s app or display.`;
     case 'telemetry_stale': case 'readings_lost': case 'command_failed': case 'default_failed':
       return `Check the ${name}’s connection.`;
     case 'site_meter_stale': case 'site_phase_currents_stale': return 'Check the grid meter’s connection.';
@@ -214,7 +255,7 @@ export function planNowWords(value) {
 
 export function controlStatus(row, live = true) {
   if (!live) return {title: 'Status not current', text: 'FTW has not reported for a while.', proof: '', next: 'Waiting for a fresh report.', tone: 'stale'};
-  const title = REASON_TITLES[row.reason] || STATUS_TITLES[row.status] || 'Checking';
+  const title = (inverterLimit(row) && 'Limited by the inverter') || REASON_TITLES[row.reason] || STATUS_TITLES[row.status] || 'Checking';
   const tone = row.severity === 'alarm' ? 'alarm' : row.severity === 'warning' ? 'warning' : row.status === 'following' ? 'ok' : 'neutral';
   return {title, text: sentence(row), proof: proofLine(row), next: nextStep(row), tone};
 }
@@ -291,7 +332,9 @@ export function controlNumbers(row, live = true) {
   if (num(row.dynamic_limit_a)) values.push(['Dynamic current setting', amps(row.dynamic_limit_a)]);
   else if (num(row.offered_a)) values.push(['Reported current setting', amps(row.offered_a)]);
   if (num(row.device_limit_a)) values.push(['Charger limit', amps(row.device_limit_a)]);
-  if (num(row.limit_a)) values.push([row.limited_by === 'load_balancer' ? 'Load balancing allows' : 'Charger lets the car take', amps(row.limit_a)]);
+  // limit_a is a charger's limit, or a battery's learned current limit.
+  if (num(row.limit_a)) values.push([row.kind === 'battery' ? 'Battery current limit'
+    : row.limited_by === 'load_balancer' ? 'Load balancing allows' : 'Charger lets the car take', amps(row.limit_a)]);
   const e = row.site_evidence;
   if (e && typeof e === 'object') {
     for (const [label, key] of [['Grid before', 'grid_before_w'], ['Grid after', 'grid_after_w']]) {

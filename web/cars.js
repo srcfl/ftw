@@ -75,6 +75,46 @@ export function goalText(goal) {
   return `${what} by ${clock(goal.ready_by_min || 0)}, ${daysText(goal.days)}`;
 }
 
+// A car's goal is set with car.goal.set's route, for the car wherever it
+// is (docs/cars.md). The body is the op's arguments, by their names in
+// contract/registry.yaml; a test holds the two together.
+export function goalPath(car) {
+  return `/api/cars/${encodeURIComponent(car.id)}/goal`;
+}
+
+// scheduleOfGoal is a car's goal as the goal editor reads a charger's
+// schedule (docs/cars.md maps the two): days 0 is once, 127 every day,
+// which the schedule spells as recurring with days 0.
+export function scheduleOfGoal(goal) {
+  if (!goal) return {};
+  const days = (goal.days || 0) & 0x7f;
+  return {
+    soc: (goal.target_permille || 0) / 1000,
+    time_of_day_min: goal.ready_by_min || 0,
+    recurring: days !== 0,
+    days: days === 0x7f ? 0 : days,
+    finish_at_vehicle_limit: goal.finish_at_limit === true,
+  };
+}
+
+// goalArgs is the editor's schedule as car.goal.set's arguments; none
+// removes the goal. The site's battery rule for spare solar is the
+// charger's, and no car op carries it.
+export function goalArgs(schedule) {
+  if (!schedule) return { clear: true };
+  const days = schedule.recurring ? ((schedule.days || 0) & 0x7f) || 0x7f : 0;
+  return {
+    target: Math.min(1, Math.max(0, Number(schedule.soc) || 0)),
+    ready_by_min: schedule.time_of_day_min,
+    days,
+    finish_at_limit: schedule.finish_at_vehicle_limit === true,
+  };
+}
+
+export function surplusArgs(on) {
+  return { surplus_only: on === true };
+}
+
 // The charger a car is on now, if any.
 export function chargerOf(car, loadpoints = []) {
   return loadpoints.find(lp => lp && lp.plugged_in && lp.car_id && lp.car_id === car.id) || null;
@@ -238,14 +278,16 @@ export function carTiles(cars = [], loadpoints = [], sinceS = 0, chargersFresh =
     return {
       id: car.id, name: car.name, sources: carLevelSources(car), where,
       level: level.value, estimate: level.estimate, source: level.source, facts: facts.join(' · '),
+      goalLabel: car.goal ? 'Change goal' : 'Set goal',
       charger: on ? { id: lp.id, driver_name: lp.driver_name } : null, knownBy: on ? knownByText(lp, names) : '',
     };
   });
 }
 
 // createCarsCard fills the dashboard's card of cars, el, which the page
-// holds in its place in the overview.
-export function createCarsCard(doc, el, { onOpenCharger, onOpenHistory = car => openCarLevelHistory(doc, car) } = {}) {
+// holds in its place in the overview. onSetGoal opens a car's goal, plugged
+// in or not, with the car as the box last listed it.
+export function createCarsCard(doc, el, { onOpenCharger, onSetGoal, onOpenHistory = car => openCarLevelHistory(doc, car) } = {}) {
   el.replaceChildren();
   const head = node(doc, 'div', 'overview-card-head', el);
   const titles = node(doc, 'div', '', head);
@@ -255,16 +297,20 @@ export function createCarsCard(doc, el, { onOpenCharger, onOpenHistory = car => 
   const age = node(doc, 'span', 'overview-cars-age', head);
   const list = node(doc, 'div', 'car-tiles', el);
   let shown = '';
+  let listed = new Map();
   function update({ cars = [], loadpoints = [], fetchedAt = 0, now = Date.now(), fresh = true, chargersFresh = true } = {}) {
     el.hidden = !cars.length;
     age.textContent = fresh || !fetchedAt ? ''
       : `Not updated since ${new Date(fetchedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+    listed = new Map(cars.map(c => [c.id, c]));
     const tiles = carTiles(cars, loadpoints, fetchedAt ? Math.max(0, (now - fetchedAt) / 1000) : 0, fresh && chargersFresh);
     // Rebuilt only when what it shows changes; ages move once a minute.
     const key = JSON.stringify(tiles);
     if (key === shown) return;
     shown = key;
-    const focused = doc.activeElement && doc.activeElement.dataset && doc.activeElement.dataset.openCar;
+    const active = doc.activeElement && doc.activeElement.dataset;
+    const focused = active && active.openCar;
+    const focusedGoal = active && active.goalCar;
     list.replaceChildren();
     tiles.forEach(t => {
       const tile = node(doc, 'article', 'car-tile', list);
@@ -274,7 +320,15 @@ export function createCarsCard(doc, el, { onOpenCharger, onOpenHistory = car => 
       node(doc, 'span', 'car-tile-where' + (t.charger ? ' is-plugged' : ''), top, t.where);
       node(doc, 'div', 'car-tile-level' + (t.estimate ? ' is-estimate' : ''), tile, t.level);
       node(doc, 'div', 'car-tile-source', tile, t.source);
-      node(doc, 'div', 'car-tile-facts', tile, t.facts);
+      const facts = node(doc, 'div', 'car-tile-facts', tile);
+      node(doc, 'span', '', facts, t.facts);
+      // The goal is the car's, so it is set here, plugged in or not.
+      if (onSetGoal) {
+        const goal = node(doc, 'button', 'car-tile-open', facts, t.goalLabel);
+        goal.type = 'button'; goal.dataset.goalCar = t.id;
+        goal.addEventListener('click', () => { const car = listed.get(t.id); if (car) onSetGoal(car); });
+        if (focusedGoal === t.id) goal.focus();
+      }
       const foot = node(doc, 'div', 'car-tile-foot', tile);
       const history = node(doc, 'button', 'car-tile-open', foot, 'Battery history');
       history.type = 'button'; history.dataset.historyCar = t.id;

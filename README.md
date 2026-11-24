@@ -34,6 +34,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Community help is best effort;
 
 Join the [FTW Discord](https://discord.gg/UK2ygPBu8N) for questions and community discussions.
 
+The FTW Energy app for iPhone and Apple Watch is free in the
+[App Store](https://apps.apple.com/app/ftw-energy/id6822024949). To test new
+app versions first, ask in Discord to join the beta.
+
 See [project statistics](https://stats.ftw.energy/) for public development
 activity and anonymous usage totals.
 

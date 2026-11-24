@@ -43,6 +43,9 @@ type driverDetailResp struct {
 	Readings []readingDTO               `json:"readings"`
 	Metrics  []telemetry.MetricSnapshot `json:"metrics"`
 	Identity driverIdentityDTO          `json:"identity"`
+	// Inverter is the driver's inverter stream, apart from Readings
+	// because no site sum includes it. Absent until the driver sends one.
+	Inverter *inverterDTO `json:"inverter,omitempty"`
 	// Controls are what this driver says an operator may command. Absent
 	// for every driver that only reports.
 	Controls []drivers.CatalogControl `json:"controls,omitempty"`
@@ -70,6 +73,17 @@ type readingDTO struct {
 	SoC       *float64 `json:"soc,omitempty"`
 	UpdatedAt int64    `json:"updated_at_ms"`
 	Stale     bool     `json:"stale"`
+}
+
+// inverterDTO is a battery or hybrid driver's AC stage: its power, how much
+// more it takes from or gives to the grid now, and the emit as sent.
+type inverterDTO struct {
+	W                *float64        `json:"w,omitempty"`
+	AvailableImportW *float64        `json:"available_import_w,omitempty"`
+	AvailableExportW *float64        `json:"available_export_w,omitempty"`
+	Data             json.RawMessage `json:"data,omitempty"`
+	UpdatedAt        int64           `json:"updated_at_ms"`
+	Stale            bool            `json:"stale"`
 }
 
 type driverIdentityDTO struct {
@@ -119,6 +133,10 @@ func (s *Server) handleDriverDetail(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt: rd.UpdatedAt.UnixMilli(),
 			Stale:     time.Since(rd.UpdatedAt) > staleAfter,
 		})
+	}
+	if inv, ok := s.deps.Tel.Inverter(name); ok {
+		resp.Inverter = &inverterDTO{W: inv.W, AvailableImportW: inv.AvailableImportW, AvailableExportW: inv.AvailableExportW,
+			Data: inv.Data, UpdatedAt: inv.UpdatedAt.UnixMilli(), Stale: time.Since(inv.UpdatedAt) > staleAfter}
 	}
 	resp.Metrics = s.deps.Tel.LatestMetricsByDriver(name)
 	sort.Slice(resp.Metrics, func(i, j int) bool { return resp.Metrics[i].Name < resp.Metrics[j].Name })

@@ -9,8 +9,8 @@ import { readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 
 import {
-  ageText, asking, carTiles, choices, createCarsCard, createWhichCar, daysText, goalText,
-  levelView, noticeTitle, tap, tapRefusedText, TAP_TIMEOUT_MS,
+  ageText, asking, carTiles, choices, createCarsCard, createWhichCar, daysText, goalArgs, goalPath, goalText,
+  levelView, noticeTitle, scheduleOfGoal, surplusArgs, tap, tapRefusedText, TAP_TIMEOUT_MS,
 } from './cars.js';
 
 const read = path => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -107,6 +107,43 @@ describe('a goal in words', () => {
     assert.equal(goalText(null), 'No goal');
     assert.equal(daysText(0x60), 'weekends');
     assert.equal(daysText(0b0000101), 'Mon, Wed');
+  });
+});
+
+describe('a car’s goal is set with car.goal.set, plugged in or not', () => {
+  // The names car.goal.set takes, from the registry the box builds from.
+  const registry = read('../contract/registry.yaml');
+  const block = /\n  car\.goal\.set:\n((?:    - \{[^\n]*\n)+)/.exec(registry)[1];
+  const names = [...block.matchAll(/name: (\w+)/g)].map(m => m[1]);
+
+  it('sends only the op’s own arguments', () => {
+    assert.ok(names.includes('target') && names.includes('surplus_only'));
+    const sent = [goalArgs(scheduleOfGoal(tesla.goal)), goalArgs(null), surplusArgs(true)];
+    for (const args of sent) {
+      for (const key of Object.keys(args)) assert.ok(names.includes(key), key);
+    }
+  });
+
+  it('reads a goal as the editor reads a schedule, and writes it back unchanged', () => {
+    const every = scheduleOfGoal(tesla.goal);
+    assert.deepEqual(every, { soc: 0.8, time_of_day_min: 420, recurring: true, days: 0, finish_at_vehicle_limit: false });
+    for (const goal of [
+      tesla.goal,
+      { target_permille: 600, ready_by_min: 390, days: 0x1f, finish_at_limit: false },
+      { target_permille: 900, ready_by_min: 1200, days: 0, finish_at_limit: false },
+      { target_permille: 800, ready_by_min: 360, days: 0x60, finish_at_limit: true },
+    ]) {
+      const args = goalArgs(scheduleOfGoal(goal));
+      assert.deepEqual(args, { target: goal.target_permille / 1000, ready_by_min: goal.ready_by_min, days: goal.days,
+        finish_at_limit: goal.finish_at_limit });
+    }
+    assert.deepEqual(scheduleOfGoal(null), {});
+    assert.deepEqual(goalArgs(null), { clear: true });
+    assert.deepEqual(surplusArgs(false), { surplus_only: false });
+  });
+
+  it('names the car in the path', () => {
+    assert.equal(goalPath({ id: 'a/b' }), '/api/cars/a%2Fb/goal');
   });
 });
 
@@ -311,6 +348,25 @@ describe('the card of cars', () => {
     await open[0].click();
     assert.deepEqual(opened, ['easee']);
     assert.match(el.textContent, /You chose it/);
+  });
+
+  it('opens each car’s goal, the away car’s too', async () => {
+    const doc = fakeDoc();
+    const el = doc.createElement('section');
+    const opened = [];
+    const card = createCarsCard(doc, el, { onSetGoal: car => opened.push(car) });
+    const lp = { id: 'garage', driver_name: 'easee', plugged_in: true, session: 's1', car_id: tesla.id, car_identified_by: 'tap' };
+    card.update({ cars: [tesla, volvo], loadpoints: [lp], fetchedAt: 1, now: 1 });
+    const goals = buttons(el).filter(b => b.dataset.goalCar);
+    assert.deepEqual(goals.map(b => b.textContent), ['Change goal', 'Set goal']);
+    await goals[1].click();
+    assert.equal(opened[0], volvo, 'the car as the box last listed it');
+    // A later list opens the later car.
+    const later = { ...volvo, goal: { target_permille: 700, ready_by_min: 400, days: 0 } };
+    card.update({ cars: [tesla, later], loadpoints: [lp], fetchedAt: 2, now: 2 });
+    await buttons(el).find(b => b.dataset.goalCar === volvo.id).click();
+    assert.equal(opened[1], later);
+    assert.equal(buttons(el).find(b => b.dataset.goalCar === volvo.id).textContent, 'Change goal');
   });
 
   it('opens saved sensor history for an unplugged car without using its estimate', async () => {

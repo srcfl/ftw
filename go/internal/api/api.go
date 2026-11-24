@@ -561,6 +561,7 @@ func (s *Server) routes() {
 	s.handle("POST   /api/cars", Local, s.handleCarAdd)
 	s.handle("PATCH  /api/cars/{id}", Local, s.handleCarUpdate)
 	s.handle("DELETE /api/cars/{id}", Local, s.handleCarRemove)
+	s.handle("PUT    /api/cars/{id}/goal", Local, s.handleCarGoalSet)
 	// The one tap. It changes what the charger plans for, so it is
 	// actuation; a phone sends the op.
 	s.handle("POST /api/loadpoints/{id}/car", Actuate, s.handleSessionCarSet, Via(protocol.OpSessionCarSet))
@@ -1155,6 +1156,21 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 				if v2x.Protocol != nil {
 					d["v2x_protocol"] = *v2x.Protocol
 				}
+			}
+		}
+		// The inverter stream is a battery or hybrid's AC stage. It sits
+		// beside the driver's readings and is never added to them. Shown
+		// only while the driver is live, with when it was read.
+		if inv, ok := s.deps.Tel.LiveInverter(name); ok {
+			d["inverter_updated_at_ms"] = inv.UpdatedAt.UnixMilli()
+			if inv.W != nil {
+				d["inverter_w"] = *inv.W
+			}
+			if inv.AvailableImportW != nil {
+				d["inverter_available_import_w"] = *inv.AvailableImportW
+			}
+			if inv.AvailableExportW != nil {
+				d["inverter_available_export_w"] = *inv.AvailableExportW
 			}
 		}
 		drivers[name] = d
@@ -2288,6 +2304,8 @@ func (s *Server) handleGetModels(w http.ResponseWriter, r *http.Request) {
 			"max_discharge_curve":   m.MaxDischargeCurve,
 			"a":                     m.A,
 			"b":                     m.B,
+			// What the battery has shown it can do when short of an order.
+			"plateaus": m.Plateaus.View(),
 		}
 	}
 	writeJSON(w, 200, out)
