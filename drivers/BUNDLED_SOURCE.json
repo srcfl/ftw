@@ -16,7 +16,7 @@
     "from the signed channel. Run scripts/sync-bundled-drivers.sh to update."
   ],
   "repository": "srcfl/device-drivers",
-  "commit": "504b0ddf7831e4b6e97ff8438c92970e4ac39c1d",
+  "commit": "e7b94b11ca6b0c41c1ed275af2a698917e05e767",
   "source_dir": "drivers/lua",
   "drivers": [
     "ambibox_v2x", "ctek", "ctek_hybrid", "ctek_v2", "deye", "easee_cloud",

@@ -29,6 +29,8 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 		PowerAt              string   `json:"power_observed_at"`
 		PowerMaxAgeS         int      `json:"power_max_age_s"`
 		EnergyAt             string   `json:"energy_observed_at"`
+		LimitA               *float64 `json:"current_limit_a"`
+		LimitedBy            string   `json:"current_limited_by"`
 	}
 	if json.Unmarshal(r.Data, &d) != nil || (d.SessionWh != nil && *d.SessionWh < 0) {
 		return loadpoint.EVSample{}, false
@@ -45,7 +47,7 @@ func currentEVSample(r *telemetry.DerReading, health *telemetry.DriverHealth, wa
 	}
 	sample := loadpoint.EVSample{ConnectionGeneration: d.ConnectionGeneration, PowerW: r.RawW,
 		PowerAt: r.UpdatedAt, PowerMaxAge: time.Duration(min(max(d.PowerMaxAgeS, 0), 180)) * time.Second, Connected: *d.Connected, RequestKnown: d.RequestActive != nil, RequestActive: active, DeviceID: deviceID, SessionID: d.SessionID,
-		SessionWhUnavailable: d.SessionWh == nil}
+		SessionWhUnavailable: d.SessionWh == nil, LoadBalancerHold: loadpoint.LoadBalancerHoldsStart(d.LimitA, d.LimitedBy)}
 	_, powerKnown := telemetry.ControlPowerObservation(sample.PowerW, r.Data, r.UpdatedAt)
 	sample.PowerUnavailable = !powerKnown
 	if d.SessionWh != nil {

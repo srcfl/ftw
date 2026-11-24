@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/srcfl/ftw/go/internal/battery"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/control"
 	"github.com/srcfl/ftw/go/internal/loadpoint"
@@ -82,6 +83,22 @@ type ControlFeedback struct {
 	// VehicleDeclined is Core's debounced record that the car refused its
 	// offer. The reason carries the result.
 	VehicleDeclined bool `json:"-"`
+	// A battery limit that explains a shortfall (api_control_capability.go):
+	// the limit in W and, under a grid limit, the battery's room, both
+	// positive in the order's direction; where it comes from ("device" or
+	// "learned"), what holds it ("grid_import", "grid_export",
+	// "battery_current", "battery_power", "battery_reported",
+	// "inverter_import" or "inverter_export"), how many
+	// runs showed it, since when, and the learned limit it replaced.
+	LimitW        *float64 `json:"limit_w,omitempty"`
+	LimitRoomW    *float64 `json:"limit_room_w,omitempty"`
+	LimitSource   string   `json:"limit_source,omitempty"`
+	LimitKind     string   `json:"limit_kind,omitempty"`
+	LimitSeen     int      `json:"limit_seen,omitempty"`
+	LimitSinceMs  int64    `json:"limit_since_ms,omitempty"`
+	LimitEarlierW *float64 `json:"limit_earlier_w,omitempty"`
+	// shortfall is the sample the battery limit learner may take.
+	shortfall *battery.ShortfallSample
 }
 
 type feedbackReading struct {
@@ -179,6 +196,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 	for _, kind := range []telemetry.DerType{telemetry.DerBattery, telemetry.DerEV, telemetry.DerPV, telemetry.DerV2X} {
 		for _, rd := range s.deps.Tel.ReadingsByType(kind) {
 			cmd, commanded := s.deps.Tel.CommandEvidence(rd.Driver, kind.String())
+			now := rowClock(now, rd.UpdatedAt, cmd.LastObservation)
 			_, loadpointOwned := lps[rd.Driver]
 			manualBattery := held && kind == telemetry.DerBattery && (hold.Driver == "" || hold.Driver == rd.Driver)
 			// Measurements inform the site comparison, but only controlled
@@ -210,7 +228,8 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			// last reading for a minute after the driver stops sending. The
 			// driver checked its limit against the pilot when it was fresh,
 			// so only the pilot becomes unknown.
-			if d.PilotConfirmedAtMs != nil && (!pilotValid || (pilotFresh && *d.PilotA == 0)) {
+			// A zero pilot agrees with load balancing that holds the start.
+			if d.PilotConfirmedAtMs != nil && (!pilotValid || (pilotFresh && *d.PilotA == 0 && !loadpoint.LoadBalancerHoldsStart(d.LimitA, d.LimitedBy))) {
 				d.LimitA, d.LimitedBy = nil, ""
 			}
 			if d.LimitA != nil {
@@ -378,6 +397,9 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			if f.VerificationLost {
 				f.Reason = "readings_lost"
 			}
+			if kind == telemetry.DerBattery && commanded && cmd.Result == "accepted" && fresh {
+				s.explainBatteryShortfall(&f, rd.Data, meter, blocked, now)
+			}
 			f.ReadingsFresh = fresh
 			out = append(out, f)
 		}
@@ -434,6 +456,10 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 func setControlStatus(f *ControlFeedback) {
 	status, severity := "waiting", "info"
 	switch f.Reason {
+	case "battery_limit", "learned_limit":
+		status = "limited"
+	case "device_standby":
+		status, severity = "not_following", "warning"
 	case "power_observed", "solar_below_ceiling", "idle", "plan", "manual_hold", "pv_surplus",
 		"vehicle_complete", "vehicle_limit_completion", "vehicle_not_requesting":
 		status = "following"
@@ -444,6 +470,8 @@ func setControlStatus(f *ControlFeedback) {
 		status = "limited"
 	case "device_limit", "offered_current_lower":
 		status, severity = "limited", "warning"
+	case "load_balancer_wait":
+		status = "waiting"
 	case "setpoint_changed", "power_below_target", "power_above_target", "power_wrong_direction",
 		"no_power_response", "power_while_idle":
 		status, severity = "not_following", "warning"
@@ -484,6 +512,10 @@ func evAwayIdle(lp loadpoint.State, requestedW *float64) bool {
 	return !lp.PluggedIn && !lp.ManualActive && (requestedW == nil || *requestedW <= 0)
 }
 
+// controlVerificationLost reports readings lost once neither measured power
+// nor a new order has come for the grace a new order gets: 30 s, or 2 min
+// for a charger, whose cloud may re-read once a minute. Stale readings get
+// the same grace as missing power: one odd poll is not lost control.
 func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, now time.Time) bool {
 	// Failed or released calls have their own status. They do not by themselves
 	// mean that a previously measured device stopped supplying power readings.
@@ -494,14 +526,26 @@ func controlVerificationLost(f ControlFeedback, cmd telemetry.CommandEvidence, n
 	case "observe_only", "disabled", "device_control", "not_connected", "idle", "no_command":
 		return false
 	}
-	if f.Reason == "telemetry_stale" {
-		return true
-	}
 	grace := 30 * time.Second
 	if f.Kind == "ev" {
 		grace = 2 * time.Minute
 	}
 	return !cmd.Since.IsZero() && now.Sub(cmd.Since) >= grace && now.Sub(cmd.LastMeasuredAt) >= grace
+}
+
+// rowClock judges one device at the latest of the caller's clock and the
+// store's own stamps on what it read. The journal samples at its ticker's
+// time, and GET /api/status takes its clock before it waits for the
+// controller's lock; a driver can store a poll in between. The store stamps
+// with the box's clock, so such a reading is the newest there is, not one
+// from the future. The result never runs ahead of the present.
+func rowClock(now time.Time, stamps ...time.Time) time.Time {
+	for _, t := range stamps {
+		if t.After(now) {
+			now = t
+		}
+	}
+	return now
 }
 
 // evMismatchWait is how long a charger's fresh readings must disagree with
@@ -554,6 +598,24 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 		coreReason != "fuse_limit" && coreReason != "import_limit" &&
 		f.SentW != nil && *f.SentW > 100 && f.ActualW != nil && math.Abs(*f.ActualW) < 100 {
 		set("waiting", "vehicle_declined", "info")
+		return
+	}
+	// The charger's own load balancing lets the car take too little to
+	// start. Easee raises that current slowly after household use falls, so
+	// Core waits LoadBalancerRaiseWait from the first zero reading under
+	// positive orders (a pause ends that run) before it reports no power.
+	// Safety pauses, a charger holding a lower order, a pilot the car could
+	// start on, and a run without that clock older than the wait keep their
+	// own verdicts.
+	if f.Kind == "ev" && commanded && cmd.Result == "accepted" &&
+		coreReason != "site_meter_stale" && coreReason != "site_phase_currents_stale" && coreReason != "fuse_cooldown" &&
+		f.SentW != nil && *f.SentW > 100 && f.ActualW != nil && math.Abs(*f.ActualW) < 100 &&
+		loadpoint.LoadBalancerHoldsStart(f.LimitA, f.LimitedBy) && (f.RequestedA == nil || *f.LimitA+0.5 < *f.RequestedA) &&
+		(f.OfferedA == nil || f.RequestedA == nil || *f.OfferedA+0.5 >= *f.RequestedA) &&
+		(f.PilotA == nil || *f.PilotA < loadpoint.MinStartCurrentA) &&
+		(!cmd.NoPowerSince.IsZero() && cmd.NoPowerAt.Sub(cmd.NoPowerSince) < loadpoint.LoadBalancerRaiseWait ||
+			cmd.NoPowerSince.IsZero() && now.Sub(cmd.Since) < loadpoint.LoadBalancerRaiseWait) {
+		set("waiting", "load_balancer_wait", "info")
 		return
 	}
 	// A positive clamp explains the lower offer, not prolonged zero delivery.

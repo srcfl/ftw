@@ -54,10 +54,6 @@ body.ftw-app .view-heading h2 {
   font-size: clamp(20px, 2.4vw, 28px);
   letter-spacing: -0.025em;
 }
-body.ftw-app .view-heading > p:last-child {
-  max-width: 62ch;
-  color: var(--fg-dim);
-}
 body.ftw-app .view-kicker {
   color: var(--accent-e);
   font-family: var(--mono);
@@ -259,10 +255,6 @@ body.ftw-app .overview-heading p {
 body.ftw-app .overview-heading h2 {
   margin-top: 3px;
 }
-body.ftw-app .overview-heading > div:first-child > p:last-child {
-  max-width: 62ch;
-  color: var(--fg-dim);
-}
 
 /* Direct child of the 12-column Overview grid: span the row or the
    card occupies one column and the copy wraps a word per line. */
@@ -409,6 +401,15 @@ body.ftw-app .car-tile-foot {
   justify-content: space-between;
   gap: 10px;
   margin-top: 4px;
+}
+body.ftw-app .car-tile-facts {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+body.ftw-app .car-tile-facts .car-tile-open {
+  flex: none;
 }
 body.ftw-app .car-tile-open {
   padding: 0.3rem 0;
@@ -683,6 +684,8 @@ body.ftw-app .overview-plan-constraint {
   margin-top: 4px;
   color: var(--fg-muted);
 }
+body.ftw-app .overview-plan-constraint:empty,
+body.ftw-app #plan-constraint:empty { display: none; }
 body.ftw-app .overview-detail-link {
   align-self: flex-start;
   margin-top: auto;
@@ -1301,6 +1304,7 @@ body.ftw-app .plan-style-note {
   color: var(--fg-dim);
 }
 body.ftw-app .plan-style-note .btn-link {
+  padding-left: 0;
   font-family: var(--sans);
   font-size: 13px;
 }
@@ -1788,19 +1792,21 @@ body.ftw-app .plan-now-secondary > div {
   flex-direction: column;
   gap: 2px;
 }
+/* One column per shown cell: Expected charge goes without a battery and
+   Planner shows in the Advanced view only. The first cell always shows. */
 body.ftw-app .plan-now-meta {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   margin: 0;
   border-top: 1px solid var(--line);
 }
 body.ftw-app .plan-now-meta > div {
   min-width: 0;
   padding: 9px 16px 11px;
-  border-right: 1px solid var(--line);
 }
-body.ftw-app .plan-now-meta > div:last-child {
-  border-right: 0;
+body.ftw-app .plan-now-meta > div + div {
+  border-left: 1px solid var(--line);
 }
 body.ftw-app .plan-now-meta dt {
   margin: 0 0 3px;
@@ -1895,43 +1901,11 @@ body.ftw-app .plan-warning-details > pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-body.ftw-app .plan-help {
-  font-family: var(--sans);
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--fg-muted);
-  margin: 6px 0 4px;
-  max-width: 68ch;
-}
 body.ftw-app .plan-actions { gap: 10px; display: flex; align-items: center; }
-
-/* The "why is it doing that?" escape hatch, below the chart because
-   that's where the question forms. Understated: it should be findable
-   when something looks wrong, not compete with the plan itself. */
-body.ftw-app .plan-help-request {
-  margin: 10px 0 2px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border);
-}
-body.ftw-app .plan-help-request button { padding-left: 0; }
-body.ftw-app .plan-help-request button[disabled] {
-  opacity: 0.6;
-  cursor: default;
-  text-decoration: none;
-}
-body.ftw-app .plan-help-request small {
-  display: block;
-  font-family: var(--sans);
-  font-size: 11px;
-  line-height: 1.5;
-  color: var(--fg-muted);
-  margin-top: 2px;
-  max-width: 68ch;
-}
 
 body.ftw-app .more-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 12px;
   margin-bottom: 18px;
 }
@@ -1950,6 +1924,7 @@ body.ftw-app .more-action {
   text-decoration: none;
   cursor: pointer;
 }
+body.ftw-app .more-action[disabled] { cursor: default; opacity: 0.7; }
 body.ftw-app .more-action:hover {
   border-color: var(--accent-e);
   background: color-mix(in oklch, var(--ink-raised) 92%, var(--accent-e));
@@ -2710,9 +2685,6 @@ body.ftw-app .diagnose-detail {
     grid-column: 1;
     align-items: start;
   }
-  body.ftw-app .overview-heading > div:first-child > p:last-child {
-    display: none;
-  }
   body.ftw-app .overview-health {
     padding-top: 4px;
   }
@@ -2958,15 +2930,15 @@ body.ftw-app .diagnose-detail {
     text-align: left;
   }
   body.ftw-app .plan-now-meta {
+    grid-auto-flow: row;
     grid-template-columns: 1fr;
   }
   body.ftw-app .plan-now-meta > div {
     padding: 9px 12px;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
   }
-  body.ftw-app .plan-now-meta > div:last-child {
-    border-bottom: 0;
+  body.ftw-app .plan-now-meta > div + div {
+    border-left: 0;
+    border-top: 1px solid var(--line);
   }
   body.ftw-app .plan-actions { align-items: stretch; flex-wrap: wrap; }
   body.ftw-app .more-actions { grid-template-columns: 1fr; }

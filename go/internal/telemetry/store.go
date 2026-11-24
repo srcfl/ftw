@@ -94,6 +94,9 @@ type DerReading struct {
 	SoCUpdatedAt time.Time // last SoC source observation (receipt time for legacy drivers)
 	Data         json.RawMessage
 	UpdatedAt    time.Time
+	// Poll is the driver poll the reading came from, as the driver host
+	// numbers them; 0 when it came outside a poll.
+	Poll uint64
 }
 
 // DriverStatus describes the health of one driver.
@@ -306,6 +309,9 @@ type Store struct {
 	health              map[string]*DriverHealth
 	commands            map[string]CommandEvidence
 	controlObservations map[string][]ControlObservation
+	// inverters holds each driver's latest inverter stream reading, apart
+	// from readings so no site sum can include it (inverter.go).
+	inverters map[string]InverterReading
 
 	processNoise     float64
 	measurementNoise float64
@@ -352,6 +358,7 @@ func NewStore() *Store {
 		readings:         make(map[string]*DerReading),
 		filters:          make(map[string]*KalmanFilter1D),
 		health:           make(map[string]*DriverHealth),
+		inverters:        make(map[string]InverterReading),
 		latestMetric:     make(map[string]metricSnap),
 		born:             time.Now(),
 		processNoise:     100, // W of expected change between samples
@@ -430,6 +437,12 @@ const BatterySoCMaxAge = 5 * time.Minute
 // Update feeds a new reading. Applies Kalman smoothing and stores both raw
 // and smoothed values.
 func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, data json.RawMessage) {
+	s.UpdateFromPoll(driver, t, rawW, soc, data, 0)
+}
+
+// UpdateFromPoll is Update for a reading from driver poll number poll, so
+// readings from one poll can be told apart from an earlier poll's.
+func (s *Store) UpdateFromPoll(driver string, t DerType, rawW float64, soc *float64, data json.RawMessage, poll uint64) {
 	if err := ValidateReading(t, rawW, soc); err != nil {
 		return
 	}
@@ -492,6 +505,7 @@ func (s *Store) Update(driver string, t DerType, rawW float64, soc *float64, dat
 		SoCUpdatedAt: socUpdatedAt,
 		Data:         data,
 		UpdatedAt:    now,
+		Poll:         poll,
 	}
 
 	s.observeCommand(driver, t, rawW, data, now)
@@ -608,6 +622,25 @@ func (s *Store) Get(driver string, t DerType) *DerReading {
 		return r
 	}
 	return nil
+}
+
+// LiveMeterPower returns a driver's measured meter power, with when it was
+// measured, only while that driver is live and its device reports no fault.
+// A cached reading survives its driver going stale, offline or faulted, so
+// callers that judge the site from the meter ask here instead of reading the
+// cache directly.
+func (s *Store) LiveMeterPower(driver string) (ControlObservation, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	h, ok := s.health[driver]
+	if !ok || !h.TelemetryLive() || h.DeviceFault {
+		return ControlObservation{}, false
+	}
+	r := s.readings[key(driver, DerMeter)]
+	if r == nil {
+		return ControlObservation{}, false
+	}
+	return ControlPowerObservation(r.RawW, r.Data, r.UpdatedAt)
 }
 
 // ReadingsByType returns all readings of a given type (e.g. all batteries).
@@ -910,6 +943,7 @@ func (s *Store) Remove(driver string) {
 		delete(s.filters, k)
 	}
 	delete(s.health, driver)
+	delete(s.inverters, driver)
 	for _, kind := range allDerTypes {
 		delete(s.controlObservations, key(driver, kind))
 	}

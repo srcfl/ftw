@@ -21,6 +21,9 @@ and agents to assess and continue. See [CONTRIBUTING.md](CONTRIBUTING.md).
   handling its stored state; hidden configuration must not keep steering a site.
 - Make request, acceptance, command, device response and measured effect
   distinct. Show freshness and failures in the normal experience.
+- A screen shows facts. Explain only when something is off, or one tap
+  away; cut a sentence that says what the screen already shows (xorath,
+  21 November 2026).
 - Treat useful cold start, simple charging, notifications, recovery and
   analysis by agents as parts of the product, not optional polish.
 - Default battery wear cost is zero. Include charge/discharge efficiency.
