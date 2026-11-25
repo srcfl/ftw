@@ -134,6 +134,7 @@ func TestStalledVehicleCallbackCanCommandItsCharger(t *testing.T) {
 func TestLaterRunsAfterTheSlotIsFree(t *testing.T) {
 	port, srv := startServer(t, telemetry.NewStore(), "garage")
 	_, _, _ = connectCharger(t, srv, port, "garage")
+	waitSlotIdle(t, srv, "garage")
 	alias, err := srv.sockets.currentID("garage")
 	if err != nil {
 		t.Fatal(err)
@@ -189,4 +190,26 @@ func TestLaterRunsAfterTheSlotIsFree(t *testing.T) {
 	if n != 0 {
 		t.Fatalf("after map kept %d keys", n)
 	}
+}
+
+// waitSlotIdle waits until the capability probe from connect and boot has
+// finished and no boundCall holds id's slot. The probe's answer runs in a
+// boundCall on the library's goroutine, so right after connect the slot may
+// still be held.
+func waitSlotIdle(t *testing.T, srv *Server, id string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		srv.handler.mu.Lock()
+		probing := srv.handler.probing[id]
+		srv.handler.mu.Unlock()
+		srv.sockets.mu.Lock()
+		_, held := srv.sockets.after[id]
+		srv.sockets.mu.Unlock()
+		if !probing && !held {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("charger %s: slot still busy after 2 s", id)
 }
