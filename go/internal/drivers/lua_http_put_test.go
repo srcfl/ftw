@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync/atomic"
 	"testing"
 
@@ -153,27 +154,37 @@ func TestLuaHTTPPutWithoutHTTPCapability(t *testing.T) {
 }
 
 func TestLuaHTTPPutRefusesRedirects(t *testing.T) {
-	var followUps atomic.Int64
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		followUps.Add(1)
-		_, _ = w.Write([]byte(`ok`))
-	}))
-	defer target.Close()
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL, http.StatusFound)
-	}))
-	defer redirector.Close()
+	for _, code := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			var followUps atomic.Int64
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				followUps.Add(1)
+				_, _ = w.Write([]byte(`ok`))
+			}))
+			defer target.Close()
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL, code)
+			}))
+			defer redirector.Close()
 
-	env := NewHostEnv("redirected", telemetry.NewStore()).WithHTTP().WithHTTPAllowWrite()
-	ok, deniedBy := runHTTPWriteDriver(t, env, "http_put", redirector.URL)
-	if ok {
-		t.Fatal("a redirected PUT must not report success")
-	}
-	if deniedBy != "denied_redirect" {
-		t.Errorf("denied by %q, want the redirect refusal", deniedBy)
-	}
-	if followUps.Load() != 0 {
-		t.Fatalf("redirect target was reached %d times", followUps.Load())
+			env := NewHostEnv("redirected", telemetry.NewStore()).WithHTTP().WithHTTPAllowWrite()
+			ok, deniedBy := runHTTPWriteDriver(t, env, "http_put", redirector.URL)
+			if ok {
+				t.Fatal("a redirected PUT must not report success")
+			}
+			if deniedBy != "denied_redirect" {
+				t.Errorf("denied by %q, want the redirect refusal", deniedBy)
+			}
+			if followUps.Load() != 0 {
+				t.Fatalf("redirect target was reached %d times", followUps.Load())
+			}
+		})
 	}
 }
 

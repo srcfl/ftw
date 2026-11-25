@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -167,27 +168,37 @@ func TestLuaHTTPPatchRefusesRedirects(t *testing.T) {
 	// Go's HTTP client re-issues most redirected writes as body-less GETs,
 	// which would make http_patch report success for a write that never
 	// reached the device. A redirected PATCH must surface as an error.
-	var followUps atomic.Int64
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		followUps.Add(1)
-		_, _ = w.Write([]byte(`ok`))
-	}))
-	defer target.Close()
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL, http.StatusFound)
-	}))
-	defer redirector.Close()
+	for _, code := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			var followUps atomic.Int64
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				followUps.Add(1)
+				_, _ = w.Write([]byte(`ok`))
+			}))
+			defer target.Close()
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL, code)
+			}))
+			defer redirector.Close()
 
-	env := NewHostEnv("redirected", telemetry.NewStore()).WithHTTP().WithHTTPAllowWrite()
-	ok, deniedBy := runPatchDriver(t, env, redirector.URL)
-	if ok {
-		t.Fatal("a redirected PATCH must not report success")
-	}
-	if deniedBy != "denied_redirect" {
-		t.Errorf("denied by %q, want the redirect refusal", deniedBy)
-	}
-	if followUps.Load() != 0 {
-		t.Fatalf("redirect target was reached %d times — the write was converted to a GET", followUps.Load())
+			env := NewHostEnv("redirected", telemetry.NewStore()).WithHTTP().WithHTTPAllowWrite()
+			ok, deniedBy := runPatchDriver(t, env, redirector.URL)
+			if ok {
+				t.Fatal("a redirected PATCH must not report success")
+			}
+			if deniedBy != "denied_redirect" {
+				t.Errorf("denied by %q, want the redirect refusal", deniedBy)
+			}
+			if followUps.Load() != 0 {
+				t.Fatalf("redirect target was reached %d times — the write was converted to a GET", followUps.Load())
+			}
+		})
 	}
 }
 
