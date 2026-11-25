@@ -10,15 +10,19 @@ import (
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// releaseHookDriver records which stop hook ran, as metrics.
+// releaseHookDriver records which stop hook ran, as metrics. A default that
+// runs after a command emits stop_default as well, so a stop's own default can
+// be told apart from the startup default of a replacement instance.
 const releaseHookDriver = `
+local commanded = false
 function driver_init(config)
     host.set_poll_interval(1000)
 end
 function driver_poll() return 1000 end
-function driver_command(action, w, cmd) return true end
+function driver_command(action, w, cmd) commanded = true; return true end
 function driver_default_mode()
     host.emit_metric("default_called", 1)
+    if commanded then host.emit_metric("stop_default", 1) end
 end
 function driver_release()
     host.emit_metric("release_called", 1)
@@ -97,6 +101,9 @@ func TestOtherStopsKeepTheSafeDefault(t *testing.T) {
 			t.Cleanup(r.ShutdownAll)
 			cfg := config.Driver{Name: "charger", Lua: path}
 			addAndForgetStartup(t, r, tel, cfg)
+			if err := r.Send(context.Background(), "charger", []byte(`{"action":"ev_set_current","w":1380}`)); err != nil {
+				t.Fatal(err)
+			}
 			if err := tc.stop(r, cfg); err != nil {
 				t.Fatal(err)
 			}
@@ -104,8 +111,8 @@ func TestOtherStopsKeepTheSafeDefault(t *testing.T) {
 			if emitted["charger:release_called"] {
 				t.Fatal("a stop that FTW comes back from handed the device to its owner")
 			}
-			if !emitted["charger:default_called"] {
-				t.Fatal("the stop did not run driver_default_mode")
+			if !emitted["charger:stop_default"] {
+				t.Fatal("the stopped instance did not run driver_default_mode")
 			}
 		})
 	}
