@@ -3,6 +3,7 @@ package control
 import (
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
@@ -28,14 +29,13 @@ func (s *State) chargeCeiling(driver string) float64 {
 	return ceiling
 }
 
-// readingChargeCeiling is chargeCeiling for a caller that holds an online
-// battery's reading.
+// readingChargeCeiling is chargeCeiling for a caller that holds a battery's
+// reading, with the same age and hold rules (SoCCeilingNow). fuseTargetBounds
+// has no tick time, so it reads the wall clock, which also stamps readings.
 func readingChargeCeiling(r *telemetry.DerReading, lim PowerLimits) float64 {
 	ceiling := lim.socCeiling()
-	if r != nil && r.SoCCeiling != nil {
-		if device := *r.SoCCeiling; usableDeviceCeiling(device, lim) && device < ceiling {
-			return device
-		}
+	if device, ok := r.SoCCeilingNow(time.Now()); ok && usableDeviceCeiling(device, lim) && device < ceiling {
+		return device
 	}
 	return ceiling
 }

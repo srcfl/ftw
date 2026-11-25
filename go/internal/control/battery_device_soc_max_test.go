@@ -125,17 +125,24 @@ func TestDeviceSoCMaxHoldsAcrossAMissedLimitRead(t *testing.T) {
 	})
 }
 
+// The full-battery stop and the fuse bound read the same ceiling, so they
+// agree on a reading that has stopped updating.
 func TestDeviceSoCMaxDropsWithAStaleReading(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		tel, st, capacities := deviceCappedBatterySite(.9, `{"max_soc_fract":0.9}`)
+		st.DriverLimits = map[string]PowerLimits{"battery": {MaxChargeW: 5000}}
+		bound := func() float64 {
+			_, upper := fuseTargetBounds(tel.Get("battery", telemetry.DerBattery), st.DriverLimits["battery"])
+			return upper
+		}
 		st.updateBatteryChargeFull(tel, capacities)
-		if st.chargeCeiling("battery") != .9 {
-			t.Fatalf("charge ceiling = %v, want 0.9", st.chargeCeiling("battery"))
+		if c, upper := st.chargeCeiling("battery"), bound(); c != .9 || upper != 0 {
+			t.Fatalf("fresh reading: ceiling %v, fuse charge bound %v; want 0.9 and 0", c, upper)
 		}
 		time.Sleep(telemetry.BatterySoCMaxAge + time.Second)
 		st.updateBatteryChargeFull(tel, capacities)
-		if c := st.chargeCeiling("battery"); c != 1 {
-			t.Fatalf("a stale reading kept the device ceiling: %v", c)
+		if c, upper := st.chargeCeiling("battery"), bound(); c != 1 || upper != 5000 {
+			t.Fatalf("stale reading: ceiling %v, fuse charge bound %v; want 1 and 5000 from both paths", c, upper)
 		}
 	})
 }
@@ -156,7 +163,8 @@ func TestDeviceSoCMaxFollowsTheLatestReading(t *testing.T) {
 
 func TestDeviceSoCMaxClosesTheFuseChargeBound(t *testing.T) {
 	soc, ceiling := .9, .9
-	r := &telemetry.DerReading{SoC: &soc, SoCCeiling: &ceiling}
+	now := time.Now()
+	r := &telemetry.DerReading{SoC: &soc, SoCCeiling: &ceiling, SoCCeilingAt: now, UpdatedAt: now}
 	lim := PowerLimits{MaxChargeW: 5000, MaxDischargeW: 5000}
 	if lower, upper := fuseTargetBounds(r, lim); upper != 0 || lower != -5000 {
 		t.Fatalf("bounds at the device ceiling = %v..%v, want -5000..0", lower, upper)

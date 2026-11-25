@@ -98,8 +98,13 @@ func TestSoCCeilingBelowTrustedMinimumIsIgnored(t *testing.T) {
 
 func TestSoCCeilingDoesNotSurviveRemove(t *testing.T) {
 	s := NewStore()
+	updateBattery(s, `{"max_soc_fract":0.3}`)
 	updateBattery(s, `{"max_soc_fract":0.9}`)
+	updateBattery(s, `{"max_soc_fract":0.3}`)
 	s.Remove("pixii")
+	if _, logged := s.lowSoCCeilings["pixii"]; logged {
+		t.Fatal("Remove kept the driver's low-ceiling log state")
+	}
 	updateBattery(s, `{}`)
 	if c, ok := batteryCeiling(s); ok {
 		t.Fatalf("a replacement driver inherited ceiling %v", c)

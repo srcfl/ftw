@@ -958,6 +958,7 @@ func (s *Store) Remove(driver string) {
 	}
 	delete(s.health, driver)
 	delete(s.inverters, driver)
+	delete(s.lowSoCCeilings, driver)
 	for _, kind := range allDerTypes {
 		delete(s.controlObservations, key(driver, kind))
 	}

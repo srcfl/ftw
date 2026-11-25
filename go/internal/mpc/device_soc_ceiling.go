@@ -28,6 +28,8 @@ func withDeviceSoCCeilings(p Params, tele *telemetry.Store) Params {
 	for i := range storages {
 		storage := &storages[i]
 		ceiling, ok := tele.Get(storage.ID, telemetry.DerBattery).SoCCeilingNow(now)
+		// The plan has one SoC floor for the fleet, p.SoCMin; dispatch uses each
+		// battery's own (control.PowerLimits.socFloor), which can be higher.
 		if wh := storage.CapacityWh * ceiling; ok && ceiling > p.SoCMin && wh < storage.MaxEnergyWh {
 			storage.MaxEnergyWh = wh
 			lowered = true
