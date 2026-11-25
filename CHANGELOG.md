@@ -1,5 +1,106 @@
 # Changelog
 
+## 0.168.0
+
+### Minor Changes
+
+- d5afcb6: Each car on the box's page now has its own goal button. "Set goal" or "Change goal" opens the same goal editor and "Only spare solar" switch as the charger view, saved with the car, so you can set a car's goal while it is away or unplugged. It applies wherever the car plugs in. The page sends it through a new route, `PUT /api/cars/{id}/goal`, which takes `car.goal.set`'s arguments and is served only on the box's own page, as the other car routes are.
+- 0bd640c: Read a hybrid's inverter stream, and say when its inverter has no grid
+  headroom left.
+  
+  The driver contract lets a battery or hybrid driver report its AC stage with
+  `host.emit("inverter", …)`: its power, phases, rating, and
+  `available_import_W` / `available_export_W`, how much more the inverter will
+  take from or give to the grid now. Core refused that emit, so the Solis C&I
+  drivers lost it on every poll. Core now keeps the latest inverter reading per
+  driver. `/api/status` shows it while the driver is live (`inverter_w`,
+  `inverter_available_import_w`, `inverter_available_export_w`,
+  `inverter_updated_at_ms`), and `/api/drivers/{name}` shows the last one with
+  its age (`inverter`). It is not a device type: no site total, dispatch, fuse
+  guard or energy ledger reads it, and none of it is written to history. A
+  field that is not a usable number is left out and the rest kept.
+  
+  A battery that gives part of its order while its inverter reports, in the
+  same driver poll, no more import headroom while charging, or no more export
+  headroom while discharging, now reads "Limited by the inverter", with words
+  such as "The inverter reports that it can take no more from the grid now.
+  FTW asked for 5.0 kW charge." A battery that gives nothing keeps its warning,
+  since a dead battery on a site that may not export sees no export headroom
+  either; only the battery's own report of 0 available explains it. Headroom
+  above 100 W, headroom from an earlier poll, and a stale, offline or faulted
+  driver explain nothing. Wrong direction, power above the order or while
+  idle, a changed setpoint and lost readings keep their own reasons. Limited
+  verdicts never send the "not following" notice.
+- e1de7f1: A read-only MQTT driver from the signed channel may now send the read
+  requests its signed policy declares, such as Victron's
+  `R/<portal ID>/keepalive`.
+  
+  Venus OS on a Victron GX publishes its values only while a client sends that
+  keep-alive. FTW refused every publish from a signed read-only driver, so
+  `victron_mqtt` from the channel went stale on a GX with no other MQTT client.
+  
+  Core now lets such a driver publish to a topic its signed manifest lists, and
+  to nothing else. The grant needs `mqtt.subscribe` and no write permission, so
+  an older Core runs the same signed driver read-only and refuses the request.
+  A listed topic must start with `R/`, Venus's read-request namespace; a `+`
+  stands for one whole level, and `#` is refused. Each request carries at most
+  1 KiB, and a driver may send six a minute. Setup measurement mode holds read
+  requests as it holds writes. Every other publish, Modbus write and POST from a
+  read-only driver is still refused. Bundled, local and control drivers behave
+  as before.
+
+### Patch Changes
+
+- 0bd640c: Fix two phrases from the battery limit verdicts. A reported battery limit
+  without a known target now reads "The battery reports a limit below what FTW
+  asked for." instead of doubling "the". The Numbers list now labels a
+  battery's learned current limit "Battery current limit", not "Charger lets
+  the car take". The words match the web app's.
+- c1c58c7: Bundle the driver fixes from the battery review: Growatt and victron_mqtt now report battery power with the right sign (charging positive); victron, ferroamp_modbus and growatt leave a failed read out instead of sending 0, and ferroamp_modbus drops NaN and infinite values; GoodWe, Fronius GEN24, AlphaESS and Kstar read the registers their vendors document; victron_mqtt sends the Venus OS keep-alive and declares it as a read request. None of it is verified on hardware yet.
+- 3cd3724: Bundle Energyplan 0.8.1. On a slow box such as a Raspberry Pi, the
+  planner now stops on its time budget on large sites too, instead of
+  sometimes answering a few tens of milliseconds late. Plans are the same
+  as 0.8.0's.
+- d9fa6f6: Bundle zaptec_cloud 0.3.0 and easee_cloud 1.5.0. Zaptec: a one-phase car on
+  an idle three-phase charger now starts at the charger's minimum instead of
+  getting 0 A, no positive current goes below the charger's own minimum,
+  removing the charger gives back the owner's maximum and resumes it, and slow
+  Zaptec Cloud calls get 20 s and one retry. Easee: re-sends the current limit
+  as a command, rejects out-of-order power readings, reports when Easee's load
+  balancing holds the car below FTW's order or holds a start, and exposes a
+  confirmed pilot current. Neither is confirmed on hardware yet.
+- 919ff0c: Add an opt-in Easee diagnostics collector that records charging starts and stops with the FTW order, pilot and power readings, and the available vehicle context.
+- 2351ca4: The box's page reads shorter. A tester found explaining text everywhere.
+  On the Plan page two of every three words explained instead of showed.
+  
+  The pages lose the sentence under each title and the cards in History lose
+  theirs. The Plan page loses the paragraph over the chart (tomorrow's price
+  time moved into the "?" help), the help report's blurb and "Safety limits
+  are the same in every style". The style captions, the export permission and
+  the sun lines are shorter, and the sun line speaks only while the plan holds
+  spare sun back. "No active safety adjustment" no longer shows when nothing
+  adjusts. The planner's workings (mode, horizon, slots, solver, DP shadow,
+  start SoC and the Planner cell) show in the Advanced view. The words on the
+  Plan page fall from 341 to 172 in the simple view.
+- 7913c89: The help file moves from under the plan chart to More, as a "Get help" tile next to Settings, Setup and Version. Asking for help is about the whole box, not the plan. It downloads the same file as before.
+- d11bf04: A car whose start the charger's own load balancing holds back now reads
+  "Waiting for load balancing" instead of "Not following", and Charge now no
+  longer says the car is not drawing. The driver must report that the load
+  balancing leaves less than the 6 A a car starts on. Easee's Equalizer raises
+  the current slowly, up to 15 minutes after the home uses less, so FTW waits
+  that long. A start still missing after 15 minutes is reported as before, and
+  the next step names the load balancing. The resume retries log their failed
+  start after the same wait.
+- d9fa6f6: Slow cloud chargers no longer get paused for being slow. A driver can ask for
+  up to 30 s per call with `host.set_command_timeout_s`; the control tick still
+  waits only its short deadline, and the call finishes in the driver's own
+  queue. Before, a Zaptec command that took longer than 5 s failed, and the safe
+  default then paused the charger at 0 A.
+  
+  Removing or disabling a driver now calls its optional `driver_release`, so a
+  charger goes back to the owner's own current instead of staying at FTW's 0 A.
+  A restart, a shutdown or a stale reading still uses `driver_default_mode`.
+
 ## 0.167.0
 
 ### Minor Changes
