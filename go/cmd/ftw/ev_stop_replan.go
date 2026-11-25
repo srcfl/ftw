@@ -17,3 +17,20 @@ func evStopNeedsReplan(lp loadpoint.State, prevW float64) bool {
 	}
 	return !lp.CommandedKnown || lp.CommandedW >= evStopLow
 }
+
+// declineReplanReason names a replan when a plugged-in car's refusal latch
+// moved since the last tick (prevDeclined): the plan leaves the car out once
+// it declined, and takes it in again once the latch ends (a retry, Charge
+// now, a higher goal, measured charging). A scheduled replan would leave the
+// old plan offering a declining car, or holding back a car that may charge,
+// for up to its whole interval.
+func declineReplanReason(lp loadpoint.State, prevDeclined bool) string {
+	declined := lp.PluggedIn && lp.ChargingDeclined
+	switch {
+	case declined && !prevDeclined:
+		return "loadpoint_declined"
+	case prevDeclined && !declined && lp.PluggedIn:
+		return "loadpoint_decline_ended"
+	}
+	return ""
+}

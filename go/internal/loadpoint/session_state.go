@@ -347,6 +347,7 @@ func (m *Manager) observeConnectionProof(id string, generation uint64, unknown b
 	lp.steadyRunArmed = false
 	lp.notRequestingSince = time.Time{}
 	lp.chargingDeclined = false
+	lp.declineRetriedAt = time.Time{}
 	lp.completionNotified = false
 	m.mu.Unlock()
 	if m.sessionStore != nil && previousDevice != "" {

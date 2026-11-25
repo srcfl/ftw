@@ -27,3 +27,27 @@ func TestEVStopReplanOnlyWhenTheCarStoppedItself(t *testing.T) {
 		}
 	}
 }
+
+// The plan follows the refusal latch at once: it leaves a car out as soon as
+// the car has declined, and takes it in as soon as the latch ends while the
+// car is still plugged in (srcfl/ftw#2080). An unplug replans on its own.
+func TestDeclineEdgesReplan(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		prev, now, plugged bool
+		want               string
+	}{
+		{"car declined", false, true, true, "loadpoint_declined"},
+		{"refusal ended", true, false, true, "loadpoint_decline_ended"},
+		{"unplugged", true, false, false, ""},
+		{"still declined", true, true, true, ""},
+		{"never declined", false, false, true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lp := loadpoint.State{PluggedIn: tc.plugged, ChargingDeclined: tc.now}
+			if got := declineReplanReason(lp, tc.prev); got != tc.want {
+				t.Fatalf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
