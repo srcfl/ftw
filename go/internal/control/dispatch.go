@@ -466,9 +466,9 @@ type State struct {
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
 	batteryChargeFull    map[string]bool
-	// batteryDeviceSoCMax is the charge ceiling each battery's device last
-	// reported (max_soc_fract). See chargeCeiling.
-	batteryDeviceSoCMax map[string]float64
+	// batteryDeviceSoCMax is the charge ceiling each battery's device
+	// reports (max_soc_fract), as the last tick saw it. See chargeCeiling.
+	batteryDeviceSoCMax map[string]deviceSoCMax
 
 	// clock is nil in production. Tests may set it to keep a dispatch
 	// scenario on one instant even when the test runner is delayed.

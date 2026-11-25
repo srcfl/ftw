@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"math"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -48,18 +49,52 @@ func TestOnlineFleetParamsPlansEachBatteryToItsDeviceCeiling(t *testing.T) {
 	}
 }
 
-func TestOnlineFleetParamsIgnoresDeviceCeilingAtTheFloor(t *testing.T) {
+func TestOnlineFleetParamsIgnoresUnusableDeviceCeilings(t *testing.T) {
+	for _, tc := range []struct {
+		name, data string
+		soc        float64
+	}{
+		// Telemetry does not trust a ceiling below 50 %.
+		{"below the trusted minimum", `{"max_soc_fract":0.3}`, .7},
+		// A ceiling at or below the floor leaves nothing to plan in.
+		{"at or below the SoC floor", `{"max_soc_fract":0.55}`, .7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := telemetry.NewStore()
+			tel.Update("pixii", telemetry.DerBattery, 0, &tc.soc, json.RawMessage(tc.data))
+			tel.DriverHealthMut("pixii").RecordSuccess()
+			s := &Service{Tele: tel}
+			p, ok := s.onlineFleetParams(Params{SoCMin: .6, SoCMax: .95}, []BatteryFleetMember{
+				{Driver: "pixii", CapacityWh: 20000, MaxChargeW: 5000, MaxDischargeW: 5000},
+			}, 0)
+			if !ok || p.SoCMax != .95 || p.Storages[0].MaxEnergyWh != 19000 {
+				t.Fatalf("an unusable device ceiling changed the plan's window: ok=%v SoCMax=%v storage=%+v",
+					ok, p.SoCMax, p.Storages[0])
+			}
+		})
+	}
+}
+
+// withDeviceSoCCeilings changes MaxEnergyWh and nothing else on a storage, so
+// any per-battery limit added beside it (for example the per-slot limits in
+// srcfl/ftw#2072) passes through unchanged.
+func TestDeviceSoCCeilingsChangeOnlyMaxEnergy(t *testing.T) {
 	tel := telemetry.NewStore()
-	soc := .1
-	tel.Update("pixii", telemetry.DerBattery, 0, &soc, json.RawMessage(`{"max_soc_fract":0.1}`))
-	tel.DriverHealthMut("pixii").RecordSuccess()
-	s := &Service{Tele: tel}
-	p, ok := s.onlineFleetParams(Params{SoCMin: .1, SoCMax: .95}, []BatteryFleetMember{
-		{Driver: "pixii", CapacityWh: 20000, MaxChargeW: 5000, MaxDischargeW: 5000},
-	}, 0)
-	if !ok || p.SoCMax != .95 || p.Storages[0].MaxEnergyWh != 19000 {
-		t.Fatalf("a device ceiling at the SoC floor changed the plan's window: ok=%v SoCMax=%v storage=%+v",
-			ok, p.SoCMax, p.Storages[0])
+	soc := .5
+	tel.Update("pixii", telemetry.DerBattery, 0, &soc, json.RawMessage(`{"max_soc_fract":0.9}`))
+	storage := StorageAssetSpec{
+		ID: "pixii", CapacityWh: 20000, InitialEnergyWh: 10000, MinEnergyWh: 2000, MaxEnergyWh: 19000,
+		MaxChargeW: 5000, MaxDischargeW: 4000, ChargeEfficiency: .95, DischargeEfficiency: .94,
+	}
+	p := Params{CapacityWh: 20000, InitialSoC: .5, SoCMin: .1, SoCMax: .95, Storages: []StorageAssetSpec{storage}}
+	got := withDeviceSoCCeilings(p, tel)
+	want := storage
+	want.MaxEnergyWh = 18000
+	if !reflect.DeepEqual(got.Storages, []StorageAssetSpec{want}) {
+		t.Fatalf("storages = %+v, want only MaxEnergyWh lowered to %+v", got.Storages, want)
+	}
+	if p.Storages[0].MaxEnergyWh != 19000 {
+		t.Fatal("withDeviceSoCCeilings wrote through to the caller's storages")
 	}
 }
 

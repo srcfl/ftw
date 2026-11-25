@@ -92,6 +92,10 @@ type DerReading struct {
 	SmoothedW    float64
 	SoC          *float64  // optional; 0..1 fraction for every DER including vehicles
 	SoCUpdatedAt time.Time // last SoC source observation (receipt time for legacy drivers)
+	// SoCCeiling is a battery's own charge ceiling, 0..1, and SoCCeilingAt
+	// when its driver last reported it. Read it through SoCCeilingNow.
+	SoCCeiling   *float64
+	SoCCeilingAt time.Time
 	Data         json.RawMessage
 	UpdatedAt    time.Time
 	// Poll is the driver poll the reading came from, as the driver host
@@ -312,6 +316,9 @@ type Store struct {
 	// inverters holds each driver's latest inverter stream reading, apart
 	// from readings so no site sum can include it (inverter.go).
 	inverters map[string]InverterReading
+	// lowSoCCeilings is the last battery ceiling per driver logged as too low
+	// to trust (battery_soc_ceiling.go).
+	lowSoCCeilings map[string]float64
 
 	processNoise     float64
 	measurementNoise float64
@@ -496,6 +503,11 @@ func (s *Store) UpdateFromPoll(driver string, t DerType, rawW float64, soc *floa
 			socUpdatedAt = prev.SoCUpdatedAt
 		}
 	}
+	var socCeiling *float64
+	var socCeilingAt time.Time
+	if t == DerBattery {
+		socCeiling, socCeilingAt = s.socCeilingFor(driver, data, s.readings[k], now)
+	}
 	s.readings[k] = &DerReading{
 		Driver:       driver,
 		DerType:      t,
@@ -503,6 +515,8 @@ func (s *Store) UpdateFromPoll(driver string, t DerType, rawW float64, soc *floa
 		SmoothedW:    smoothed,
 		SoC:          soc,
 		SoCUpdatedAt: socUpdatedAt,
+		SoCCeiling:   socCeiling,
+		SoCCeilingAt: socCeilingAt,
 		Data:         data,
 		UpdatedAt:    now,
 		Poll:         poll,
