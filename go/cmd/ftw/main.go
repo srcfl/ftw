@@ -2068,12 +2068,9 @@ func main() {
 		})
 		// An observe-only or read-only charger is never offered current
 		// again after a refusal; an approved OCPP charger may be.
-		lpController.SetChargerControlAllowed(func(name string) bool {
-			if ocppSrv != nil && ocppSrv.Handler().IsOnline(name) && ocppSrv.Handler().IsApproved(name) {
-				return true
-			}
-			return reg.CanControl(name)
-		})
+		lpController.SetChargerControlAllowed(chargerControlAllowed(reg, func(name string) bool {
+			return ocppSrv != nil && ocppSrv.Handler().IsOnline(name) && ocppSrv.Handler().IsApproved(name)
+		}))
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.

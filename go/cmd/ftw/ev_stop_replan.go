@@ -34,3 +34,16 @@ func declineReplanReason(lp loadpoint.State, prevDeclined bool) string {
 	}
 	return ""
 }
+
+// chargerControlAllowed is the write authority the decline retry asks for: an
+// approved OCPP charger, or a loaded driver that is neither observe-only nor
+// read-only (Registry.CanControl). A charger Core only observes is never
+// offered current again on its own.
+func chargerControlAllowed(reg interface{ CanControl(string) bool }, ocppApproved func(string) bool) func(string) bool {
+	return func(name string) bool {
+		if ocppApproved != nil && ocppApproved(name) {
+			return true
+		}
+		return reg != nil && reg.CanControl(name)
+	}
+}

@@ -1757,6 +1757,11 @@ func (m *Manager) retryDeclinedCharging(id string, now time.Time, carDone bool) 
 	lp.chargingDeclined = false
 	lp.notRequestingSince = time.Time{}
 	lp.declineRetriedAt = now
+	// The run before the refusal ended with the car declining. Its stop is
+	// not a fresh interruption, so a slow start after the retry must not
+	// report it as one; a new steady run arms the notice again.
+	lp.steadyRunArmed = false
+	lp.stoppedSince = time.Time{}
 	return true
 }
 

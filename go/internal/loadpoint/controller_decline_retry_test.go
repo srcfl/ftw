@@ -4,37 +4,49 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/srcfl/ftw/go/internal/events"
 )
 
 // declineRetryRig drives one charger through the field case of
 // srcfl/ftw#2080. The plan offers the car current only while the loadpoint
 // has not latched a refusal, as Core's planner does. The car declines every
 // offer when refuses is set. Under Core's own 0 A the charger reports the car
-// as asking, as an Easee does with reason 52.
+// as asking, as an Easee does with reason 52. With slowStart the car asks but
+// draws nothing, as while an Easee starts; with absent the charger has no
+// reading (its driver is not running).
 type declineRetryRig struct {
-	t       *testing.T
-	c       *Controller
-	cfg     Config
-	dir     *Directive
-	samples map[string]EVSample
-	clock   time.Time
-	refuses bool
-	offers  []time.Time // when an offer began after Core held 0 A
+	t           *testing.T
+	c           *Controller
+	cfg         Config
+	dir         *Directive
+	samples     map[string]EVSample
+	clock       time.Time
+	refuses     bool
+	slowStart   bool
+	absent      bool
+	dispatch    bool
+	offers      []time.Time // when an offer began after Core held 0 A
+	interrupted int         // charging.interrupted events
 }
 
 func newDeclineRetryRig(t *testing.T) *declineRetryRig {
 	t.Helper()
 	r := &declineRetryRig{
-		t:     t,
-		cfg:   reasonLoadpoint(),
-		dir:   &Directive{},
-		clock: time.Date(2026, 11, 24, 21, 45, 0, 0, time.UTC),
+		t:        t,
+		cfg:      reasonLoadpoint(),
+		dir:      &Directive{},
+		clock:    time.Date(2026, 11, 24, 21, 45, 0, 0, time.UTC),
+		dispatch: true,
 	}
 	r.samples = map[string]EVSample{r.cfg.DriverName: {Connected: true, PowerW: 11000, RequestActive: true}}
 	r.c = newTestController(t, []Config{r.cfg}, r.dir, r.samples, &fakeSender{})
 	r.c.manager.SetNowFn(func() time.Time { return r.clock })
 	r.c.manager.SetLocation(time.UTC)
 	r.c.manager.SetTarget(r.cfg.ID, 1, r.clock.Add(9*time.Hour))
+	bus := events.NewBus()
+	bus.Subscribe(events.KindChargingInterrupted, func(events.Event) { r.interrupted++ })
+	r.c.manager.SetBus(bus)
 	return r
 }
 
@@ -55,6 +67,10 @@ func (r *declineRetryRig) step(d time.Duration) {
 	r.clock = r.clock.Add(d)
 	offered := before.CommandedKnown && before.CommandedW >= DeliveringW
 	switch {
+	case r.absent:
+		delete(r.samples, r.cfg.DriverName)
+	case r.slowStart:
+		r.samples[r.cfg.DriverName] = EVSample{Connected: true, PowerW: 0, RequestActive: true}
 	case !r.refuses:
 		r.samples[r.cfg.DriverName] = EVSample{Connected: true, PowerW: before.CommandedW, RequestActive: true}
 	case offered:
@@ -69,7 +85,7 @@ func (r *declineRetryRig) step(d time.Duration) {
 	if r.samples[r.cfg.DriverName].Connected && !r.state().ChargingDeclined {
 		r.dir.LoadpointEnergyWh[r.cfg.ID] = 2750
 	}
-	r.c.Tick(context.Background(), r.clock)
+	r.c.TickWithDispatch(context.Background(), r.clock, r.dispatch)
 	if after := r.state(); !offered && after.CommandedW >= DeliveringW && before.CommandedKnown {
 		r.offers = append(r.offers, r.clock)
 	}
@@ -250,4 +266,89 @@ func TestDeclineExitsStillActAtOnce(t *testing.T) {
 			t.Fatal("unplug kept the refusal")
 		}
 	})
+}
+
+// srcfl/ftw#2084 review: a car that charged steadily and then declined keeps
+// its old stop. A retry that ends the latch must not turn that stop into
+// "Charging stopped early" while an Easee takes minutes to start.
+func TestRetryDoesNotReportAnOldStopAsAnInterruption(t *testing.T) {
+	r := newDeclineRetryRig(t)
+	r.run(InterruptSteadyRun+time.Minute, 5*time.Second)
+	latched := r.decline()
+	r.run(DeclineRetryInterval-time.Minute-r.clock.Sub(latched), 30*time.Second)
+	r.wantLatched("before the retry interval")
+
+	r.slowStart = true
+	r.run(10*time.Minute, 5*time.Second)
+	if st := r.state(); st.ChargingDeclined || st.CommandedW < DeliveringW {
+		t.Fatalf("the retry did not offer current: %+v", st)
+	}
+	if r.interrupted != 0 {
+		t.Fatalf("a retry reported the stop of an hour ago as an interruption %d times", r.interrupted)
+	}
+}
+
+// Charge now and Stop hold the charger for the owner; the retry leaves both.
+func TestDeclinedCarIsNotRetriedUnderAHold(t *testing.T) {
+	t.Run("stop", func(t *testing.T) {
+		r := newDeclineRetryRig(t)
+		r.decline()
+		r.c.SetManualHold(r.cfg.ID, ManualHold{PowerW: 0, Persistent: true})
+		r.refuses = false
+		r.run(DeclineRetryInterval+2*time.Minute, time.Minute)
+		if !r.state().ChargingDeclined {
+			t.Fatal("retried while Stop held the charger")
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		hold ManualHold
+	}{
+		{"stop", ManualHold{PowerW: 0, Persistent: true}},
+		{"charge now", ManualHold{PowerW: 11040, PhaseMode: "3p", Persistent: true}},
+	} {
+		t.Run(tc.name+" guard", func(t *testing.T) {
+			r := newDeclineRetryRig(t)
+			r.decline()
+			r.c.SetManualHold(r.cfg.ID, tc.hold)
+			// Charge now ends a refusal itself. Latch one again under the
+			// hold, overdue for a retry, as a car refusing the hold would.
+			r.c.manager.mu.Lock()
+			lp := r.c.manager.byID[r.cfg.ID]
+			lp.chargingDeclined = true
+			lp.chargingDeclinedAt = r.clock.Add(-2 * DeclineRetryInterval)
+			lp.declinedForTarget = lp.targetTime
+			r.c.manager.mu.Unlock()
+			r.c.retryDeclinedCar(r.cfg, r.clock.Add(time.Minute))
+			if !r.state().ChargingDeclined {
+				t.Fatal("retried under a hold")
+			}
+		})
+	}
+}
+
+// A charger Core cannot reach, one without a running driver, and any tick
+// that holds dispatch are never offered current again on their own.
+func TestDeclinedCarIsNotRetriedWithoutDispatch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(r *declineRetryRig)
+	}{
+		{"charger offline", func(r *declineRetryRig) {
+			r.c.SetDriverOnline(func(string) bool { return false })
+		}},
+		{"driver not running", func(r *declineRetryRig) { r.absent = true }},
+		{"dispatch held", func(r *declineRetryRig) { r.dispatch = false }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newDeclineRetryRig(t)
+			r.decline()
+			tc.setup(r)
+			r.refuses = false
+			r.run(DeclineRetryInterval+2*time.Minute, time.Minute)
+			if !r.state().ChargingDeclined {
+				t.Fatal("retried without dispatch")
+			}
+		})
+	}
 }
