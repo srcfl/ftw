@@ -1554,6 +1554,12 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 			// 0 W standdown so the charger pauses cleanly.
 			cmdW = 0
 			cmdReason = "no_plan_budget"
+			// The planner leaves out a car that declined current this
+			// session (Manager.observe latches it), so its slots carry
+			// nothing. The stop is Core's, for that car, not an empty plan.
+			if st, ok := c.manager.State(lpCfg.ID); ok && st.ChargingDeclined {
+				cmdReason = "vehicle_not_requesting"
+			}
 		}
 		finishW, finishing := c.vehicleCompletionOffer(lpCfg, now)
 		if finishing {
