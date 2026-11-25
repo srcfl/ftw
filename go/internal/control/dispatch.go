@@ -466,6 +466,9 @@ type State struct {
 	LastDispatch         *time.Time
 	PrevTargets          map[string]float64
 	batteryChargeFull    map[string]bool
+	// batteryDeviceSoCMax is the charge ceiling each battery's device
+	// reports (max_soc_fract), as the last tick saw it. See chargeCeiling.
+	batteryDeviceSoCMax map[string]deviceSoCMax
 
 	// clock is nil in production. Tests may set it to keep a dispatch
 	// scenario on one instant even when the test runner is delayed.
@@ -4863,7 +4866,7 @@ func fuseTargetBounds(r *telemetry.DerReading, lim PowerLimits) (lower, upper fl
 	if r.SoC == nil || *r.SoC <= lim.socFloor() || dischargeBlocked {
 		lower = 0
 	}
-	if chargeBlocked || r.SoC != nil && *r.SoC >= lim.socCeiling() {
+	if chargeBlocked || r.SoC != nil && *r.SoC >= readingChargeCeiling(r, lim) {
 		upper = 0
 	}
 	return lower, upper

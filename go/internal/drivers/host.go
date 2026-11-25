@@ -189,6 +189,10 @@ type HostEnv struct {
 	// their registers carry meaningful values. Set via host.set_warmup_s
 	// in driver_init; read once by the registry's run loop.
 	WarmupS float64
+	// CommandTimeoutS is how long one driver call may run before the host
+	// gives up on it, for drivers whose vendor cloud answers slowly. Set via
+	// host.set_command_timeout_s in driver_init. Zero keeps the host default.
+	CommandTimeoutS float64
 
 	// PersistSecret, when non-nil, lets a driver write a secret (e.g. a
 	// rotated OAuth refresh_token) into its own persisted KV namespace.
@@ -800,6 +804,26 @@ func (h *HostEnv) setWarmupS(s float64) {
 	h.mu.Lock()
 	h.WarmupS = s
 	h.mu.Unlock()
+}
+
+// setCommandTimeoutS records how long one driver call may run, in seconds.
+func (h *HostEnv) setCommandTimeoutS(s float64) {
+	h.mu.Lock()
+	h.CommandTimeoutS = s
+	h.mu.Unlock()
+}
+
+// CommandTimeout returns the call time the driver asked for, or 0.
+func (h *HostEnv) CommandTimeout() time.Duration {
+	if h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.CommandTimeoutS <= 0 {
+		return 0
+	}
+	return time.Duration(h.CommandTimeoutS * float64(time.Second))
 }
 
 // DeviceModel returns the model name the driver reported, or "" if it

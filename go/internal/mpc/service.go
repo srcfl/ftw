@@ -2905,5 +2905,5 @@ func (s *Service) onlineFleetParams(p Params, fleet []BatteryFleetMember, fuseMa
 		storages[i].MaxDischargeW *= dischargeScale
 	}
 	p.Storages = storages
-	return p, true
+	return withDeviceSoCCeilings(p, s.Tele), true
 }

@@ -248,6 +248,16 @@ func (l *luaRuntime) Cleanup(ctx context.Context) error {
 	l.LuaDriver.CleanupContext(ctx)
 	return nil
 }
+func (l *luaRuntime) Release(ctx context.Context) error {
+	return l.LuaDriver.ReleaseContext(ctx)
+}
+
+// releaser is a runtime that can hand its device back to the owner when the
+// driver is removed for good. Returning ErrNoRelease means it cannot, and the
+// registry stops it with driver_default_mode instead.
+type releaser interface {
+	Release(ctx context.Context) error
+}
 func (l *luaRuntime) Env() *HostEnv { return l.LuaDriver.Env }
 
 func driverInitConfigJSON(cfg config.Driver, troubleshootingMode bool) []byte {
@@ -301,11 +311,26 @@ type runningDriver struct {
 	// defaultRetryMax. Tests set them.
 	retryInitial time.Duration
 	retryMax     time.Duration
+	// releaseOnStop is set before stop is sent when the owner removed or
+	// disabled the driver. The send on stop orders it before the read.
+	releaseOnStop bool
 	// Poll loop coordination
 	cmdCh     chan driverCmd
 	defaultCh chan driverCmd
 	stop      chan bool
 	done      chan struct{}
+}
+
+// runTimeout is the least time one driver call gets: commandRunTimeout, or
+// longer when a slow cloud driver asked for it in driver_init.
+func (rd *runningDriver) runTimeout() time.Duration {
+	timeout := commandRunTimeout
+	if rd != nil && rd.env != nil {
+		if t := rd.env.CommandTimeout(); t > timeout {
+			timeout = t
+		}
+	}
+	return timeout
 }
 
 func (rd *runningDriver) controlStatus() DriverControlStatus {
@@ -369,15 +394,40 @@ func (rd *runningDriver) markDefaultRecoveryPending() {
 	rd.statusMu.Unlock()
 }
 
-// commandRunContext gives a started command at least commandRunTimeout. A
-// caller deadline shorter than that ends only the caller's wait; an explicit
-// cancel still stops the command.
-func commandRunContext(caller context.Context) (context.Context, func()) {
+// stopDevice is the last write before a driver stops. A driver the owner
+// removed or disabled hands its device back with driver_release when it has
+// one; every other stop, and a driver without release, uses
+// driver_default_mode.
+func stopDevice(ctx context.Context, rd *runningDriver) error {
+	if rd.releaseOnStop {
+		if rel, ok := rd.driver.(releaser); ok {
+			err := rel.Release(ctx)
+			if !errors.Is(err, ErrNoRelease) {
+				if err != nil {
+					slog.Error("driver failed to hand its device back on removal", "name", rd.cfg.Name, "err", err)
+				} else {
+					slog.Info("driver handed its device back on removal", "name", rd.cfg.Name)
+				}
+				return err
+			}
+		}
+	}
+	err := rd.driver.DefaultMode(ctx)
+	if err != nil {
+		slog.Error("driver failed to enter default mode during shutdown", "name", rd.cfg.Name, "err", err)
+	}
+	return err
+}
+
+// commandRunContext gives a started command at least least. A caller deadline
+// shorter than that ends only the caller's wait; an explicit cancel still
+// stops the command.
+func commandRunContext(caller context.Context, least time.Duration) (context.Context, func()) {
 	deadline, ok := caller.Deadline()
-	if !ok || time.Until(deadline) >= commandRunTimeout {
+	if !ok || time.Until(deadline) >= least {
 		return caller, func() {}
 	}
-	run, cancel := context.WithTimeout(context.WithoutCancel(caller), commandRunTimeout)
+	run, cancel := context.WithTimeout(context.WithoutCancel(caller), least)
 	stop := context.AfterFunc(caller, func() {
 		if errors.Is(caller.Err(), context.Canceled) {
 			cancel()
@@ -817,7 +867,11 @@ func (r *Registry) add(ctx context.Context, cfg config.Driver, startupDefault bo
 	}
 	var startupDefaultErr error
 	if startupDefault && !cfg.ObserveOnly && !r.controlBlocked() {
-		defaultCtx, cancel := context.WithTimeout(ctx, defaultRecoveryTimeout)
+		startupTimeout := defaultRecoveryTimeout
+		if t := drv.Env().CommandTimeout(); t > startupTimeout {
+			startupTimeout = t
+		}
+		defaultCtx, cancel := context.WithTimeout(ctx, startupTimeout)
 		startupDefaultErr = drv.DefaultMode(defaultCtx)
 		cancel()
 		if startupDefaultErr != nil {
@@ -958,7 +1012,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 		// continuation before the default call starts, regardless of whether
 		// the device later confirms it.
 		invalidateCommandSequence()
-		defaultCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
+		defaultCtx, cancel := context.WithTimeout(context.Background(), rd.runTimeout())
 		defaultErr := rd.driver.DefaultMode(defaultCtx)
 		if r.tel != nil {
 			r.tel.EndCommandControl(rd.cfg.Name, defaultErr != nil)
@@ -994,11 +1048,13 @@ func (r *Registry) runLoop(rd *runningDriver) {
 			cmdCtx = ctx
 		}
 		// Once accepted, a safety default must survive its caller timing out
-		// behind an older command. A fresh bounded attempt keeps that request
-		// durable without letting the actor block forever.
+		// behind an older command, and a slow cloud driver gets the time it
+		// asked for even when its caller waits less. A fresh bounded attempt
+		// keeps that request durable without letting the actor block forever.
 		var cancel context.CancelFunc
-		if cmdCtx.Err() != nil {
-			cmdCtx, cancel = context.WithTimeout(context.Background(), defaultRecoveryTimeout)
+		least := rd.runTimeout()
+		if deadline, ok := cmdCtx.Deadline(); cmdCtx.Err() != nil || ok && time.Until(deadline) < least {
+			cmdCtx, cancel = context.WithTimeout(context.Background(), least)
 		}
 		err := rd.driver.DefaultMode(cmdCtx)
 		if r.tel != nil {
@@ -1035,17 +1091,14 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				rd.driver.Discard()
 			} else {
 				invalidateCommandSequence()
-				shutdownCtx, cancel := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
-				defaultErr := rd.driver.DefaultMode(shutdownCtx)
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), rd.runTimeout())
+				defaultErr := stopDevice(shutdownCtx, rd)
 				rd.setShutdownDefaultError(defaultErr)
-				if defaultErr != nil {
-					slog.Error("driver failed to enter default mode during shutdown", "name", rd.cfg.Name, "err", defaultErr)
-				}
 				cancel()
 				// The lifecycle context is already canceled. driver_cleanup
 				// gets its own bound so the hand-back it performs (releasing
 				// a PV curtailment, for one) still runs.
-				cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), defaultRecoveryTimeout)
+				cleanupCtx, cancelCleanup := context.WithTimeout(context.Background(), rd.runTimeout())
 				_ = rd.driver.Cleanup(cleanupCtx)
 				cancelCleanup()
 			}
@@ -1137,7 +1190,7 @@ func (r *Registry) runLoop(rd *runningDriver) {
 				// late must fail and restore the default, not latch as pending.
 				runCtx, finishRun := cmdCtx, func() {}
 				if cmd.cycleID == 0 {
-					runCtx, finishRun = commandRunContext(cmdCtx)
+					runCtx, finishRun = commandRunContext(cmdCtx, rd.runTimeout())
 				}
 				commandCtx, finishCommand := rd.beginCommand(runCtx)
 				// SendDefault may close the control window after the earlier queue
@@ -1281,6 +1334,19 @@ func (r *Registry) remove(name string, skipDefault bool) {
 	release := r.acquireLifecycle(name)
 	defer release()
 	r.removeLocked(name, skipDefault, false)
+}
+
+// removeReleasingLocked stops a driver the owner removed or disabled. Its
+// last write is driver_release, so the device goes back to the owner's own
+// settings rather than staying in FTW's safe stop. The caller holds the
+// per-name lifecycle gate, so the instance cannot change in between.
+func (r *Registry) removeReleasingLocked(name string) {
+	r.mu.Lock()
+	if rd, ok := r.rec[name]; ok {
+		rd.releaseOnStop = true
+	}
+	r.mu.Unlock()
+	r.removeLocked(name, false, false)
 }
 
 // removeLocked stops a driver while its per-name lifecycle gate is held. This
@@ -1602,8 +1668,9 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troub
 		newCfg, stillThere := findDriver(active, n)
 		requiresRestart := stillThere && (troubleshootingChanged || !sameDriverConfig(old, newCfg))
 		if !stillThere {
+			// The owner removed or disabled it: hand the device back.
 			release := r.acquireLifecycle(n)
-			r.removeLocked(n, false, false)
+			r.removeReleasingLocked(n)
 			release()
 		} else if requiresRestart {
 			if troubleshootingChanged {
