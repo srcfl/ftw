@@ -44,6 +44,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	net_http "net/http"
 	net_url "net/url"
 	"os"
@@ -59,6 +60,9 @@ import (
 // maxDriverWatchdogTimeout is the longest a Lua driver may stretch the
 // per-driver staleness window. Tesla's 5-minute BLE proxy fits; a year does not.
 const maxDriverWatchdogTimeout = 15 * time.Minute
+
+// maxDriverCommandTimeout caps host.set_command_timeout_s.
+const maxDriverCommandTimeout = 30 * time.Second
 
 // driverInitTimeout bounds driver_init. An init that runs past it fails like
 // any other init error, so a looping or hung init cannot block boot, a reload
@@ -475,6 +479,21 @@ func (d *LuaDriver) DefaultModeContext(ctx context.Context) error {
 	return d.call(ctx, "driver_default_mode")
 }
 
+// ErrNoRelease means the driver defines no driver_release. The registry then
+// stops it with driver_default_mode, as before release existed.
+var ErrNoRelease = errors.New("driver defines no driver_release")
+
+// ReleaseContext calls driver_release() when the owner removes or disables
+// the driver: FTW stops managing the device for good, so the driver gives
+// back the owner's own settings instead of holding FTW's safe stop. A
+// restart, a shutdown or a stale reading still uses driver_default_mode.
+func (d *LuaDriver) ReleaseContext(ctx context.Context) error {
+	if !d.hasEntrypoint("driver_release") {
+		return ErrNoRelease
+	}
+	return d.call(ctx, "driver_release")
+}
+
 // hasEntrypoint reports whether the loaded driver defines a callable global.
 // Missing lifecycle hooks remain optional for reporting-only drivers, so the
 // registry uses this only when it has already established that an operator
@@ -494,7 +513,7 @@ func (d *LuaDriver) call(ctx context.Context, name string) error {
 	if fn == lua.LNil {
 		return nil
 	}
-	cleanup := d.setLuaCallContext(ctx, 5*time.Second)
+	cleanup := d.setLuaCallContext(ctx, d.lifecycleCallTimeout())
 	defer cleanup()
 	if err := d.L.CallByParam(lua.P{Fn: fn, NRet: 1, Protect: true}); err != nil {
 		return err
@@ -502,6 +521,16 @@ func (d *LuaDriver) call(ctx context.Context, name string) error {
 	ret := d.L.Get(-1)
 	d.L.Pop(1)
 	return luaReturnError(name, ret)
+}
+
+// lifecycleCallTimeout bounds one lifecycle call: 5 s, or longer when the
+// driver asked for it with host.set_command_timeout_s.
+func (d *LuaDriver) lifecycleCallTimeout() time.Duration {
+	timeout := 5 * time.Second
+	if t := d.Env.CommandTimeout(); t > timeout {
+		timeout = t
+	}
+	return timeout
 }
 
 func luaReturnError(name string, ret lua.LValue) error {
@@ -803,6 +832,26 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// Time already spent in driver_init counts towards the window.
 	host.RawSetString("set_warmup_s", L.NewFunction(func(L *lua.LState) int {
 		env.setWarmupS(float64(L.CheckNumber(1)))
+		return 0
+	}))
+
+	// host.set_command_timeout_s(seconds) — call from driver_init. A
+	// driver whose vendor cloud answers slowly gets this long for each
+	// command, default mode, release and cleanup call, instead of 5 s. The
+	// control tick still waits only its own short deadline; the command
+	// finishes in the driver's actor and its result is recorded there.
+	// 0 restores the default. Values above 30 s are capped so a hung
+	// cloud cannot hold the driver's safety default for long.
+	host.RawSetString("set_command_timeout_s", L.NewFunction(func(L *lua.LState) int {
+		secs := float64(L.CheckNumber(1))
+		if secs < 0 || math.IsNaN(secs) || math.IsInf(secs, 0) {
+			L.Push(lua.LString("set_command_timeout_s: timeout must be >= 0"))
+			return 1
+		}
+		if limit := maxDriverCommandTimeout.Seconds(); secs > limit {
+			secs = limit
+		}
+		env.setCommandTimeoutS(secs)
 		return 0
 	}))
 
