@@ -105,16 +105,20 @@ func TestVehicleStopBlipKeepsFailedStartVerdict(t *testing.T) {
 }
 
 // Core's own 0 W stop for a car that stopped asking is Core in control.
+// Under that 0 A an Easee reports the car as asking again (srcfl/ftw#2080);
+// the verdict stays Core's stop either way.
 func TestCoreStopForANotRequestingCarIsFollowing(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		e := &vehicleStopTrace{evTrace: newEVTrace(0), stopped: true}
-		for range 60 / 5 {
-			e.tick(0, "vehicle_not_requesting")
-		}
-		if f := e.verdict(t); f.Reason != "vehicle_not_requesting" || f.Status != "following" || f.Evidence != "measured" {
-			t.Fatalf("Core's own stop: %+v", f)
-		}
-	})
+	for _, stopped := range []bool{true, false} {
+		synctest.Test(t, func(t *testing.T) {
+			e := &vehicleStopTrace{evTrace: newEVTrace(0), stopped: stopped}
+			for range 60 / 5 {
+				e.tick(0, "vehicle_not_requesting")
+			}
+			if f := e.verdict(t); f.Reason != "vehicle_not_requesting" || f.Status != "following" || f.Evidence != "measured" {
+				t.Fatalf("Core's own stop, charger says stopped=%v: %+v", stopped, f)
+			}
+		})
+	}
 }
 
 func TestVehicleStopNeverOverridesStaleFailedOrContradictoryEvidence(t *testing.T) {

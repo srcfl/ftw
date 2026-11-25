@@ -43,6 +43,54 @@ func TestCommandedReasonNoPlanBudget(t *testing.T) {
 	}
 }
 
+// srcfl/ftw#2080: a car with a goal and a deadline stopped asking for current
+// while the plan offered it. Once that lasts SessionCompletionTimeout the
+// planner leaves the car out for the session, so its slots carry no energy.
+// Easee then reports request_active again, because Core's own 0 A is what it
+// sees. The stop is Core's, for a car that declined; "no_plan_budget" says
+// the plan simply chose not to charge, which is not why.
+func TestCommandedReasonDeclinedCarIsNotAnEmptyPlan(t *testing.T) {
+	base := time.Date(2026, 11, 24, 22, 0, 0, 0, time.UTC)
+	clock := base
+	sender := &fakeSender{}
+	cfg := reasonLoadpoint()
+	dir := &Directive{
+		SlotStart:         base.Add(-time.Second),
+		SlotEnd:           base.Add(15 * time.Minute),
+		LoadpointEnergyWh: map[string]float64{cfg.ID: 2750},
+	}
+	samples := map[string]EVSample{cfg.DriverName: {Connected: true, PowerW: 11000, RequestActive: true}}
+	c := newTestController(t, []Config{cfg}, dir, samples, sender)
+	c.manager.SetNowFn(func() time.Time { return clock })
+	c.manager.SetTarget(cfg.ID, 1, base.Add(9*time.Hour))
+
+	c.Tick(context.Background(), clock)
+	if w, r := commandedReason(t, c, cfg.ID); w <= 0 || r != "plan" {
+		t.Fatalf("charging to plan: got (%.0f, %q)", w, r)
+	}
+
+	// The car stops asking while the plan still offers current.
+	samples[cfg.DriverName] = EVSample{Connected: true, PowerW: 0, RequestActive: false}
+	for clock.Sub(base) <= SessionCompletionTimeout+10*time.Second {
+		clock = clock.Add(5 * time.Second)
+		c.Tick(context.Background(), clock)
+	}
+	if st, _ := c.manager.State(cfg.ID); !st.ChargingDeclined {
+		t.Fatalf("lasting refusal under a live offer did not latch: %+v", st)
+	}
+
+	// The next plan leaves the car out. Core holds 0 A and the charger
+	// reports the car as asking again.
+	dir.LoadpointEnergyWh = map[string]float64{}
+	samples[cfg.DriverName] = EVSample{Connected: true, PowerW: 0, RequestActive: true}
+	clock = clock.Add(5 * time.Second)
+	c.Tick(context.Background(), clock)
+
+	if w, r := commandedReason(t, c, cfg.ID); w != 0 || r != "vehicle_not_requesting" {
+		t.Errorf("declined car left out of the plan: want (0, vehicle_not_requesting), got (%.0f, %q)", w, r)
+	}
+}
+
 func TestCommandedReasonPlan(t *testing.T) {
 	base := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	sender := &fakeSender{}
