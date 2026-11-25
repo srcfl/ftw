@@ -36,7 +36,7 @@ current host API and the source of truth for it. Today it registers:
 |---|---|
 | Telemetry | `emit`, `emit_metric` |
 | Identity and nameplate | `set_make`, `set_sn`, `set_model`, `set_rated_w` |
-| Driver control | `set_poll_interval`, `set_warmup_s`, `set_watchdog_timeout_s`, `set_device_fault` |
+| Driver control | `set_poll_interval`, `set_warmup_s`, `set_watchdog_timeout_s`, `set_command_timeout_s`, `set_device_fault` |
 | Helpers | `log`, `sleep`, `millis`, `now_ms`, `unix_ms`, `json_encode`, `json_decode`, `persist_secret` |
 | Vehicle | `reserve_vehicle_wake`, `site_location` |
 | Decoding | `decode_string`, `decode_i16`, `decode_i32_be`, `decode_i32_le`, `decode_u32_be`, `decode_u32_le` |
@@ -138,9 +138,21 @@ Sign conversion happens only here. Read
 driver is a bug.
 
 A controllable device needs a real `driver_default_mode`. The host calls it for
-stale telemetry, relevant reloads, removal and shutdown, so it is the path that
+stale telemetry, relevant reloads, restarts and shutdown, so it is the path that
 returns hardware to safe autonomous operation when FTW stops being able to
-steer it. Polling must not keep re-emitting an indefinitely cached value as
+steer it.
+
+When the owner removes or disables a driver, FTW is done with the device, and
+the host calls the optional `driver_release()` instead. A driver whose safe
+stop is stored on the device, such as a charger held at 0 A, gives the owner's
+own setting back there. Without `driver_release` the host uses
+`driver_default_mode`, as before. Return `false` when the device refuses.
+
+Each command, default, release and cleanup call gets 5 s. A driver whose vendor
+cloud answers slowly calls `host.set_command_timeout_s(seconds)` in
+`driver_init` for up to 30 s. The control tick does not wait longer: the call
+finishes in the driver's own queue, and only a call that runs out of that time
+counts as failed. Polling must not keep re-emitting an indefinitely cached value as
 fresh telemetry: age vendor data and stop emitting when it is stale, or core's
 watchdog cannot see the fault.
 
