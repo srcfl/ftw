@@ -151,10 +151,18 @@ test('raw energy rows load only when opened, flag rejected data and page locally
   let expectedChargeWh = 0;
   let expectedChargeOre = 0;
   let omitSecondPrice = false;
+  // Both mock charging buckets must be in the past, including on CI runs
+  // shortly after midnight.
+  const now = new Date(2026, 6, 24, 12).getTime();
+  const midnight = new Date(2026, 6, 24).getTime();
+  class FixtureDate extends Date {
+    constructor(...args) { super(...(args.length ? args : [now])); }
+    static now() { return now; }
+  }
   const window = { addEventListener() {}, devicePixelRatio: 1 };
 
   vm.runInNewContext(source, {
-    Array, Date, Intl, Map, Math, Number, Object, Promise, Set, String, URLSearchParams,
+    Array, Date: FixtureDate, Intl, Map, Math, Number, Object, Promise, Set, String, URLSearchParams,
     document: {
       createElement() { return element({ id: 'option' }); },
       documentElement: {},
@@ -173,13 +181,8 @@ test('raw energy rows load only when opened, flag rejected data and page locally
         const params = new URLSearchParams(path.split('?')[1]);
         if (params.get('bucket') === '30m') {
           evHistoryRequests += 1;
-          const since = Number(params.get('since'));
           const bucket = 1800000;
-          const today = new Date();
-          today.setHours(0, 0, 0, 0);
-          const first = Math.floor(today.getTime() / bucket) * bucket;
-          const second = first + bucket;
-          const chargePoints = [first, second].map((start) => ({
+          const chargePoints = [midnight, midnight + bucket].map((start) => ({
             bucket_start_ms: start, bucket_len_ms: bucket, flow: 'vehicle_charge',
             energy_wh: 1500, quality: 'measured', source: 'hardware_counter', provenance: 'counter',
           }));
@@ -192,12 +195,7 @@ test('raw energy rows load only when opened, flag rejected data and page locally
       }
       if (path.startsWith('/api/prices?')) {
         priceRequests += 1;
-        const params = new URLSearchParams(path.split('?')[1]);
-        // The cost assertion is supplied with slots matching the two readings
-        // by using their query-window relationship (both ranges are whole days).
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const first = Math.floor(today.getTime() / 1800000) * 1800000;
+        const first = midnight;
         return { ok: true, json: async () => ({
           enabled: true, currency: 'SEK', items: [
             { slot_ts_ms: first, slot_len_min: 15, total_ore_kwh: 100 },

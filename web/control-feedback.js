@@ -80,6 +80,7 @@ const REASON_TITLES = {
   load_balancer_limit: 'Limited by the charger’s load balancing', charger_pilot_limit: 'Limited by the charger',
   load_balancer_wait: 'Waiting for load balancing',
   one_phase: 'Charging on one phase',
+  battery_calibrating: 'Calibrating',
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
   command_failed: 'Commands failing', command_unconfirmed: 'Command not confirmed', default_failed: 'Cannot hand back control',
   response_unknown: 'No power reading', observe_only: 'Monitoring only', disabled: 'Disabled', device_control: 'Own control',
@@ -129,6 +130,7 @@ function sentence(row) {
     case 'no_power_response': return evPowerWarning(row) || `Asked for ${target(row)}, but it delivers no power.`;
     case 'power_while_idle': return `Asked to stay idle, but it is ${doing(row, actual)} ${controlPower(actual)}.`;
     case 'setpoint_changed': return `The ${name} reports a target of ${controlFlow(row, row.readback_w)}, not the ${target(row)} FTW sent.`;
+    case 'battery_calibrating': return 'The battery is calibrating its charge level. FTW waits for calibration to finish before controlling it.';
     case 'device_fault': return row.device_reason ? `The ${name} reports a fault: ${row.device_reason}.` : `The ${name} reports a fault that stops control.`;
     case 'telemetry_stale': return `FTW has no fresh readings from the ${name}.`;
     case 'readings_lost': return clock(row.observed_at_ms)

@@ -1148,6 +1148,13 @@ func (r *Registry) runLoop(rd *runningDriver) {
 					err = cancelErr
 					break
 				}
+				if action == "battery" && r.tel != nil {
+					if health := r.tel.DriverHealth(rd.cfg.Name); health != nil && health.Calibrating {
+						err = ErrCommandIneligible
+						reportOutcome = false
+						break
+					}
+				}
 				if cmd.checkEVHealth && isPhysicalEVCommand(action) && r.tel != nil {
 					health := r.tel.DriverHealth(rd.cfg.Name)
 					if health == nil || !health.IsOnline() {
@@ -1326,7 +1333,7 @@ func (r *Registry) clearRecoveryRequired(name string, rd *runningDriver) {
 func (r *Registry) remove(name string, skipDefault bool) {
 	release := r.acquireLifecycle(name)
 	defer release()
-	r.removeLocked(name, skipDefault)
+	r.removeLocked(name, skipDefault, false)
 }
 
 // removeReleasingLocked stops a driver the owner removed or disabled. Its
@@ -1339,19 +1346,25 @@ func (r *Registry) removeReleasingLocked(name string) {
 		rd.releaseOnStop = true
 	}
 	r.mu.Unlock()
-	r.removeLocked(name, false)
+	r.removeLocked(name, false, false)
 }
 
 // removeLocked stops a driver while its per-name lifecycle gate is held. This
 // lets Restart and Reload keep the old generation and its replacement in one
 // serialized transition instead of opening an Add/Remove gap.
-func (r *Registry) removeLocked(name string, skipDefault bool) {
+func (r *Registry) removeLocked(name string, skipDefault, replacing bool) {
+	r.mu.Lock()
+	_, pending := r.spawnRetries[name]
+	r.mu.Unlock()
 	r.takeSpawnRetry(name)
 	skipDefault = skipDefault || r.controlBlocked()
 	r.mu.Lock()
 	rd, ok := r.rec[name]
 	if !ok {
 		r.mu.Unlock()
+		if pending && !replacing && r.tel != nil {
+			r.tel.Remove(name)
+		}
 		return
 	}
 	// Another party owns an observe_only device's actuation (a retailer VPP,
@@ -1395,7 +1408,11 @@ func (r *Registry) removeLocked(name string, skipDefault bool) {
 		}
 	}
 	if r.tel != nil {
-		r.tel.Remove(name)
+		if replacing {
+			r.tel.RemoveForReplacement(name)
+		} else {
+			r.tel.Remove(name)
+		}
 	}
 	slog.Info("driver removed", "name", name)
 }
@@ -1631,7 +1648,7 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troub
 	for _, n := range r.pendingSpawnRetries() {
 		if _, ok := findDriver(active, n); !ok {
 			release := r.acquireLifecycle(n)
-			r.removeLocked(n, false)
+			r.removeLocked(n, false, false)
 			release()
 		}
 	}
@@ -1662,7 +1679,7 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troub
 				slog.Info("driver config changed, restarting", "name", n)
 			}
 			release := r.acquireLifecycle(n)
-			r.removeLocked(n, false)
+			r.removeLocked(n, false, true)
 			if err := r.add(ctx, newCfg, true); err != nil {
 				slog.Warn("reload driver failed", "name", n, "err", err)
 			}
@@ -1684,7 +1701,7 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troub
 			continue
 		}
 		if exists {
-			r.removeLocked(d.Name, false)
+			r.removeLocked(d.Name, false, true)
 		}
 		if err := r.add(ctx, d, true); err != nil {
 			slog.Warn("add driver failed", "name", d.Name, "err", err)
@@ -1699,7 +1716,7 @@ func (r *Registry) Reload(ctx context.Context, newDrivers []config.Driver, troub
 func (r *Registry) Restart(ctx context.Context, cfg config.Driver) error {
 	release := r.acquireLifecycle(cfg.Name)
 	defer release()
-	r.removeLocked(cfg.Name, false)
+	r.removeLocked(cfg.Name, false, !cfg.Disabled)
 	if cfg.Disabled {
 		return nil
 	}
@@ -1719,7 +1736,7 @@ func (r *Registry) RestartByName(ctx context.Context, name string) error {
 		return fmt.Errorf("driver %q not running", name)
 	}
 	cfg := rd.cfg
-	r.removeLocked(name, false)
+	r.removeLocked(name, false, !cfg.Disabled)
 	if cfg.Disabled {
 		return nil
 	}
