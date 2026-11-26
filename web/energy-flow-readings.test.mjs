@@ -245,3 +245,35 @@ it("draws Core's estimated Home use as an estimate, not a blank", () => {
   assert.equal(result.loadEstimated, true);
   assert.equal(flowReadingsFromStatus({load_w: 980, load_quality: "measured"}).loadEstimated, false);
 });
+
+it("shows an unplugged charger even without power and preserves connected idle", () => {
+  for (const ev_w of [null, 0, 1000]) {
+    const r = flowReadingsFromStatus({drivers:{easee:{status:"ok",ev_connected:false,ev_w}}});
+    const ev = r.planets.find(p => p.id === "ev-easee");
+    assert.equal(ev.sub, "not connected");
+    assert.equal(ev.kw, 0);
+  }
+  const r = flowReadingsFromStatus({drivers:{easee:{status:"ok",ev_connected:true,ev_w:0}}});
+  assert.equal(r.planets.find(p => p.id === "ev-easee").sub, "idle");
+});
+
+it("keeps a known connected state when charger power is unavailable", () => {
+  const r = flowReadingsFromStatus({drivers:{easee:{status:"ok",ev_connected:true,ev_w:null}}});
+  const ev = r.planets.find(p => p.id === "ev-easee");
+  assert.equal(ev.sub, "connected · no data");
+  assert.equal(ev.placeholder, true);
+});
+
+it("keeps charger connection information when control feedback has no power", () => {
+  const feedback = {driver:"easee",kind:"ev",status:"waiting",severity:"info",readings_fresh:false};
+  const status = {drivers:{easee:{status:"ok",ev_connected:false,ev_w:null}},
+    control_feedback:[{...feedback,reason:"not_connected"}]};
+  const disconnected = flowReadingsFromStatus(status).planets.find(p => p.id === "ev-easee");
+  assert.equal(disconnected.sub, "not connected");
+  assert.equal(disconnected.placeholder, false);
+  status.drivers.easee.ev_connected = true;
+  status.control_feedback[0].reason = "telemetry_stale";
+  const connected = flowReadingsFromStatus(status).planets.find(p => p.id === "ev-easee");
+  assert.equal(connected.sub, "connected · no data");
+  assert.equal(connected.placeholder, true);
+});
