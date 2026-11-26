@@ -831,3 +831,38 @@ func TestBatteryMakesAPeakCheaperToHeatThrough(t *testing.T) {
 		}
 	}
 }
+
+func valueChanges(p Plan) int {
+	n := 0
+	for i := 1; i < len(p.Slots); i++ {
+		if p.Slots[i].Value != p.Slots[i-1].Value {
+			n++
+		}
+	}
+	return n
+}
+
+// A price that wobbles by a couple of percent from slot to slot is worth
+// nothing to chase: every change of value is a write to the device. The plan
+// keeps the shape the real peak gives it and ignores the wobble.
+func TestAWobbleInThePriceIsNotChased(t *testing.T) {
+	price := eveningPeak(day, 100, 200)
+	for i := range price {
+		price[i] += 2 * float64(i%2)
+	}
+	for name, c := range map[string]struct {
+		r   Request
+		max int
+	}{
+		"slab":      {slabHouse(day, price, flat(day, 0)), 6},
+		"radiators": {radiatorHouse(day, price), 16},
+	} {
+		p := propose(t, c.r)
+		if got := valueChanges(p); got > c.max {
+			t.Errorf("%s: %d changes of value for a wobble, want at most %d", name, got, c.max)
+		}
+		if p.Cost >= p.BaselineCost {
+			t.Errorf("%s: cost %.0f, no better than %.0f left alone", name, p.Cost, p.BaselineCost)
+		}
+	}
+}
