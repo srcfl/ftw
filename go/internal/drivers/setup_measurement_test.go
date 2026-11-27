@@ -18,7 +18,7 @@ func TestMeasurementSetupBlocksWritesInEveryLuaPhase(t *testing.T) {
 	env := NewHostEnv("meter", telemetry.NewStore())
 	env.ControlBlocked = blocked.Load
 	env.SetupAuthPaths = []string{"/oauth/token"}
-	for _, verb := range []string{"modbus.write", "mqtt.publish", "http.post", "http.patch", "websocket.send"} {
+	for _, verb := range []string{"modbus.write", "mqtt.publish", "http.post", "http.patch", "http.put", "websocket.send"} {
 		if err := env.allowWrite(verb); err == nil {
 			t.Fatal("setup allowed", verb)
 		}

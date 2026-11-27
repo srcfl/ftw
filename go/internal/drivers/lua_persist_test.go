@@ -29,6 +29,7 @@ func TestManagedPersistSecretScope(t *testing.T) {
 		{name: "no_http_get", key: "refresh_token", change: func(p *RuntimePolicy) { p.Permissions = nil }},
 		{name: "not_read_only", key: "refresh_token", change: func(p *RuntimePolicy) { p.ReadOnly = false }},
 		{name: "broad_http_write", key: "refresh_token", change: func(p *RuntimePolicy) { p.Permissions["http.patch"] = true }},
+		{name: "broad_http_put_write", key: "refresh_token", change: func(p *RuntimePolicy) { p.Permissions["http.put"] = true }},
 		{name: "unwired", key: "refresh_token", unwired: true},
 		{name: "at_value_limit", key: "refresh_token", valueBytes: 1 << 20, allowed: true},
 		{name: "above_value_limit", key: "refresh_token", valueBytes: (1 << 20) + 1},
@@ -67,7 +68,7 @@ end`, tc.key, tc.valueBytes)
 			}
 			d, err := NewLuaDriverWithPolicy(path, env, policy)
 			if err != nil {
-				if tc.name == "not_read_only" || tc.name == "broad_http_write" {
+				if tc.name == "not_read_only" || tc.name == "broad_http_write" || tc.name == "broad_http_put_write" {
 					return
 				}
 				if tc.name == "no_auth_path" || tc.name == "no_http_get" {
