@@ -9,8 +9,9 @@ import (
 	"github.com/srcfl/ftw/go/internal/telemetry"
 )
 
-// Exercise the bundled Lua in FTW's host, including its persistent fault state.
-func TestPixiiUnknownStatusPreservesCalibrationFault(t *testing.T) {
+// Exercise the bundled Lua in FTW's host, including its persistent
+// calibration state.
+func TestPixiiUnknownStatusPreservesCalibration(t *testing.T) {
 	tel := telemetry.NewStore()
 	modbus := newPixiiTestModbus()
 	env := NewHostEnv("pixii", tel).WithModbus(modbus)
@@ -24,9 +25,9 @@ func TestPixiiUnknownStatusPreservesCalibrationFault(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, step := range []struct {
-		code  uint16
-		fault bool
-		label string
+		code        uint16
+		calibrating bool
+		label       string
 	}{
 		{0xffff, false, "unknown"},
 		{7, true, "testing"},
@@ -39,8 +40,9 @@ func TestPixiiUnknownStatusPreservesCalibrationFault(t *testing.T) {
 			t.Fatal(err)
 		}
 		health := tel.DriverHealth("pixii")
-		if health == nil || health.DeviceFault != step.fault || health.IsOnline() == step.fault {
-			t.Fatalf("charge status %d: health = %+v, want fault=%v", step.code, health, step.fault)
+		if health == nil || health.Calibrating != step.calibrating || health.CanControl() == step.calibrating ||
+			health.DeviceFault || !health.IsOnline() {
+			t.Fatalf("charge status %d: health = %+v, want calibrating=%v and no fault", step.code, health, step.calibrating)
 		}
 		reading := tel.Get("pixii", telemetry.DerBattery)
 		if reading == nil || tel.Get("pixii", telemetry.DerMeter) == nil {

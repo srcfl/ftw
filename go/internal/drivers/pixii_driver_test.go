@@ -181,23 +181,22 @@ func TestPixiiTroubleshootingStatusAndSetpoint(t *testing.T) {
 		t.Fatalf("control_mode = %v, want remote", data["control_mode"])
 	}
 
+	// From pixii 2.1.10 the driver reports calibration with
+	// host.set_calibrating: no control, but no fault and live measurements.
 	h := tel.DriverHealth("pixii")
-	if h == nil || !h.DeviceFault {
-		t.Fatal("expected device fault while Pixii ChaSt=testing")
+	if h == nil || !h.Calibrating || h.CanControl() {
+		t.Fatalf("calibrating Pixii must be out of control while ChaSt=testing, got %+v", h)
 	}
-	if h.DeviceFaultReason == "" {
-		t.Fatal("expected device_fault_reason while calibrating")
-	}
-	if h.IsOnline() {
-		t.Fatal("calibrating Pixii must be offline for control")
+	if h.DeviceFault || !h.IsOnline() {
+		t.Fatalf("calibration is not a device fault, got %+v", h)
 	}
 	modbus.regs[40137] = 4 // charging: calibration finished
 	if _, err := d.Poll(context.Background()); err != nil {
 		t.Fatalf("recovery poll: %v", err)
 	}
 	h = tel.DriverHealth("pixii")
-	if h == nil || h.DeviceFault || !h.IsOnline() {
-		t.Fatalf("expected online Pixii after calibration, got %+v", h)
+	if h == nil || h.Calibrating || h.DeviceFault || !h.CanControl() {
+		t.Fatalf("expected controllable Pixii after calibration, got %+v", h)
 	}
 	if tel.Get("pixii", telemetry.DerBattery) == nil || tel.Get("pixii", telemetry.DerMeter) == nil {
 		t.Fatal("expected battery and site-meter telemetry through calibration recovery")
