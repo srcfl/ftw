@@ -57,6 +57,9 @@ plug sessions. Completion requires a live report from the session car's own
 source, made after the observed connection, and no measured charging. A car
 the box has not named cannot finish the goal. A charger declining current is reported as a refusal, never
 as an invented battery level or proof that the target was reached.
+A car that declined stays out of the plan for an hour, or until the next
+goal window, while it stays plugged in with a goal to meet. Then the plan
+takes it in once more; a car that declines again costs one short offer.
 
 ### Cars
 

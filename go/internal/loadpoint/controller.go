@@ -128,6 +128,9 @@ type Controller struct {
 	vehicleRefreshTarget  func(loadpointID string) (string, error)
 	vehicleChargeState    func(loadpointID string) (VehicleChargeState, bool)
 	vehicleControlAllowed func(driver string) bool
+	// chargerControlAllowed is the charger driver's write authority. nil
+	// allows, as in narrow tests.
+	chargerControlAllowed func(driver string) bool
 
 	// peakRemainingSurplusW is the best PV-minus-load surplus left today.
 	// Below the 3Φ minimum, surplus_only locks 1Φ for the day. nil keeps 3Φ.
@@ -609,6 +612,40 @@ func (c *Controller) SetVehicleControlAllowed(f func(string) bool) {
 
 func (c *Controller) canControlVehicle(driver string) bool {
 	return c.vehicleControlAllowed == nil || c.vehicleControlAllowed(driver)
+}
+
+// SetChargerControlAllowed checks the charger driver's write authority. A
+// charger Core only observes is never offered current again on its own.
+func (c *Controller) SetChargerControlAllowed(f func(string) bool) {
+	if c != nil {
+		c.chargerControlAllowed = f
+	}
+}
+
+// retryDeclinedCar lets a car that declined current into the plan again
+// when Manager.retryDeclinedCharging says the refusal is due for another
+// offer. Charge now already retries at once, and a charger Core may not
+// command, or a car whose own fresh reading is Complete or at its limit,
+// is left alone. The plan then decides when the offer comes.
+func (c *Controller) retryDeclinedCar(cfg Config, now time.Time) {
+	if st, ok := c.manager.State(cfg.ID); !ok || !st.ChargingDeclined {
+		return
+	}
+	if _, held := c.GetManualHold(cfg.ID, now); held {
+		return
+	}
+	if c.chargerControlAllowed != nil && !c.chargerControlAllowed(cfg.DriverName) {
+		return
+	}
+	carDone := false
+	if c.vehicleChargeState != nil {
+		if car, fresh := c.vehicleChargeState(cfg.ID); fresh {
+			carDone = car.State == "Complete" || car.Limit > 0 && car.SoC >= car.Limit
+		}
+	}
+	if c.manager.retryDeclinedCharging(cfg.ID, now, carDone) {
+		slog.Info("loadpoint: planning a car again that declined current", "lp", cfg.ID, "retry_interval", DeclineRetryInterval)
+	}
 }
 
 // SetVehicleRefreshTarget selects an authorized telemetry recipient from
@@ -1462,6 +1499,7 @@ func (c *Controller) tickOne(ctx context.Context, now time.Time, lpCfg Config, s
 		// but do not advance completion timers or perform wake side effects.
 		return
 	}
+	c.retryDeclinedCar(lpCfg, now)
 	// Wallbox just started delivering current: fire a wake at the
 	// bound vehicle so the next vehicle-driver poll comes back with
 	// fresh charging_state / charge_limit_pct / SoC. Gated by

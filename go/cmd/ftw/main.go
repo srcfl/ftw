@@ -2066,6 +2066,11 @@ func main() {
 			health := tel.DriverHealth(name)
 			return health != nil && health.IsOnline()
 		})
+		// An observe-only or read-only charger is never offered current
+		// again after a refusal; an approved OCPP charger may be.
+		lpController.SetChargerControlAllowed(chargerControlAllowed(reg, func(name string) bool {
+			return ocppSrv != nil && ocppSrv.Handler().IsOnline(name) && ocppSrv.Handler().IsApproved(name)
+		}))
 		// Wire the site fuse so the per-phase EV clamp and the
 		// phase-split derivation can use the actual site voltage and
 		// breaker rating instead of hard-coding 230 V × 16 A.
@@ -2942,6 +2947,9 @@ func main() {
 	// Cooldown shares the fuse-replan cooldown to keep per-second flap
 	// from spamming the optimizer.
 	evDrawPrev := map[string]float64{}
+	// declinedPrev is each plugged-in car's refusal latch on the last tick;
+	// declineReplanReason replans when it moves.
+	declinedPrev := map[string]bool{}
 	var lastEVStopReplan time.Time
 	const evStopReplanCooldown = 60 * time.Second
 	var staleDefaults staleSiteDefaultTracker
@@ -3406,6 +3414,10 @@ func main() {
 							"power_unavailable", lp.PowerUnavailable)
 					}
 					evDrawPrev[lp.ID] = curr
+					if reason := declineReplanReason(lp, declinedPrev[lp.ID]); reason != "" {
+						mpcSvc.RequestReplan(reason)
+					}
+					declinedPrev[lp.ID] = lp.PluggedIn && lp.ChargingDeclined
 				}
 			}
 

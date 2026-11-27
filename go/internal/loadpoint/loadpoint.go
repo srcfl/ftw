@@ -369,6 +369,17 @@ type Manager struct {
 // A refusal is not evidence that the battery reached its target.
 const SessionCompletionTimeout = 90 * time.Second
 
+// DeclineRetryInterval is how long a car that declined current stays out of
+// the plan before Core offers it current again in the same plug-in. A car
+// that is full or at its own limit declines again and the latch re-forms
+// after SessionCompletionTimeout, so each retry costs one offer: 90 s, plus
+// the charger's start delay (Easee: up to about 5 min) and a replan. An hour
+// keeps that under a tenth of the time. It is longer than the Easee start
+// delay and LoadBalancerRaiseWait, so one retry has ended before the next
+// can begin, and short enough that a car that paused on its own (a timer in
+// the car, a cold battery) loses at most an hour of a night's charging.
+const DeclineRetryInterval = time.Hour
+
 // VehicleDeclinesOffer reports a car that has refused Core's offered current
 // for SessionCompletionTimeout. A brief stop during the session handshake is
 // not enough. It says nothing about the battery level or a met goal.
@@ -502,6 +513,13 @@ type loadpointRuntime struct {
 	// It suspends planning while the vehicle refuses energy, without
 	// changing the estimated battery level. Cleared on plug-out.
 	chargingDeclined bool
+	// chargingDeclinedAt is when the latch last formed and
+	// declinedForTarget the deadline it formed under; declineRetriedAt is
+	// when Core last ended it to offer current again. They time the retry
+	// (retryDeclinedCharging) and reset with the plug-in.
+	chargingDeclinedAt time.Time
+	declinedForTarget  time.Time
+	declineRetriedAt   time.Time
 
 	// socConfirmed is true only after a level from the user or a matched car.
 	// A configured/default plug-in level remains a planning assumption.
@@ -688,6 +706,9 @@ func (m *Manager) Load(cfgs []Config) {
 			lp.lastRolledFor = existing.lastRolledFor
 			lp.notRequestingSince = existing.notRequestingSince
 			lp.chargingDeclined = existing.chargingDeclined
+			lp.chargingDeclinedAt = existing.chargingDeclinedAt
+			lp.declinedForTarget = existing.declinedForTarget
+			lp.declineRetriedAt = existing.declineRetriedAt
 			lp.socConfirmed = existing.socConfirmed && existing.DriverName == c.DriverName
 			if lp.socConfirmed {
 				lp.socConfirmedAt = existing.socConfirmedAt
@@ -869,12 +890,14 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 		lp.deliveredHistory = nil
 		lp.notRequestingSince = time.Time{}
 		lp.chargingDeclined = false
+		lp.declineRetriedAt = time.Time{}
 		lp.carPhases = carPhases{}
 	}
 	if !pluggedIn {
 		// Plug-out: drop any pending completion timer / latch.
 		lp.notRequestingSince = time.Time{}
 		lp.chargingDeclined = false
+		lp.declineRetriedAt = time.Time{}
 		lp.carPhases = carPhases{}
 		if lp.capacityFromCar {
 			// The car that measured its own capacity left with its
@@ -918,6 +941,8 @@ func (m *Manager) observe(id string, pluggedIn bool, powerW, deliveredWh float64
 			!lp.notRequestingSince.IsZero() &&
 			now.Sub(lp.notRequestingSince) >= SessionCompletionTimeout {
 			lp.chargingDeclined = true
+			lp.chargingDeclinedAt = now
+			lp.declinedForTarget = lp.targetTime
 		}
 	} else if pluggedIn && requestActive {
 		// Vehicle is back to requesting. Reset the timer, but keep
@@ -1699,6 +1724,45 @@ func (m *Manager) RollSchedules(now time.Time) {
 			lp.lastRolledFor = next
 		}
 	}
+}
+
+// retryDeclinedCharging ends a refusal latch so the plan takes the car in
+// again and Core offers it current once more in this plug-in. It is due
+// DeclineRetryInterval after the car declined, or when a new goal window
+// starts (the recurring deadline rolled, or the owner set another), and Core
+// ends a latch at most once per DeclineRetryInterval. It never retries a
+// goal that is met, a goal whose deadline has passed (a vehicle-limit goal
+// stays due), or a car whose own fresh reading says it is done (carDone).
+// It changes no battery level or stored intent, and reports whether it
+// ended the latch.
+func (m *Manager) retryDeclinedCharging(id string, now time.Time, carDone bool) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lp := m.byID[id]
+	if lp == nil || !lp.pluggedIn || !lp.chargingDeclined || lp.chargingDeclinedAt.IsZero() ||
+		carDone || lp.finishGoalCompleted {
+		return false
+	}
+	st := lp.snapshot()
+	if target := PlanningTarget(st, st.CarChargeLimit); target <= 0 || st.CurrentSoC >= target ||
+		!lp.finishAtVehicleLimit && !lp.targetTime.After(now) {
+		return false
+	}
+	if !lp.declineRetriedAt.IsZero() && now.Sub(lp.declineRetriedAt) < DeclineRetryInterval {
+		return false
+	}
+	if now.Sub(lp.chargingDeclinedAt) < DeclineRetryInterval && lp.targetTime.Equal(lp.declinedForTarget) {
+		return false
+	}
+	lp.chargingDeclined = false
+	lp.notRequestingSince = time.Time{}
+	lp.declineRetriedAt = now
+	// The run before the refusal ended with the car declining. Its stop is
+	// not a fresh interruption, so a slow start after the retry must not
+	// report it as one; a new steady run arms the notice again.
+	lp.steadyRunArmed = false
+	lp.stoppedSince = time.Time{}
+	return true
 }
 
 // RetryCharging lets an explicit Start action retry a vehicle that previously
