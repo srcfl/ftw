@@ -77,3 +77,23 @@ func (s *Store) socCeilingFor(driver string, data json.RawMessage, prev *DerRead
 	}
 	return nil, time.Time{}
 }
+
+// FullBandFract is how near its full level a battery stands when a refused
+// charge order is the battery keeping a normal limit, not a device that
+// cannot actuate (srcfl/ftw#1993): a FoxESS H3 refuses forced charge from
+// 99 %, and other packs stop just under their own ceiling.
+const FullBandFract = 0.02
+
+// AtFull reports whether the battery's fresh SoC is at, or within
+// FullBandFract of, its full level: its own ceiling when it reports one
+// (SoCCeilingNow), else 100 %. A stale or missing SoC is never full.
+func (r *DerReading) AtFull(now time.Time) bool {
+	if r == nil || r.SoC == nil || r.SoCUpdatedAt.After(now) || now.Sub(r.SoCUpdatedAt) > BatterySoCMaxAge {
+		return false
+	}
+	full := 1.0
+	if c, ok := r.SoCCeilingNow(now); ok && c < full {
+		full = c
+	}
+	return *r.SoC >= full-FullBandFract
+}

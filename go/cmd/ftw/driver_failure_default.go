@@ -148,7 +148,34 @@ func (t *driverActuationTracker) dispatchCommand(
 	timeout time.Duration,
 	now time.Time,
 ) {
-	t.recordCommandOutcomeFor(name, dispatchAction(payload), sendDriverCommand(ctx, reg, kind, name, payload, timeout), now)
+	err := sendDriverCommand(ctx, reg, kind, name, payload, timeout)
+	if t != nil && t.tel != nil && isCommandRefusal(err) && isChargeOrder(payload) &&
+		t.tel.Get(name, telemetry.DerBattery).AtFull(now) {
+		// A full battery that refuses more charge keeps a normal limit
+		// (srcfl/ftw#1993). It stays in dispatch and the plan, and may still
+		// discharge; the streak of real refusals is left as it was.
+		return
+	}
+	t.recordCommandOutcomeFor(name, dispatchAction(payload), err, now)
+}
+
+// isChargeOrder reports whether a dispatch payload asks a battery to charge:
+// the `battery` action with positive watts, which is charging in the site
+// convention.
+func isChargeOrder(payload []byte) bool {
+	var command struct {
+		Action string   `json:"action"`
+		PowerW *float64 `json:"power_w"`
+		W      *float64 `json:"w"`
+	}
+	if json.Unmarshal(payload, &command) != nil || command.Action != "battery" {
+		return false
+	}
+	w := command.PowerW
+	if w == nil {
+		w = command.W
+	}
+	return w != nil && *w > 0
 }
 
 // releaseCommand sends a command that hands a device back to its own control

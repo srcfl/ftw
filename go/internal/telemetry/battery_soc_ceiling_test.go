@@ -110,3 +110,23 @@ func TestSoCCeilingDoesNotSurviveRemove(t *testing.T) {
 		t.Fatalf("a replacement driver inherited ceiling %v", c)
 	}
 }
+
+func TestAtFullUsesTheBatterysOwnCeiling(t *testing.T) {
+	now := time.Now()
+	soc := func(v float64) *float64 { return &v }
+	for _, tc := range []struct {
+		name    string
+		r       *DerReading
+		want    bool
+	}{
+		{"no reading", nil, false},
+		{"99 % with no ceiling", &DerReading{SoC: soc(0.99), SoCUpdatedAt: now, UpdatedAt: now}, true},
+		{"97 % with no ceiling", &DerReading{SoC: soc(0.97), SoCUpdatedAt: now, UpdatedAt: now}, false},
+		{"89 % under a 90 % ceiling", &DerReading{SoC: soc(0.89), SoCUpdatedAt: now, UpdatedAt: now, SoCCeiling: soc(0.9), SoCCeilingAt: now}, true},
+		{"stale 100 %", &DerReading{SoC: soc(1), SoCUpdatedAt: now.Add(-BatterySoCMaxAge - time.Second), UpdatedAt: now}, false},
+	} {
+		if got := tc.r.AtFull(now); got != tc.want {
+			t.Errorf("%s: AtFull = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}

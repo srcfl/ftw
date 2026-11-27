@@ -283,6 +283,12 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 				coreReason = "battery_full"
 				f.ChargeResumeSoC = watts(resume)
 			}
+			// The battery refused a charge order because it is full: a
+			// normal limit, not a failed command (srcfl/ftw#1993).
+			if coreReason == "" && kind == telemetry.DerBattery && commanded && cmd.Result == "failed" &&
+				cmd.PowerW != nil && *cmd.PowerW > 0 && rd.AtFull(now) {
+				coreReason = "battery_full_refused"
+			}
 			if held && kind == telemetry.DerBattery && (hold.Driver == "" || hold.Driver == rd.Driver) {
 				f.Mode = "manual"
 				f.RequestedW = watts(hold.PowerW)
@@ -576,6 +582,10 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 	}
 	if commanded && cmd.Result == "released" {
 		set("idle", "device_control", "info")
+		return
+	}
+	if commanded && cmd.Result == "failed" && coreReason == "battery_full_refused" {
+		set("limited", "battery_full", "info")
 		return
 	}
 	if commanded && cmd.Result == "failed" {
