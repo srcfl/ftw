@@ -22,7 +22,7 @@
 //	host.mqtt_sub / mqtt_subscribe, host.mqtt_pub / mqtt_publish, host.mqtt_messages
 //	host.modbus_read, host.modbus_write / write, host.modbus_write_multi / write_registers
 //	host.serial_read, host.aes_gcm_decrypt, host.json_decode, host.json_encode
-//	host.http_get, host.http_post, host.http_patch
+//	host.http_get, host.http_post, host.http_patch, host.http_put
 //	host.ws_open, host.ws_send, host.ws_messages, host.ws_is_open, host.ws_close
 //	host.tcp_open, host.tcp_recv, host.tcp_is_open, host.tcp_close
 //
@@ -1281,12 +1281,12 @@ func registerHost(L *lua.LState, env *HostEnv) {
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
 			}
-			// A redirected PATCH is unsafe: Go re-issues 301/302/303 as a
-			// body-less GET, so the device write silently never lands while the
-			// call still reports success. Refuse it — a write must reach the
-			// host it was checked against, or fail loudly.
-			if len(via) > 0 && via[0].Method == "PATCH" {
-				return fmt.Errorf("redirect not followed for PATCH (a redirected write cannot be verified)")
+			// A redirected PATCH or PUT is unsafe: Go re-issues 301/302/303 as
+			// a body-less GET, so the device write silently never lands while
+			// the call still reports success. Refuse it — a write must reach
+			// the host it was checked against, or fail loudly.
+			if len(via) > 0 && (via[0].Method == "PATCH" || via[0].Method == "PUT") {
+				return fmt.Errorf("redirect not followed for %s (a redirected write cannot be verified)", via[0].Method)
 			}
 			// The managed read-only OAuth exception authorizes one exact path.
 			// A 307/308 must not carry its POST body to a device write endpoint.
@@ -1467,60 +1467,70 @@ func registerHost(L *lua.LState, env *HostEnv) {
 	// grant, so granting HTTP for telemetry never implicitly grants the ability
 	// to mutate a device. Same allowlist, TLS pinning and 1MB response cap as
 	// the other verbs.
-	host.RawSetString("http_patch", L.NewFunction(func(L *lua.LState) int {
-		if !env.HTTP {
-			L.Push(lua.LNil)
-			L.Push(lua.LString("http: capability not granted"))
-			return 2
+	//
+	// host.http_put(url, body, headers?) is the same write under PUT, for
+	// device APIs that replace a resource instead of patching it (the
+	// sonnenBatterie JSON API v2 /configurations endpoint). It shares the
+	// allow_write gate and every other rule with http_patch.
+	httpWrite := func(method string) lua.LGFunction {
+		permission := "http." + strings.ToLower(method)
+		return func(L *lua.LState) int {
+			if !env.HTTP {
+				L.Push(lua.LNil)
+				L.Push(lua.LString("http: capability not granted"))
+				return 2
+			}
+			if !env.HTTPAllowWrite {
+				L.Push(lua.LNil)
+				L.Push(lua.LString("http: write not granted (set capabilities.http.allow_write)"))
+				return 2
+			}
+			if err := env.allowWrite(permission); err != nil {
+				L.Push(lua.LNil)
+				L.Push(lua.LString(err.Error()))
+				return 2
+			}
+			url := L.CheckString(1)
+			if ok, reason := hostAllowed(url); !ok {
+				L.Push(lua.LNil)
+				L.Push(lua.LString("http: " + reason))
+				return 2
+			}
+			payload := L.CheckString(2)
+			// Keep the same ordering rule as POST: the registry actor must not send
+			// a default while this older mutating request can still finish normally.
+			req, err := net_http.NewRequest(method, url, strings.NewReader(payload))
+			if err != nil {
+				L.Push(lua.LNil)
+				L.Push(lua.LString(err.Error()))
+				return 2
+			}
+			req.Header.Set("Content-Type", "application/json")
+			applyHeaders(req, L, 3)
+			resp, err := httpClient.Do(req)
+			if err != nil {
+				L.Push(lua.LNil)
+				L.Push(lua.LString(err.Error()))
+				return 2
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+			if err != nil {
+				L.Push(lua.LNil)
+				L.Push(lua.LString(err.Error()))
+				return 2
+			}
+			if resp.StatusCode >= 400 {
+				L.Push(lua.LNil)
+				L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
+				return 2
+			}
+			L.Push(lua.LString(string(body)))
+			return 1
 		}
-		if !env.HTTPAllowWrite {
-			L.Push(lua.LNil)
-			L.Push(lua.LString("http: write not granted (set capabilities.http.allow_write)"))
-			return 2
-		}
-		if err := env.allowWrite("http.patch"); err != nil {
-			L.Push(lua.LNil)
-			L.Push(lua.LString(err.Error()))
-			return 2
-		}
-		url := L.CheckString(1)
-		if ok, reason := hostAllowed(url); !ok {
-			L.Push(lua.LNil)
-			L.Push(lua.LString("http: " + reason))
-			return 2
-		}
-		payload := L.CheckString(2)
-		// Keep the same ordering rule as POST: the registry actor must not send
-		// a default while this older mutating request can still finish normally.
-		req, err := net_http.NewRequest("PATCH", url, strings.NewReader(payload))
-		if err != nil {
-			L.Push(lua.LNil)
-			L.Push(lua.LString(err.Error()))
-			return 2
-		}
-		req.Header.Set("Content-Type", "application/json")
-		applyHeaders(req, L, 3)
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			L.Push(lua.LNil)
-			L.Push(lua.LString(err.Error()))
-			return 2
-		}
-		defer resp.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if err != nil {
-			L.Push(lua.LNil)
-			L.Push(lua.LString(err.Error()))
-			return 2
-		}
-		if resp.StatusCode >= 400 {
-			L.Push(lua.LNil)
-			L.Push(lua.LString(fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))))
-			return 2
-		}
-		L.Push(lua.LString(string(body)))
-		return 1
-	}))
+	}
+	host.RawSetString("http_patch", L.NewFunction(httpWrite("PATCH")))
+	host.RawSetString("http_put", L.NewFunction(httpWrite("PUT")))
 
 	registerHTTPRequest(L, host, env, httpClient, hostAllowed)
 

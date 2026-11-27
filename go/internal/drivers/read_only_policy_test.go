@@ -71,7 +71,7 @@ func TestRuntimePolicyThatMayWriteIsRefused(t *testing.T) {
 		t.Fatal("a signed policy that is not read-only was accepted")
 	}
 	env := &HostEnv{RuntimePolicy: policy}
-	for _, permission := range []string{"modbus.write", "mqtt.publish", "http.post", "http.patch"} {
+	for _, permission := range []string{"modbus.write", "mqtt.publish", "http.post", "http.patch", "http.put"} {
 		if err := env.allowWrite(permission); err == nil {
 			t.Fatalf("%s: a managed driver was allowed to write", permission)
 		}

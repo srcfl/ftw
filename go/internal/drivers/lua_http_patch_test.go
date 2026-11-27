@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -26,10 +27,17 @@ import (
 // tests can assert WHICH gate fired, not just that something failed.
 func runPatchDriver(t *testing.T, env *HostEnv, targetURL string) (ok bool, deniedBy string) {
 	t.Helper()
+	return runHTTPWriteDriver(t, env, "http_patch", targetURL)
+}
+
+// runHTTPWriteDriver runs the same one-shot driver through any mutating
+// verb (host.http_patch or host.http_put).
+func runHTTPWriteDriver(t *testing.T, env *HostEnv, fn, targetURL string) (ok bool, deniedBy string) {
+	t.Helper()
 	src := `
 		function driver_init() end
 		function driver_poll()
-			local body, err = host.http_patch("` + targetURL + `",
+			local body, err = host.` + fn + `("` + targetURL + `",
 				'[{"variableId":5202,"integerValue":3000}]',
 				{ Authorization = "Basic dTpw" })
 			if err then
@@ -160,27 +168,37 @@ func TestLuaHTTPPatchRefusesRedirects(t *testing.T) {
 	// Go's HTTP client re-issues most redirected writes as body-less GETs,
 	// which would make http_patch report success for a write that never
 	// reached the device. A redirected PATCH must surface as an error.
-	var followUps atomic.Int64
-	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		followUps.Add(1)
-		_, _ = w.Write([]byte(`ok`))
-	}))
-	defer target.Close()
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL, http.StatusFound)
-	}))
-	defer redirector.Close()
+	for _, code := range []int{
+		http.StatusMovedPermanently,
+		http.StatusFound,
+		http.StatusSeeOther,
+		http.StatusTemporaryRedirect,
+		http.StatusPermanentRedirect,
+	} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			var followUps atomic.Int64
+			target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				followUps.Add(1)
+				_, _ = w.Write([]byte(`ok`))
+			}))
+			defer target.Close()
+			redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL, code)
+			}))
+			defer redirector.Close()
 
-	env := NewHostEnv("redirected", telemetry.NewStore()).WithHTTP().WithHTTPAllowWrite()
-	ok, deniedBy := runPatchDriver(t, env, redirector.URL)
-	if ok {
-		t.Fatal("a redirected PATCH must not report success")
-	}
-	if deniedBy != "denied_redirect" {
-		t.Errorf("denied by %q, want the redirect refusal", deniedBy)
-	}
-	if followUps.Load() != 0 {
-		t.Fatalf("redirect target was reached %d times — the write was converted to a GET", followUps.Load())
+			env := NewHostEnv("redirected", telemetry.NewStore()).WithHTTP().WithHTTPAllowWrite()
+			ok, deniedBy := runPatchDriver(t, env, redirector.URL)
+			if ok {
+				t.Fatal("a redirected PATCH must not report success")
+			}
+			if deniedBy != "denied_redirect" {
+				t.Errorf("denied by %q, want the redirect refusal", deniedBy)
+			}
+			if followUps.Load() != 0 {
+				t.Fatalf("redirect target was reached %d times — the write was converted to a GET", followUps.Load())
+			}
+		})
 	}
 }
 
