@@ -635,3 +635,39 @@ func TestAcceptedTrialEndsGuardWhileOtherActionStreakRemains(t *testing.T) {
 		t.Fatalf("driver back from a 29 s outage waits out the %v window", driverRefusalRetryInterval)
 	}
 }
+
+// srcfl/ftw#1993: a FoxESS H3 refuses forced charge from 99 %. That is the
+// battery keeping a normal limit: it must stay in dispatch and the plan.
+// The same refusal below full, or a refused discharge at full, still counts.
+func TestFullBatteryRefusingChargeIsALimitNotAFault(t *testing.T) {
+	refuse := &stubSender{handler: func(ctx context.Context, name string) error {
+		return errors.New("driver_command: battery is full; refusing forced charge")
+	}}
+	charge := []byte(`{"action":"battery","power_w":2900}`)
+	discharge := []byte(`{"action":"battery","power_w":-2000}`)
+	for _, tc := range []struct {
+		name     string
+		soc      float64
+		payload  []byte
+		excluded bool
+	}{
+		{"full battery refuses charge", 0.99, charge, false},
+		{"full battery refuses discharge", 0.99, discharge, true},
+		{"half-full battery refuses charge", 0.5, charge, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tel := pollingStore(t, "foxess")
+			soc := tc.soc
+			tel.Update("foxess", telemetry.DerBattery, 0, &soc, nil)
+			tracker := newDriverActuationTracker(tel)
+			now := time.Now()
+			for i := 0; i < driverRefusalLimit+2; i++ {
+				tracker.dispatchCommand(context.Background(), refuse, "driver send", "foxess", tc.payload, time.Second, now)
+				now = now.Add(time.Second)
+			}
+			if got := !tel.DriverHealth("foxess").IsOnline(); got != tc.excluded {
+				t.Fatalf("excluded = %v, want %v", got, tc.excluded)
+			}
+		})
+	}
+}

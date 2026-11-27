@@ -59,6 +59,31 @@ func TestControlFeedbackReasons(t *testing.T) {
 	}
 }
 
+// srcfl/ftw#1993: a full battery that refuses a charge order is limited,
+// not a failed command; below full the refusal stays a warning.
+func TestControlFeedbackFullBatteryRefusalIsALimit(t *testing.T) {
+	for _, tc := range []struct {
+		soc  float64
+		want string
+	}{{0.99, "battery_full"}, {0.5, "command_failed"}} {
+		tel := telemetry.NewStore()
+		now := time.Now()
+		c := tel.BeginCommand("battery", []byte(`{"action":"battery","power_w":2900}`), now.Add(-time.Minute))
+		tel.CompleteCommand(c, "failed")
+		soc := tc.soc
+		tel.Update("battery", telemetry.DerBattery, 0, &soc, []byte(`{}`))
+		tel.RecordDriverSuccess("battery")
+		srv := New(&Deps{Tel: tel, Ctrl: &control.State{}, CtrlMu: &sync.Mutex{}, Cfg: &config.Config{}, CfgMu: &sync.RWMutex{}})
+		got := srv.controlFeedback(time.Now())
+		if len(got) != 1 || got[0].Reason != tc.want {
+			t.Fatalf("SoC %.2f: %+v, want %s", tc.soc, got, tc.want)
+		}
+		if tc.want == "battery_full" && (got[0].Severity != "info" || got[0].Status == "blocked") {
+			t.Fatalf("a full battery's refusal reads as a fault: %+v", got[0])
+		}
+	}
+}
+
 func TestControlFeedbackEveryModeUsesEvidence(t *testing.T) {
 	for _, mode := range control.AllModes() {
 		t.Run(string(mode), func(t *testing.T) {
