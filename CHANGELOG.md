@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.169.0
+
+### Minor Changes
+
+- e703091: A car that stopped asking for charge is no longer left out for the rest of
+  the plug-in. While it stays plugged in with a goal to meet, FTW plans it
+  again an hour after it declined, or when the next ready time starts. A car
+  that is full or at its own limit declines once more and is left out again
+  after 90 seconds, so FTW offers it current at most once an hour. FTW does
+  not retry when the goal is met, when the car reports it is done or at its
+  limit, after a one-time ready time has passed, or on a charger it only
+  observes. Unplugging, a higher goal and Charge now still act at once, and
+  the plan now follows a refusal and its end right away instead of at the
+  next scheduled replan.
+
+### Patch Changes
+
+- dbf0699: Plan and charge a battery no higher than the charge level its own device
+  reports it will accept. A Pixii can stop at 90 % while the plan booked energy
+  up to 95 %, so dispatch ordered charge the battery never took. Drivers report
+  the limit as `max_soc_fract` (Pixii from driver 2.2.0). Core uses the lower of
+  it and the configured ceiling. It ignores a device limit below 50 % or at or
+  below the battery's SoC floor, and keeps the last one for up to ten minutes
+  when a reading leaves it out.
+- d94bc56: Bundle teslamate_vehicle 0.2.2. It reads TeslaMate's `location` topic as
+  well as the older latitude and longitude topics. Without a geofence the
+  driver uses that position to tell whether the car is at the site, so a car
+  on a newer TeslaMate no longer loses it.
+- 4c41555: Bundle three driver changes from srcfl/device-drivers:
+  
+  - Tibber 1.1.3 (srcfl/device-drivers#282) declares its WebSocket host. A box
+    set up from the UI now opens Tibber's live stream instead of logging
+    `ws: capability not granted`. Core grants it from the driver's `ws_hosts`
+    (srcfl/ftw#1822).
+  - Pixii 2.1.10 (srcfl/device-drivers#228) detects the battery's own
+    calibration from Pixii's running-service register. Core suspends control
+    and keeps measurements live while it lasts (srcfl/ftw#2017).
+  - Pixii 2.2.0 (srcfl/device-drivers#281) reports the battery's own charge
+    ceiling as `max_soc_fract`. Core plans and charges no higher than it
+    (srcfl/ftw#2083).
+- 4f22a77: Show when a car is not connected in the power flow. An attached car with no power reading shows that it is connected and power data is missing. Control feedback preserves these connection states.
+- 0416210: A car that stopped asking for charge while FTW offered it now reads "Car not
+  taking power" instead of "Waiting for the plan". The plan leaves such a car
+  out for the rest of the session, so the old text blamed an empty plan for a
+  stop the car made. Nothing else changes: unplugging, a higher goal, Charge
+  now, measured charging, or a car on a finish-at-limit goal reporting that it
+  is charging still lets FTW offer current again, and the battery level is never
+  guessed from the stop.
+- dbc311e: Show battery calibration as a normal operating state and suspend control and scoped manual overrides while calibration is active.
+
 ## 0.168.0
 
 ### Minor Changes
