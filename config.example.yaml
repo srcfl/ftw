@@ -221,20 +221,20 @@ state:
 app_link:
   enabled: true
 
-# Anonymous daily reports. Statistics are one answer on the box: part of FTW
-# Cloud, and on for a box without Cloud until its owner turns them off under
-# Settings → FTW app → Anonymous statistics, which shows each message. Two
-# reports, each alone and at its own time. The fleet report carries six
+# Daily reports, part of the project statistics in FTW Cloud's terms: with
+# FTW Cloud on they are sent, without it nothing is. Settings → FTW app →
+# Statistics shows each message. Two reports, each alone and at its own
+# time, neither with a box id. The fleet report carries six
 # things: FTW version, release channel, driver types, roughly how much
 # battery, price zone and roughly how old the install is. The energy report
 # carries a closed UTC day's six whole-kWh sums. No box id, no key, no serial,
 # no site name, no counter. Once a release names a relay, both go through it,
 # sealed with a random number drawn new for each report and the day it was
-# sent, so FTW Cloud never sees the address; until then the fleet report goes
-# straight to `endpoint`, which sees the address, and the energy report is not
-# sent.
-# `enabled: false` from an earlier release is read once and kept as "off"; it
-# is no longer a switch of its own.
+# sent, so FTW Cloud never sees the address. No release names one yet, so the
+# fleet report goes straight to `endpoint`, which sees the address, and the
+# energy report is not sent.
+# `enabled` is no longer read; FTW Cloud decides. A collector of your own in
+# `endpoint` also gets a report only while FTW Cloud is on.
 fleet_ping:
   enabled: true
   # endpoint: https://cloud.ftw.energy/v1/fleet

@@ -206,12 +206,14 @@
     return out;
   }
 
-  // The length chosen until the owner picks another: a week, or less when the
-  // offer asks for less. A week is long enough to try an assistant and short
-  // enough that one forgotten here ends; renewing is a button on this page.
+  // The length chosen until the owner picks another: 90 days, as in the
+  // apps, or the longest offered when the offer or the box takes less
+  // (Fredrik, 28 November 2026). The box warns a day before it ends, and
+  // renewing is a button on this page.
+  var DEFAULT_S = 90 * DAY_S;
   function defaultLength(options) {
-    var week = options.filter(function (s) { return s <= 7 * DAY_S; });
-    return week.length ? week[week.length - 1] : options[0];
+    var fits = options.filter(function (s) { return s <= DEFAULT_S; });
+    return fits.length ? fits[fits.length - 1] : options[0];
   }
 
   // The longest grant the box takes for a role, in seconds, as its facts
@@ -250,10 +252,17 @@
     return "used " + Math.round(d / 86400000) + " days ago";
   }
 
+  // Whether FTW Cloud carries an assistant: on under the current terms. An
+  // owner who accepted them when pairing a phone, in the web app or on this
+  // box has nothing more to do here.
+  function cloudReady(cloud) {
+    return !!cloud && cloud.link === "on" && !cloud.statisticsOnly && !!cloud.cloudTermsAccepted;
+  }
+
   // What stops a grant before the owner types a code, or null. The order is
   // the order to fix them in.
   function readiness(list, unavailable, auth) {
-    if (state.cloudChecked && (!state.cloud || state.cloud.link !== "on" || state.cloud.statisticsOnly || !state.cloud.cloudTermsAccepted)) return {kind:"cloud"};
+    if (state.cloudChecked && !cloudReady(state.cloud)) return {kind:"cloud"};
     if (unavailable) return { kind: "unavailable" };
     if (!list) return { kind: "loading" };
     // A box that could not say offers no "choose": a signed-in owner would
@@ -491,7 +500,9 @@
     slot.appendChild(box);
     switch (problem.kind) {
       case "cloud":
-        box.appendChild(el("p", {text:"Accept FTW Cloud terms above before entering the assistant code. Statistics-only sharing gives no assistant remote access. If Cloud is stopping, wait for its deletion receipt first."}));
+        box.appendChild(el("p", {text:state.cloud && state.cloud.link === "ending"
+          ? "FTW Cloud is stopping. Wait for its deletion receipt, then turn it on again above."
+          : "Assistants connect through FTW Cloud. Accept its terms above, or pair the FTW app, which accepts them."}));
         return;
       case "loading":
         box.className = "access-quiet";
@@ -952,8 +963,12 @@
     var select = el("select", { name: "length", id: "access-length-" + row.id });
     var left = Math.floor((row.expiresAtMs - now) / 1000);
     if (left > 60) select.appendChild(el("option", { value: "keep", text: "Keep the end, " + whenText(row.expiresAtMs) }));
-    lengthOptions(longestS(state.list && state.list.box, row.role)).forEach(function (s) {
-      select.appendChild(el("option", { value: String(s), text: lengthText(s) + " from now" }));
+    var renewals = lengthOptions(longestS(state.list && state.list.box, row.role));
+    var fresh = left > 60 ? null : defaultLength(renewals);
+    renewals.forEach(function (s) {
+      var opt = el("option", { value: String(s), text: lengthText(s) + " from now" });
+      if (s === fresh) opt.selected = true;
+      select.appendChild(opt);
     });
     form.appendChild(el("label", { for: select.id, text: "How long" }));
     form.appendChild(select);
@@ -1154,7 +1169,7 @@
     var given={idSuffix:"invite",heading:"The code allows",scopes:info.scopes,ops:info.ops,caps:info.caps};
     var limits=grantForm(form,given,state.list.registry,null);
     var length=el("select",{name:"length",id:"invite-access-length"});
-    [1,7,30,365].forEach(function(days){var opt=el("option",{value:String(days*DAY_S),text:lengthText(days*DAY_S)});opt.selected=days===7;length.appendChild(opt);});
+    lengthOptions(365*DAY_S).forEach(function(s){var opt=el("option",{value:String(s),text:lengthText(s)});opt.selected=s===DEFAULT_S;length.appendChild(opt);});
     form.appendChild(el("label",{for:"invite-access-length",text:"Access lasts"}));form.appendChild(length);
     form.appendChild(el("p",{className:"access-quiet",text:"The six-character code works once and ends within ten minutes. Access lasts as long as you choose above."}));
     form.appendChild(el("p",{className:"access-quiet",text:"The label helps you find this invitation. It does not check the recipient's identity. Reading technical backups can reveal saved credentials. Setup and control stay off until you choose them."}));
@@ -1221,8 +1236,8 @@
         "if you allow it, control it within limits. It connects through FTW Cloud. This box " +
         "decides what it may do and checks every call. No phone app is needed.</p>" +
         '<p class="access-quiet">' + (window.FTWHomeAssistant ?
-          'Home Assistant has signed you in. Review Cloud terms, then ask your assistant to begin FTW setup and approve its connection below.' :
-          'For a new box: review Cloud terms, then ask your assistant to begin FTW setup. Approve its setup connection below with the house password. If its connection page offers a choice, choose “Set up and configure”. The assistant can resume the draft stored on this box.') + '</p>' +
+          'Home Assistant has signed you in. Ask your assistant to begin FTW setup and approve its connection below.' :
+          'For a new box: ask your assistant to begin FTW setup. Approve its setup connection below with the house password. If its connection page offers a choice, choose “Set up and configure”. The assistant can resume the draft stored on this box.') + '</p>' +
         '<div id="access-cloud-settings" data-project-statistics-settings></div>' +
         '<div id="access-ready"></div>' +
         '<form id="access-code-form" class="access-code-form" autocomplete="off">' +
@@ -1283,6 +1298,7 @@
     choiceProblem: choiceProblem,
     lengthOptions: lengthOptions,
     defaultLength: defaultLength,
+    cloudReady: cloudReady,
     longestS: longestS,
     lengthText: lengthText,
     kwExact: kwExact,

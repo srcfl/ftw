@@ -627,15 +627,15 @@ The honest limits, which belong here rather than in a comment nobody reads:
 
 ## Fleet ping
 
-The box's anonymous daily report is separate from the Cloud readable-copy
-grant. Once a day it posts its FTW version and channel, each driver that delivered
+The box's anonymous daily report comes with the FTW Cloud grant but travels
+apart from the readable copy. Once a day it posts its FTW version and channel, each driver that delivered
 readings with its version (`pixii@2.1.9`), its battery to the nearest kWh, its price
 zone and an install-age range. The driver lists show how many boxes ran exactly that
 version the last closed day, from one and up. That count is all FTW says about a
 driver; there is no separate verification status. It answers
 how many reports arrive and what they describe, which helps size engineering
-bets. It is one of two anonymous daily reports under one statistics answer, with
-the energy report beside it (ADR 0008).
+bets. It is one of two anonymous daily reports, with the energy report beside
+it, and both go only while FTW Cloud is on under the current terms (ADR 0008).
 
 Since `ftw.fleet/2` it also says, in four buckets, how the box ran: the
 slowest plan of the last 24 hours (`none`, `0-1s`, `1-5s`, `5s+`), how many of
@@ -722,10 +722,10 @@ to it, though the Cloud service writes no request log or source address; through
 the relay it does not. And nothing ties two reports to one box, so the totals
 count reports, not unique boxes.
 
-A failed send is forgotten, never retried. Settings → FTW app → Anonymous
-statistics renders the exact payload from the same call the sender uses, and
-what goes beside it, so the claim is checkable rather than promised. It follows
-the one statistics answer, whose switch is on that screen. See
+A failed send is forgotten, never retried. Settings → FTW app → Statistics
+renders the exact payload from the same call the sender uses, and
+what goes beside it, so the claim is checkable rather than promised. It goes
+only while FTW Cloud is on, and that screen says so; it has no switch. See
 [`go/internal/fleetping`](../go/internal/fleetping).
 
 ## Releases

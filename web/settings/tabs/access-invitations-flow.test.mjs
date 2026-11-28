@@ -78,6 +78,8 @@ test('lost creation reply keeps the exact body and recovers its copyable code', 
   const first = structuredClone(r.posts[0]);
   assert.ok(first);
   assert.equal(first.scopes.includes('ftw.setup.write'), false);
+  // Access lasts 90 days unless the owner picks another length.
+  assert.ok(Math.abs(first.expiresAtMs - first.claimUntilMs - (90 * 86400000 - 600000)) < 5000, 'invitation access starts at 90 days');
   form.submit(); await settle();
   assert.deepEqual(r.posts[1], first, 'a retry never makes a new invitation');
   const code = r.all().find(e => e['aria-label'] === 'Invitation code');

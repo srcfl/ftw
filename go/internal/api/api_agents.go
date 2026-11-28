@@ -277,7 +277,7 @@ func (s *Server) handleAgentsAudit(w http.ResponseWriter, r *http.Request) {
 
 // agentAddBody is a grant offer, as FTW Cloud's consent page shows it, and
 // what the owner chose to grant of it. A field left out grants what the
-// offer asks, except ttlS, which grants at most 30 days.
+// offer asks, except ttlS, which grants at most 90 days.
 type agentAddBody struct {
 	Offer  string         `json:"offer"`
 	Scopes []string       `json:"scopes,omitempty"`
@@ -418,8 +418,9 @@ func (s *Server) handleAgentsOffer(w http.ResponseWriter, r *http.Request) {
 }
 
 // defaultTTLS is the length a grant gets when the request names none and the
-// offer asks for more: 30 days, where the app starts.
-const defaultTTLS = 30 * 24 * 60 * 60
+// offer asks for more: 90 days, where the box page and the apps start
+// (Fredrik, 28 November 2026).
+const defaultTTLS = 90 * 24 * 60 * 60
 
 // grantEnd is the end of a grant of ttlS seconds from now. A length past the
 // role's longest grant is refused here, as the box would refuse it, before

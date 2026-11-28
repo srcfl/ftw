@@ -523,7 +523,7 @@ func yearOfferBody(t *testing.T, extra string) string {
 	return `{"offer":"` + base64.RawURLEncoding.EncodeToString(raw) + `"` + extra + `}`
 }
 
-// A grant with no length named gets 30 days of an offer's year; one past a
+// A grant with no length named gets 90 days of an offer's year; one past a
 // year, or so long it would wrap, is refused as the box would refuse it,
 // with the latest end it takes.
 func TestTheBoxPageBoundsALength(t *testing.T) {
@@ -552,7 +552,7 @@ func TestTheBoxPageBoundsALength(t *testing.T) {
 	}
 
 	if w := post("/api/agents", yearOfferBody(t, "")); w.Code != http.StatusCreated ||
-		agents.added[0].ExpiresAtMs != 1_000_000+30*day {
+		agents.added[0].ExpiresAtMs != 1_000_000+90*day {
 		t.Fatalf("no length named: %d, ends %d", w.Code, agents.added[len(agents.added)-1].ExpiresAtMs)
 	}
 	if w := post("/api/agents", yearOfferBody(t, `,"ttlS":31536000`)); w.Code != http.StatusCreated ||

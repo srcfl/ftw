@@ -28,9 +28,8 @@ import (
 
 // A config saved from the Settings screen does not pass through applyDefaults:
 // handlePostConfig unmarshals what the client sent and configreload.Apply
-// swaps it in whole. So every reading of an absent fleet_ping section has to
-// agree with applyDefaults, or saving anything at all switches the ping off
-// until the next reboot — and asks for a restart nobody needs on the way.
+// swaps it in whole. A config with no fleet_ping section must not ask for a
+// restart nobody needs.
 
 // noFleetPingConfig is what a client that never learned about the section
 // posts: a valid config with no fleet_ping object in it.
@@ -76,18 +75,11 @@ func postConfigJSON(t *testing.T, srv *api.Server, body string) map[string]any {
 	return out
 }
 
-func TestSavingAConfigWithoutTheSectionLeavesThePingOn(t *testing.T) {
-	srv, cfg, cfgMu := fleetPingPostRig(t)
-	enabled := fleetPingEnabled(cfg, cfgMu)
-	if !enabled() {
-		t.Fatal("a fresh box is not sending; applyDefaults turns the ping on")
-	}
-
+// fleet_ping.enabled is no longer read: statistics come only with FTW Cloud.
+// Saving a config with no fleet_ping section must still ask for no restart.
+func TestSavingAConfigWithoutTheSectionAsksForNoRestart(t *testing.T) {
+	srv, _, _ := fleetPingPostRig(t)
 	res := postConfigJSON(t, srv, noFleetPingConfig)
-
-	if !enabled() {
-		t.Error("saving a config with no fleet_ping section switched the ping off until the next reboot")
-	}
 	reasons, _ := res["restart_reasons"].([]any)
 	if reasons == nil {
 		t.Fatal("restart_reasons must be [] when no restart is needed, not null")
@@ -99,20 +91,6 @@ func TestSavingAConfigWithoutTheSectionLeavesThePingOn(t *testing.T) {
 	}
 }
 
-func TestSavingAnExplicitOptOutStillTurnsThePingOff(t *testing.T) {
-	// Without this the test above would pass against a switch wired to true.
-	srv, cfg, cfgMu := fleetPingPostRig(t)
-	enabled := fleetPingEnabled(cfg, cfgMu)
-
-	body := strings.Replace(noFleetPingConfig, `"drivers": []`,
-		`"drivers": [], "fleet_ping": {"enabled": false}`, 1)
-	postConfigJSON(t, srv, body)
-
-	if enabled() {
-		t.Fatal("an explicit opt-out saved from Settings was ignored")
-	}
-}
-
 func TestRunningFleetPingSeesADriverInstalledLater(t *testing.T) {
 	store := openStore(t)
 	active := t.TempDir()
@@ -121,7 +99,7 @@ func TestRunningFleetPingSeesADriverInstalledLater(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{st: store}, nil, nil, "v1.4.0", active)
+	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{}, nil, nil, "v1.4.0", active)
 	if err != nil {
 		t.Fatalf("startFleetPing: %v", err)
 	}
@@ -343,7 +321,7 @@ func TestNoNameTheHouseholdChoseReachesThePostedPing(t *testing.T) {
 	// path unchanged. Payload() is what sendOnce marshals and posts.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{st: store}, nil, nil, "v1.4.0", active)
+	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{}, nil, nil, "v1.4.0", active)
 	if err != nil {
 		t.Fatalf("startFleetPing: %v", err)
 	}
@@ -473,7 +451,7 @@ func TestARepositoryRootInsideTheBundledTreeIsNotTheShippedCatalogue(t *testing.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{st: store}, nil, nil, "v1.4.0", active)
+	pinger, err := startFleetPing(ctx, cfg, cfgMu, store, statsAnswer{}, nil, nil, "v1.4.0", active)
 	if err != nil {
 		t.Fatalf("startFleetPing: %v", err)
 	}

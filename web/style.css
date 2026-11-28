@@ -1812,6 +1812,12 @@ footer {
 .fleet-ping-limits {
   margin-top: 8px;
 }
+/* Whether the box shares statistics: the fact, set apart from the text that
+   explains it. */
+.fleet-share-state {
+  margin: 0 0 8px;
+  font-weight: 600;
+}
 /* The payload table. Label left, value right, and the value wraps: a site
    with several driver types produces a long line, and it must not widen the
    settings modal past a phone screen. */

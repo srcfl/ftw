@@ -168,8 +168,9 @@ func (s *Server) handleCloudRevoke(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, link.Status())
 }
 
-// POST /api/cloud/stats {policy} — contribute to statistics, a separate
-// consent under a grant already on. Same gate as the grant.
+// POST /api/cloud/stats {policy} — statistics, which come only with FTW
+// Cloud under the current terms: there it keeps them on, under older terms
+// and without Cloud it answers 409. Same gate as the grant.
 func (s *Server) handleCloudStats(w http.ResponseWriter, r *http.Request) {
 	if !s.cloudGate(w, r, true) {
 		return
@@ -198,8 +199,9 @@ func (s *Server) handleCloudStats(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// DELETE /api/cloud/stats — stop contributing to statistics. Any door, as for
-// the grant.
+// DELETE /api/cloud/stats — statistics off where a grant from an earlier
+// release still carries them. Under the current terms it answers 409: turn
+// FTW Cloud off instead. Any door, as for the grant.
 func (s *Server) handleCloudStopStats(w http.ResponseWriter, r *http.Request) {
 	if !s.cloudGate(w, r, false) {
 		return

@@ -29,28 +29,28 @@ func TestCloudTermsIncludeStatisticsAndCannotOptOutSeparately(t *testing.T) {
 	}
 }
 
-// Without Cloud, statistics are an answer on the box. Turning them on or off
-// links nothing to Cloud and publishes no remote access.
-func TestLocalStatisticsLinkNothingToCloud(t *testing.T) {
+// Without FTW Cloud nothing is shared (Fredrik, 28 November 2026): asking
+// for statistics is refused and links nothing to Cloud, and turning them off
+// has nothing to stop.
+func TestWithoutCloudStatisticsAreRefusedAndNothingIsShared(t *testing.T) {
 	svc := newFakeService(t)
 	h := newHarness(t, svc)
-	if s := h.link.Status(); s.StatisticsDecisionRequired || s.Statistics || s.StatisticsRequired {
-		t.Fatal("a box asked, or shared before its answer was recorded", s)
+	if s := h.link.Status(); s.StatisticsDecisionRequired || s.Statistics || s.StatisticsRequired || h.link.SharesStatistics() {
+		t.Fatal("a box without Cloud asked, or shared", s)
 	}
-	if err := h.link.Stats(StatsRequest{Policy: cloudwire.StatsPolicy, By: "local owner"}); err != nil {
-		t.Fatal(err)
+	if err := h.link.Stats(StatsRequest{Policy: cloudwire.StatsPolicy, By: "local owner"}); !errors.Is(err, ErrNotGranted) {
+		t.Fatalf("statistics without Cloud: %v", err)
 	}
-	s := h.link.Status()
-	if !s.Statistics || s.StatisticsRequired || s.Link != "off" || s.StatisticsOnly || !SharesStatistics(h.kv) {
-		t.Fatal("local statistics are not a local answer", s)
+	if s := h.link.Status(); s.Statistics || s.Link != "off" || s.StatisticsOnly || h.link.SharesStatistics() {
+		t.Fatal("a refused request shared statistics", s)
 	}
 	if h.link.Home() != "" || h.link.SessionInfo() != nil || h.link.current().copyOn() || h.link.current().g != nil {
-		t.Fatal("local statistics enabled Cloud functions")
+		t.Fatal("asking for statistics enabled Cloud functions")
 	}
 	if err := h.link.StopStats("local owner"); err != nil {
 		t.Fatal(err)
 	}
-	if s := h.link.Status(); s.Statistics || s.Link != "off" || s.StatisticsActive || SharesStatistics(h.kv) {
+	if s := h.link.Status(); s.Statistics || s.Link != "off" || s.StatisticsActive {
 		t.Fatal("off did not stay off and local", s)
 	}
 }
@@ -73,70 +73,58 @@ func TestEndingCloudPreventsAutomaticRelinkFromPairedPhones(t *testing.T) {
 	}
 }
 
-// Every earlier No stays no; every other box shares, since a box without
-// Cloud shares until its owner turns it off. The answer is written once.
-func TestMigrationKeepsEveryEarlierNo(t *testing.T) {
-	yes := grantRecord{StatsPolicy: cloudwire.StatsPolicy, StatsID: make([]byte, 16), Purposes: []string{protocol.CloudPurposeStats}}
-	for name, c := range map[string]struct {
-		kv       map[string]string
-		grant    *grantRecord
-		fleetOff bool
-		want     bool
-	}{
-		"never asked":           {want: true},
-		"local yes":             {grant: &yes, want: true},
-		"local no":              {kv: map[string]string{statsDecisionKey: cloudwire.StatsPolicy}, want: false},
-		"no to an older policy": {kv: map[string]string{statsDecisionKey: "ftw-project-stats-2026-10-v1"}, want: false},
-		"Cloud turned off":      {kv: map[string]string{disabledKey: "true"}, want: false},
-		"fleet report off":      {fleetOff: true, want: false},
-		"yes, fleet report off": {grant: &yes, fleetOff: true, want: false},
-		"already answered: on":  {kv: map[string]string{statsShareKey: "on", disabledKey: "true"}, want: true},
-		"already on by default": {kv: map[string]string{statsShareKey: "default"}, want: true},
-		"already answered: off": {kv: map[string]string{statsShareKey: "off"}, want: false},
-	} {
+// Whatever an earlier release stored as the local answer, it is written
+// "off" once. Nothing reads it now; off keeps a rollback from sending from a
+// box without Cloud.
+func TestEveryEarlierLocalAnswerIsRetiredAsOff(t *testing.T) {
+	for _, before := range []string{"", "on", "default", "off", "unreadable"} {
 		kv := &memKV{m: map[string]string{}}
-		for k, v := range c.kv {
-			kv.m[k] = v
+		if before != "" {
+			kv.m[statsShareKey] = before
 		}
-		if c.grant != nil {
-			if err := saveJSON(kv, grantKey, *c.grant); err != nil {
+		for range 2 {
+			if err := RetireLocalStatistics(kv); err != nil {
 				t.Fatal(err)
 			}
-		}
-		if SharesStatistics(kv) && c.kv[statsShareKey] == "" {
-			t.Fatalf("%s: shared before the answer was written", name)
-		}
-		if err := MigrateStatistics(kv, c.fleetOff); err != nil {
-			t.Fatal(err)
-		}
-		if got := SharesStatistics(kv); got != c.want {
-			t.Fatalf("%s: shares %v, want %v", name, got, c.want)
-		}
-		// Only a yes that was given counts as one.
-		if said := SaidYesToStatistics(kv); said != (c.want && (c.grant != nil || c.kv[statsShareKey] == "on")) {
-			t.Fatalf("%s: said yes %v", name, said)
-		}
-		// Written once: a later start reads the answer, not the old flags.
-		if err := MigrateStatistics(kv, !c.fleetOff); err != nil || SharesStatistics(kv) != c.want {
-			t.Fatalf("%s: a second start changed the answer", name)
+			if v, _ := kv.LoadConfig(statsShareKey); v != "off" {
+				t.Fatalf("%q: stored %q, want off", before, v)
+			}
 		}
 	}
 }
 
-// Without a running link no stored grant counts, so the box's own answer
-// alone decides. The link's answer, with the grant it honours, is tested in
-// link_test.go.
-func TestWithoutALinkOnlyTheLocalAnswerCounts(t *testing.T) {
-	kv := &memKV{m: map[string]string{statsShareKey: "off"}}
-	cloud := grantRecord{Policy: cloudwire.CloudTermsPolicy, Purposes: []string{protocol.CloudPurposeServe, protocol.CloudPurposeStats}}
-	if err := saveJSON(kv, grantKey, cloud); err != nil {
+// The old local answer counts for nothing. Without Cloud no answer sends;
+// under the current terms an old "off" does not stop what the terms include;
+// Cloud turned off sends none.
+func TestTheOldLocalAnswerCountsForNothing(t *testing.T) {
+	svc := newFakeService(t)
+	h := newHarness(t, svc)
+	answers := []string{"on", "default", "off"}
+	for _, share := range answers {
+		if err := h.kv.SaveConfig(statsShareKey, share); err != nil {
+			t.Fatal(err)
+		}
+		if h.link.SharesStatistics() || h.link.Status().Statistics {
+			t.Fatalf("a box without Cloud shares with the old answer %q", share)
+		}
+	}
+	if err := h.link.Grant(GrantRequest{Scopes: []string{protocol.ScopeLiveRead}, Policy: cloudwire.CloudTermsPolicy, By: "owner"}); err != nil {
 		t.Fatal(err)
 	}
-	for share, want := range map[string][2]bool{"off": {false, false}, "default": {true, false}, "on": {true, true}} {
-		kv.m[statsShareKey] = share
-		if got := [2]bool{SharesStatistics(kv), SaidYesToStatistics(kv)}; got != want {
-			t.Fatalf("%s: shares, said yes = %v, want %v", share, got, want)
+	h.nextRoster(t)
+	for _, share := range answers {
+		if err := h.kv.SaveConfig(statsShareKey, share); err != nil {
+			t.Fatal(err)
 		}
+		if !h.link.SharesStatistics() || !h.link.Status().Statistics {
+			t.Fatalf("the current Cloud terms do not share with the old answer %q", share)
+		}
+	}
+	if err := h.link.End("owner"); err != nil {
+		t.Fatal(err)
+	}
+	if h.link.SharesStatistics() || h.link.Status().Statistics {
+		t.Fatal("Cloud turned off still shares")
 	}
 }
 
@@ -182,7 +170,7 @@ func (f failingChoiceKV) SaveConfig(key, value string) error {
 }
 
 func TestWholeCloudOffStopsImmediatelyWhenLaterStorageFails(t *testing.T) {
-	for _, failKey := range []string{statsDecisionKey, linkKey, grantKey} {
+	for _, failKey := range []string{linkKey, grantKey} {
 		t.Run(failKey, func(t *testing.T) {
 			var armed atomic.Bool
 			svc := newFakeService(t)
@@ -195,7 +183,7 @@ func TestWholeCloudOffStopsImmediatelyWhenLaterStorageFails(t *testing.T) {
 			if err := h.link.End("owner"); err == nil {
 				t.Fatal("storage failure was not returned")
 			}
-			if h.link.TakesTun() || h.link.Home() != "" || h.link.SessionInfo() != nil || h.link.current().copyOn() || SharesStatistics(h.kv) {
+			if h.link.TakesTun() || h.link.Home() != "" || h.link.SessionInfo() != nil || h.link.current().copyOn() || h.link.SharesStatistics() {
 				t.Fatal("a failed follow-up write left Cloud sharing active")
 			}
 			if disabled, _ := h.kv.LoadConfig(disabledKey); disabled != "true" {

@@ -5,8 +5,8 @@ import vm from "node:vm";
 
 // The fleet statistics panel makes one claim: what you see is what the box sends.
 // These tests hold it to that. The rows must come from the payload rather
-// than from a list in the tab, and the checkbox must reflect the box's own
-// default rather than a friendlier one.
+// than from a list in the tab, and the line above them must say what the box
+// does: statistics go only with FTW Cloud, so there is no switch to show.
 //
 // fleet.js is a plain IIFE, so it loads under a small shim and these tests
 // drive the real render() and the real row builder.
@@ -59,12 +59,15 @@ const payload = {
 };
 
 describe("the fleet statistics panel", () => {
-  it("offers one statistics switch, not a config setting", () => {
-    // Statistics are one answer for both reports, kept by the box, not a
-    // field in the config document that Save writes.
+  it("offers no statistics switch and no config setting", () => {
+    // Statistics are part of FTW Cloud and nothing else (Fredrik, 28
+    // November 2026): the panel states what the box does, and Save writes
+    // nothing for it.
     const config = {};
     const html = render(config);
-    assert.match(html, /id="statistics-share"/);
+    assert.doesNotMatch(html, /type="checkbox"/);
+    assert.doesNotMatch(html, /id="statistics-share"/);
+    assert.match(html, /id="statistics-share-note"/);
     assert.doesNotMatch(html, /data-checkbox-path/);
     assert.equal(config.fleet_ping, undefined, "render() wrote a config section");
   });
@@ -79,11 +82,24 @@ describe("the fleet statistics panel", () => {
     assert.match(html, /with what goes beside it/);
   });
 
-  it("names both reports and says they never travel together", () => {
+  it("names the reports, says which are linked to the home, and that the daily ones never travel together", () => {
+    // The hourly reports carry a statistics id so Sourceful can delete them:
+    // they are not anonymous, and the panel must not say so.
     const html = render({});
-    assert.match(html, /two anonymous reports a day/);
+    assert.match(html, /<legend>Statistics<\/legend>/);
+    assert.match(html, /With FTW Cloud on, this box sends hourly reports, which Sourceful links to your Cloud home for 48 hours so it can delete them, and daily reports with no box id/);
+    assert.match(html, /part of FTW Cloud's terms/);
+    assert.match(html, /Daily fleet report/);
+    assert.match(html, /Daily energy report/);
     assert.match(html, /never travel together/);
-    assert.match(html, /part of Cloud/);
+    assert.doesNotMatch(html, /anonymous statistics/i);
+  });
+
+  it("does not say a relay hides the address while none is named", () => {
+    const html = render({});
+    assert.match(html, /until FTW names a relay, the receiving service sees the address/);
+    assert.match(html, /Once FTW names an independent relay, the report goes through it/);
+    assert.match(html, /Until then this release does not send it/);
   });
 
   it("names every field the message carries", () => {
@@ -202,24 +218,23 @@ describe("the line under the payload", () => {
   });
 });
 
-describe("the statistics switch", () => {
+describe("the statistics line", () => {
   const { shareLine } = tab._pure;
 
-  it("is part of FTW Cloud while Cloud is on", () => {
+  it("is on only as part of FTW Cloud", () => {
     const line = shareLine({ statistics: true, statisticsRequired: true });
-    assert.match(line, /Part of FTW Cloud/);
-    assert.match(line, /no separate off switch/);
+    assert.match(line, /^On, as part of FTW Cloud/);
+    assert.match(line, /Turning FTW Cloud off stops them/);
   });
 
   it("says nothing goes under earlier Cloud terms", () => {
     const line = shareLine({ statistics: false, statisticsRequired: false, statisticsNeedTerms: true });
-    assert.match(line, /earlier terms/);
-    assert.match(line, /Nothing is sent until you accept the current terms/);
+    assert.match(line, /^Off\. FTW Cloud runs under earlier terms/);
   });
 
-  it("says what on and off mean without Cloud", () => {
-    assert.match(shareLine({ statistics: true, statisticsRequired: false }), /takes effect at once, with no restart/);
-    assert.match(shareLine({ statistics: false, statisticsRequired: false }), /^Off\. Nothing is sent/);
+  it("says nothing goes without Cloud, whatever an old answer was", () => {
+    assert.match(shareLine({ statistics: false, statisticsRequired: false }), /^Off\. This box does not use FTW Cloud, so nothing is sent/);
+    assert.match(shareLine({ link: "off" }), /^Off\./);
     assert.match(shareLine(null), /Could not read/);
   });
 
@@ -253,8 +268,8 @@ describe("keeping the line true after a save", () => {
     vm.createContext(sandbox);
     vm.runInContext(source, sandbox);
     sandbox.window.FTWSettings.fleetPing.afterSave();
-    // And the statistics answer, which the switch shows.
-    assert.deepEqual([...asked].sort(), ["/api/cloud", "/api/cloud/stats-policy", "/api/fleet-ping"]);
+    // And whether the box shares, which the line above the reports shows.
+    assert.deepEqual([...asked].sort(), ["/api/cloud", "/api/fleet-ping"]);
   });
 });
 

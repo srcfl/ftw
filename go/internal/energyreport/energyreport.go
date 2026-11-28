@@ -1,10 +1,11 @@
-// Package energyreport sends one anonymous energy report a day, through an
-// independent Oblivious HTTP relay, so that neither the relay nor FTW Cloud
-// can tell which home sent it.
+// Package energyreport sends one energy report a day, with no box id, through
+// an independent Oblivious HTTP relay, so that neither the relay nor FTW
+// Cloud can tell which home sent it. No release names a relay yet, so it
+// sends nothing; Settings shows the report it would send.
 //
 // The report is six whole-kWh sums of one closed UTC day and its date
-// (package energywire). Package statsrelay seals it to FTW Cloud's gateway
-// key, pinned in this release, and posts it to the relay:
+// (package energywire). Once a release pins a relay and FTW Cloud's gateway
+// key, package statsrelay seals it to that key and posts it to the relay:
 //
 //   - the relay sees the box's address, the time and a ciphertext of fixed
 //     length, never the report;

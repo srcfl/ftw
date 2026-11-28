@@ -2594,16 +2594,17 @@ func main() {
 	// The bundled drivers dir is deliberately not passed: which drivers this
 	// build ships with is compiled in, not discovered on disk. See
 	// fleetCatalogue for what that buys.
-	migrateStatistics(cfg, cfgMu, st, cloudLink)
-	answer := statsAnswer{st: st, link: cloudLink}
+	retireLocalStatistics(st, cloudLink)
+	answer := statsAnswer{link: cloudLink}
 	fleetPinger, fleetPingErr := startFleetPing(
 		ctx, cfg, cfgMu, st, answer, tel, selfUpdater, Version, config.ManagedDriversDirOverride,
 	)
 	if fleetPingErr != nil {
 		slog.Warn("fleet ping unavailable", "err", fleetPingErr)
 	}
-	// The anonymous daily energy report, under the same answer, through an
-	// independent relay so that FTW Cloud never learns which box sent it.
+	// The daily energy report, under the same answer. It goes only through an
+	// independent relay, and no release names one yet, so it is not sent;
+	// Settings still shows what it would carry.
 	energyReport := startEnergyReport(ctx, cfg, cfgMu, st, answer)
 
 	mutationPolicy := apiMutationPolicy()

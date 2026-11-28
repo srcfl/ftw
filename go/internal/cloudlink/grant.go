@@ -22,15 +22,14 @@ import (
 // document, so a whole-document config write cannot reset them. A missing
 // record reads as off.
 const (
-	linkKey          = "cloud/link_v1"
-	grantKey         = "cloud/grant_v1"
-	rosterKey        = "cloud/roster_v1"
-	purgedKey        = "cloud/purged_v1"
-	disabledKey      = "cloud/disabled_v1"
-	statsDecisionKey = "cloud/statistics_decision_v1"
-	// statsShareKey is the one statistics answer of a box without FTW Cloud:
-	// "on" (the owner said yes), "default" (on, never answered) or "off"
-	// (MigrateStatistics, SharesStatistics).
+	linkKey     = "cloud/link_v1"
+	grantKey    = "cloud/grant_v1"
+	rosterKey   = "cloud/roster_v1"
+	purgedKey   = "cloud/purged_v1"
+	disabledKey = "cloud/disabled_v1"
+	// statsShareKey held an earlier release's statistics answer for a box
+	// without FTW Cloud. Statistics now come only with Cloud; the key is
+	// written "off" once and read by nothing (RetireLocalStatistics).
 	statsShareKey = "statistics/share_v1"
 )
 

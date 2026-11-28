@@ -91,8 +91,8 @@ and verified on hardware.
 First-run bootstrap now offers assistant setup alongside the wizard. It stores
 an empty measurement-only configuration and a private house-password hash in
 one published SQLite settings file, then restarts. The owner signs in from
-another device on the LAN, reviews Cloud terms and approves the setup grant
-in Access. Statistics-only sharing cannot carry an assistant session.
+another device on the LAN, accepts Cloud terms in Access unless pairing the
+app already did, and approves the setup grant there.
 
 `setup_begin` requests diagnostic and setup access together. The box supplies
 the complete typed configuration schema, supported modes, runtime time zone,

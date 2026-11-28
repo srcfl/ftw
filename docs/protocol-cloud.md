@@ -1605,7 +1605,7 @@ consent text.
 | `GET /api/cloud/stats-policy` | The same. Exact fields, purpose and group rules for a fresh consent |
 | `GET /api/cloud/preview` | The same. The exact bytes that leave the house |
 | `POST /api/cloud/grant {scopes, policy}` | An owner's session, the box itself, or a direct private LAN client. The optional house password, when on, requires a LAN login as Settings does. On a grant already on, it changes the scopes and keeps the key, home id and `grantKey` |
-| `POST /api/cloud/stats {policy}` | The same gate, as a separate consent. 409 while the grant is off or a revoke waits for its receipt |
+| `POST /api/cloud/stats {policy}` | The same gate. Statistics come only with FTW Cloud: 200 under the current terms, which already include them; 409 under older terms, without Cloud, or while a revoke waits for its receipt |
 | `DELETE /api/cloud/grant`, `DELETE /api/cloud/stats` | An owner's session, or any client on the LAN, because narrowing access is safe |
 
 A viewer's session gets 403 on every route, and so does a request with
@@ -1622,12 +1622,14 @@ writes do not gain access. CGNAT is not a private network for this choice.
   off pushes `cloud.revoked`. A change of scopes, and turning statistics on
   or off, push nothing. Every change writes an audit line on the box. A grant,
   a change of scopes and a statistics change each send a new roster.
-- `POST /api/cloud/stats` draws a `statsId` the first time and keeps it while
-  statistics stay on under the same policy. A new policy draws a new id.
-  Turning statistics on again after a withdrawal draws a new one.
-- `DELETE /api/cloud/stats` removes `stats` from the purposes at once. The
-  box forgets its stats id and sends a roster without statistics metadata.
-  Cloud deletes the rows when it receives that signed roster.
+- Accepting the current terms draws a `statsId` and keeps it while Cloud
+  stays on under the same policy. A new policy draws a new id.
+  `POST /api/cloud/stats` under those terms changes nothing.
+- `DELETE /api/cloud/stats` answers 409 under the current terms: turning
+  FTW Cloud off stops statistics. On a grant an earlier release left with
+  `stats` beside older terms, it removes `stats` from the purposes at once;
+  the box forgets its stats id and sends a roster without statistics
+  metadata. Cloud deletes the rows when it receives that signed roster.
 
 ## Revocation and deletion
 
@@ -1863,8 +1865,11 @@ also rejects tunnels locally in that mode and emits no live or event data.
 Collection stays off until the signed C8 review; the default operator setting
 is empty. Withdrawal and retention continue while it is paused.
 
-Since 24 October 2026 a box without Cloud no longer starts a statistics-only
-roster: its statistics are the two anonymous daily reports, through the
-Oblivious HTTP relay (ADR 0008, "Anonymous daily reports and one statistics
-answer"). Statistics-only rosters already running keep working until the
-owner turns statistics off.
+Since 24 October 2026 a box without Cloud starts no statistics-only roster
+(ADR 0008, "Anonymous daily reports and one statistics answer"). Since 28
+November 2026 statistics come only with FTW Cloud (ADR 0008, amendment of
+that date). A box ends a statistics-only roster at its next start, so the
+service deletes its rows, and a box without Cloud sends no statistics at
+all. No release names a relay yet: the daily fleet report goes straight to
+`/v1/fleet`, which sees the box's address, and the energy report is not
+sent.

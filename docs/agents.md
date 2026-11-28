@@ -569,9 +569,10 @@ key ends as from a stranger. The watch exchange refuses it too.
 - **A warning first.** A day before a grant runs out, the box pushes
   `agent.expiring` to every owner, whatever the grant's length.
 - **The owner picks the length.** For an `agent`, the app and the box page
-  offer 1, 7, 30 and 90 days and a year. The app starts at 30 days, the box
-  page at a week. Neither offers more than the offer's `ttlS` or the box's
-  `longestMs` for the role.
+  offer 1, 7, 30 and 90 days and a year. Both start at 90 days (Fredrik,
+  28 November 2026), or at the longest offered when that is less. Neither
+  offers more than the offer's `ttlS` or the box's `longestMs` for the role.
+  An invitation from the box page starts at 90 days too.
 
 ### Mixed versions
 
@@ -687,7 +688,7 @@ above and its approval key, and an agent can never reach them.
   the owner types the consent page's code, and the page, in the owner's
   browser, fetches the signed offer from FTW Cloud's code lookup and posts
   it here. The owner may grant less: `scopes`, `ops`, `caps` and `ttlS`
-  replace the offer's when given. Without `ttlS` the grant lasts 30 days, or
+  replace the offer's when given. Without `ttlS` the grant lasts 90 days, or
   the offer's length if shorter. A `ttlS` past the role's longest grant is
   `E_CAP_EXCEEDED {cap: "expiresAtMs", max}`.
 - **Every route that widens access needs a browser signed in with the
