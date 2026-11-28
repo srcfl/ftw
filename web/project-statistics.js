@@ -49,7 +49,7 @@
     node("summary","What the statistics share",disclosure);
     say(disclosure,details);
     say(disclosure,privacy);
-    var link=node("a","Privacy and Cloud terms",parent);link.href="https://ftw.sourceful.energy/privacy#statistics";link.target="_blank";link.rel="noopener";
+    var link=node("a","Privacy and Cloud terms",parent);link.href="https://ftw.energy/privacy#statistics";link.target="_blank";link.rel="noopener";
   }
   function signIn(parent) {
     say(parent,authStatus && authStatus.home_assistant

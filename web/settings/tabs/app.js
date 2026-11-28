@@ -696,7 +696,7 @@
         "</div>" +
         '<p id="app-link-terms" class="hint" hidden>The app reaches this box through FTW Cloud, ' +
         "which keeps a readable copy of your energy data and takes project statistics. Pairing accepts its " +
-        '<a href="https://ftw.sourceful.energy/privacy" target="_blank" rel="noopener">terms</a>. ' +
+        '<a href="https://ftw.energy/privacy" target="_blank" rel="noopener">terms</a>. ' +
         "The box runs without it.</p>" +
         // The slot sits right under the buttons that fill it. It used to sit
         // after the hint paragraphs below, which put the answer — QR, spoken
