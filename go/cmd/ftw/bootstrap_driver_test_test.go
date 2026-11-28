@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/srcfl/ftw/go/internal/api"
 )
 
 // The setup guide tests each device before a box has settings. The probe
@@ -25,7 +27,7 @@ func TestBootstrapDriverTestRunsTheDriverWithoutSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := bootstrapDriverTest(configPath)
+	handler := api.FirstRunDriverTest(firstRunProbeDeps(configPath, dir))
 	post := func(body string) (int, map[string]any) {
 		req := httptest.NewRequest(http.MethodPost, "/api/drivers/test", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

@@ -19,7 +19,6 @@ import (
 	modbuscli "github.com/srcfl/ftw/go/internal/modbus"
 	mqttcli "github.com/srcfl/ftw/go/internal/mqtt"
 	"github.com/srcfl/ftw/go/internal/prices"
-	"github.com/srcfl/ftw/go/internal/scanner"
 )
 
 // runBootstrap serves the setup wizard when config.yaml does not exist yet.
@@ -63,16 +62,11 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		}
 		writeBootstrapJSON(w, http.StatusOK, map[string]any{"path": driverDir, "entries": entries})
 	})
-	// The guide tests each device as it is added, before anything is saved.
-	mux.Handle("POST /api/drivers/test", bootstrapDriverTest(configPath))
-	mux.HandleFunc("GET /api/scan", func(w http.ResponseWriter, r *http.Request) {
-		devices, err := scanner.Scan(r.Context())
-		if err != nil {
-			writeBootstrapJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeBootstrapJSON(w, http.StatusOK, devices)
-	})
+	// The guide names what the scan finds and tests each device as it is
+	// added, before anything is saved, as Settings does.
+	probes := firstRunProbeDeps(configPath, driverDir)
+	mux.Handle("POST /api/drivers/test", api.FirstRunDriverTest(probes))
+	mux.Handle("GET /api/scan", api.FirstRunScan(probes))
 	mux.HandleFunc("GET /api/ev/providers", func(w http.ResponseWriter, _ *http.Request) {
 		writeBootstrapJSON(w, http.StatusOK, evcloud.Describe())
 	})
@@ -116,12 +110,14 @@ func runBootstrap(configPath, webDir, driverDir string) {
 	}
 }
 
-// bootstrapDriverTest runs one short driver probe with the same Modbus and
-// MQTT clients the running box uses.
-func bootstrapDriverTest(configPath string) http.Handler {
+// firstRunProbeDeps gives the guide's scan and device test the same Modbus
+// and MQTT clients and the same drivers the running box uses.
+func firstRunProbeDeps(configPath, driverDir string) api.Deps {
 	modbusEngine := modbuscli.NewEngine()
-	return api.FirstRunDriverTest(api.Deps{
-		ConfigPath: configPath,
+	return api.Deps{
+		ConfigPath:    configPath,
+		DriverDir:     driverDir,
+		UserDriverDir: config.UserDriversDirOverride,
 		DriverMQTTFactory: func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
 			return mqttcli.DialWithOptions(c.Host, c.Port, c.Username, c.Password, "ftw-"+name, c.AllowUnverifiedLocal)
 		},
@@ -129,7 +125,7 @@ func bootstrapDriverTest(configPath string) http.Handler {
 			return modbusEngine.Open(c.Host, c.Port, c.UnitID, c.AllowUnverifiedLocal)
 		},
 		DriverARPLookup: arp.Lookup,
-	})
+	}
 }
 
 // bootstrapConfig saves the wizard's settings, with the house password it
