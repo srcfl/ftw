@@ -1,4 +1,6 @@
-// <ftw-savings-card> — historical savings vs no-PV/no-battery baseline.
+// <ftw-savings-card> — historical savings, labelled with their baseline:
+// self-use when the box sends it and the owner chose it, otherwise buying
+// all use from the grid ("no solar or battery").
 //
 // Fetches /api/savings/daily and renders:
 //   - a headline "+247 SEK saved (+23%)" sized for scanning, color by sign
@@ -22,6 +24,7 @@ import {
   SAVINGS_LOOKBACK_DAYS,
   buildSavingsPeriods,
   formatCompactMinor,
+  savingsBaseline,
 } from "./savings-periods.js";
 
 const SAVINGS_BASELINE_KEY = "ftw.savings.baseline";
@@ -453,13 +456,12 @@ class FtwSavingsCard extends FtwElement {
     }
     const wk = this._range === "week";
     const compact = this.hasAttribute("compact");
-    const self = this._baseline === "self";
-    const compare = self ? "Compared to self-use" : "Compared to no system";
+    const compare = savingsBaseline(this._payload, this._baseline).label;
     return `
       <div class="card-inner">
         <div class="head">
           <div>
-            <div class="label" title="No system buys the recorded house and vehicle use from the grid. Self-use is the same solar and battery run blind: it stores surplus, covers the house, wastes a little on conversion, keeps a small reserve, and keeps exporting when that export costs money.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : "Savings"}</div>
+            <div class="label" title="No solar or battery buys the recorded house use from the grid, and a car's energy at the day's average price. Self-use is the same solar and battery run blind: it stores surplus, covers the house, wastes a little on conversion, keeps a small reserve, and keeps exporting when that export costs money.">${compact ? `Savings <span class="compact-currency" data-role="compact-currency">${escapeHtml(activeCurrency())}</span>` : "Savings"}</div>
             <div class="compare" data-role="compare">${compare}</div>
           </div>
           <div class="toggle range-toggle" role="tablist" data-active="${wk ? "week" : "month"}">
@@ -641,7 +643,8 @@ class FtwSavingsCard extends FtwElement {
     statusEl.hidden = true;
     statusEl.textContent = "";
 
-    const periods = buildSavingsPeriods(days, this._baseline === "self" ? "self_consumption_saved_ore" : "saved_ore");
+    // days already carry the chosen baseline in saved_ore (see _paint).
+    const periods = buildSavingsPeriods(days, "saved_ore");
     const specs = [
       ["today", "Today", periods.today],
       ["week", "Last 7 days", periods.week],
@@ -734,7 +737,10 @@ class FtwSavingsCard extends FtwElement {
 
     const rawDays = this._payload.days;
     const rawTotals = this._payload.totals;
-    const self = this._baseline === "self";
+    const baseline = savingsBaseline(this._payload, this._baseline);
+    const self = baseline.self;
+    const compareEl = root.querySelector('[data-role="compare"]');
+    if (compareEl) compareEl.textContent = baseline.label;
     const days = self ? rawDays.map((d) => ({
       ...d,
       saved_ore: d.self_consumption_saved_ore,
@@ -787,11 +793,11 @@ class FtwSavingsCard extends FtwElement {
       : "var(--fg)";
     this.style.setProperty('--ftw-savings-color', color);
 
-    // Sub-line: actual + no-PV/no-battery baseline in SEK. Gives the
-    // operator the two numbers the delta is derived from.
+    // Sub-line: actual + the baseline in the household's currency. Gives
+    // the operator the two numbers the delta is derived from.
     const actualSek = actualOre / 100;
     const baselineSek = baselineOre / 100;
-    const compared = self ? "self-use" : "no system";
+    const compared = baseline.short;
     subEl.innerHTML =
       `Actual <b>${fmtSek(actualSek)} ${cur}</b>, ${compared} <b>${fmtSek(baselineSek)} ${cur}</b>`;
 

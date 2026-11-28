@@ -35,8 +35,9 @@ export function updateEnergyToday(today, root = document) {
   for (const [id, key] of Object.entries(ENERGY_FIELDS)) {
     const el = root.getElementById(id);
     if (!el) continue;
-    const {partial, estimated} = energyTodayReading(today, key);
+    const {wh, partial, estimated} = energyTodayReading(today, key);
     el.textContent = formatEnergyToday(today, key);
+    el.classList.toggle("is-unknown", wh === null);
     el.title = estimated ? "Estimated from source energy during brief balance failures."
       : partial ? "Recorded energy only; missing readings are excluded." : "";
   }

@@ -821,6 +821,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // ---- /api/status ----
 
+// statusStaleAfter is how long a device's reading stays live: the site
+// watchdog, as the app link uses it. Call it with CfgMu held.
+func statusStaleAfter(cfg *config.Config) time.Duration {
+	if cfg != nil && cfg.Site.WatchdogTimeoutS > 0 {
+		return time.Duration(cfg.Site.WatchdogTimeoutS) * time.Second
+	}
+	return 60 * time.Second
+}
+
 func statusDriverOnline(tel *telemetry.Store, name string) bool {
 	if tel == nil || name == "" {
 		return false
@@ -861,6 +870,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	s.deps.CfgMu.RLock()
 	observeOnly := config.ObserveOnlyDriverSet(s.deps.Cfg)
+	staleAfter := statusStaleAfter(s.deps.Cfg)
+	luaByDriver := map[string]string{}
+	if s.deps.Cfg != nil {
+		for _, dc := range s.deps.Cfg.Drivers {
+			luaByDriver[dc.Name] = dc.Lua
+		}
+	}
 	s.deps.CfgMu.RUnlock()
 
 	// Aggregate live readings. Offline readings stay in telemetry so detailed
@@ -915,6 +931,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Per-driver details
 	drivers := make(map[string]any)
+	now := time.Now()
 	for name, h := range s.deps.Tel.AllHealth() {
 		// A device fault overrides the emit-based status: the driver keeps
 		// emitting (Status stays ok) but the device can't actuate, so surface
@@ -927,6 +944,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"status":             status,
 			"consecutive_errors": h.ConsecutiveErrors,
 			"tick_count":         h.TickCount,
+			// Freshness as an app session grades it: the overview's LIVE
+			// is lit only while every device here says live.
+			"src_state": appproto.DriverSourceState(&h, staleAfter, now),
+		}
+		if h.LastSuccess != nil {
+			d["last_ok_age_ms"] = max(now.Sub(*h.LastSuccess).Milliseconds(), 0)
+		}
+		if statusVehicleOnly(luaByDriver[name], s.deps.Tel, name) {
+			d["vehicle_only"] = true
 		}
 		if h.DeviceFault {
 			d["device_fault"] = true
@@ -1196,6 +1222,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			drivers[dc.Name] = map[string]any{
 				"status":      "offline",
 				"not_running": true,
+				"src_state":   appproto.SourceNever,
 			}
 		}
 	}

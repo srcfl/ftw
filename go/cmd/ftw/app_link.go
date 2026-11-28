@@ -83,33 +83,18 @@ func (a *appSite) Snapshot() appproto.Snapshot {
 		GridW: live.GridW, PVW: live.PVW, BatteryW: live.BatteryW, EVW: live.EVW,
 		LoadW: live.LoadW, LoadWKnown: live.LoadKnown}
 
-	uptimeMs := time.Since(a.started).Milliseconds()
+	now := time.Now()
+	uptimeMs := now.Sub(a.started).Milliseconds()
 	seen := map[string]bool{}
 	addSource := func(driver string) {
 		if driver == "" || seen[driver] {
 			return
 		}
 		seen[driver] = true
-
-		src := appproto.Source{ID: driver, Kind: "driver", Name: driver, LastOkUptimeMs: -1}
-		health := a.tel.DriverHealth(driver)
-		if health == nil {
-			snap.Sources = append(snap.Sources, src)
-			return
-		}
-		stale := a.siteMeterStale
-		if health.WatchdogTimeoutOverride > 0 {
-			// A cloud-polled inverter and a P1 meter are not comparable, so
-			// the driver's own cadence decides when its reading goes stale
-			// rather than one number for the whole site.
-			stale = health.WatchdogTimeoutOverride
-		}
-		src.StaleAfterMs = stale.Milliseconds()
-		src.Offline = !health.IsOnline()
-		if health.LastSuccess != nil {
-			src.LastOkUptimeMs = uptimeMs - time.Since(*health.LastSuccess).Milliseconds()
-		}
-		snap.Sources = append(snap.Sources, src)
+		// The box's own page grades its devices with the same function
+		// (/api/status src_state), so the two never disagree about live.
+		snap.Sources = append(snap.Sources,
+			appproto.DriverSource(driver, a.tel.DriverHealth(driver), a.siteMeterStale, uptimeMs, now))
 	}
 
 	if siteMeterDriver != "" {

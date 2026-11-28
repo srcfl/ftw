@@ -43,6 +43,19 @@ function finite(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
+// What a savings answer is compared against. Self-use (the same solar and
+// battery run without prices) only when the owner chose it and the box sent
+// it for every day; otherwise the figure against buying all use from the
+// grid, named as that, since it counts what the panels bring as savings.
+export function savingsBaseline(payload, preferred) {
+  const days = (payload && Array.isArray(payload.days)) ? payload.days : [];
+  const sent = days.length > 0 && days.every((row) => Number.isFinite(row && row.self_consumption_saved_ore));
+  const self = preferred === "self" && sent;
+  return self
+    ? { self, label: "Compared to self-use", short: "self-use" }
+    : { self, label: "Compared to no solar or battery", short: "no solar or battery" };
+}
+
 // Minor units in, signed major units out. The currency sits once in the card
 // heading, which leaves enough room for all three values on a phone.
 export function formatCompactMinor(minor) {

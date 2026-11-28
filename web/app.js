@@ -8,6 +8,7 @@
   const POLL_INTERVAL = 2000;        // status poll cadence — snappier cards
   const historyMigrationUI = import("/history-migration.js").catch(function () { return null; });
   const energyTodayUI = import("/energy-today.js").catch(function () { return null; });
+  const overviewFreshnessUI = import("/overview-freshness.js").catch(function () { return null; });
   const carsUI = import("/cars.js").catch(function () { return null; });
   function updateHistoryMigration(health) {
     historyMigrationUI.then(function (ui) { if (ui) ui.updateMigrationBanner(health); }).catch(function () {});
@@ -836,15 +837,21 @@
     });
     if (data.energy && data.energy.today) {
       var t = data.energy.today;
-      if (eImport) eImport.textContent = formatKwh(t.import_wh);
-      if (eExport) eExport.textContent = formatKwh(t.export_wh);
-      if (ePv) ePv.textContent = formatKwh(t.pv_wh);
-      if (eCharged) eCharged.textContent = formatKwh(t.bat_charged_wh);
-      if (eDischarged) eDischarged.textContent = formatKwh(t.bat_discharged_wh);
-      if (eLoad) eLoad.textContent = formatKwh(t.load_wh);
-      if (overviewEImport) overviewEImport.textContent = formatKwh(t.import_wh);
-      if (overviewEExport) overviewEExport.textContent = formatKwh(t.export_wh);
-      if (overviewEPv) overviewEPv.textContent = formatKwh(t.pv_wh);
+      // "Unknown" carries no direction colour (.is-unknown).
+      var setKwh = function (el, wh) {
+        if (!el) return;
+        el.textContent = formatKwh(wh);
+        el.classList.toggle("is-unknown", wh == null);
+      };
+      setKwh(eImport, t.import_wh);
+      setKwh(eExport, t.export_wh);
+      setKwh(ePv, t.pv_wh);
+      setKwh(eCharged, t.bat_charged_wh);
+      setKwh(eDischarged, t.bat_discharged_wh);
+      setKwh(eLoad, t.load_wh);
+      setKwh(overviewEImport, t.import_wh);
+      setKwh(overviewEExport, t.export_wh);
+      setKwh(overviewEPv, t.pv_wh);
     }
 
     // Fuse gauge — per-phase bars if the server reports phase amperage,
@@ -2303,7 +2310,7 @@
           carsFetchedAt = Date.now();
         }
         updateChargingNotice(lp);
-        setConnected(true);
+        setConnected(true, data);
         if (firstLoad) { firstLoad = false; }
         if (setupBannerShown) { hideSetupBanner(); }
         // Always refresh timestamp on successful fetch
@@ -2612,7 +2619,20 @@
       });
   }
 
-  function setConnected(ok) {
+  // A later answer wins: a paint queued behind the module load must not
+  // relight LIVE after the connection was lost.
+  var freshnessSeq = 0;
+  function openSettingsTab(tab) {
+    return function () {
+      if (window.FTWSettings && typeof window.FTWSettings.open === "function") window.FTWSettings.open(tab);
+    };
+  }
+  var openDevicesSettings = openSettingsTab("devices");
+  var openPriceSettings = openSettingsTab("price");
+
+  // ok says the box answered this poll; data is that answer. LIVE is lit
+  // only when every device in it answers as well (overview-freshness.js).
+  function setConnected(ok, data) {
     // update-badge.js is deferred, so on the first tick or two the element
     // may not have upgraded yet and the method is absent. Polling re-asserts
     // this every cycle and the component defaults to connected, which is
@@ -2620,13 +2640,25 @@
     if (updateBadge && typeof updateBadge.setConnected === "function") {
       updateBadge.setConnected(ok);
     }
+    var seq = ++freshnessSeq;
     if (ok) {
-      if (overviewHealth) overviewHealth.classList.add("is-connected");
-      if (overviewHealthLabel) overviewHealthLabel.textContent = "Live";
+      overviewFreshnessUI.then(function (ui) {
+        if (seq !== freshnessSeq) return;
+        if (ui) {
+          ui.paintOverviewFreshness(document, data, openDevicesSettings);
+          ui.paintPriceAreaNote(document, data, openPriceSettings);
+        } else {
+          if (overviewHealth) overviewHealth.classList.add("is-connected");
+          if (overviewHealthLabel) overviewHealthLabel.textContent = "Connected";
+        }
+      });
       // render() will update lastUpdate with timestamp
     } else {
-      if (overviewHealth) overviewHealth.classList.remove("is-connected");
+      if (overviewHealth) overviewHealth.classList.remove("is-connected", "is-live");
       if (overviewHealthLabel) overviewHealthLabel.textContent = "Connection lost";
+      // What the devices said is as old as the last answer; say nothing.
+      var quiet = document.getElementById("overview-quiet");
+      if (quiet) { quiet.hidden = true; quiet.dataset.key = ""; }
       lastUpdate.textContent = "Connection lost";
     }
   }
