@@ -66,9 +66,12 @@ manually in this document.
   They never go down and never return to zero, and a restart counts no
   energy twice. They appear a few minutes after an update, once FTW has
   added up the history it already holds. Only an empty history, as on a new
-  box, starts them at zero. Restoring an older backup takes them back to
-  that backup's totals; fix the jump this makes in Home Assistant under
-  **Developer tools → Statistics**.
+  box, starts them at zero. A full backup holds the history but not the
+  totals, so a restore adds them up again from that history. Restoring an
+  older backup therefore takes them back to that backup's totals; fix the
+  jump this makes in Home Assistant under **Developer tools → Statistics**.
+  An older FTW drops the totals if it rebuilds its history file; after the
+  next update they add up again from the stored history.
 - The `Today …` energy sensors are `total_increasing`: they count from local
   midnight and return to zero there. A driver's energy metric is
   `total_increasing` only when it is a lifetime total or a meter's

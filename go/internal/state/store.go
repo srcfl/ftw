@@ -327,6 +327,8 @@ func (s *Store) Close() error {
 	}
 	err := s.StopHistory()
 	if s.history != nil {
+		// The last totals shown to others become the floor a restart reads.
+		err = errors.Join(err, s.saveLifetimeFloor(context.Background()))
 		err = errors.Join(err, s.history.Close())
 	}
 	err = errors.Join(err, s.closeForecastLongArchive())

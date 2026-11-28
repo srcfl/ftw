@@ -13,13 +13,15 @@ import (
 // counters that only count up, such as Home Assistant's Energy dashboard.
 //
 // The base row holds the history added for good, up to through_ms. Whole
-// quarter hours are added once they are an hour old: by then the history
-// writer, load estimates and source holds have long finished writing them.
-// Each read adds the newer history to the base. The floor row holds the
-// highest totals already returned, so a read never returns less, also after
-// a restart. Both rows live in history.db beside the rows they sum: an empty
-// history file starts them again at zero, and a lost base is rebuilt from
-// the stored history.
+// quarter hours are added once the stored history runs an hour past them:
+// by then the history writer, load estimates and source holds have long
+// finished writing them. Each read adds the newer history to the base. The
+// floor row holds the highest totals already returned, so a read never
+// returns less, also after a restart. Both rows live in history.db beside
+// the rows they sum: an empty history file starts them again at zero, and a
+// lost base is rebuilt from the stored history. Full backups (the history
+// export) and history files rebuilt by older Cores leave the table out;
+// the totals then rebuild from the history that came along.
 const lifetimeEnergySchema = `CREATE TABLE IF NOT EXISTS energy_lifetime(key TEXT PRIMARY KEY,through_ms INTEGER NOT NULL,import_wh REAL NOT NULL,export_wh REAL NOT NULL,pv_wh REAL NOT NULL,bat_charged_wh REAL NOT NULL,bat_discharged_wh REAL NOT NULL,load_wh REAL NOT NULL) STRICT`
 
 const (
@@ -68,8 +70,13 @@ func (l LifetimeEnergy) atLeast(o LifetimeEnergy) LifetimeEnergy {
 
 // LifetimeEnergy returns each flow's energy since the stored history began.
 // The totals never fall and never count stored history twice, also across
-// restarts. ok is false while the first read is still adding up older
-// history, one week per call, or while a history import runs.
+// restarts. ok is false while a read is still adding up older history, one
+// week per call, or while a history import runs before the first read.
+//
+// The stored history, not the wall clock, decides how far history is added
+// for good: a clock that runs ahead must not move the base past rows the
+// writer has yet to store, and one that runs behind must not hide stored
+// rows from the total.
 func (s *Store) LifetimeEnergy(now time.Time) (LifetimeEnergy, bool, error) {
 	if s == nil || s.history == nil {
 		return LifetimeEnergy{}, false, nil
@@ -86,28 +93,35 @@ func (s *Store) LifetimeEnergy(now time.Time) (LifetimeEnergy, bool, error) {
 	if err != nil {
 		return LifetimeEnergy{}, false, err
 	}
-	foldTo := bucketStart(now.Add(-lifetimeSettle).UnixMilli(), lifetimeStepMS)
+	newest, stored, err := s.newestEnergyHistoryMS(ctx)
+	if err != nil {
+		return LifetimeEnergy{}, false, err
+	}
+	if !stored {
+		// Nothing to add up yet. A new box shows zero and saves nothing.
+		out := floor.atLeast(s.lifetimeShown)
+		s.lifetimeShown = out
+		return out, true, nil
+	}
 	if !found {
 		// A first read, or a history file without the row: start at the
 		// oldest stored history, once an import has put it all in place.
+		// The value already shown stays the least this process returns.
 		if m := s.HistoryMigrationStatus(); !m.HistoryComplete && m.State != "failed" {
 			return LifetimeEnergy{}, false, nil
 		}
-		oldest, ok, err := s.oldestEnergyHistoryMS(ctx)
+		oldest, _, err := s.oldestEnergyHistoryMS(ctx)
 		if err != nil {
 			return LifetimeEnergy{}, false, err
 		}
-		through = foldTo
-		if ok && oldest < foldTo {
-			through = oldest
-		}
-		base = LifetimeEnergy{}
-		s.lifetimeShown = LifetimeEnergy{}
+		base, through = LifetimeEnergy{}, oldest
 	}
 
+	nowMS := now.UnixMilli()
+	foldTo := bucketStart(min(nowMS, newest)-lifetimeSettle.Milliseconds(), lifetimeStepMS)
 	ready := true
 	if foldTo > through || !found {
-		to := foldTo
+		to := max(foldTo, through)
 		if step := bucketStart(through+lifetimeCatchUp.Milliseconds(), lifetimeStepMS); step < to {
 			to, ready = step, false
 		}
@@ -119,20 +133,57 @@ func (s *Store) LifetimeEnergy(now time.Time) (LifetimeEnergy, bool, error) {
 			base, through = base.plus(d), to
 		}
 		floor = floor.atLeast(s.lifetimeShown)
-		if err := s.saveLifetime(ctx, through, base, floor); err != nil {
+		if err := s.saveLifetimeRows(ctx, lifetimeRowValue{"base", through, base}, lifetimeRowValue{"floor", 0, floor}); err != nil {
 			return LifetimeEnergy{}, false, err
 		}
 	}
 	if !ready {
 		return LifetimeEnergy{}, false, nil
 	}
-	tail, err := s.DailyEnergy(through, now.UnixMilli())
+	// The newest stored row ends at most a minute after it starts.
+	tail, err := s.DailyEnergy(through, max(nowMS, newest+ArchiveResolutionMS))
 	if err != nil {
 		return LifetimeEnergy{}, false, err
 	}
 	out := base.plus(tail).atLeast(floor).atLeast(s.lifetimeShown)
 	s.lifetimeShown = out
+	if out.above(floor, lifetimeFloorMarginWh) {
+		if err := s.saveLifetimeRows(ctx, lifetimeRowValue{"floor", 0, out}); err != nil {
+			return LifetimeEnergy{}, false, err
+		}
+	}
 	return out, true, nil
+}
+
+// lifetimeFloorMarginWh is how far a shown total may run ahead of the saved
+// floor before the floor is saved between folds. Close saves the rest, so
+// only a power cut can lose it, and then at most this much of a flow whose
+// stored total fell, such as PV at night.
+const lifetimeFloorMarginWh = 50
+
+func (l LifetimeEnergy) above(o LifetimeEnergy, margin float64) bool {
+	return l.ImportWh-o.ImportWh >= margin || l.ExportWh-o.ExportWh >= margin || l.PVWh-o.PVWh >= margin ||
+		l.BatChargedWh-o.BatChargedWh >= margin || l.BatDischargedWh-o.BatDischargedWh >= margin || l.LoadWh-o.LoadWh >= margin
+}
+
+// saveLifetimeFloor saves the totals already shown as the floor, for Close.
+func (s *Store) saveLifetimeFloor(ctx context.Context) error {
+	if s.history == nil {
+		return nil
+	}
+	s.lifetimeMu.Lock()
+	defer s.lifetimeMu.Unlock()
+	if s.lifetimeShown == (LifetimeEnergy{}) {
+		return nil
+	}
+	floor, _, _, err := s.lifetimeRow(ctx, "floor")
+	if err != nil {
+		return err
+	}
+	if !s.lifetimeShown.above(floor, math.SmallestNonzeroFloat64) {
+		return nil
+	}
+	return s.saveLifetimeRows(ctx, lifetimeRowValue{"floor", 0, floor.atLeast(s.lifetimeShown)})
 }
 
 func (s *Store) lifetimeRow(ctx context.Context, key string) (LifetimeEnergy, int64, bool, error) {
@@ -149,9 +200,15 @@ func (s *Store) lifetimeRow(ctx context.Context, key string) (LifetimeEnergy, in
 	return l, through, true, nil
 }
 
-// saveLifetime writes the base and the floor in one transaction, so a
-// restart finds a floor that covers what the base already holds.
-func (s *Store) saveLifetime(ctx context.Context, through int64, base, floor LifetimeEnergy) error {
+type lifetimeRowValue struct {
+	key     string
+	through int64
+	l       LifetimeEnergy
+}
+
+// saveLifetimeRows writes rows in one transaction: a fold saves the base and
+// the floor together, so a restart finds a floor that covers the base.
+func (s *Store) saveLifetimeRows(ctx context.Context, rows ...lifetimeRowValue) error {
 	s.historyWriteMu.Lock()
 	defer s.historyWriteMu.Unlock()
 	tx, end, err := s.beginHistoryWrite(ctx)
@@ -159,11 +216,7 @@ func (s *Store) saveLifetime(ctx context.Context, through int64, base, floor Lif
 		return err
 	}
 	defer end()
-	for _, row := range []struct {
-		key     string
-		through int64
-		l       LifetimeEnergy
-	}{{"base", through, base}, {"floor", 0, floor}} {
+	for _, row := range rows {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO energy_lifetime VALUES(?,?,?,?,?,?,?,?)
  ON CONFLICT(key) DO UPDATE SET through_ms=excluded.through_ms,import_wh=excluded.import_wh,export_wh=excluded.export_wh,pv_wh=excluded.pv_wh,
  bat_charged_wh=excluded.bat_charged_wh,bat_discharged_wh=excluded.bat_discharged_wh,load_wh=excluded.load_wh`,
@@ -186,4 +239,18 @@ func (s *Store) oldestEnergyHistoryMS(ctx context.Context) (int64, bool, error) 
 		return 0, false, err
 	}
 	return oldest.Int64, oldest.Valid, nil
+}
+
+// newestEnergyHistoryMS is the start of the newest stored energy evidence.
+// Each table's primary key or index leads with the time, so this is cheap.
+func (s *Store) newestEnergyHistoryMS(ctx context.Context) (int64, bool, error) {
+	var newest sql.NullInt64
+	err := s.history.QueryRowContext(ctx, `SELECT MAX(m) FROM (
+ SELECT MAX(start_ms) AS m FROM history_site_energy UNION ALL SELECT MAX(start_ms) FROM history_site_energy_partial
+ UNION ALL SELECT MAX(start_ms) FROM `+sourceEnergyTable+`
+ UNION ALL SELECT MAX(ts_ms) FROM history_hot UNION ALL SELECT MAX(ts_ms) FROM history_warm UNION ALL SELECT MAX(ts_ms) FROM history_cold)`).Scan(&newest)
+	if err != nil {
+		return 0, false, err
+	}
+	return newest.Int64, newest.Valid, nil
 }
