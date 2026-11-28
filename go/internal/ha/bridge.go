@@ -913,13 +913,21 @@ func metricStateClass(name, unit, devClass string) string {
 // lifetimeEnergyCounter reports a metric name that drivers use for an energy
 // counter that only grows: ev_lifetime_wh (CTEK), ev_lifetime_kwh (Easee),
 // meter_total_import_wh and meter_total_export_wh (a meter's registers).
+// A meter register must end the name, before the unit: total_import_last_hour_wh
+// is not one.
 func lifetimeEnergyCounter(name string) bool {
 	for _, part := range strings.Split(name, "_") {
 		if part == "lifetime" {
 			return true
 		}
 	}
-	return strings.Contains(name, "total_import") || strings.Contains(name, "total_export")
+	base := strings.TrimSuffix(strings.TrimSuffix(name, "_kwh"), "_wh")
+	for _, register := range []string{"total_import", "total_export"} {
+		if base == register || strings.HasSuffix(base, "_"+register) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- Command subscriber ----

@@ -1725,7 +1725,7 @@ footer {
   background: color-mix(in srgb, var(--alarm) 8%, transparent);
   color: var(--alarm);
 }
-/* A change waiting for Save is not a failure. */
+/* Waiting for Save or for a broker is not a failure. */
 .ha-status-indicator.ha-pending {
   border-color: color-mix(in srgb, var(--fg) 30%, transparent);
   background: color-mix(in srgb, var(--fg) 6%, transparent);

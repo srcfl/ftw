@@ -260,13 +260,18 @@ func TestLegacyCoverSwitchShowsOnlyWhileOn(t *testing.T) {
 
 func TestMetricStateClassNeedsALifetimeName(t *testing.T) {
 	for name, want := range map[string]bool{
-		"ev_lifetime_wh":        true,
-		"meter_total_export_wh": true,
-		"pv_total_import_kwh":   true,
-		"ev_session_wh":         false,
-		"battery_capacity_wh":   false,
-		"today_pv_wh":           false,
-		"hp_lifetimer_wh":       false, // "lifetime" must be a whole word
+		"ev_lifetime_wh":            true,
+		"meter_total_export_wh":     true,
+		"pv_total_import_kwh":       true,
+		"ev_session_wh":             false,
+		"battery_capacity_wh":       false,
+		"today_pv_wh":               false,
+		"hp_lifetimer_wh":           false, // "lifetime" must be a whole word
+		"total_import_wh":           true,
+		"meter_total_export":        true,
+		"total_import_last_hour_wh": false, // the register must end the name
+		"hp_total_exported_wh":      false,
+		"mytotal_import_wh":         false,
 	} {
 		if got := lifetimeEnergyCounter(name); got != want {
 			t.Errorf("lifetimeEnergyCounter(%q) = %v, want %v", name, got, want)

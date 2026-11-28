@@ -27,6 +27,15 @@ describe("Home Assistant status", () => {
     });
   });
 
+  it("says FTW waits when no broker is known yet", () => {
+    for (const broker of [undefined, ""]) {
+      assert.deepEqual(statusView({ enabled: true, connected: false, broker }, true), {
+        className: "ha-status-indicator ha-pending",
+        text: "○  Waiting for an MQTT broker. Install the Mosquitto broker app in Home Assistant, or set a broker host below. FTW connects by itself.",
+      });
+    }
+  });
+
   it("marks a checked but unsaved form without calling it disabled", () => {
     assert.deepEqual(statusView({ enabled: false }, true), {
       className: "ha-status-indicator ha-pending",

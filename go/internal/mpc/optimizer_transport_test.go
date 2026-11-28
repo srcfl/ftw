@@ -324,3 +324,42 @@ func TestProtocolWindowDefaultsToTheReportedVersion(t *testing.T) {
 		t.Fatalf("window = %d-%d, want 1-3", min, max)
 	}
 }
+
+// The solver runs with Core's environment, less the secrets it never needs.
+// In the Home Assistant app that environment holds the Supervisor token and
+// the broker login.
+func TestProcessTransportKeepsCoreSecretsFromTheWorker(t *testing.T) {
+	if os.Args[len(os.Args)-1] == "env-helper" {
+		seen := []string{}
+		for _, name := range []string{"SUPERVISOR_TOKEN", "HASSIO_TOKEN", "FTW_HA_MQTT_PASSWORD", "FTW_WORKER_ENV_PROBE"} {
+			if _, ok := os.LookupEnv(name); ok {
+				seen = append(seen, name)
+			}
+		}
+		_, _ = os.Stdout.WriteString(strings.Join(seen, ",") + "\n")
+		os.Exit(0)
+	}
+	t.Setenv("SUPERVISOR_TOKEN", "token")
+	t.Setenv("HASSIO_TOKEN", "token")
+	t.Setenv("FTW_HA_MQTT_PASSWORD", "pw")
+	t.Setenv("FTW_WORKER_ENV_PROBE", "1")
+	transport, err := NewProcessTransport(ProcessTransportConfig{
+		Command: []string{os.Args[0], "-test.run=^TestProcessTransportKeepsCoreSecretsFromTheWorker$", "--", "env-helper"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = transport.Close() })
+	if err := transport.ensureStartedLocked(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	line, err := scanLine(ctx, transport.scanner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(line) != "FTW_WORKER_ENV_PROBE" {
+		t.Fatalf("the worker saw %q; want only the probe, not Core's secrets", line)
+	}
+}

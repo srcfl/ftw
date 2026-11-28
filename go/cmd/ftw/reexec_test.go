@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"os"
+	"slices"
 	"testing"
 
 	"github.com/srcfl/ftw/go/internal/components"
@@ -77,5 +78,19 @@ func TestExecCurrentProcessTreatsNilReturnAsFailure(t *testing.T) {
 	err := execCurrentProcess(func(string, []string, []string) error { return nil })
 	if err == nil {
 		t.Fatal("exec that returns nil must still be an error; success never returns")
+	}
+}
+
+// A re-exec starts Core again, not a helper. In the Home Assistant app the
+// new Core still needs the Supervisor token to find a broker added later.
+func TestReexecKeepsTheSupervisorTokenForCore(t *testing.T) {
+	t.Setenv("SUPERVISOR_TOKEN", "token")
+	var env []string
+	_ = execCurrentProcess(func(_ string, _ []string, envv []string) error {
+		env = envv
+		return errors.New("execve: refused")
+	})
+	if !slices.Contains(env, "SUPERVISOR_TOKEN=token") {
+		t.Fatal("the re-executed Core lost the Supervisor token")
 	}
 }

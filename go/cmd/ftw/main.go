@@ -2703,6 +2703,7 @@ func main() {
 			return forecastSettings.Snapshot().Options
 		},
 		HA:               haOwner.Bridge,
+		HABroker:         haOwner.BrokerFor,
 		Registry:         reg,
 		DriverRepository: driverRepository,
 		Events:           bus,

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -118,6 +120,18 @@ func (o *haBridgeOwner) Apply(cfg *config.HomeAssistant) {
 		o.setBridge(b)
 		slog.Info("HA bridge started", "broker", cfg.Broker)
 	}
+}
+
+// BrokerFor is the broker, as host:port, that the bridge uses for the saved
+// settings: the saved broker, or in the Home Assistant app Home Assistant's
+// own. It is empty while no broker is known, so the settings page can say
+// FTW is waiting for one.
+func (o *haBridgeOwner) BrokerFor(saved *config.HomeAssistant) string {
+	cfg, ready := o.broker.fill(saved)
+	if !ready || cfg == nil || strings.TrimSpace(cfg.Broker) == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d", cfg.Broker, cfg.Port)
 }
 
 // Stop ends any retry and stops the bridge. Apply does nothing afterwards.

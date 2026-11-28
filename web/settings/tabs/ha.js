@@ -29,9 +29,15 @@
         text: "● connected to " + status.broker + "  ·  " + (status.sensors_announced || 0) + " sensors  ·  last publish " + age,
       };
     }
+    if (!status.broker) {
+      return {
+        className: "ha-status-indicator ha-pending",
+        text: "○  Waiting for an MQTT broker. Install the Mosquitto broker app in Home Assistant, or set a broker host below. FTW connects by itself.",
+      };
+    }
     return {
       className: "ha-status-indicator ha-warn",
-      text: "⚠  enabled but not connected to " + (status.broker || "?") + "  —  check broker + credentials",
+      text: "⚠  enabled but not connected to " + status.broker + "  —  check broker + credentials",
     };
   }
 

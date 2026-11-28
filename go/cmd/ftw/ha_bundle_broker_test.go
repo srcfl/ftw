@@ -359,3 +359,21 @@ func TestHABridgeOwnerAnnouncesEntitiesWhenMosquittoComesLater(t *testing.T) {
 	owner.Stop()
 	closeTestBroker(t, mb)
 }
+
+func TestHABridgeOwnerBrokerForNamesTheBrokerItUses(t *testing.T) {
+	o := newFakeHAOwner(newFakeHAStarter())
+	if got := o.BrokerFor(haCfg("192.168.1.10")); got != "192.168.1.10:1883" {
+		t.Fatalf("saved broker = %q", got)
+	}
+	o.broker = &haAppBroker{}
+	if got := o.BrokerFor(&config.HomeAssistant{Enabled: true}); got != "" {
+		t.Fatalf("no broker known yet, got %q", got)
+	}
+	o.broker = knownHABroker(haBundleBroker{Host: "core-mosquitto", Port: 1884})
+	if got := o.BrokerFor(&config.HomeAssistant{Enabled: true}); got != "core-mosquitto:1884" {
+		t.Fatalf("Home Assistant's broker = %q", got)
+	}
+	if got := o.BrokerFor(haCfg("192.168.1.10")); got != "192.168.1.10:1883" {
+		t.Fatalf("a saved broker must win, got %q", got)
+	}
+}

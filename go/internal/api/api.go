@@ -220,6 +220,10 @@ type Deps struct {
 	// Optional: returns the running HA MQTT bridge, or nil when HA is
 	// disabled or not connected yet. Nil func means HA is not wired.
 	HA func() *ha.Bridge
+	// Optional: the broker, as host:port, that the HA bridge uses for these
+	// saved settings, which in the Home Assistant app may be Home
+	// Assistant's own. "" while none is known. Nil means the saved broker.
+	HABroker func(saved *config.HomeAssistant) string
 
 	// Driver registry — used by lifecycle endpoints (restart/disable/enable)
 	// and EV command dispatch. Nil disables those endpoints (returns 503).
@@ -2281,7 +2285,10 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		if cfg := s.deps.Cfg.HomeAssistant; cfg != nil {
 			enabled = cfg.Enabled
-			if cfg.Broker != "" {
+			switch {
+			case s.deps.HABroker != nil:
+				broker = s.deps.HABroker(cfg)
+			case cfg.Broker != "":
 				broker = fmt.Sprintf("%s:%d", cfg.Broker, cfg.Port)
 			}
 		} else {
