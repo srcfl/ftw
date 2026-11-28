@@ -20,3 +20,11 @@
   box-sizing: border-box;
   margin: 8px 0;
 }
+
+#app-link-terms {
+  margin-bottom: 12px;
+}
+
+#app-link-terms a {
+  color: var(--accent-e);
+}

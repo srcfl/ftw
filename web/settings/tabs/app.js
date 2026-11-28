@@ -43,8 +43,52 @@
       if (!saved) return "Running. It stops at the next restart.";
       return null; // The caller shows the pairing count instead.
     }
-    if (saved) return "Not running yet. Choose Save and restart FTW below to turn it on.";
+    if (saved) return "Not running yet. Choose Save and restart FTW to turn it on.";
     return "Off. Turn it on above, then choose Save and restart FTW.";
+  }
+
+  // The phone reaches this box through FTW Cloud, so pairing accepts its
+  // terms, as it does in the app (Fredrik, 23 November 2026). The page says
+  // so in one line by the buttons rather than sending anyone to a separate
+  // panel first. The box records the answer and is the judge of it: a box
+  // whose build names no Cloud service has nothing to accept.
+  function cloudNeedsTerms(cloud) {
+    return !!cloud && cloud.available === true && !cloud.cloudTermsAccepted;
+  }
+
+  // Cloud in use, or still being deleted: the only times its panel has
+  // something to show here. Off, pairing is the way in.
+  function cloudInUse(cloud) {
+    return !!cloud && ((cloud.link === "on" && !cloud.statisticsOnly) ||
+      cloud.link === "ending" || cloud.state === "revoking");
+  }
+
+  function readJSON(path) {
+    return fetch(path)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; });
+  }
+
+  // Accepts the current terms through the same route as the Cloud panel,
+  // POST /api/cloud/grant, and only when the box says they are not yet
+  // accepted. A refusal stops the pairing: the line by the button promised
+  // that pairing accepts them.
+  function acceptCloudTerms() {
+    return Promise.all([readJSON("/api/cloud"), readJSON("/api/cloud/stats-policy")])
+      .then(function (v) {
+        var cloud = v[0], policy = v[1];
+        if (!cloudNeedsTerms(cloud) || !policy) return;
+        return fetch("/api/cloud/grant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scopes: policy.cloud_scopes, policy: policy.cloud_policy }),
+        }).then(function (r) {
+          return r.json().then(function (body) {
+            if (!r.ok) throw new Error((body && body.error) || "Could not accept the FTW Cloud terms.");
+            if (window.FTWStatistics) window.FTWStatistics.refresh();
+          });
+        });
+      });
   }
 
   function agoText(ms) {
@@ -212,14 +256,22 @@
       .catch(function () {});
   }
 
+  function setHidden(id, hidden) {
+    var el = document.getElementById(id);
+    if (el) el.hidden = hidden;
+  }
+
   function refreshStatus(ctx) {
     var saved = !!(ctx && ctx.config.app_link && ctx.config.app_link.enabled);
 
-    fetch("/api/app-link/status")
-      .then(function (r) {
+    Promise.all([
+      fetch("/api/app-link/status").then(function (r) {
         return r.ok ? r.json() : null;
-      })
-      .then(function (s) {
+      }),
+      readJSON("/api/cloud"),
+    ])
+      .then(function (v) {
+        var s = v[0], cloud = v[1];
         // Both ways of letting a phone in, enabled together. Sharing is not a
         // separate feature that could still work with the app link off: it
         // mints the same code from the same endpoint.
@@ -231,15 +283,21 @@
         var setEnabled = function (on) {
           buttons.forEach(function (b) { if (b) b.disabled = !on; });
         };
+        setHidden("app-cloud-panel", !cloudInUse(cloud));
         if (!s) {
           setStatus("Pairing is available on your local network only.");
           setEnabled(false);
+          setHidden("app-link-terms", true);
           return;
         }
         var note = describe(saved, s.enabled);
         setStatus(note === null ? pairedText(s.paired_devices) : note);
+        // The switch and its restart are for turning the app link on. While
+        // it is on and running there is nothing to do with them.
+        setHidden("app-link-switch", saved && s.enabled);
         var restart = document.getElementById("app-link-restart");
         if (restart) restart.className = saved !== s.enabled ? "btn-send" : "btn-ghost";
+        setHidden("app-link-terms", !(s.enabled && cloudNeedsTerms(cloud)));
         setEnabled(s.enabled);
         if (s.enabled) refreshDevices();
       })
@@ -308,6 +366,20 @@
     return btn;
   }
 
+  // The address the app asks for beside a pairing code: this page's own,
+  // which demonstrably works from inside the house. The QR carries it too,
+  // so it is shown there as well, and nobody has to look in the router.
+  function boxAddress() {
+    return (window.location && window.location.origin) || "";
+  }
+
+  function sayBoxAddress(slot) {
+    if (!boxAddress()) return;
+    var address = document.createElement("p");
+    address.textContent = "Box address: " + boxAddress();
+    slot.appendChild(address);
+  }
+
   function showCode(pairing) {
     var slot = document.getElementById("app-link-slot");
     if (!slot) return;
@@ -329,11 +401,9 @@
         "Enter this code and the box address shown below. " + expiryText(pairing) + " Five wrong tries and it " +
         "stops working, so ask for a new one rather than guessing.";
       slot.appendChild(how);
-      if (window.location && window.location.origin) {
-        var address = document.createElement("p");
-        address.textContent = "Box address: " + window.location.origin;
-        slot.appendChild(address);
-        copyButton(slot, "Copy pairing code and address", window.location.origin + "#" + pairing.code);
+      if (boxAddress()) {
+        sayBoxAddress(slot);
+        copyButton(slot, "Copy pairing code and address", boxAddress() + "#" + pairing.code);
       }
       if (slot.scrollIntoView) slot.scrollIntoView({ block: "nearest" });
       return;
@@ -343,6 +413,7 @@
     // it, whenever the encoder finishes.
     var picture = document.createElement("div");
     slot.appendChild(picture);
+    sayBoxAddress(slot);
     if (/^https:\/\/app\.ftw\.energy\/p#v[23]\./.test(pairing.url)) {
       var open = document.createElement("a");
       open.href = pairing.url;
@@ -454,12 +525,6 @@
   // a pairing code still on screen, and the reverse. Every button here goes
   // through this, so the rule is not something a caller has to remember.
   function requestCode(opts, button, busyText, doneText) {
-    if(window.FTWStatistics && !window.FTWStatistics.cloudAccepted()) {
-      setStatus("Accept the Cloud terms above before pairing a phone. Statistics are included with Cloud.");
-      window.FTWStatistics.refresh();
-      return;
-    }
-
     var slot = document.getElementById("app-link-slot");
     if (!button || !slot) return;
 
@@ -467,11 +532,14 @@
     button.textContent = busyText;
     slot.textContent = "";
 
-    fetch("/api/app-link/pairing", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts),
-    })
+    acceptCloudTerms()
+      .then(function () {
+        return fetch("/api/app-link/pairing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(opts),
+        });
+      })
       .then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok) throw new Error(body.error || "could not make a code");
@@ -556,19 +624,18 @@
 
       return (
         '<link rel="stylesheet" href="/settings/app-pairing.css">' +
-        '<div data-project-statistics-settings></div>' +
         '<fieldset class="app-pairing"><legend>The FTW app</legend>' +
-        '<p class="hint">This is not the Sourceful (Zap) app. The FTW app at ' +
-        "app.ftw.energy talks to this box when you are away. On the same Wi-Fi you " +
-        "can just open this page in a browser — no pairing needed. Readings and " +
-        "commands are end-to-end encrypted. Sourceful can see your IP and when the " +
-        "box is connected, but cannot read them.</p>" +
+        '<p class="hint">This is not the Sourceful (Zap) app. The FTW app needs ' +
+        "pairing, at home and away. A browser on your home Wi-Fi needs none.</p>" +
+        // Shown only while the app link is off: on a box where it runs, the
+        // switch and the restart have nothing to do.
+        '<div id="app-link-switch"' + (enabled ? " hidden" : "") + ">" +
         '<label><input type="checkbox" id="app-link-enabled" ' +
         'data-checkbox-path="app_link.enabled"' + (enabled ? " checked" : "") +
         "> Let the FTW app connect to this box</label>" +
-        '<p class="hint">Changing this setting needs a restart. FTW pauses energy control briefly while it restarts.</p>' +
         '<button type="button" class="btn-send" id="app-link-restart">Save and restart FTW…</button>' +
         '<p id="app-link-restart-status" class="hint" role="status"></p>' +
+        "</div>" +
         '<p id="app-link-status" class="hint">checking…</p>' +
         '<div id="app-link-devices"></div>' +
         '<div class="app-link-actions">' +
@@ -576,6 +643,10 @@
         '<button type="button" class="btn-ghost" id="app-link-code" disabled>Use a pairing code</button>' +
         '<button type="button" class="btn-ghost" id="app-link-share" hidden>Let someone see this home</button>' +
         "</div>" +
+        '<p id="app-link-terms" class="hint" hidden>The app reaches this box through FTW Cloud, ' +
+        "which keeps a readable copy of your energy data. Pairing accepts its " +
+        '<a href="https://ftw.sourceful.energy/privacy" target="_blank" rel="noopener">terms</a>. ' +
+        "The box runs without it.</p>" +
         // The slot sits right under the buttons that fill it. It used to sit
         // after the hint paragraphs below, which put the answer — QR, spoken
         // code, or a refusal — some 300 px under the button and usually below
@@ -592,6 +663,9 @@
         "If you set a house password, the app asks for it too. You can also choose a screenshot " +
         "of the QR in the FTW app. Only one code works at a time; making a new code cancels the last one.</p>" +
         "</fieldset>" +
+        // FTW Cloud's own panel, below the pairing so it never pushes a code
+        // out of view when it appears. Hidden while Cloud is off.
+        '<div id="app-cloud-panel" hidden><div data-project-statistics-settings></div></div>' +
         fleetPanel(ctx)
       );
     },
