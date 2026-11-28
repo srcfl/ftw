@@ -1,6 +1,7 @@
 # ADR 0008: FTW Cloud keeps a readable copy the owner turns on
 
-- Status: proposed. Nothing described here has shipped.
+- Status: proposed. Nothing described here had shipped when it was written;
+  see the note of 28 November 2026.
 - Date: 2026-10-12
 - Decided by: Fredrik on 12 October 2026, decisions 1–5 and 7. Decision 6 is
   the recommendation, taken as the working choice until he answers it.
@@ -9,6 +10,13 @@
   Decision 1's public AGPL repository and the published running digest
   under the controls below no longer hold; the wire format stays public in
   `go/protocol`.
+- Changed 28 November 2026: parts of this have shipped. Release builds know
+  FTW Cloud by its key since #1609, so FTW betas from v0.141.7-beta.1
+  (13 October 2026) link to `cloud.ftw.energy`, and the FTW app reaches
+  boxes through it. No stable release does yet. Since 23 November 2026
+  pairing a phone accepts the Cloud terms, which sends a grant with every
+  scope in `cloud_scopes`: the readable copy runs while FTW Cloud is on and
+  has no switch of its own, so the owner "turns it on" by turning on Cloud.
 - Revisits: [ADR 0006](0006-app-uplink.md), which made the relay the only
   remote path. That still holds for homes that do not turn FTW Cloud on.
 - Turns away from: [#1323](https://github.com/srcfl/ftw/issues/1323), which

@@ -402,7 +402,7 @@ The path uses these packages:
 - [`go/internal/appuplink`](../go/internal/appuplink) holds the box's Noise
   sessions and serves them over the Cloud tunnel.
 - [`go/internal/cloudlink`](../go/internal/cloudlink) holds the one Cloud
-  connection, the signed device roster and the optional readable copy.
+  connection, the signed device roster and the readable copy.
 
 The QR pins the box's Noise key. A forwarding service cannot impersonate the
 box. This does not protect a web client from code served by a compromised web
@@ -417,8 +417,10 @@ The gateway's display name is a label, never an authenticator.
 
 The service sees a stable home id, public keys, roster roles and scopes, pairing
 code hashes, source addresses and traffic timing. It cannot read the inner
-Noise session. A separate owner grant enables a signed, readable copy for
-Cloud features; that grant is off by default. Core's agent checks require a
+Noise session. An owner grant turns on a signed, readable copy for Cloud
+features. Pairing a phone, or accepting the Cloud terms on the box page,
+sends that grant with every scope in `cloud_scopes`. The copy has no switch
+of its own; turning FTW Cloud off withdraws it. Core's agent checks require a
 separate Noise session and a current owner grant on every request. Neither
 transport access nor a readable-copy grant grants an agent control.
 

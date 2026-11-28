@@ -1,6 +1,8 @@
 # FTW Cloud protocol
 
-Proposed with [ADR 0008](adr/0008-ftw-cloud.md). Nothing here has shipped.
+Proposed with [ADR 0008](adr/0008-ftw-cloud.md). FTW betas from
+v0.141.7-beta.1 (13 October 2026) speak it to `cloud.ftw.energy`; no stable
+release does yet.
 This document is normative: "must" is a requirement on the box, the service
 or the phone. The bytes live in `go/protocol/cloudwire`, with golden vectors
 in its `testdata`: `cloud-vectors.json` for the uplink,
