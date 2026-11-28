@@ -97,7 +97,7 @@ describe("the app tab", () => {
     assert.match(html, /id="app-link-terms" class="hint" hidden>/);
     assert.match(html, /through FTW Cloud/);
     assert.match(html, /readable copy of your energy data and takes project statistics/);
-    assert.match(html, /Pairing accepts its <a href="https:\/\/ftw\.sourceful\.energy\/privacy"/);
+    assert.match(html, /Pairing accepts its <a href="https:\/\/ftw\.energy\/privacy"/);
     assert.match(html, /The box runs without it/);
     assert.doesNotMatch(html, /cannot read/);
   });
