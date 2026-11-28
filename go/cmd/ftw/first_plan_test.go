@@ -118,6 +118,10 @@ func TestPlanInputsReady(t *testing.T) {
 	}
 	soc := 0.5
 	tel.Update("sungrow", telemetry.DerBattery, 0, &soc, nil)
+	if battery(time.Now()) {
+		t.Fatal("ready before the battery driver is known to be online")
+	}
+	tel.RecordDriverSuccess("sungrow")
 	if !battery(time.Now()) {
 		t.Fatal("not ready with prices and a fresh charge level")
 	}

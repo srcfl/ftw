@@ -57,8 +57,8 @@ func firstPlanWhenReady(ctx context.Context, svc firstPlanner, ready func(time.T
 }
 
 // planInputsReady follows the planner's own gates: prices for the slot in
-// progress, and for a site that plans a battery, a fresh charge level from at
-// least one battery (mpc rejects older readings with the same age limit).
+// progress, and for a site that plans a battery, a fresh charge level from an
+// online battery (telemetry.FreshBatterySoCOnline, the planner's own limits).
 func planInputsReady(svc *mpc.Service, tel *telemetry.Store, needBattery bool) func(time.Time) bool {
 	return func(now time.Time) bool {
 		if svc == nil || svc.Store == nil {
@@ -71,17 +71,6 @@ func planInputsReady(svc *mpc.Service, tel *telemetry.Store, needBattery bool) f
 		if !needBattery {
 			return true
 		}
-		if tel == nil {
-			return false
-		}
-		for _, b := range tel.ReadingsByType(telemetry.DerBattery) {
-			if b == nil || b.SoC == nil || b.SoCUpdatedAt.IsZero() {
-				continue
-			}
-			if age := now.Sub(b.SoCUpdatedAt); age >= 0 && age <= telemetry.BatterySoCMaxAge {
-				return true
-			}
-		}
-		return false
+		return tel != nil && tel.FreshBatterySoCOnline(now)
 	}
 }
