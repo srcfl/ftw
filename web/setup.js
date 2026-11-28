@@ -4,7 +4,7 @@
 (function () {
   'use strict';
 
-  var TOTAL_STEPS = 8;
+  var TOTAL_STEPS = 5;
   var currentStep = 1;
   // A new box has no /api/auth/status until it first starts, so a missing
   // one means this wizard claims it and asks for the house password. Run
@@ -21,55 +21,17 @@
     return firstRun && !window.FTWHomeAssistant;
   }
 
-  window.startAssistantSetup = async function () {
-    var btn = document.getElementById('assistant-start');
-    var note = document.getElementById('assistant-status');
-	var password = document.getElementById('assistant-password').value;
-	if (!password || password !== document.getElementById('assistant-password-confirm').value) {
-	  note.textContent = 'Enter the same house password twice.';
-	  return;
-	}
-    btn.disabled = true;
-    note.textContent = 'Starting the box in measurement mode…';
-    try {
-      var reply = await fetch('/api/setup/assistant', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirmed: true, password: password})});
-      if (!reply.ok) {
-        var problem = await reply.json();
-        note.textContent = problem.error || 'Could not start setup.';
-        btn.disabled = false;
-        return;
-      }
-	  document.getElementById('assistant-password').value = '';
-	  document.getElementById('assistant-password-confirm').value = '';
-	  password = '';
-    } catch (error) {
-      // The process can restart before its reply arrives. Find the saved
-      // setup before allowing another first-run write.
-      note.textContent = error.message + ' Checking whether the box started…';
-    }
-    for (var attempt = 0; attempt < 30; attempt++) {
-      await new Promise(function (resolve) { setTimeout(resolve, 1000); });
-      try {
-        var status = await fetch('/api/auth/status', {cache: 'no-store'});
-        if (status.ok) {
-          window.location.href = '/?setup=assistant';
-          return;
-        }
-      } catch (_) { /* Wait for the same box to restart. */ }
-    }
-    note.textContent = 'The box has not answered yet. Open it to check the saved setup before trying again. Your equipment has not been configured by this step.';
-    document.getElementById('assistant-resume').hidden = false;
-  };
+  // Collected state. Each device carries the driver block it saves, the
+  // catalog entry it came from, and what its test found.
+  var devices = [];          // [{driver, entry, tested: 'ok' | 'untested', words}]
+  var driverCatalog = [];    // /api/drivers/catalog entries
+  var catalogLoaded = false;
+  var pick = null;           // {entry, scan} while one device is being added
+  var scanChoice = null;     // a scanned device waiting for its driver
 
-  // Collected state
-  var configuredDrivers = [];    // array of driver objects ready for config.drivers
-  var selectedDevice = null;     // { ip, port, protocol, hostname } from scan or manual entry
-  var selectedCatalog = null;    // CatalogEntry from /api/drivers/catalog
-  var driverCatalog = [];        // full catalog cache
-
-  // Picker option for a device with no catalog entry. Deliberately not a
-  // number so it can never be mistaken for a catalog index.
-  var NOT_LISTED = '__not_listed__';
+  function flow() {
+    return window.FTWDeviceFlow;
+  }
 
   // --- Step navigation ---
 
@@ -90,10 +52,9 @@
     if (currentStep === 2 && n > 2 && !validateConnection()) return;
 
     // Pre-step hooks
-    if (n === 4) loadCatalog();
-    if (n === 6) renderDriversSummary();
-    if (n === 7) prepareIntegrations();
-    if (n === 8) renderReview();
+    if (n === 3) { loadCatalog(); renderDeviceList(); }
+    if (n === 4) prepareIntegrations();
+    if (n === 5) renderReview();
 
     currentStep = n;
     var steps = document.querySelectorAll('.step');
@@ -103,18 +64,6 @@
     document.getElementById('step-' + n).classList.add('visible');
     renderDots();
     window.scrollTo(0, 0);
-  };
-
-  // Back from step 7 goes to step 6 if we have drivers, step 2 if we skipped
-  window.goStepBack7 = function () {
-    goStep(configuredDrivers.length > 0 ? 6 : 2);
-  };
-
-  // Forward path for a device the catalog cannot serve: the devices
-  // summary when something is already configured, otherwise straight on
-  // to the integrations.
-  window.skipUnlistedDevice = function () {
-    goStep(configuredDrivers.length > 0 ? 6 : 7);
   };
 
   // --- Electricity connection ---
@@ -189,340 +138,44 @@
     return true;
   }
 
-  // --- Step 3: Scan ---
 
-  window.startScan = function () {
-    var statusEl = document.getElementById('scan-status');
-    var resultsEl = document.getElementById('scan-results');
-    statusEl.style.display = 'block';
-    statusEl.innerHTML = '<span class="spinner"></span> Scanning network...';
-    resultsEl.style.display = 'none';
-
-    fetch('/api/scan?fingerprint=1')
-      .then(function (r) { return r.json(); })
-      .then(function (data) {
-        // API returns a raw array, not {devices: [...]}
-        var devices = Array.isArray(data) ? data : (data.devices || []);
-        if (devices.length === 0) {
-          statusEl.innerHTML = 'No devices found. Try entering the IP manually.';
-          return;
-        }
-        statusEl.style.display = 'none';
-        var tbody = document.getElementById('scan-tbody');
-        tbody.innerHTML = '';
-        devices.sort(function (a, b) {
-          return Number(Boolean(b.matches && b.matches.length)) - Number(Boolean(a.matches && a.matches.length));
-        });
-        devices.forEach(function (d) {
-          var tr = document.createElement('tr');
-          var proto = d.protocol || 'modbus';
-          var match = d.matches && d.matches.length ? d.matches[0] : null;
-          var address = esc(d.ip);
-          if (d.hostname) address += '<span class="dev-host">' + esc(d.hostname) + '</span>';
-          var identity = '<span class="dev-unknown">Unrecognised</span>';
-          if (match) {
-            var label = match.name || match.make || match.driver;
-            var detail = [match.model, match.serial ? 'SN ' + match.serial : ''].filter(Boolean).join(' · ');
-            identity = '<span class="dev-name">' + esc(label) + '</span>' +
-              (detail ? '<span class="dev-caps">' + esc(detail) + '</span>' : '');
-          }
-          tr.innerHTML =
-            '<td>' + address + '</td>' +
-            '<td>' + esc(String(d.port)) + '</td>' +
-            '<td>' + esc(proto) + '</td>' +
-            '<td>' + identity + '</td>' +
-            '<td><button class="btn-use">Use this device</button></td>';
-          tr.querySelector('.btn-use').addEventListener('click', function () {
-            useScanDevice(d, proto, match && match.driver);
-          });
-          tbody.appendChild(tr);
-        });
-        resultsEl.style.display = 'block';
-      })
-      .catch(function (err) {
-        statusEl.innerHTML = 'Scan failed: ' + esc(err.message) +
-          '. Try entering the IP manually.';
-      });
-  };
-
-  window.showManualIP = function () {
-    document.getElementById('manual-ip-form').style.display = 'block';
-    document.getElementById('manual-ip-toggle').style.display = 'none';
-  };
-
-  function useScanDevice(dev, protocol, matchedFilename) {
-    selectedDevice = {
-      ip: dev.ip,
-      port: dev.port,
-      protocol: protocol,
-      hostname: dev.hostname || '',
-      matchedFilename: matchedFilename || ''
-    };
-    goStep(4);
-  }
-
-  window.useManualDevice = function () {
-    var host = document.getElementById('manual-ip').value.trim();
-    var port = parseInt(document.getElementById('manual-port').value, 10) || 502;
-    if (!host) return;
-    selectedDevice = { ip: host, port: port, protocol: guessProtocol(port), hostname: '' };
-    goStep(4);
-  };
-
-  function guessProtocol(port) {
-    if (port === 1883 || port === 8883) return 'mqtt';
-    if (port === 80 || port === 443 || port === 8080) return 'http';
-    return 'modbus';
-  }
-
-  // --- Step 4: Driver catalog ---
+  // --- Step 3: Devices ---
+  //
+  // The flow Settings → Devices runs, from device-flow.js: find the driver,
+  // give the address, and test the device when it is added. A device that
+  // does not answer stays out until the owner fixes it or adds it anyway.
 
   function loadCatalog() {
-    if (driverCatalog.length > 0) {
-      populateDriverDropdown();
-      return;
-    }
+    if (catalogLoaded) { renderCatalog(); return; }
     fetch('/api/drivers/catalog')
       .then(function (r) { return r.json(); })
       .then(function (data) {
-        driverCatalog = data.entries || [];
-        populateDriverDropdown();
+        driverCatalog = (data && data.entries) || [];
+        catalogLoaded = true;
+        renderCatalog();
       })
       .catch(function () {
-        driverCatalog = [];
-        populateDriverDropdown();
+        document.getElementById('catalog-results').textContent =
+          'The driver list did not load. Reload the page to try again.';
       });
   }
 
-  // How many boxes ran exactly this version the last closed day, in the same
-  // words Settings uses. Nothing when the counts are not known.
-  function usageLabel(count) {
-    if (typeof count !== 'number') return '';
-    return count === 1 ? '1 home runs this version' : count + ' homes run this version';
-  }
-
-  function populateDriverDropdown() {
-    var sel = document.getElementById('driver-select');
-    sel.innerHTML = '<option value="">-- Select a driver --</option>';
-
-    var proto = selectedDevice ? selectedDevice.protocol : null;
-
-    driverCatalog.forEach(function (entry, idx) {
-      // Filter by protocol if we have one
-      if (proto && entry.protocols && entry.protocols.length > 0) {
-        var match = entry.protocols.some(function (p) {
-          return p.toLowerCase() === proto.toLowerCase();
-        });
-        if (!match) return;
-      }
-
-      var label = '';
-      var displayName = entry.name || entry.filename;
-      // Several drivers already begin their name with the manufacturer, which
-      // read as "Sungrow Sungrow SH Hybrid Inverter".
-      if (entry.manufacturer && displayName.toLowerCase()
-            .indexOf(entry.manufacturer.toLowerCase()) !== 0) {
-        label += entry.manufacturer + ' ';
-      }
-      label += displayName;
-      if (entry.protocols && entry.protocols.length > 0) {
-        label += ' (' + entry.protocols.join(', ');
-        if (entry.capabilities && entry.capabilities.length > 0) {
-          label += ', ' + entry.capabilities.join('+');
-        }
-        label += ')';
-      }
-      // How many run it: that is all FTW says about a driver.
-      var usage = usageLabel(entry.run_by);
-      if (usage) label += ' — ' + usage;
-      if (readOnlyNote(entry)) label += ' — reads only';
-
-      var opt = document.createElement('option');
-      opt.value = String(idx);
-      opt.textContent = label;
-      sel.appendChild(opt);
-    });
-
-    // The escape hatch. Without it, a device with no catalog entry
-    // dead-ends this step: Continue stays disabled and the only
-    // affordance left is Back.
-    var notListed = document.createElement('option');
-    notListed.value = NOT_LISTED;
-    notListed.textContent = 'My device is not listed…';
-    sel.appendChild(notListed);
-
-    // A positive fingerprint preselects the matching catalog driver while
-    // still sending the operator through the normal configuration form.
-    if (selectedDevice && selectedDevice.matchedFilename) {
-      for (var i = 0; i < sel.options.length; i++) {
-        var value = sel.options[i].value;
-        if (value === '') continue;
-        var entry = driverCatalog[parseInt(value, 10)];
-        if (entry && entry.filename === selectedDevice.matchedFilename) {
-          sel.value = value;
-          window.onDriverSelected();
-          break;
-        }
-      }
-    }
-  }
-
-  // Whether FTW can control the driver's device, in the shared words of
-  // driver-control.js. Nothing when that file is missing.
-  function readOnlyNote(entry) {
-    var words = window.FTWDriverControl;
-    return words ? words.readOnlyNote(entry) : null;
-  }
-
-  function isZapCatalog(entry) {
-    return !!entry && (entry.filename === 'zap.lua' || entry.id === 'zap');
-  }
-
-  window.onDriverSelected = function () {
-    var sel = document.getElementById('driver-select');
-    var btn = document.getElementById('driver-next-btn');
-    var descEl = document.getElementById('driver-description');
-    var notListedEl = document.getElementById('driver-not-listed');
-
-    if (!sel.value) {
-      selectedCatalog = null;
-      btn.disabled = true;
-      descEl.style.display = 'none';
-      notListedEl.style.display = 'none';
+  function renderCatalog() {
+    if (!catalogLoaded) return;
+    var host = document.getElementById('catalog-results');
+    var query = document.getElementById('catalog-search').value;
+    var matches = flow().search(driverCatalog, query);
+    host.innerHTML = '';
+    if (matches.length === 0) {
+      host.textContent = query.trim()
+        ? 'No driver matches “' + query.trim() + '”. Try the maker, or the model on the label.'
+        : 'No drivers on this box.';
       return;
     }
-
-    if (sel.value === NOT_LISTED) {
-      // Nothing to configure, so Continue stays held; the panel offers
-      // its own forward path instead.
-      selectedCatalog = null;
-      btn.disabled = true;
-      descEl.style.display = 'none';
-      notListedEl.style.display = 'block';
-      return;
-    }
-    notListedEl.style.display = 'none';
-
-    selectedCatalog = driverCatalog[parseInt(sel.value, 10)];
-    btn.disabled = false;
-
-    var lines = [];
-    if (isZapCatalog(selectedCatalog)) {
-      lines.push('This driver is the P1/HAN site meter by default. Add inverters, batteries and chargers as their own devices in FTW when you can. If Zap is the only reader, turn on PV or battery ingest later under Settings → Devices.');
-    }
-    // Before the device is added, not after: FTW will read a charger or
-    // battery this driver only reads, and never steer it. The driver's own
-    // reason is in its description, the next line.
-    var readOnly = readOnlyNote(selectedCatalog);
-    if (readOnly) lines.push(readOnly.text);
-    if (selectedCatalog.description) lines.push(selectedCatalog.description);
-
-    var version = selectedCatalog.installed_version || selectedCatalog.version;
-    var provenance = [];
-    if (version) provenance.push('version ' + version);
-    // Where the file came from: an operator's own override, a signed artifact
-    // from the channel, or the copy bundled with this build.
-    if (selectedCatalog.source === 'local') provenance.push('your own override');
-    else if (selectedCatalog.source === 'managed') provenance.push('signed driver channel');
-    else if (selectedCatalog.source === 'bundled') provenance.push('bundled with this build');
-    if (provenance.length) lines.push(provenance.join(' · '));
-
-    var usage = usageLabel(selectedCatalog.run_by);
-    if (usage) lines.push(usage);
-
-    if (lines.length) {
-      descEl.textContent = '';
-      lines.forEach(function (line, i) {
-        var el = document.createElement('div');
-        el.textContent = line;
-        if (i > 0) el.style.marginTop = '4px';
-        descEl.appendChild(el);
-      });
-      descEl.style.display = 'block';
-    } else {
-      descEl.style.display = 'none';
-    }
-
-    // Pre-fill step 5
-    prefillDriverConfig();
-  };
-
-  // --- Step 5: Configure driver ---
-
-  function prefillDriverConfig() {
-    if (!selectedCatalog) return;
-
-    var nameBase = (selectedCatalog.manufacturer || selectedCatalog.id || 'device').toLowerCase()
-      .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-    // Make unique if name already taken
-    var name = nameBase;
-    var n = 2;
-    while (configuredDrivers.some(function (d) { return d.name === name; })) {
-      name = nameBase + '_' + n;
-      n++;
-    }
-    document.getElementById('drv-name').value = name;
-
-    if (selectedDevice) {
-      // Prefer the device's self-broadcast mDNS (.local) name over the raw
-      // IP: the name follows the device across DHCP lease changes, the IP
-      // doesn't. Other reverse-DNS names stay display-only — resolving them
-      // at runtime depends on the router, so the IP is the safer default.
-      var host = isMDNSName(selectedDevice.hostname) ? selectedDevice.hostname : selectedDevice.ip;
-      document.getElementById('drv-ip').value = host;
-      document.getElementById('drv-port').value = selectedDevice.port;
-    }
-    updateHostHint();
-
-    // Show/hide unit ID for modbus
-    var isModbus = !selectedCatalog.protocols || selectedCatalog.protocols.length === 0 ||
-      selectedCatalog.protocols.some(function (p) { return p === 'modbus'; });
-    document.getElementById('drv-unitid-group').style.display = isModbus ? 'block' : 'none';
-
-    // Read-only gateway drivers may expose battery telemetry, but battery
-    // capacity is the control-pool opt-in. Never offer that field for them.
-    var hasBattery = selectedCatalog.capabilities &&
-      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; }) &&
-      !selectedCatalog.read_only;
-    document.getElementById('drv-battery-group').style.display = hasBattery ? 'block' : 'none';
-
-    // First driver defaults to site meter
-    document.getElementById('drv-site-meter').checked = configuredDrivers.length === 0;
-
-    // Default port based on protocol, with a driver-specific override for
-    // appliances whose official local API uses a different well-known port.
-    if (!selectedDevice) {
-      var defPort = 502;
-      if (selectedCatalog.protocols && selectedCatalog.protocols.indexOf('mqtt') >= 0) defPort = 1883;
-      if (selectedCatalog.protocols && selectedCatalog.protocols.indexOf('http') >= 0) defPort = 8080;
-      if (selectedCatalog.connection_defaults && selectedCatalog.connection_defaults.port) {
-        defPort = selectedCatalog.connection_defaults.port;
-      }
-      document.getElementById('drv-port').value = defPort;
-    }
-
-    // Render password inputs for each catalog-declared config secret
-    // (e.g. sonnen Auth-Token). Each input id is "drv-secret-<key>" and
-    // saveDriver reads them back into driver.config[<key>]. The key comes
-    // from the driver's DRIVER block, so it is set as a property and never
-    // parsed as markup.
-    var secretsGroup = document.getElementById('drv-secrets-group');
-    secretsGroup.innerHTML = '';
-    var secrets = selectedCatalog.config_secrets || [];
-    secrets.forEach(function (key) {
-      var fg = document.createElement('div');
-      fg.className = 'form-group';
-      var label = document.createElement('label');
-      label.htmlFor = 'drv-secret-' + key;
-      label.textContent = key.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
-      var input = document.createElement('input');
-      input.type = 'password';
-      input.id = 'drv-secret-' + key;
-      input.setAttribute('autocomplete', 'off');
-      input.placeholder = 'Paste from device web UI';
-      fg.appendChild(label);
-      fg.appendChild(input);
-      secretsGroup.appendChild(fg);
+    matches.forEach(function (entry) {
+      host.appendChild(flow().card(entry, {
+        onChoose: function () { chooseDriver(entry, scanChoice); }
+      }));
     });
   }
 
@@ -537,360 +190,514 @@
     return /^\d{1,3}(\.\d{1,3}){3}$/.test(host || '');
   }
 
-  // Addressing hint under the host field: a .local name survives DHCP
-  // lease changes; a raw IP only stays valid if the operator reserves it
-  // for the device in the router's DHCP pool. Tracks user edits live.
+  // One calm line under the address: a .local name survives a new address
+  // from the router, a raw IP only if the router keeps it.
   function updateHostHint() {
-    var el = document.getElementById('drv-host-hint');
-    var input = document.getElementById('drv-ip');
+    var el = document.getElementById('dev-host-hint');
+    var input = document.getElementById('dev-host');
     if (!el || !input) return;
     var host = input.value.trim();
-    el.style.display = 'none';
-    el.className = 'host-hint';
+    el.hidden = true;
     if (isMDNSName(host)) {
-      var discovered = '';
-      if (selectedDevice && selectedDevice.ip &&
-          host.toLowerCase() === (selectedDevice.hostname || '').toLowerCase()) {
-        discovered = ' (discovered at ' + selectedDevice.ip + ')';
-      }
-      el.textContent = 'Connecting by the device’s mDNS name' + discovered +
-        ' — it keeps working even if your router assigns the device a new IP address.';
-      el.className = 'host-hint mdns';
-      el.style.display = 'block';
+      el.textContent = 'FTW finds this device by name, even if its address changes.';
+      el.hidden = false;
     } else if (isIPv4Literal(host)) {
-      el.textContent = 'No mDNS (.local) name in use — FTW will connect to this fixed IP address. ' +
-        'Reserve it for the device in your router’s DHCP settings so a new ' +
-        'DHCP lease can’t move the device and break the connection.';
-      el.className = 'host-hint dhcp';
-      el.style.display = 'block';
+      el.textContent = 'Tip: give this device a fixed address in your router.';
+      el.hidden = false;
     }
   }
 
-  window.saveDriver = function () {
-    var name = document.getElementById('drv-name').value.trim();
-    if (!name) { alert('Driver name is required.'); return; }
-
-    var host = document.getElementById('drv-ip').value.trim();
-    var port = parseInt(document.getElementById('drv-port').value, 10);
-    var unitId = parseInt(document.getElementById('drv-unitid').value, 10) || 1;
-    var isSiteMeter = document.getElementById('drv-site-meter').checked;
-    // Only read battery capacity for drivers that actually support it —
-    // the <input> has a default value of 10, so without this gate a
-    // PV-only driver (e.g. solaredge_pv) would persist a phantom
-    // battery_capacity_wh = 10000 that the control loop later tries to
-    // target against a device with no battery.
-    var hasBattery = selectedCatalog && selectedCatalog.capabilities &&
-      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; }) &&
-      !selectedCatalog.read_only;
-    var batteryKwh = hasBattery
-      ? (parseFloat(document.getElementById('drv-battery-kwh').value) || 0)
-      : 0;
-
-    if (!host) { alert('IP address or hostname is required.'); return; }
-
-    // Determine protocol from catalog entry
-    var protocol = 'modbus';
-    if (selectedCatalog && selectedCatalog.protocols && selectedCatalog.protocols.length > 0) {
-      protocol = selectedCatalog.protocols[0];
+  // Names stay unique: the maker or driver id, then _2, _3.
+  function uniqueName(entry) {
+    var base = String(entry.manufacturer || entry.id || 'device').toLowerCase()
+      .replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'device';
+    var name = base;
+    for (var n = 2; devices.some(function (d) { return d.driver.name === name; }); n++) {
+      name = base + '_' + n;
     }
-
-    var driver = {
-      name: name,
-      lua: selectedCatalog ? selectedCatalog.path : '',
-      is_site_meter: isSiteMeter,
-      capabilities: {}
-    };
-
-    var hasBatteryTelemetry = selectedCatalog && selectedCatalog.capabilities &&
-      selectedCatalog.capabilities.some(function (c) { return c === 'battery'; });
-    if (hasBatteryTelemetry && selectedCatalog.read_only) {
-      driver.battery_telemetry_only = true;
-    }
-
-    if (batteryKwh > 0) {
-      driver.battery_capacity_wh = batteryKwh * 1000;
-    }
-
-    if (protocol === 'modbus') {
-      driver.capabilities.modbus = { host: host, port: port, unit_id: unitId };
-    } else if (protocol === 'mqtt') {
-      driver.capabilities.mqtt = { host: host, port: port };
-    } else if (protocol === 'http') {
-      driver.capabilities.http = { allowed_hosts: [host] };
-      // connection_defaults.host is declared only by drivers that take a
-      // user-configurable local endpoint — seed config.host from the IP the
-      // user just entered. Cloud drivers (Easee etc.) declare http_hosts
-      // for allowed-hosts handling but have no connection_defaults.host;
-      // their vendor endpoint is hardcoded and they key off
-      // config.email/password instead, so leave config untouched here.
-      var connDefaults = (selectedCatalog && selectedCatalog.connection_defaults) || {};
-      // connection_defaults.host being declared (even when empty) is the
-      // signal that this driver takes a user-configurable local endpoint.
-      // Cloud drivers don't declare it and key off email/password.
-      if (Object.prototype.hasOwnProperty.call(connDefaults, 'host')) {
-        driver.config = driver.config || {};
-        driver.config.host = host;
-      }
-    }
-
-    // Zap reads PV and battery only on opt-in. Save the off state, because
-    // Core treats a missing read_pv as PV that may still report.
-    if (isZapCatalog(selectedCatalog)) {
-      driver.config = driver.config || {};
-      driver.config.read_pv = false;
-      driver.config.read_battery = false;
-    }
-
-    // Persist per-driver secrets the prefill rendered (api_token, etc.)
-    // into driver.config.<key>. Lives OUTSIDE the protocol branches so
-    // a future Modbus/MQTT driver that declares config_secrets still
-    // captures them — the previous version silently dropped operator-
-    // entered secrets for any driver whose top-protocol wasn't http.
-    var secrets = (selectedCatalog && selectedCatalog.config_secrets) || [];
-    secrets.forEach(function (key) {
-      var el = document.getElementById('drv-secret-' + key);
-      if (!el) return;
-      var v = (el.value || '').trim();
-      if (v === '') return;
-      driver.config = driver.config || {};
-      driver.config[key] = v;
-    });
-
-    // If this is the site meter, uncheck others
-    if (isSiteMeter) {
-      configuredDrivers.forEach(function (d) { d.is_site_meter = false; });
-    }
-
-    // Store catalog ref for display
-    driver._catalog = selectedCatalog;
-
-    configuredDrivers.push(driver);
-    selectedDevice = null;
-    selectedCatalog = null;
-    goStep(6);
-  };
-
-  // --- Driver description helper ---
-
-  function driverDetail(d) {
-    var detail = '';
-    if (d.capabilities.modbus) {
-      detail = d.capabilities.modbus.host + ':' + d.capabilities.modbus.port;
-    } else if (d.capabilities.mqtt) {
-      detail = d.capabilities.mqtt.host + ':' + d.capabilities.mqtt.port;
-    } else if (d.capabilities.http) {
-      detail = (d.config && d.config.host) || (d.capabilities.http.allowed_hosts || [])[0] || '';
-    }
-    var tags = [];
-    if (d.is_site_meter) tags.push('site meter');
-    if (d.battery_capacity_wh) tags.push((d.battery_capacity_wh / 1000).toFixed(1) + ' kWh battery');
-    if (tags.length > 0) detail += ' (' + tags.join(', ') + ')';
-    return detail;
+    return name;
   }
 
-  // --- Step 6: Drivers summary ---
+  function hasSiteMeter() {
+    return devices.some(function (d) { return d.driver.is_site_meter; });
+  }
 
-  function renderDriversSummary() {
-    var container = document.getElementById('drivers-summary');
-    container.innerHTML = '';
+  function has(obj, key) {
+    return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
+  }
 
-    if (configuredDrivers.length === 0) {
-      container.innerHTML = '<p style="color:var(--text-dim);font-size:0.85rem;">No devices configured yet.</p>';
+  // A labelled input, built from nodes: labels and keys come from driver files.
+  function field(parent, id, labelText, input) {
+    var group = document.createElement('div');
+    group.className = 'form-group';
+    var label = document.createElement('label');
+    label.htmlFor = id;
+    label.textContent = labelText;
+    input.id = id;
+    group.appendChild(label);
+    group.appendChild(input);
+    parent.appendChild(group);
+    return group;
+  }
+
+  function input(type, value, placeholder) {
+    var el = document.createElement('input');
+    el.type = type;
+    el.value = value == null ? '' : String(value);
+    if (placeholder) el.placeholder = placeholder;
+    el.setAttribute('autocomplete', 'off');
+    return el;
+  }
+
+  function chooseDriver(entry, scan) {
+    pick = { entry: entry, scan: scan || null };
+    var driver = flow().newDriver(entry, { name: uniqueName(entry) });
+    var kind = flow().addressKind(driver);
+    var defaults = entry.connection_defaults || {};
+
+    document.getElementById('device-find').hidden = true;
+    document.getElementById('device-form').hidden = false;
+    document.getElementById('device-title').textContent = flow().title(entry);
+    var hint = flow().setupHint(entry);
+    var hintEl = document.getElementById('device-hint');
+    hintEl.textContent = hint;
+    hintEl.hidden = !hint;
+    var readOnly = flow().readOnlySentence(entry);
+    var readOnlyEl = document.getElementById('device-readonly');
+    readOnlyEl.textContent = readOnly;
+    readOnlyEl.hidden = !readOnly;
+    resetTest();
+
+    var fields = document.getElementById('device-fields');
+    fields.innerHTML = '';
+    var add = document.getElementById('device-add');
+    add.hidden = kind === '';
+    add.textContent = 'Add and test';
+    if (kind === '') {
+      var later = document.createElement('p');
+      later.className = 'connection-hint';
+      later.textContent = 'This device needs a sign-in the guide does not have. Add it in Settings → Devices after setup.';
+      fields.appendChild(later);
       return;
     }
 
-    configuredDrivers.forEach(function (d, idx) {
+    if (entry.id === 'zap' || entry.filename === 'zap.lua') {
+      var zap = document.createElement('p');
+      zap.className = 'connection-hint';
+      zap.textContent = 'Zap is the P1/HAN site meter by default. Add inverters, batteries and chargers as their own devices. If Zap is the only reader, turn on PV or battery reads later in Settings → Devices.';
+      fields.appendChild(zap);
+    }
+
+    if (kind === 'modbus' || kind === 'mqtt' || kind === 'host') {
+      var host = (driver.config && driver.config.host) || '';
+      if (scan) host = isMDNSName(scan.hostname) ? scan.hostname : scan.ip;
+      var hostInput = input('text', host, '192.168.1.10 or inverter.local');
+      hostInput.addEventListener('input', updateHostHint);
+      var group = field(fields, 'dev-host', 'Address', hostInput);
+      var hostHint = document.createElement('p');
+      hostHint.className = 'connection-hint host-hint';
+      hostHint.id = 'dev-host-hint';
+      hostHint.hidden = true;
+      group.appendChild(hostHint);
+      updateHostHint();
+    }
+    if (kind === 'account') {
+      field(fields, 'dev-email', 'Email', input('text', '', 'you@example.com'));
+      field(fields, 'dev-password', 'Password', input('password', ''));
+      var find = document.createElement('button');
+      find.type = 'button';
+      find.className = 'btn-secondary';
+      find.id = 'dev-find-chargers';
+      find.textContent = 'Find my chargers';
+      find.addEventListener('click', findChargers);
+      fields.appendChild(find);
+      var serial = document.createElement('select');
+      var serialGroup = field(fields, 'dev-serial', 'Charger', serial);
+      serialGroup.id = 'dev-serial-group';
+      serialGroup.hidden = true;
+    }
+    if (has(driver.config, 'username')) field(fields, 'dev-username', 'Username', input('text', ''));
+    if (kind === 'host' && has(driver.config, 'password')) field(fields, 'dev-password', 'Password', input('password', ''));
+    flow().secretKeys(entry, driver).forEach(function (key) {
+      var label = key.replace(/_/g, ' ').replace(/\b\w/g, function (c) { return c.toUpperCase(); });
+      field(fields, 'dev-secret-' + key, label, input('password', '', 'From the device or its app'));
+    });
+    var profiles = flow().configProfiles(entry);
+    if (profiles.length > 0) {
+      var select = document.createElement('select');
+      profiles.forEach(function (profile) {
+        var opt = document.createElement('option');
+        opt.value = profile.value;
+        opt.textContent = profile.label;
+        select.appendChild(opt);
+      });
+      field(fields, 'dev-profile', 'Register map', select);
+      // Each map answers on its own Unit ID.
+      select.addEventListener('change', function () {
+        var unitEl = document.getElementById('dev-unit');
+        var chosen = flow().profileByValue(profiles, select.value);
+        if (unitEl && chosen) unitEl.value = String(chosen.unitId);
+      });
+    }
+    // Battery size is the opt-in to control; a driver that only reads gets none.
+    var caps = entry.capabilities || [];
+    if (caps.indexOf('battery') >= 0 && !entry.read_only) {
+      var battery = input('number', '', 'e.g. 10');
+      battery.min = '0';
+      battery.step = '0.1';
+      var bgroup = field(fields, 'dev-battery', 'Battery size (kWh)', battery);
+      var bhint = document.createElement('p');
+      bhint.className = 'connection-hint';
+      bhint.textContent = 'On the battery label. Without it, FTW only reads the battery.';
+      bgroup.appendChild(bhint);
+    }
+    if (caps.indexOf('meter') >= 0) {
+      var check = document.createElement('div');
+      check.className = 'form-check';
+      var box = document.createElement('input');
+      box.type = 'checkbox';
+      box.id = 'dev-site-meter';
+      box.checked = !hasSiteMeter();
+      var boxLabel = document.createElement('label');
+      boxLabel.htmlFor = 'dev-site-meter';
+      boxLabel.textContent = 'This meter measures the whole home at the grid connection';
+      check.appendChild(box);
+      check.appendChild(boxLabel);
+      fields.appendChild(check);
+    }
+
+    // What an expert may change: the name, and the port and Unit ID the
+    // scan or the driver already knows.
+    var more = document.createElement('details');
+    more.className = 'device-advanced';
+    var summary = document.createElement('summary');
+    summary.textContent = 'Advanced';
+    more.appendChild(summary);
+    field(more, 'dev-name', 'Name', input('text', driver.name));
+    if (kind === 'modbus' || kind === 'mqtt') {
+      var port = (scan && scan.port) || defaults.port || (kind === 'mqtt' ? 1883 : 502);
+      field(more, 'dev-port', 'Port', input('number', port));
+    }
+    if (kind === 'modbus') {
+      var unit = profiles.length === 0 && defaults.unit_id != null ? defaults.unit_id : driver.capabilities.modbus.unit_id;
+      field(more, 'dev-unit', 'Unit ID', input('number', unit));
+    }
+    fields.appendChild(more);
+  }
+
+  function value(id) {
+    var el = document.getElementById(id);
+    return el ? String(el.value || '').trim() : '';
+  }
+
+  // The driver block from the form, or {error} naming what is missing.
+  function readDevice() {
+    var entry = pick.entry;
+    var profile = document.getElementById('dev-profile');
+    var driver = flow().newDriver(entry, {
+      name: value('dev-name') || uniqueName(entry),
+      profile: profile ? profile.value : undefined
+    });
+    if (devices.some(function (d) { return d.driver.name === driver.name; })) {
+      return { error: 'Another device already has the name ' + driver.name + '.' };
+    }
+    var kind = flow().addressKind(driver);
+    if (kind === 'modbus' || kind === 'mqtt' || kind === 'host') {
+      var host = value('dev-host');
+      if (!host) return { error: 'Enter the device address.' };
+      flow().setAddress(driver, entry, { host: host, port: value('dev-port'), unitId: value('dev-unit') });
+    }
+    driver.config = driver.config || {};
+    if (kind === 'account') {
+      driver.config.email = value('dev-email');
+      driver.config.password = document.getElementById('dev-password').value;
+      driver.config.serial = value('dev-serial');
+      if (!driver.config.email || !driver.config.password) return { error: 'Enter the email and password of the account.' };
+      if (!driver.config.serial) return { error: 'Find your chargers and choose one.' };
+    }
+    if (has(driver.config, 'username')) driver.config.username = value('dev-username');
+    if (kind === 'host' && has(driver.config, 'password')) driver.config.password = document.getElementById('dev-password').value;
+    flow().secretKeys(entry, driver).forEach(function (key) {
+      var v = value('dev-secret-' + key);
+      if (v) driver.config[key] = v;
+    });
+    if (Object.keys(driver.config).length === 0) delete driver.config;
+    var battery = parseFloat(value('dev-battery'));
+    if (battery > 0) driver.battery_capacity_wh = battery * 1000;
+    var meter = document.getElementById('dev-site-meter');
+    driver.is_site_meter = !!(meter && meter.checked);
+    return { driver: driver };
+  }
+
+  function resetTest() {
+    var el = document.getElementById('device-test');
+    el.hidden = true;
+    el.className = 'device-test';
+    el.textContent = '';
+    document.getElementById('device-add-anyway').hidden = true;
+  }
+
+  function showTestFailure(res) {
+    var el = document.getElementById('device-test');
+    el.hidden = false;
+    el.className = 'device-test failed';
+    el.textContent = 'FTW could not read this device. Check the address. If the device is off now, add it anyway.';
+    var hint = flow().setupHint(pick.entry);
+    if (hint) {
+      var h = document.createElement('span');
+      h.className = 'device-test-hint';
+      h.textContent = hint;
+      el.appendChild(h);
+    }
+    if (res.error) {
+      var detail = document.createElement('span');
+      detail.className = 'device-error';
+      detail.textContent = res.error;
+      el.appendChild(detail);
+    }
+    document.getElementById('device-add').textContent = 'Test again';
+    document.getElementById('device-add-anyway').hidden = false;
+  }
+
+  window.addDevice = function () {
+    var read = readDevice();
+    var el = document.getElementById('device-test');
+    if (read.error) {
+      el.hidden = false;
+      el.className = 'device-test failed';
+      el.textContent = read.error;
+      return;
+    }
+    var add = document.getElementById('device-add');
+    add.disabled = true;
+    document.getElementById('device-add-anyway').hidden = true;
+    el.hidden = false;
+    el.className = 'device-test';
+    el.innerHTML = '<span class="spinner"></span> Testing the connection…';
+    flow().test(read.driver).then(function (res) {
+      add.disabled = false;
+      if (res && res.ok) {
+        keepDevice(read.driver, 'ok', flow().readingWords(res));
+        return;
+      }
+      showTestFailure(res || {});
+    });
+  };
+
+  // For a device that is off right now. It is saved, and marked untested.
+  window.addDeviceAnyway = function () {
+    var read = readDevice();
+    if (read.error) return;
+    keepDevice(read.driver, 'untested', '');
+  };
+
+  function keepDevice(driver, tested, words) {
+    if (driver.is_site_meter) {
+      devices.forEach(function (d) { d.driver.is_site_meter = false; });
+    }
+    devices.push({ driver: driver, entry: pick.entry, tested: tested, words: words });
+    window.closeDeviceForm();
+    renderDeviceList();
+  }
+
+  window.closeDeviceForm = function () {
+    pick = null;
+    scanChoice = null;
+    document.getElementById('device-form').hidden = true;
+    document.getElementById('device-find').hidden = false;
+    document.getElementById('catalog-for').hidden = true;
+    document.getElementById('catalog-search').value = '';
+    renderCatalog();
+  };
+
+  function deviceDetail(d) {
+    var parts = [flow().addressOf(d.driver)];
+    if (d.driver.is_site_meter) parts.push('site meter');
+    if (d.driver.battery_capacity_wh) parts.push((d.driver.battery_capacity_wh / 1000).toFixed(1) + ' kWh battery');
+    return parts.filter(Boolean).join(' · ');
+  }
+
+  function deviceState(d) {
+    return d.tested === 'ok'
+      ? 'Connected' + (d.words ? ' · ' + d.words : '')
+      : 'Not tested: it did not answer';
+  }
+
+  function renderDeviceList() {
+    var container = document.getElementById('device-list');
+    container.innerHTML = '';
+    devices.forEach(function (d, idx) {
       var item = document.createElement('div');
       item.className = 'driver-summary-item';
-      item.innerHTML =
-        '<div class="driver-info">' +
-          '<span class="driver-label">' + esc(d.name) + '</span>' +
-          '<span class="driver-detail">' + esc(driverDetail(d)) + '</span>' +
-        '</div>';
+      var info = document.createElement('div');
+      info.className = 'driver-info';
+      var label = document.createElement('span');
+      label.className = 'driver-label';
+      label.textContent = flow().title(d.entry) + ' · ' + d.driver.name;
+      var detail = document.createElement('span');
+      detail.className = 'driver-detail';
+      detail.textContent = deviceDetail(d);
+      var state = document.createElement('span');
+      state.className = 'device-state' + (d.tested === 'ok' ? ' ok' : '');
+      state.textContent = deviceState(d);
+      info.appendChild(label);
+      info.appendChild(detail);
+      info.appendChild(state);
       var btn = document.createElement('button');
       btn.className = 'btn-remove-sm';
       btn.textContent = 'Remove';
-      btn.addEventListener('click', function () { removeDriver(idx); });
+      btn.addEventListener('click', function () {
+        devices.splice(idx, 1);
+        renderDeviceList();
+      });
+      item.appendChild(info);
       item.appendChild(btn);
       container.appendChild(item);
     });
+    document.getElementById('devices-next').textContent = devices.length ? 'Continue' : 'Continue without devices';
   }
 
-  function removeDriver(idx) {
-    configuredDrivers.splice(idx, 1);
-    renderDriversSummary();
+  // Cloud chargers: the account lists its chargers, the owner picks one.
+  function findChargers() {
+    var btn = document.getElementById('dev-find-chargers');
+    var el = document.getElementById('device-test');
+    var email = value('dev-email');
+    var password = document.getElementById('dev-password').value;
+    resetTest();
+    if (!email || !password) {
+      el.hidden = false;
+      el.className = 'device-test failed';
+      el.textContent = 'Enter the email and password of the account.';
+      return;
+    }
+    var provider = String(pick.entry.filename || pick.entry.id || '')
+      .replace(/\.lua$/i, '').replace(/_cloud$/i, '');
+    btn.disabled = true;
+    el.hidden = false;
+    el.innerHTML = '<span class="spinner"></span> Signing in…';
+    fetch('/api/ev/chargers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: provider, email: email, password: password })
+    }).then(function (r) {
+      return r.json().then(function (j) { return { ok: r.ok, body: j }; });
+    }).then(function (res) {
+      var chargers = res.ok && Array.isArray(res.body) ? res.body : [];
+      if (!res.ok || chargers.length === 0) {
+        el.className = 'device-test failed';
+        el.textContent = res.ok ? 'This account has no chargers.' : ((res.body && res.body.error) || 'Sign-in failed.');
+        return;
+      }
+      var sel = document.getElementById('dev-serial');
+      sel.innerHTML = '';
+      chargers.forEach(function (c) {
+        var opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.name ? c.name + ' · ' + c.id : c.id;
+        sel.appendChild(opt);
+      });
+      document.getElementById('dev-serial-group').hidden = false;
+      resetTest();
+    }).catch(function (err) {
+      el.className = 'device-test failed';
+      el.textContent = err.message;
+    }).finally(function () {
+      btn.disabled = false;
+    });
   }
 
-  window.addAnotherDevice = function () {
-    selectedDevice = null;
-    selectedCatalog = null;
-    goStep(3);
+  // The scan finds addresses that answer on a known port and, when it can,
+  // the device behind them.
+  window.startScan = function () {
+    var statusEl = document.getElementById('scan-status');
+    var resultsEl = document.getElementById('scan-results');
+    var btn = document.getElementById('scan-btn');
+    statusEl.innerHTML = '<span class="spinner"></span> Scanning your network…';
+    resultsEl.hidden = true;
+    btn.disabled = true;
+    fetch('/api/scan?fingerprint=1')
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        var found = Array.isArray(data) ? data : (data.devices || []);
+        if (found.length === 0) {
+          statusEl.textContent = 'Nothing found. Find your device below and type its address.';
+          return;
+        }
+        statusEl.textContent = found.length === 1 ? '1 device found.' : found.length + ' devices found.';
+        found.sort(function (a, b) {
+          return Number(Boolean(b.matches && b.matches.length)) - Number(Boolean(a.matches && a.matches.length));
+        });
+        resultsEl.innerHTML = '';
+        found.forEach(function (d) {
+          var row = document.createElement('div');
+          row.className = 'scan-found';
+          var match = d.matches && d.matches.length ? d.matches[0] : null;
+          var text = document.createElement('span');
+          var name = match ? (match.name || match.make || match.driver) : 'Unknown device';
+          text.textContent = name + ' · ' + (d.hostname || d.ip) + ':' + d.port;
+          var use = document.createElement('button');
+          use.className = 'btn-secondary';
+          use.textContent = 'Use';
+          use.addEventListener('click', function () { useScanned(d, match); });
+          row.appendChild(text);
+          row.appendChild(use);
+          resultsEl.appendChild(row);
+        });
+        resultsEl.hidden = false;
+      })
+      .catch(function (err) {
+        statusEl.textContent = 'The scan failed: ' + err.message + '. Find your device below and type its address.';
+      })
+      .finally(function () { btn.disabled = false; });
   };
 
-  // --- Step 7: Integrations ---
+  function useScanned(dev, match) {
+    var entry = null;
+    if (match && match.driver) {
+      for (var i = 0; i < driverCatalog.length; i++) {
+        if (driverCatalog[i].filename === match.driver) { entry = driverCatalog[i]; break; }
+      }
+    }
+    if (entry) { chooseDriver(entry, dev); return; }
+    scanChoice = dev;
+    var forEl = document.getElementById('catalog-for');
+    forEl.textContent = 'Choose the driver for ' + (dev.hostname || dev.ip) + ' (port ' + dev.port + ').';
+    forEl.hidden = false;
+  }
+
+  // --- Step 4: Prices and Home Assistant ---
 
   var integrationListenersBound = false;
-
-  // Known EV charger providers, keyed by the `provider` string the Go
-  // config (EVCharger.Provider) accepts. `transport` selects which field
-  // block (#ev-fields-http vs #ev-fields-modbus) the wizard reveals:
-  //   - easee:    cloud HTTP, needs username/password + serial lookup.
-  //   - zaptec:   cloud HTTP, needs username/password + serial lookup.
-  //   - tesla-wc: local HTTP, needs host, no auth. Observation only.
-  //   - ctek:     local Modbus/TCP, needs host/port/unit, no auth.
-  // Mirrors go/internal/config/config.go EVCharger.Validate.
-  var EV_PROVIDERS = [
-    { value: 'easee', label: 'Easee', transport: 'http' },
-    { value: 'zaptec', label: 'Zaptec', transport: 'http' },
-    { value: 'tesla-wc', label: 'Tesla Wall Connector', transport: 'http-local' },
-    { value: 'ctek', label: 'CTEK', transport: 'modbus' }
-  ];
-
-  function evProviderTransport(value) {
-    for (var i = 0; i < EV_PROVIDERS.length; i++) {
-      if (EV_PROVIDERS[i].value === value) return EV_PROVIDERS[i].transport;
-    }
-    return null;
-  }
-
-  function evProviderLabel(value) {
-    for (var i = 0; i < EV_PROVIDERS.length; i++) {
-      if (EV_PROVIDERS[i].value === value) return EV_PROVIDERS[i].label;
-    }
-    return value;
-  }
-
-  function populateEVProviders() {
-    var sel = document.getElementById('ev-provider');
-    if (!sel || sel.dataset.populated === '1') return;
-    // Keep the existing "None" option (value="") as the first child.
-    EV_PROVIDERS.forEach(function (p) {
-      var opt = document.createElement('option');
-      opt.value = p.value;
-      opt.textContent = p.label;
-      sel.appendChild(opt);
-    });
-    sel.dataset.populated = '1';
-  }
-
-  // Reveal the field block matching the selected provider's transport.
-  function syncEVFields() {
-    var provider = document.getElementById('ev-provider').value;
-    var transport = evProviderTransport(provider);
-    document.getElementById('ev-fields').style.display = provider ? 'block' : 'none';
-    document.getElementById('ev-fields-http').style.display = transport === 'http' ? 'block' : 'none';
-    var localHttp = document.getElementById('ev-fields-http-local');
-    if (localHttp) localHttp.style.display = transport === 'http-local' ? 'block' : 'none';
-    document.getElementById('ev-fields-modbus').style.display = transport === 'modbus' ? 'block' : 'none';
-    // Probe is offered for cloud accounts and for a LAN Tesla Wall Connector.
-    var canProbe = transport === 'http' || transport === 'http-local';
-    document.getElementById('ev-load-chargers').style.display = canProbe ? '' : 'none';
-    if (!canProbe) {
-      document.getElementById('ev-serial-group').style.display = 'none';
-    }
-  }
 
   function prepareIntegrations() {
     var zone = document.getElementById('price-zone').value;
     document.getElementById('price-zone-readonly').value = zone;
 
-    populateEVProviders();
-    syncEVFields();
-
     if (!integrationListenersBound) {
       integrationListenersBound = true;
-      document.getElementById('ev-provider').addEventListener('change', syncEVFields);
       document.getElementById('ha-enabled').addEventListener('change', function () {
         document.getElementById('ha-fields').style.display = this.checked ? 'block' : 'none';
       });
     }
   }
 
-  // Populate the <select id="ev-serial"> by calling /api/ev/chargers —
-  // mirrors the settings screen so operators don't have to transcribe a
-  // serial off the side of the charger. The serial field only appears
-  // after a successful call returns at least one device.
-  function evLocalHTTPBase(host) {
-    host = (host || '').trim();
-    if (!host) return '';
-    if (host.indexOf('://') >= 0) return host.replace(/\/$/, '');
-    return 'http://' + host.replace(/\/$/, '');
-  }
+  // --- Step 5: Review ---
 
-  window.loadEVChargers = function () {
-    var provider = document.getElementById('ev-provider').value || 'easee';
-    var transport = evProviderTransport(provider);
-    var username = document.getElementById('ev-username').value.trim();
-    var password = document.getElementById('ev-password').value;
-    var btn = document.getElementById('ev-load-chargers');
-    var statusEl = document.getElementById('ev-chargers-status');
-    var group = document.getElementById('ev-serial-group');
-    var sel = document.getElementById('ev-serial');
-    var body;
-
-    statusEl.style.display = 'inline';
-    statusEl.style.color = 'var(--fg-muted)';
-    if (transport === 'http-local') {
-      var localHost = document.getElementById('ev-http-host').value.trim();
-      if (!localHost) { statusEl.textContent = 'Enter the wall connector IP first'; return; }
-      body = { provider: provider, http: { base_url: evLocalHTTPBase(localHost) } };
-    } else {
-      if (!username) { statusEl.textContent = 'Enter username first'; return; }
-      if (!password) { statusEl.textContent = 'Enter password first'; return; }
-      body = { provider: provider, email: username, password: password };
+  // The zone's own name, "SE3 · Stockholm", as the step 2 list shows it.
+  function zoneLabel(code) {
+    var sel = document.getElementById('price-zone');
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === code) return sel.options[i].textContent;
     }
-
-    statusEl.textContent = 'Connecting…';
-    btn.disabled = true;
-
-    fetch('/api/ev/chargers', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    })
-      .then(function (r) {
-        return r.json().then(function (j) { return { ok: r.ok, body: j }; });
-      })
-      .then(function (res) {
-        if (!res.ok) {
-          statusEl.style.color = 'var(--alarm)';
-          statusEl.textContent = (res.body && res.body.error) || 'Failed to load chargers';
-          return;
-        }
-        var chargers = Array.isArray(res.body) ? res.body : [];
-        if (chargers.length === 0) {
-          statusEl.textContent = 'No chargers found on this account';
-          group.style.display = 'none';
-          return;
-        }
-        sel.innerHTML = '';
-        chargers.forEach(function (c) {
-          var opt = document.createElement('option');
-          opt.value = c.id;
-          opt.textContent = c.id + (c.name ? '  —  ' + c.name : '');
-          sel.appendChild(opt);
-        });
-        group.style.display = 'block';
-        statusEl.style.color = 'var(--live)';
-        statusEl.textContent = chargers.length + ' charger' + (chargers.length === 1 ? '' : 's') + ' found';
-      })
-      .catch(function (e) {
-        statusEl.style.color = 'var(--alarm)';
-        statusEl.textContent = 'Error: ' + e.message;
-      })
-      .finally(function () {
-        btn.disabled = false;
-      });
-  };
-
-  // --- Step 8: Review ---
+    return code;
+  }
 
   function renderReview() {
     var zone = document.getElementById('price-zone').value;
     var html = '';
 
     // Site
-    html += '<div class="review-section"><h3>Site</h3><div class="review-item">';
+    html += '<div class="review-section"><h3>Home</h3><div class="review-item">';
     html += esc(document.getElementById('site-name').value) + ', ';
     var connection = document.getElementById('site-connection').value;
     var connectionLabel = connection === '3' ? 'Three-phase' : connection === '1' ? 'Single-phase' :
@@ -901,39 +708,27 @@
       html += ' · ' + esc(document.getElementById('fuse-phases').value) + ' phases · ' +
         esc(document.getElementById('fuse-voltage').value) + ' V per phase';
     }
-    html += ' · ' + esc(zone);
+    html += ' · ' + (zone ? 'price area ' + esc(zoneLabel(zone)) : 'no price area');
     var clock = browserTimeZone();
     if (clock) html += ' · clock ' + esc(clock);
     html += '</div></div>';
-
-    // Devices
-    if (configuredDrivers.length > 0) {
-      html += '<div class="review-section"><h3>Devices</h3>';
-      configuredDrivers.forEach(function (d) {
-        var desc = esc(d.name);
-        var detail = driverDetail(d);
-        if (detail) desc += ' — ' + esc(detail);
-        html += '<div class="review-item">' + desc + '</div>';
-      });
-      html += '</div>';
+    // Said here, not found out later: without an area FTW has no prices.
+    if (!zone) {
+      html += '<div class="notice" id="no-price-area">No price area. FTW will not fetch prices or plan by price until you choose one in Settings → Price.</div>';
     }
 
-    // EV
-    var evProvider = document.getElementById('ev-provider').value;
-    if (evProvider) {
-      html += '<div class="review-section"><h3>EV Charger</h3><div class="review-item">';
-      html += esc(evProviderLabel(evProvider));
-      if (evProviderTransport(evProvider) === 'modbus') {
-        var mbHost = document.getElementById('ev-mb-host').value.trim();
-        if (mbHost) html += ' (' + esc(mbHost) + ')';
-      } else if (evProviderTransport(evProvider) === 'http-local') {
-        var httpHost = document.getElementById('ev-http-host').value.trim();
-        if (httpHost) html += ' (' + esc(httpHost) + ')';
-      } else {
-        var evSerial = document.getElementById('ev-serial').value;
-        if (evSerial) html += ' (' + esc(evSerial) + ')';
-      }
-      html += '</div></div>';
+    // Devices
+    if (devices.length > 0) {
+      html += '<div class="review-section"><h3>Devices</h3>';
+      devices.forEach(function (d) {
+        var desc = esc(flow().title(d.entry)) + ' — ' + esc(deviceDetail(d));
+        html += '<div class="review-item">' + desc +
+          '<span class="device-state' + (d.tested === 'ok' ? ' ok' : '') + '" style="display:block">' +
+          esc(deviceState(d)) + '</span></div>';
+      });
+      html += '</div>';
+    } else {
+      html += '<div class="notice">No devices. FTW shows nothing live until you add one in Settings → Devices.</div>';
     }
 
     // HA
@@ -947,7 +742,7 @@
     }
 
     // Price
-    var priceProv = document.getElementById('price-provider').value;
+    var priceProv = zone ? document.getElementById('price-provider').value : '';
     if (priceProv) {
       html += '<div class="review-section"><h3>Price</h3><div class="review-item">';
       html += esc(priceProv) + ' / ' + esc(zone);
@@ -965,10 +760,8 @@
 
   window.saveConfig = function () {
     if (!validateConnection()) return;
-    // Empty drivers list is valid — e.g. an EV-only site that only
-    // configured a cloud EV charger in step 7 and doesn't own local
-    // hardware. The backend accepts this and runs with a no-op
-    // control loop (no site meter to balance against).
+    // An empty device list is valid: the review says FTW shows nothing
+    // live, and the owner adds devices later in Settings.
     var btn = document.getElementById('save-btn');
     var errEl = document.getElementById('save-error');
     var cfg = buildConfig();
@@ -1049,18 +842,16 @@
         phases: Number(document.getElementById('fuse-phases').value),
         voltage: Number(document.getElementById('fuse-voltage').value)
       },
-      drivers: configuredDrivers.map(function (d) {
-        var clean = {};
-        for (var k in d) {
-          if (d.hasOwnProperty(k) && k !== '_catalog') clean[k] = d[k];
-        }
-        return clean;
-      }),
-      api: { port: 8080 }
+      drivers: devices.map(function (d) { return d.driver; }),
+      api: { port: 8080 },
+      // A new box plans from the start. It does not sell from the battery
+      // until the owner allows it, so Plan does not ask on the first day.
+      planner: { enabled: true, battery_export: 'not_allowed' }
     };
 
-    // Price
-    var priceProv = document.getElementById('price-provider').value;
+    // Price. With no area there is no provider: Core would otherwise price
+    // the home by SE3 without saying so.
+    var priceProv = zone ? document.getElementById('price-provider').value : '';
     if (priceProv) {
       cfg.price = {
         provider: priceProv,
@@ -1068,34 +859,6 @@
       };
       var cur = currencyForZone(zone);
       if (cur) cfg.price.currency = cur;
-    }
-
-    // EV Charger — shape the block to match the provider's transport
-    // (see go/internal/config/config.go EVCharger). Cloud HTTP providers
-    // (easee, zaptec) carry username/password/serial; local HTTP
-    // (tesla-wc) carries http.base_url; local Modbus (ctek) carries a
-    // modbus{host,port,unit_id} block and rejects auth.
-    var evProvider = document.getElementById('ev-provider').value;
-    if (evProvider) {
-      var ev = { provider: evProvider };
-      if (evProviderTransport(evProvider) === 'modbus') {
-        var mbHost = document.getElementById('ev-mb-host').value.trim();
-        var mbPort = parseInt(document.getElementById('ev-mb-port').value, 10);
-        var mbUnit = parseInt(document.getElementById('ev-mb-unit').value, 10);
-        ev.modbus = { host: mbHost };
-        if (mbPort) ev.modbus.port = mbPort;
-        if (!isNaN(mbUnit)) ev.modbus.unit_id = mbUnit;
-      } else if (evProviderTransport(evProvider) === 'http-local') {
-        var localBase = evLocalHTTPBase(document.getElementById('ev-http-host').value);
-        if (localBase) ev.http = { base_url: localBase };
-        var localSerial = document.getElementById('ev-serial').value.trim();
-        if (localSerial) ev.serial = localSerial;
-      } else {
-        ev.username = document.getElementById('ev-username').value.trim();
-        ev.password = document.getElementById('ev-password').value;
-        ev.serial = document.getElementById('ev-serial').value.trim();
-      }
-      cfg.ev_charger = ev;
     }
 
     // Home Assistant
@@ -1154,19 +917,30 @@
       .catch(function () { /* the Swedish fallback list stays */ });
   }
 
+  // A country with one area needs no question. With more, nothing is
+  // chosen for the owner: a wrong area gives another area's prices.
   function fillZonesForCountry() {
     var country = document.getElementById('price-country').value;
     var zoneEl = document.getElementById('price-zone');
+    var inCountry = priceZones.filter(function (z) { return z.country === country; });
     zoneEl.innerHTML = '';
-    priceZones.filter(function (z) { return z.country === country; })
-      .forEach(function (z, i) {
-        var sub = z.name && z.name.indexOf(' — ') > 0 ? z.name.split(' — ')[1] : '';
-        var o = document.createElement('option');
-        o.value = z.code;
-        o.textContent = sub ? z.code + ' · ' + sub : z.code;
-        if (i === 0 || z.code === 'SE3') o.selected = true;
-        zoneEl.appendChild(o);
-      });
+    if (inCountry.length > 1) {
+      var none = document.createElement('option');
+      none.value = '';
+      none.textContent = 'Choose your price area';
+      none.selected = true;
+      zoneEl.appendChild(none);
+    }
+    inCountry.forEach(function (z) {
+      var sub = z.name && z.name.indexOf(' — ') > 0 ? z.name.split(' — ')[1] : '';
+      var o = document.createElement('option');
+      o.value = z.code;
+      o.textContent = sub ? z.code + ' · ' + sub : z.code;
+      if (inCountry.length === 1) o.selected = true;
+      zoneEl.appendChild(o);
+    });
+    zoneEl.value = inCountry.length === 1 ? inCountry[0].code : '';
+    document.getElementById('price-zone-group').hidden = inCountry.length === 1;
   }
 
   // The currency the picked zone bills in, so a Belgian install doesn't
@@ -1179,8 +953,8 @@
   }
 
   // --- Init ---
-  // Honor a `?step=N` deep-link (the dashboard links to /setup?step=3 from
-  // its "no devices" prompt). Clamp into the valid 1..TOTAL_STEPS range so a
+  // Honor a `?step=N` deep-link (the dashboard and Settings link to
+  // /setup?step=3, the devices step). Clamp into the valid 1..TOTAL_STEPS range so a
   // hand-typed or stale param can't land on a non-existent step. Default to
   // step 1 when absent or unparseable.
   //
@@ -1199,16 +973,16 @@
   }
 
   // A short house password is the owner's choice: a word, not a refusal.
-  [['assistant-password', 'assistant-password-hint'], ['house-password', 'house-password-hint']].forEach(function (ids) {
-    var input = document.getElementById(ids[0]);
-    var hint = document.getElementById(ids[1]);
+  (function () {
+    var input = document.getElementById('house-password');
+    var hint = document.getElementById('house-password-hint');
     input.addEventListener('input', function () {
       var n = Array.from(input.value).length;
       hint.textContent = n > 0 && n < 8 ? 'Short passwords are easy to guess. You can still use this one.' : '';
     });
-  });
+  })();
 
-  document.getElementById('drv-ip').addEventListener('input', updateHostHint);
+  document.getElementById('catalog-search').addEventListener('input', renderCatalog);
   document.getElementById('site-connection').addEventListener('change', chooseConnection);
   document.getElementById('price-country').addEventListener('change', connectionHelp);
   document.getElementById('fuse-phases').addEventListener('change', customConnection);

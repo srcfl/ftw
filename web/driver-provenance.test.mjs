@@ -1,61 +1,64 @@
-// An operator picking a driver sees how many homes run that exact version.
-// That count is all FTW says about a driver.
+// An owner picking a driver sees how many homes run that exact version.
+// That count is all FTW says about a driver. Settings and the setup guide
+// show the same card, from device-flow.js.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import vm from "node:vm";
 
-const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, "setup.js"), "utf8");
+const flowSource = readFileSync(new URL("./device-flow.js", import.meta.url), "utf8");
+const setup = readFileSync(new URL("./setup.js", import.meta.url), "utf8");
+
+function element(tag) {
+  return {
+    tag, children: [], className: "", markup: [],
+    _text: "",
+    set textContent(v) { this._text = String(v); },
+    get textContent() { return this._text; },
+    set innerHTML(v) { this.markup.push(v); },
+    appendChild(child) { this.children.push(child); return child; },
+    addEventListener() {},
+  };
+}
+
+function deviceFlow() {
+  const window = {};
+  vm.runInNewContext(flowSource, { window, document: { createElement: element } });
+  return window.FTWDeviceFlow;
+}
+
+const texts = (el) => [el.textContent, ...el.children.flatMap(texts)].filter(Boolean);
 
 test("a count is turned into words", () => {
-  assert.match(source, /function usageLabel\(count\)/,
-    "the wording belongs in one function so the dropdown and the description cannot disagree");
-  assert.ok(source.includes("1 home runs this version"));
-  assert.ok(source.includes("homes run this version"));
-  assert.ok(!source.includes("verified on hardware"), "no status label is left");
-  assert.ok(!source.includes("untested"), "no status label is left");
+  const flow = deviceFlow();
+  assert.equal(flow.usageLabel(1), "1 home runs this version");
+  assert.equal(flow.usageLabel(14), "14 homes run this version");
+  assert.equal(flow.usageLabel(undefined), "", "no count, no words");
+  assert.ok(!flowSource.includes("verified on hardware"), "no status label is left");
+  assert.ok(!flowSource.includes("untested"), "no status label is left");
 });
 
-test("the dropdown label carries the count", () => {
-  const populate = source.slice(
-    source.indexOf("function populateDriverDropdown"),
-    source.indexOf("window.onDriverSelected"));
-  assert.match(populate, /usageLabel\(entry\.run_by\)/);
+test("the card carries the count, the version and the models", () => {
+  const card = deviceFlow().card({
+    id: "sungrow", name: "Sungrow SH Hybrid Inverter", manufacturer: "Sungrow", version: "1.4.0",
+    protocols: ["modbus"], capabilities: ["meter"], run_by: 9, tested_models: ["SH10RT"],
+  });
+  const all = texts(card);
+  assert.ok(all.includes("9 homes run this version"));
+  assert.ok(all.includes("modbus · v1.4.0 · SH10RT"));
+  assert.equal(card.tag, "button");
 });
 
-test("the description says which version and where it came from", () => {
-  const selected = source.slice(
-    source.indexOf("window.onDriverSelected"),
-    source.indexOf("prefillDriverConfig()", source.indexOf("window.onDriverSelected")));
-
-  assert.match(selected, /installed_version \|\| selectedCatalog\.version/,
-    "prefer the installed version over the catalog's, since they can differ");
-
-  // Local override > signed channel > bundled is the order FTW resolves in.
-  // An operator debugging a device needs to know which one is actually running.
-  for (const source_kind of ["local", "managed", "bundled"]) {
-    assert.ok(selected.includes(`'${source_kind}'`),
-      `the description must distinguish a ${source_kind} driver`);
-  }
-  assert.match(selected, /usageLabel\(selectedCatalog\.run_by\)/);
+test("the card is built as elements, not markup from the driver file", () => {
+  const hostile = '<img src=x onerror="alert(1)">';
+  const card = deviceFlow().card({ id: "x", name: hostile, setup_hint: hostile, tested_models: [hostile] });
+  const walk = (el) => [el, ...el.children.flatMap(walk)];
+  for (const el of walk(card)) assert.equal(el.markup.length, 0, "no innerHTML on a card");
+  assert.ok(texts(card).includes(hostile), "the name stays text");
 });
 
-test("a driver with nothing to say still hides the panel", () => {
-  const selected = source.slice(source.indexOf("window.onDriverSelected"));
-  assert.match(selected, /if \(lines\.length\) \{/,
-    "an empty description must not leave an empty box on screen");
-  assert.match(selected, /descEl\.style\.display = 'none'/,
-    "the panel is hidden when there is nothing to put in it");
-});
-
-test("the description is built as elements, not by string concatenation", () => {
-  const selected = source.slice(source.indexOf("window.onDriverSelected"));
-  assert.ok(!/descEl\.innerHTML\s*=/.test(selected),
-    "verification notes come from a driver file; setting innerHTML would " +
-    "make them executable");
-  assert.match(selected, /createElement\('div'\)/);
-  assert.match(selected, /el\.textContent = line/);
+test("the guide shows the shared card", () => {
+  assert.match(setup, /flow\(\)\.card\(entry, \{/);
+  assert.doesNotMatch(setup, /function usageLabel\(count\)/, "the guide keeps no copy of the wording");
 });

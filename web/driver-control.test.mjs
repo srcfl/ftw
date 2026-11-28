@@ -103,8 +103,10 @@ describe('the other places the owner looks', () => {
     const at = name => index.indexOf(name);
     assert.ok(at('/driver-control.js') > 0 && at('/driver-control.js') < at('/app.js'));
     assert.ok(at('/driver-control.js') < at('/settings/tabs/devices.js'));
+    assert.ok(at('/driver-control.js') < at('/device-flow.js') && at('/device-flow.js') < at('/settings/tabs/devices.js'));
     const setup = read('./setup.html');
-    assert.ok(setup.indexOf('/driver-control.js') > 0 && setup.indexOf('/driver-control.js') < setup.indexOf('/setup.js'));
+    assert.ok(setup.indexOf('/driver-control.js') > 0 && setup.indexOf('/driver-control.js') < setup.indexOf('/device-flow.js'));
+    assert.ok(setup.indexOf('/device-flow.js') < setup.indexOf('/setup.js'));
   });
 
   it('shows the note on the device row, the catalog card, setup and the EV card', () => {
@@ -112,10 +114,13 @@ describe('the other places the owner looks', () => {
     assert.match(devices, /class="drv-module-readonly-note read-only-note" role="note"/);
     assert.match(devices, /opts\.readOnlyNoteEl\.textContent = readOnlySentence\(note\)/,
       'a version switch must update the note with the badge');
-    assert.match(devices, /readOnlyTag\.textContent = "reads only, no control"/);
+    // The catalog card is shared by Settings and setup (device-flow.js).
+    const flow = read('./device-flow.js');
+    assert.match(flow, /if \(readsOnly\(e\)\) tag\('reads only', 'drv-catalog-unproven', readOnlySentence\(e\)\)/);
+    assert.match(devices, /flow\(\)\.card\(e, \{/);
     const setup = read('./setup.js');
-    assert.match(setup, /if \(readOnly\) lines\.push\(readOnly\.text\)/);
-    assert.match(setup, /label \+= ' — reads only'/);
+    assert.match(setup, /flow\(\)\.card\(entry, \{/);
+    assert.match(setup, /readOnlyEl\.textContent = readOnly;/, 'the device form says it before the device is added');
     const app = read('./app.js');
     assert.match(app, /window\.FTWDriverControl\.loadpointNote\(matched\)/);
     assert.match(app, /readOnlyNote\.className = "ev-read-only-note read-only-note"/);
