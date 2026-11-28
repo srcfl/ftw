@@ -256,8 +256,9 @@ type FleetPing struct {
 // forgotten, never retried.
 const DefaultFleetPingEndpoint = "https://cloud.ftw.energy/v1/fleet"
 
-// On reports whether the ping is switched on, and is the only place that
-// answers it.
+// On reports what the retired switch says. Core no longer reads it: the
+// daily reports follow FTW Cloud (Fredrik, 28 November 2026). It stays for
+// configs that carry the field.
 //
 // Nil means never configured, which is the state every existing box is in, and
 // applyDefaults reads it as on. Config posted to /api/config does not pass
@@ -1757,9 +1758,10 @@ func applyDefaults(c *Config) {
 	}
 	if c.FleetPing == nil {
 		// Absent means never configured, which is the state every existing
-		// box is in. Enabled is the owner's call; an explicit
-		// `fleet_ping: {enabled: false}` block is the opt-out and survives
-		// this because only a missing section is filled in.
+		// box is in. Enabled is no longer read: statistics follow FTW Cloud
+		// and nothing else (Fredrik, 28 November 2026). A box without Cloud
+		// sends no daily report, also not to a collector of its own set in
+		// Endpoint.
 		c.FleetPing = &FleetPing{Enabled: true}
 	}
 	// Endpoint is deliberately left blank: Resolved() supplies the default at

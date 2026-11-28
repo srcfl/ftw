@@ -1,4 +1,4 @@
-// Settings → FTW app → Anonymous statistics: whether this box shares them,
+// Settings → FTW app → Statistics: whether this box shares them,
 // and the messages it adds to FTW's fleet and energy totals. They are part
 // of FTW Cloud and nothing else (Fredrik, 28 November 2026), so there is no
 // switch here: FTW Cloud on shares them, without Cloud nothing is sent.
@@ -300,10 +300,11 @@
       }, 0);
 
       return (
-        "<fieldset><legend>Anonymous statistics</legend>" +
+        "<fieldset><legend>Statistics</legend>" +
         '<p id="statistics-share-note" class="fleet-share-state" role="status">Checking…</p>' +
-        '<p class="hint">With FTW Cloud on, this box sends two anonymous reports a day, each on its own ' +
-        "and at its own time: a fleet report and an energy report. They are part of FTW Cloud's terms.</p>" +
+        '<p class="hint">With FTW Cloud on, this box sends hourly reports, which Sourceful links to your ' +
+        "Cloud home for 48 hours so it can delete them, and daily reports with no box id, shown below. " +
+        "They are part of FTW Cloud's terms.</p>" +
         '<h4 class="fleet-energy-title">Daily fleet report</h4>' +
         '<p class="hint">The fleet report carries ten things once a day: its ' +
         "FTW version, its release channel, the kinds of device it talks to, " +
@@ -319,7 +320,7 @@
         "was sent. Neither says which box sent it.</p>" +
         '<p class="hint fleet-ping-limits">Two limits, plainly. Those ten things still describe ' +
         "you: a beta box in a small price zone with a big battery may be the " +
-        "only one of its kind. And without a relay the receiving service sees the address during " +
+        "only one of its kind. And until FTW names a relay, the receiving service sees the address during " +
         "the request, the way any website does. What it keeps depends on the " +
         "endpoint shown below. Here is the whole message, as this box would send it right now, " +
         "with what goes beside it.</p>" +
@@ -331,9 +332,10 @@
         "nothing from the fleet report, and leaves at its own time, so the two " +
         "cannot be matched. They never travel together: device kinds and a price " +
         "zone can point at one home, and the energy beside them would then be " +
-        "that home's. It goes through an independent relay, so FTW Cloud reads " +
-        "the numbers without this box's address, and the relay sees the address " +
-        "without the numbers. Sealed with it go a random number, drawn new for " +
+        "that home's. Once FTW names an independent relay, the report goes " +
+        "through it, so FTW Cloud reads the numbers without this box's address, " +
+        "and the relay sees the address without the numbers. Until then this " +
+        "release does not send it. Sealed with it go a random number, drawn new for " +
         "each report so FTW Cloud counts it once, and the UTC day it was sent. " +
         "A day with a gap in the energy record is skipped.</p>" +
         '<div id="fleet-energy-payload"></div>' +

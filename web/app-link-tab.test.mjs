@@ -96,7 +96,7 @@ describe("the app tab", () => {
     const html = render({});
     assert.match(html, /id="app-link-terms" class="hint" hidden>/);
     assert.match(html, /through FTW Cloud/);
-    assert.match(html, /readable copy of your energy data and takes anonymous statistics/);
+    assert.match(html, /readable copy of your energy data and takes project statistics/);
     assert.match(html, /Pairing accepts its <a href="https:\/\/ftw\.sourceful\.energy\/privacy"/);
     assert.match(html, /The box runs without it/);
     assert.doesNotMatch(html, /cannot read/);
@@ -131,7 +131,7 @@ describe("the app tab", () => {
     const config = { app_link: { enabled: false } };
     const html = appWithFleet.render({ config });
 
-    assert.match(html, /<legend>Anonymous statistics<\/legend>/);
+    assert.match(html, /<legend>Statistics<\/legend>/);
     assert.match(html, /id="statistics-share-note"/);
     assert.doesNotMatch(html, /id="statistics-share"/);
     assert.doesNotMatch(html, /data-checkbox-path="fleet_ping\.enabled"/);

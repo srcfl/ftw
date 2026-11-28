@@ -1865,13 +1865,11 @@ also rejects tunnels locally in that mode and emits no live or event data.
 Collection stays off until the signed C8 review; the default operator setting
 is empty. Withdrawal and retention continue while it is paused.
 
-Since 24 October 2026 a box without Cloud no longer starts a statistics-only
-roster: its statistics are the two anonymous daily reports, through the
-Oblivious HTTP relay (ADR 0008, "Anonymous daily reports and one statistics
-answer"). Statistics-only rosters already running keep working until the
-owner turns statistics off.
-
-Since 28 November 2026 statistics come only with FTW Cloud (ADR 0008,
-amendment of that date). A box ends a statistics-only roster at its next
-start, so the service deletes its rows, and a box without Cloud sends no
-statistics at all.
+Since 24 October 2026 a box without Cloud starts no statistics-only roster
+(ADR 0008, "Anonymous daily reports and one statistics answer"). Since 28
+November 2026 statistics come only with FTW Cloud (ADR 0008, amendment of
+that date). A box ends a statistics-only roster at its next start, so the
+service deletes its rows, and a box without Cloud sends no statistics at
+all. No release names a relay yet: the daily fleet report goes straight to
+`/v1/fleet`, which sees the box's address, and the energy report is not
+sent.

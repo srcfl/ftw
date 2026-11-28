@@ -70,14 +70,16 @@ test('a box without Cloud sends nothing and offers no statistics choice',async()
   const p=page('off');await p.window.FTWStatistics.refresh();
   assert.deepEqual(p.labels(p.app),[]);
   assert.match(p.app.textContent,/FTW Cloud is off\. The box works locally and sends no statistics/);
-  assert.doesNotMatch(p.main.textContent,/Anonymous statistics below|Yes, contribute|keep it local/);
+  assert.doesNotMatch(p.main.textContent,/anonymous statistics|Yes, contribute|keep it local/i);
+  // The hourly reports are linked to the home, and the details say so.
+  assert.match(p.assistant.textContent,/They are not anonymous and stay for 48 hours/);
 });
 
 test('Cloud accepted at pairing is not asked again',async()=>{
   const p=page('on');await p.window.FTWStatistics.refresh();
   for(const host of [p.app,p.assistant]) {
     assert.deepEqual(p.labels(host),['Turn FTW Cloud off']);
-    assert.match(host.textContent,/FTW Cloud is on\. Its terms include anonymous statistics/);
+    assert.match(host.textContent,/FTW Cloud is on\. Its terms include project statistics/);
     assert.doesNotMatch(host.textContent,/Review|Accept|house password/);
   }
   assert.equal(p.writes.length,0);
@@ -86,7 +88,7 @@ test('Cloud accepted at pairing is not asked again',async()=>{
 test('Cloud under earlier terms is offered the current ones once, in Settings',async()=>{
   const p=page('earlier');await p.window.FTWStatistics.refresh();
   assert.deepEqual(p.labels(p.app),['Accept the current terms','Turn FTW Cloud off']);
-  assert.match(p.app.textContent,/earlier terms\. The current terms add anonymous statistics/);
+  assert.match(p.app.textContent,/earlier terms\. The current terms add project statistics/);
   assert.match(p.app.textContent,/No house password is required/);
   p.buttons()[0].events.click();await setImmediate();await setImmediate();
   assert.equal(p.writes.length,1);assert.equal(p.writes[0].path,'/api/cloud/grant');
@@ -98,7 +100,7 @@ test('an assistant without Cloud accepts its terms once, here',async()=>{
   const p=page('off');await p.window.FTWStatistics.refresh();
   assert.deepEqual(p.labels(p.assistant),['Accept Cloud terms and turn it on']);
   assert.match(p.assistant.textContent,/readable copy of your energy data/);
-  assert.match(p.assistant.textContent,/terms include anonymous statistics/);
+  assert.match(p.assistant.textContent,/terms include project statistics/);
 });
 
 test('turning Cloud off says statistics stop too',async()=>{

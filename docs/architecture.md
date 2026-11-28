@@ -722,8 +722,8 @@ to it, though the Cloud service writes no request log or source address; through
 the relay it does not. And nothing ties two reports to one box, so the totals
 count reports, not unique boxes.
 
-A failed send is forgotten, never retried. Settings → FTW app → Anonymous
-statistics renders the exact payload from the same call the sender uses, and
+A failed send is forgotten, never retried. Settings → FTW app → Statistics
+renders the exact payload from the same call the sender uses, and
 what goes beside it, so the claim is checkable rather than promised. It goes
 only while FTW Cloud is on, and that screen says so; it has no switch. See
 [`go/internal/fleetping`](../go/internal/fleetping).

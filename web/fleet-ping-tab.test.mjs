@@ -82,12 +82,24 @@ describe("the fleet statistics panel", () => {
     assert.match(html, /with what goes beside it/);
   });
 
-  it("names both reports and says they never travel together", () => {
+  it("names the reports, says which are linked to the home, and that the daily ones never travel together", () => {
+    // The hourly reports carry a statistics id so Sourceful can delete them:
+    // they are not anonymous, and the panel must not say so.
     const html = render({});
-    assert.match(html, /two anonymous reports a day/);
-    assert.match(html, /never travel together/);
-    assert.match(html, /With FTW Cloud on, this box sends two anonymous reports a day/);
+    assert.match(html, /<legend>Statistics<\/legend>/);
+    assert.match(html, /With FTW Cloud on, this box sends hourly reports, which Sourceful links to your Cloud home for 48 hours so it can delete them, and daily reports with no box id/);
     assert.match(html, /part of FTW Cloud's terms/);
+    assert.match(html, /Daily fleet report/);
+    assert.match(html, /Daily energy report/);
+    assert.match(html, /never travel together/);
+    assert.doesNotMatch(html, /anonymous statistics/i);
+  });
+
+  it("does not say a relay hides the address while none is named", () => {
+    const html = render({});
+    assert.match(html, /until FTW names a relay, the receiving service sees the address/);
+    assert.match(html, /Once FTW names an independent relay, the report goes through it/);
+    assert.match(html, /Until then this release does not send it/);
   });
 
   it("names every field the message carries", () => {

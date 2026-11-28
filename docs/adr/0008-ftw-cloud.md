@@ -405,14 +405,19 @@ anonymous daily reports, with no second setting:
   with the key it was made with.
 
 **Amended 28 November 2026.** Statistics are part of FTW Cloud and nothing
-else. Fredrik: "Either you use no cloud at all, or you use FTW Cloud, and
-then sharing the anonymous statistics is included." So:
+else. Fredrik: either no cloud at all, or FTW Cloud with the project
+statistics included. So:
 
 - With FTW Cloud on under the current terms, the box sends the hourly upload
-  and both daily reports, as above. Cloud under older terms sends none.
+  and the daily reports, as above. The hourly reports are linked to the
+  Cloud home for 48 hours so they can be deleted, so the box and its pages
+  do not call them anonymous. Cloud under older terms sends none.
+- No release names an Oblivious HTTP relay yet. The fleet report goes
+  straight to FTW Cloud, which sees the box's address while the request is
+  open, and the energy report is not sent.
 - Without Cloud the box sends no statistics: no fleet report, no energy
   report, no hourly upload, and it does not fetch the public driver counts.
-  There is no switch. Settings → FTW app → Anonymous statistics says which
+  There is no switch. Settings → FTW app → Statistics says which
   case holds and still shows each message. A collector set in
   `fleet_ping.endpoint` gets a report only while Cloud is on, too.
 - The owner accepts the terms once, when pairing on the box page, in the

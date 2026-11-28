@@ -48,7 +48,7 @@
   }
 
   // The phone reaches this box through FTW Cloud, so pairing accepts its
-  // terms, anonymous statistics included, as it does in the app (Fredrik, 23
+  // terms, project statistics included, as it does in the app (Fredrik, 23
   // and 28 November 2026). The page says so in one line by the buttons
   // rather than sending anyone to a separate panel first, and asks nothing
   // more. The box records the answer and is the judge of it: a box whose
@@ -695,7 +695,7 @@
         '<button type="button" class="btn-ghost" id="app-link-share" hidden>Let someone see this home</button>' +
         "</div>" +
         '<p id="app-link-terms" class="hint" hidden>The app reaches this box through FTW Cloud, ' +
-        "which keeps a readable copy of your energy data and takes anonymous statistics. Pairing accepts its " +
+        "which keeps a readable copy of your energy data and takes project statistics. Pairing accepts its " +
         '<a href="https://ftw.sourceful.energy/privacy" target="_blank" rel="noopener">terms</a>. ' +
         "The box runs without it.</p>" +
         // The slot sits right under the buttons that fill it. It used to sit

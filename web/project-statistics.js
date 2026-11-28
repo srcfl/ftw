@@ -1,4 +1,4 @@
-// FTW Cloud's panel in Settings. Anonymous statistics are part of Cloud's
+// FTW Cloud's panel in Settings. Project statistics are part of Cloud's
 // terms and nothing else: with Cloud on they are shared, without it nothing
 // leaves the box (Fredrik, 28 November 2026). The owner accepts the terms
 // once, when pairing here, in the app or in the web app, and the box does
@@ -83,18 +83,18 @@
       },false,feedback);
     };
     if(cloud && status.cloudTermsAccepted) {
-      say(lead,"FTW Cloud is on. Its terms include anonymous statistics.");
+      say(lead,"FTW Cloud is on. Its terms include project statistics.");
       cloudScope(lead);
       off();
     } else if(cloud) {
       // Cloud under earlier terms: the one place the box offers the current ones.
-      say(lead,"FTW Cloud runs under earlier terms. The current terms add anonymous statistics.");
+      say(lead,"FTW Cloud runs under earlier terms. The current terms add project statistics.");
       cloudScope(lead);
       signIn(lead);
       button(actions,"Accept the current terms",accept,true,feedback);
       off();
     } else if(assistant) {
-      say(lead,"Your assistant reaches this box through FTW Cloud. Sourceful keeps a readable copy of your energy data, and Cloud's terms include anonymous statistics.");
+      say(lead,"Your assistant reaches this box through FTW Cloud. Sourceful keeps a readable copy of your energy data, and Cloud's terms include project statistics.");
       cloudScope(lead);
       signIn(lead);
       button(actions,"Accept Cloud terms and turn it on",accept,true,feedback);
