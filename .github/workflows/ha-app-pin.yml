@@ -98,7 +98,7 @@ jobs:
             "The Home Assistant app (\`ftw-0x-beta\` in srcfl/home-assistant-addons) has not picked up a published 0.x beta. People who run FTW in Home Assistant are not offered the update." \
             "${REPORT}" \
             "Look in the order a release travels:" \
-            "1. The **Offer the published beta to the Home Assistant app** job in the newest [native release run](https://github.com/srcfl/ftw/actions/workflows/native-release.yml). A notice that \`HA_ADDON_DISPATCH_TOKEN\` is absent, or a 401 or 403 from the dispatch, means the token is missing or has expired." \
+            "1. The **Offer the published release to the Home Assistant app** job in the newest [native release run](https://github.com/srcfl/ftw/actions/workflows/native-release.yml). A notice that \`HA_ADDON_DISPATCH_TOKEN\` is absent, or a 401 or 403 from the dispatch, means the token is missing or has expired." \
             "2. [Pin new FTW 0.x beta](https://github.com/srcfl/home-assistant-addons/actions/workflows/sync-native.yml) in the app repository. No run for the beta means the dispatch never arrived or the workflow is disabled. A failed run says why." \
             "3. The open [pin pull requests](https://github.com/srcfl/home-assistant-addons/pulls?q=is%3Apr+is%3Aopen+author%3Aapp%2Fgithub-actions). Do not close the newest one by hand: the workflow never reopens a closed pin." \
             "When the cause is fixed, run **Pin new FTW 0.x beta** by hand with the newest tag." \

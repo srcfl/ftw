@@ -11,6 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TAG = "v0.154.1-beta.1"
+STABLE = "v0.154.1"
 ASSETS = [f"ftw-linux-{arch}.tar.gz{suffix}"
           for arch in ("amd64", "arm64") for suffix in ("", ".sha256")]
 
@@ -45,9 +46,9 @@ class HandoffTest(unittest.TestCase):
             '''))
         gh.chmod(0o755)
 
-    def run_handoff(self, token="test-dispatch-token"):
+    def run_handoff(self, token="test-dispatch-token", channel="beta", tag=TAG):
         env = dict(os.environ, PATH=f"{self.work}:{os.environ['PATH']}",
-                   TAG=TAG, GITHUB_REPOSITORY="srcfl/ftw", GH_TOKEN="test-read-token",
+                   CHANNEL=channel, TAG=tag, GITHUB_REPOSITORY="srcfl/ftw", GH_TOKEN="test-read-token",
                    HA_ADDON_DISPATCH_TOKEN=token,
                    TEST_RELEASE=json.dumps(self.release), TEST_RECEIPT=json.dumps(self.receipt),
                    TEST_SENT=str(self.work / "sent.json"))
@@ -79,6 +80,36 @@ class HandoffTest(unittest.TestCase):
         self.release["isDraft"] = False
         self.release["assets"].pop(0)
         result, sent = self.run_handoff()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIsNone(sent)
+
+    def stable(self):
+        self.release.update(tagName=STABLE, isPrerelease=False)
+        self.receipt.update(tag=STABLE, channel="stable", source_beta=TAG)
+
+    def test_published_stable_requests_its_pin_too(self):
+        self.stable()
+        result, sent = self.run_handoff(channel="stable", tag=STABLE)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(sent["payload"], {"event_type": "ftw-native-release",
+                         "client_payload": {"tag": STABLE, "channel": "stable"}})
+        self.assertEqual(sent["token"], "test-dispatch-token")
+
+    def test_stable_handoff_checks_tag_release_and_receipt(self):
+        for name, change, tag in (
+            ("beta tag on the stable channel", lambda: None, TAG),
+            ("release marked prerelease", lambda: self.release.update(isPrerelease=True), STABLE),
+            ("receipt from the beta", lambda: self.receipt.update(channel="beta"), STABLE),
+        ):
+            with self.subTest(name):
+                self.stable()
+                change()
+                result, sent = self.run_handoff(channel="stable", tag=tag)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(sent)
+
+    def test_unknown_channel_never_dispatches(self):
+        result, sent = self.run_handoff(channel="edge")
         self.assertNotEqual(result.returncode, 0)
         self.assertIsNone(sent)
 
