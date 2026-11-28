@@ -484,6 +484,23 @@ body.ftw-app #overview-quiet small {
   font-size: 11px;
   overflow-wrap: anywhere;
 }
+body.ftw-app .overview-price-note {
+  margin: 10px 0 0;
+  font-size: 0.8rem;
+}
+body.ftw-app .overview-price-note[hidden] {
+  display: none;
+}
+body.ftw-app .overview-price-note button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--fg-dim);
+  font: inherit;
+  text-align: left;
+  text-decoration: underline;
+  cursor: pointer;
+}
 body.ftw-app #overview-quiet button {
   padding: 0.3rem 0;
   border: 0;

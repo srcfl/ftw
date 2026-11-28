@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -70,5 +73,64 @@ func TestHandleStatusGradesEachDriverAsTheAppsDo(t *testing.T) {
 	}
 	if _, ok := resp.Drivers["sungrow"]["last_ok_age_ms"]; ok {
 		t.Errorf("a driver that never answered has no age: %v", resp.Drivers["sungrow"])
+	}
+}
+
+// After a restart with the car away, a vehicle driver never answers and the
+// watchdog takes it offline. That is a car away, not a broken house: Core
+// marks the driver vehicle_only from its own catalog entry, and the overview
+// leaves it out of LIVE. A charger beside it is not marked.
+func TestHandleStatusMarksACarAwayAfterRestartAsVehicleOnly(t *testing.T) {
+	dir := t.TempDir()
+	write := func(file, caps string) string {
+		p := filepath.Join(dir, file)
+		lua := "DRIVER = {\n  id = \"" + strings.TrimSuffix(file, ".lua") + "\",\n  name = \"x\",\n  capabilities = { " + caps + " },\n}\n"
+		if err := os.WriteFile(p, []byte(lua), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	car := write("car.lua", `"vehicle"`)
+	charger := write("charger.lua", `"ev"`)
+
+	tel := telemetry.NewStore()
+	tel.Update("meter", telemetry.DerMeter, 300, nil, nil)
+	tel.RecordDriverSuccess("meter")
+	tel.DriverHealthMut("tesla").SetOffline() // started, never emitted, watchdog fired
+	tel.DriverHealthMut("easee").SetOffline()
+	// A driver Core has no catalog entry for is judged by what it read.
+	tel.Update("custom-car", telemetry.DerVehicle, 0, nil, nil)
+	tel.RecordDriverSuccess("custom-car")
+
+	srv := New(&Deps{
+		Tel:        tel,
+		Ctrl:       &control.State{SiteMeterDriver: "meter"},
+		CtrlMu:     &sync.Mutex{},
+		CapMu:      &sync.RWMutex{},
+		Capacities: map[string]float64{},
+		CfgMu:      &sync.RWMutex{},
+		Cfg: &config.Config{Drivers: []config.Driver{
+			{Name: "meter"}, {Name: "tesla", Lua: car}, {Name: "easee", Lua: charger},
+			{Name: "custom-car", Lua: filepath.Join(dir, "missing.lua")},
+		}},
+	})
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+	var resp struct {
+		Drivers map[string]map[string]any `json:"drivers"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if got := resp.Drivers["tesla"]; got["vehicle_only"] != true || got["src_state"] != "never" {
+		t.Errorf("tesla = %v, want vehicle_only and src_state never", got)
+	}
+	if got := resp.Drivers["custom-car"]["vehicle_only"]; got != true {
+		t.Errorf("custom-car vehicle_only = %v, want true from its readings", got)
+	}
+	for _, name := range []string{"meter", "easee"} {
+		if _, ok := resp.Drivers[name]["vehicle_only"]; ok {
+			t.Errorf("%s is not a car: %v", name, resp.Drivers[name])
+		}
 	}
 }

@@ -60,6 +60,11 @@ export function deviceFreshness(status) {
   for (const name of Object.keys(drivers).sort()) {
     const d = drivers[name] || {};
     if (d.disabled || d.status === "disabled") continue;
+    // A car away from home answers nothing for hours, and after a restart
+    // may not have answered at all. That is normal: Core marks a driver that
+    // only reads a car vehicle_only, and it counts here only when it reports
+    // an error or did not start.
+    if (d.vehicle_only && !d.not_running && !(d.consecutive_errors > 0) && !d.device_fault) continue;
     const state = sourceState(d);
     if (state !== LIVE) live = false;
     const row = quietRow(name, d, state);
@@ -114,4 +119,29 @@ export function paintOverviewFreshness(doc, status, openDevices) {
   if (label) label.textContent = fresh.live ? "Live" : "Not live";
   if (card) paintQuiet(doc, card, fresh.quiet, openDevices);
   return fresh;
+}
+
+// Core's line when it prices by an area nobody chose (price_area_note on
+// /api/status, e.g. "Price area not set, using SE3"). One quiet line that
+// opens Settings → Price; nothing when Core sends no note.
+export function paintPriceAreaNote(doc, status, openPrice) {
+  const line = doc.getElementById("overview-price-note");
+  if (!line) return;
+  const note = status && typeof status.price_area_note === "string" ? status.price_area_note.trim() : "";
+  line.hidden = !note;
+  if (line.dataset.note === note) return;
+  line.dataset.note = note;
+  if (!note) {
+    line.replaceChildren();
+    return;
+  }
+  if (!openPrice) {
+    line.replaceChildren(note);
+    return;
+  }
+  const button = doc.createElement("button");
+  button.type = "button";
+  button.textContent = note;
+  button.addEventListener("click", openPrice);
+  line.replaceChildren(button);
 }

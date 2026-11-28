@@ -871,6 +871,12 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	s.deps.CfgMu.RLock()
 	observeOnly := config.ObserveOnlyDriverSet(s.deps.Cfg)
 	staleAfter := statusStaleAfter(s.deps.Cfg)
+	luaByDriver := map[string]string{}
+	if s.deps.Cfg != nil {
+		for _, dc := range s.deps.Cfg.Drivers {
+			luaByDriver[dc.Name] = dc.Lua
+		}
+	}
 	s.deps.CfgMu.RUnlock()
 
 	// Aggregate live readings. Offline readings stay in telemetry so detailed
@@ -944,6 +950,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.LastSuccess != nil {
 			d["last_ok_age_ms"] = max(now.Sub(*h.LastSuccess).Milliseconds(), 0)
+		}
+		if statusVehicleOnly(luaByDriver[name], s.deps.Tel, name) {
+			d["vehicle_only"] = true
 		}
 		if h.DeviceFault {
 			d["device_fault"] = true

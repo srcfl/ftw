@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
-import { deviceFreshness, paintOverviewFreshness } from "./overview-freshness.js";
+import { deviceFreshness, paintOverviewFreshness, paintPriceAreaNote } from "./overview-freshness.js";
 
 // /api/status rows as Core sends them with one driver on a wrong port: the
 // emit status still says ok for the first polls, src_state says never.
@@ -85,6 +85,42 @@ describe("overview freshness", () => {
     assert.equal(card.hidden, true);
   });
 
+  it("leaves a car away out of LIVE, after a restart too, unless it reports an error", () => {
+    // Restarted with the car away: never answered, the watchdog fired.
+    const away = { status: "offline", src_state: "never", consecutive_errors: 0, vehicle_only: true };
+    assert.deepEqual(deviceFreshness({ drivers: { meter, tesla: away } }), { live: true, quiet: [] });
+    // Away for a while after answering.
+    const gone = { status: "offline", src_state: "down", consecutive_errors: 0, last_ok_age_ms: 5 * 3_600_000, vehicle_only: true };
+    assert.deepEqual(deviceFreshness({ drivers: { meter, tesla: gone } }), { live: true, quiet: [] });
+    // An error is a fact about the driver, not the car's trip.
+    const failing = { ...away, consecutive_errors: 3, last_error: "driver_poll: 401 unauthorized" };
+    const f = deviceFreshness({ drivers: { meter, tesla: failing } });
+    assert.equal(f.live, false);
+    assert.deepEqual(f.quiet, [{ name: "tesla", says: "has never answered", detail: "401 unauthorized" }]);
+    const notStarted = { status: "offline", not_running: true, src_state: "never", vehicle_only: true };
+    assert.equal(deviceFreshness({ drivers: { meter, tesla: notStarted } }).quiet[0].says, "did not start");
+    // Only drivers Core marks as vehicle_only: a charger that went quiet counts.
+    const charger = { status: "offline", src_state: "never", consecutive_errors: 0 };
+    assert.equal(deviceFreshness({ drivers: { meter, easee: charger } }).live, false);
+  });
+
+  it("shows Core's price area note as one line to Settings → Price, and nothing without it", () => {
+    const doc = fakeDocument();
+    const line = doc.getElementById("overview-price-note");
+    let opened = 0;
+    paintPriceAreaNote(doc, { price_area_note: "Price area not set, using SE3" }, () => opened++);
+    assert.equal(line.hidden, false);
+    assert.equal(line.text(), "Price area not set, using SE3");
+    line.find("button").click();
+    assert.equal(opened, 1);
+    // A Core without the field (before it ships) or with the area set.
+    paintPriceAreaNote(doc, {}, () => opened++);
+    assert.equal(line.hidden, true);
+    assert.equal(line.text(), "");
+    paintPriceAreaNote(doc, { price_area_note: "" }, () => opened++);
+    assert.equal(line.hidden, true);
+  });
+
   it("is wired into the page: the card exists and the green dot needs is-live", () => {
     const html = readFileSync(new URL("./index.html", import.meta.url), "utf8");
     const css = readFileSync(new URL("./app.css", import.meta.url), "utf8");
@@ -93,6 +129,8 @@ describe("overview freshness", () => {
     assert.match(css, /\.overview-health\.is-live \.overview-health-dot \{\s*background: var\(--live\)/);
     assert.doesNotMatch(css, /\.overview-health\.is-connected \.overview-health-dot \{\s*background: var\(--live\)/);
     assert.match(app, /setConnected\(true, data\)/);
+    assert.match(html, /id="overview-price-note"[^>]*hidden/);
+    assert.match(app, /paintPriceAreaNote\(document, data, openPriceSettings\)/);
     assert.doesNotMatch(app, /overviewHealthLabel\.textContent = "Live"/);
   });
 });
@@ -132,6 +170,7 @@ function fakeDocument() {
     "overview-health": fakeElement("div"),
     "overview-health-label": fakeElement("span"),
     "overview-quiet": fakeElement("section"),
+    "overview-price-note": fakeElement("p"),
   };
   byId["overview-quiet"].hidden = true;
   return { getElementById: (id) => byId[id] || null, createElement: (t) => fakeElement(t) };

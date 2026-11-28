@@ -2622,9 +2622,13 @@
   // A later answer wins: a paint queued behind the module load must not
   // relight LIVE after the connection was lost.
   var freshnessSeq = 0;
-  function openDevicesSettings() {
-    if (window.FTWSettings && typeof window.FTWSettings.open === "function") window.FTWSettings.open("devices");
+  function openSettingsTab(tab) {
+    return function () {
+      if (window.FTWSettings && typeof window.FTWSettings.open === "function") window.FTWSettings.open(tab);
+    };
   }
+  var openDevicesSettings = openSettingsTab("devices");
+  var openPriceSettings = openSettingsTab("price");
 
   // ok says the box answered this poll; data is that answer. LIVE is lit
   // only when every device in it answers as well (overview-freshness.js).
@@ -2642,6 +2646,7 @@
         if (seq !== freshnessSeq) return;
         if (ui) {
           ui.paintOverviewFreshness(document, data, openDevicesSettings);
+          ui.paintPriceAreaNote(document, data, openPriceSettings);
         } else {
           if (overviewHealth) overviewHealth.classList.add("is-connected");
           if (overviewHealthLabel) overviewHealthLabel.textContent = "Connected";
