@@ -1,27 +1,27 @@
-// Package energyreport sends one energy report a day, with no box id, through
-// an independent Oblivious HTTP relay, so that neither the relay nor FTW
-// Cloud can tell which home sent it. No release names a relay yet, so it
-// sends nothing; Settings shows the report it would send.
+// Package energyreport sends one energy report a day, with no box id,
+// straight to FTW Cloud.
 //
 // The report is six whole-kWh sums of one closed UTC day and its date
-// (package energywire). Once a release pins a relay and FTW Cloud's gateway
-// key, package statsrelay seals it to that key and posts it to the relay:
-//
-//   - the relay sees the box's address, the time and a ciphertext of fixed
-//     length, never the report;
-//   - the gateway sees the report and the relay's address, never the box's.
-//     It adds the sums to that day's totals and keeps nothing of the report.
+// (package energywire). Package statsrelay posts it to FTW Cloud's
+// POST /v1/energy as one padded request of fixed length (package
+// reportwire), as the fleet report goes to /v1/fleet (Fredrik, 12 November
+// 2026). FTW Cloud sees the box's address while the request is open, adds
+// the sums to that day's totals and keeps neither the address nor the
+// report.
 //
 // Two things keep the report from being joined to the daily fleet report,
 // which carries the box's drivers, zone and size: it carries no field the
 // fleet report carries, and it is sent alone at its own time, drawn afresh
 // for each day from 1 to 12 hours after the day closes. With a fleet of a
 // few boxes those fields can point at one home, so energy sent beside them
-// would be that home's again.
+// would be that home's again. Both reach FTW Cloud from the box's address,
+// so only a rule in FTW Cloud's code, keeping no address, stops Sourceful
+// from matching them by address and time.
 //
-// It runs only while the box shares statistics (cloudlink.SharesStatistics),
-// the one answer that also covers the fleet report, and never for a site a
-// partner controls. It adds no question or setting of its own.
+// It runs only while the box has FTW Cloud on under the current terms
+// (cloudlink.Link.SharesStatistics), the one answer that also covers the
+// fleet report, and never for a site a partner controls. It adds no question
+// or setting of its own.
 package energyreport
 
 import (
@@ -37,7 +37,7 @@ import (
 
 const (
 	// The send window after a day closes: late enough that the day's last
-	// readings are in the ledger, early enough that the gateway still takes
+	// readings are in the ledger, early enough that FTW Cloud still takes
 	// the date.
 	firstSend = time.Hour
 	lastSend  = 12 * time.Hour
@@ -55,13 +55,15 @@ type KV interface {
 
 // Options wires the sender.
 type Options struct {
-	// Enabled is the owner's answer and the partner rule, read at each send.
+	// Enabled is FTW Cloud under the current terms and the partner rule,
+	// read at each send.
 	Enabled func() bool
 	Ledger  Ledger
 	KV      KV
 
-	// Relay defaults to statsrelay.Pinned. Tests set a fake relay.
-	Relay  *statsrelay.Client
+	// Client defaults to one for FTW Cloud's energy route
+	// (statsrelay.DirectURL). Tests set a fake.
+	Client *statsrelay.Client
 	Logger *slog.Logger
 
 	// Injectable seams. Production leaves them nil.
@@ -75,7 +77,7 @@ type Sender struct {
 	enabled func() bool
 	ledger  Ledger
 	kv      KV
-	relay   *statsrelay.Client
+	client  *statsrelay.Client
 	log     *slog.Logger
 	now     func() time.Time
 	random  func() float64
@@ -86,10 +88,10 @@ func New(opts Options) (*Sender, error) {
 	if opts.Ledger == nil {
 		return nil, errors.New("energyreport: Ledger is required")
 	}
-	s := &Sender{enabled: opts.Enabled, ledger: opts.Ledger, kv: opts.KV, relay: opts.Relay, log: opts.Logger,
+	s := &Sender{enabled: opts.Enabled, ledger: opts.Ledger, kv: opts.KV, client: opts.Client, log: opts.Logger,
 		now: opts.Now, random: opts.Random, synced: opts.ClockSynced}
-	if s.relay == nil {
-		s.relay = statsrelay.Pinned()
+	if s.client == nil {
+		s.client = statsrelay.NewDirect(statsrelay.DirectURL, nil)
 	}
 	if s.enabled == nil {
 		s.enabled = func() bool { return false }
@@ -112,10 +114,10 @@ func New(opts Options) (*Sender, error) {
 
 // Preview is what the box would send for yesterday, for Settings.
 type Preview struct {
-	// Relay is where it goes, empty when this build has no relay.
-	Relay string `json:"relay"`
-	// Sending is whether this box sends at all: a relay and a gateway key in
-	// this build, and the owner's answer now.
+	// Endpoint is where the box posts it: FTW Cloud's energy route.
+	Endpoint string `json:"endpoint"`
+	// Sending is whether this box sends at all, read now: FTW Cloud on under
+	// the current terms, and no partner controls the site.
 	Sending bool `json:"sending"`
 	// Day is the closed UTC day it describes.
 	Day string `json:"day"`
@@ -126,22 +128,15 @@ type Preview struct {
 // Preview builds yesterday's report with the same call the sender uses.
 func (s *Sender) Preview(ctx context.Context) Preview {
 	day := s.now().UTC().Truncate(24*time.Hour).AddDate(0, 0, -1)
-	p := Preview{Day: day.Format(time.DateOnly)}
-	if s.relay != nil {
-		p.Relay, p.Sending = s.relay.Relay(), s.enabled()
-	}
+	p := Preview{Day: day.Format(time.DateOnly), Endpoint: s.client.Endpoint(), Sending: s.enabled()}
 	if r, ok, err := Day(ctx, s.ledger, day); err == nil && ok {
 		p.Payload = &r
 	}
 	return p
 }
 
-// Run sends once a day until ctx ends. Without a relay and a gateway key it
-// returns at once and sends nothing.
+// Run sends once a day until ctx ends.
 func (s *Sender) Run(ctx context.Context) {
-	if s.relay == nil {
-		return
-	}
 	var p plan
 	for {
 		now := s.now()
@@ -208,7 +203,7 @@ func (s *Sender) sent(day time.Time) bool {
 // send makes one attempt for one day and forgets about it. There is no
 // retry: a lost report is one fewer in a count that says it counts reports.
 func (s *Sender) send(ctx context.Context, day time.Time) {
-	if s.relay == nil || !s.synced() || !s.enabled() || s.sent(day) {
+	if !s.synced() || !s.enabled() || s.sent(day) {
 		return
 	}
 	r, ok, err := Day(ctx, s.ledger, day)
@@ -231,7 +226,7 @@ func (s *Sender) send(ctx context.Context, day time.Time) {
 	if err != nil {
 		return
 	}
-	if err := s.relay.Send(ctx, body); err != nil {
+	if err := s.client.Send(ctx, body); err != nil {
 		s.log.Debug("energy report did not go through", "err", err)
 	}
 }

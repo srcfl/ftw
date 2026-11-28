@@ -2602,9 +2602,8 @@ func main() {
 	if fleetPingErr != nil {
 		slog.Warn("fleet ping unavailable", "err", fleetPingErr)
 	}
-	// The daily energy report, under the same answer. It goes only through an
-	// independent relay, and no release names one yet, so it is not sent;
-	// Settings still shows what it would carry.
+	// The daily energy report, under the same answer. It goes straight to
+	// FTW Cloud's /v1/energy; Settings shows what it carries.
 	energyReport := startEnergyReport(ctx, cfg, cfgMu, st, answer)
 
 	mutationPolicy := apiMutationPolicy()

@@ -1,8 +1,8 @@
-// Package energywire names the anonymous daily energy report: one closed UTC
-// day of one home as six whole-kWh sums, and nothing that says whose.
+// Package energywire names the daily energy report: one closed UTC day of one
+// home as six whole-kWh sums, and nothing that says whose.
 //
-// It travels alone through a relay (package reportwire), so the gateway never
-// sees the box's address. It carries no id, version, driver, zone or size,
+// It travels alone, as one padded request (package reportwire), straight to
+// FTW Cloud's /v1/energy. It carries no id, version, driver, zone or size,
 // because the daily fleet report (package fleetwire) carries those, and the
 // two must never be joined into one home's record.
 package energywire

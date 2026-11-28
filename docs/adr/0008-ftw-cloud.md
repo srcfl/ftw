@@ -412,9 +412,11 @@ statistics included. So:
   and the daily reports, as above. The hourly reports are linked to the
   Cloud home for 48 hours so they can be deleted, so the box and its pages
   do not call them anonymous. Cloud under older terms sends none.
-- No release names an Oblivious HTTP relay yet. The fleet report goes
-  straight to FTW Cloud, which sees the box's address while the request is
-  open, and the energy report is not sent.
+- No release names an Oblivious HTTP relay yet. Both daily reports go
+  straight to FTW Cloud, the fleet report to `/v1/fleet` and the energy
+  report to `/v1/energy` (amendment of 12 November, below). FTW Cloud sees
+  the box's address while the request is open, an address it already has
+  from the box's Cloud link.
 - Without Cloud the box sends no statistics: no fleet report, no energy
   report, no hourly upload, and it does not fetch the public driver counts.
   There is no switch. Settings → FTW app → Statistics says which
@@ -473,9 +475,21 @@ build with the relay sends the fleet report to FTW Cloud only through it.
 release after the first that pins the relay. A collector the household set
 in `fleet_ping.endpoint` is still posted to directly.
 
+**Amended 12 November 2026.** No relay runs. On 8 November Fredrik decided
+that every box that shares sends its fleet report straight to `/v1/fleet`.
+On 12 November he decided the same for the energy report, so that
+stats.ftw.energy can show energy: the box posts it to `POST /v1/energy`
+(`statsrelay.DirectURL`). That route takes the same padded inner request,
+unsealed, checks its id and day the same way and adds it to the same totals.
+FTW Cloud then sees the box's address while the request is open and keeps
+neither the address nor the report. Sourceful alone could still match an
+energy report to a fleet report by address and time; that it does not is a
+rule in code.
+
 *Removed 28 November 2026:* `ftwcloudd` no longer serves `POST /v1/ohttp` or
 holds a gateway key (srcfl/ftw-cloud#72). No release had pinned a relay, so
 no box ever sent through it. A build that pins one needs a new gateway first.
+The energy report never takes this path; it goes to `/v1/energy` only.
 
 **Who sees what.** The relay sees the box's address, the time and a
 ciphertext of fixed length, never a report. Cloudflare's relay, if chosen,

@@ -148,21 +148,22 @@
   }
 
   // energyLine is whereLine for the energy report. It follows the box's own
-  // answer, and says so when this release has no relay to send through.
+  // answer: FTW Cloud on under the current terms.
   //
   // Without a report to show, it does not point at one.
   function energyLine(energy) {
     var shown = !!(energy && energy.payload);
-    if (!energy || !energy.relay) {
-      return "This release has no relay yet, so no energy report is sent." +
+    if (!energy || !energy.endpoint) {
+      return "This box has nowhere to send an energy report, so none is sent." +
         (shown ? " This is the report it would send." : "");
     }
-    var how = " The relay sees this box's address but not the report. FTW Cloud reads the report but not the address, adds it to that day's totals and keeps nothing of it.";
+    var where = "straight to FTW Cloud at " + energy.endpoint + ",";
+    var how = " FTW Cloud sees this box's address while the request is open, the way any website does. It adds the report to that day's totals and keeps neither the report nor the address.";
     if (energy.sending) {
-      return "Sent through " + energy.relay + ", an independent relay, once a day, 1 to 12 hours after the UTC day ends." + how;
+      return "Sent " + where + " once a day, 1 to 12 hours after the UTC day ends." + how;
     }
-    return "Nothing is sent. " + (shown ? "This is the report that would go" : "A report would go") + " through " +
-      energy.relay + ", an independent relay, once a day, if sharing were on." + how;
+    return "Nothing is sent. " + (shown ? "This is the report that would go" : "A report would go") + " " +
+      where + " once a day, with FTW Cloud on." + how;
   }
 
   function row(label, value) {
@@ -209,8 +210,9 @@
     if (body.through_relay) sealedRows(slot);
   }
 
-  // sealedRows shows what goes beside a message sent through the relay,
-  // inside the sealed request: drawn when it is sent, so not shown as values.
+  // sealedRows shows what goes beside a report inside its padded request,
+  // sealed when it goes through the relay: drawn when it is sent, so not
+  // shown as values.
   function sealedRows(slot) {
     slot.appendChild(row("Report id", "a random number, new for each report"));
     slot.appendChild(row("Send day", "the UTC day it is sent"));
@@ -329,14 +331,13 @@
         '<p class="hint">The other report: the date, and the ' +
         "day's solar generation, grid import and export, battery charge and " +
         "discharge, and vehicle charge, each in whole kWh. It carries no box id and " +
-        "nothing from the fleet report, and leaves at its own time, so the two " +
-        "cannot be matched. They never travel together: device kinds and a price " +
+        "nothing from the fleet report, and leaves at its own time, so nothing in " +
+        "them ties the two together. They never travel together: device kinds and a price " +
         "zone can point at one home, and the energy beside them would then be " +
-        "that home's. Once FTW names an independent relay, the report goes " +
-        "through it, so FTW Cloud reads the numbers without this box's address, " +
-        "and the relay sees the address without the numbers. Until then this " +
-        "release does not send it. Sealed with it go a random number, drawn new for " +
-        "each report so FTW Cloud counts it once, and the UTC day it was sent. " +
+        "that home's. It goes straight to FTW Cloud, which sees the address while " +
+        "the request is open and keeps neither the address nor the report. With " +
+        "it go a random number, drawn new for each report so FTW Cloud counts it " +
+        "once, and the UTC day it was sent. " +
         "A day with a gap in the energy record is skipped.</p>" +
         '<div id="fleet-energy-payload"></div>' +
         "</fieldset>"

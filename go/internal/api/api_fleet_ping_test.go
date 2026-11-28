@@ -182,9 +182,8 @@ func (dayLedger) LoadEnergyHistoryContext(_ context.Context, q state.EnergyHisto
 	return out, false, nil
 }
 
-// The daily energy report rides under the same switch, so Settings shows it
-// beside the fleet report, built by the call its sender uses. A build with no
-// relay says it sends nothing.
+// Settings shows the daily energy report beside the fleet report, built by
+// the call its sender uses, and says it goes straight to FTW Cloud.
 func TestFleetPingShowsTheEnergyReportItWouldSend(t *testing.T) {
 	cfg := &config.Config{FleetPing: &config.FleetPing{Enabled: true}}
 	srv := fleetPingServer(t, cfg)
@@ -199,17 +198,23 @@ func TestFleetPingShowsTheEnergyReportItWouldSend(t *testing.T) {
 	srv.Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/fleet-ping", nil))
 	var got struct {
 		Energy struct {
-			Relay   string         `json:"relay"`
-			Sending bool           `json:"sending"`
-			Day     string         `json:"day"`
-			Payload map[string]any `json:"payload"`
+			Endpoint string         `json:"endpoint"`
+			Sending  bool           `json:"sending"`
+			Day      string         `json:"day"`
+			Payload  map[string]any `json:"payload"`
 		} `json:"energy"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	var keys struct {
+		Energy map[string]json.RawMessage `json:"energy"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &keys); err != nil || len(keys.Energy) != 4 {
+		t.Fatalf("energy keys %v: %v", keys.Energy, err)
+	}
 	e := got.Energy
-	if e.Relay != "" || e.Sending || e.Day != "2026-10-23" || e.Payload["grid_import_kwh"] != 14.0 || e.Payload["date"] != "2026-10-23" || len(e.Payload) != 8 {
+	if e.Endpoint != "https://cloud.ftw.energy/v1/energy" || !e.Sending || e.Day != "2026-10-23" || e.Payload["grid_import_kwh"] != 14.0 || e.Payload["date"] != "2026-10-23" || len(e.Payload) != 8 {
 		t.Fatalf("energy = %+v", e)
 	}
 }

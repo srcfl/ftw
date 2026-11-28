@@ -1,6 +1,7 @@
-// Package reportwire is how the box's anonymous daily reports reach FTW
-// Cloud: each report alone, as one padded inner request sealed with Oblivious
-// HTTP (package ohttp) and posted to an independent relay. The gateway reads
+// Package reportwire is how the box's daily reports reach FTW Cloud: each
+// report alone, as one padded inner request (a Binary HTTP message, package
+// ohttp). The energy report goes unsealed to /v1/energy. A relay would carry
+// it sealed with Oblivious HTTP to a gateway; none runs. The receiver reads
 // the report's schema and hands it to that report's decoder: the fleet report
 // (package fleetwire) or the energy report (package energywire).
 //

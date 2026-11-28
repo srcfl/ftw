@@ -98,8 +98,8 @@ describe("the fleet statistics panel", () => {
   it("does not say a relay hides the address while none is named", () => {
     const html = render({});
     assert.match(html, /until FTW names a relay, the receiving service sees the address/);
-    assert.match(html, /Once FTW names an independent relay, the report goes through it/);
-    assert.match(html, /Until then this release does not send it/);
+    assert.match(html, /It goes straight to FTW Cloud, which sees the address while the request is open/);
+    assert.doesNotMatch(html, /independent relay/);
   });
 
   it("names every field the message carries", () => {
@@ -342,31 +342,37 @@ describe("the daily energy report", () => {
     assert.ok(extra, "an unexpected field was silently dropped");
   });
 
-  it("says nothing is sent from a release without a relay", () => {
-    const line = energyLine({ relay: "", sending: false, day: "2026-10-23", payload: energy });
-    assert.match(line, /no relay yet/i);
+  it("says the report goes straight to FTW Cloud, and only with FTW Cloud on", () => {
+    const endpoint = "https://cloud.ftw.energy/v1/energy";
+    const on = energyLine({ endpoint, sending: true, day: "2026-10-23", payload: energy });
+    assert.match(on, /^Sent straight to FTW Cloud at https:\/\/cloud\.ftw\.energy\/v1\/energy/);
+    assert.match(on, /sees this box's address while the request is open/);
+    assert.match(on, /keeps neither the report nor the address/);
+    assert.doesNotMatch(on, /relay/i);
+    const off = energyLine({ endpoint, sending: false, payload: energy });
+    assert.match(off, /^Nothing is sent/);
+    assert.match(off, /with FTW Cloud on\./);
+    assert.doesNotMatch(off, /sharing/i);
+  });
+
+  it("says nothing is sent when the box has nowhere to send", () => {
+    const line = energyLine({ endpoint: "", sending: true, day: "2026-10-23", payload: energy });
+    assert.match(line, /nowhere to send/i);
     assert.doesNotMatch(line, /^Sent/);
   });
 
   it("does not point at a report it is not showing", () => {
-    assert.doesNotMatch(energyLine({ relay: "", day: "2026-10-23", payload: null }), /this is the report/i);
-    assert.doesNotMatch(energyLine({ relay: "https://relay.example.net/ftw", day: "2026-10-23", payload: null }), /this is the report/i);
+    assert.doesNotMatch(energyLine({ endpoint: "", day: "2026-10-23", payload: null }), /this is the report/i);
+    assert.doesNotMatch(energyLine({ endpoint: "https://cloud.ftw.energy/v1/energy", day: "2026-10-23", payload: null }), /this is the report/i);
   });
 
-  it("says who sees what while it is sent, and nothing is sent while it is off", () => {
-    const relay = "https://relay.example.net/ftw";
-    const on = energyLine({ relay, sending: true, payload: energy });
-    assert.match(on, /^Sent through https:\/\/relay\.example\.net/);
-    assert.match(on, /sees this box's address but not the report/);
-    assert.match(on, /reads the report but not the address/);
-    assert.match(energyLine({ relay, sending: false, payload: energy }), /^Nothing is sent/);
-  });
-
-  it("names the fields, the missing id and the relay in its paragraph", () => {
+  it("names the fields, the missing id and where it goes in its paragraph", () => {
     const html = render({});
     assert.match(html, /id="fleet-energy-payload"/);
-    for (const want of [/solar generation/i, /grid import and export/i, /battery charge/i, /vehicle charge/i, /whole kWh/i, /no box id/i, /independent relay/i, /skipped/i]) {
+    for (const want of [/solar generation/i, /grid import and export/i, /battery charge/i, /vehicle charge/i, /whole kWh/i, /no box id/i, /straight to FTW Cloud/i, /skipped/i]) {
       assert.match(html, want, `the paragraph does not say ${want}`);
     }
+    assert.doesNotMatch(html, /independent relay/i);
+    assert.doesNotMatch(html, /does not send it/i);
   });
 });
