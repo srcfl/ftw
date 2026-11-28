@@ -594,7 +594,7 @@
       <!-- The quiet second way in. Only a new box shows it. FTW Cloud's
            texts name the "Start assistant setup" button: keep its label. -->
       <button type="button" class="btn-link" id="assistant-open" aria-expanded="false" aria-controls="assistant-setup" onclick="openAssistantSetup()" hidden>Set up with ChatGPT or Claude instead</button>
-      <section id="assistant-setup" class="password-setup" aria-labelledby="assistant-open" hidden>
+      <form id="assistant-setup" class="password-setup" aria-labelledby="assistant-open" hidden>
         <p>FTW starts with no devices and control off. Your assistant sets up the rest with you.</p>
         <div id="assistant-password-fields">
           <div class="form-group"><label for="assistant-password">House password</label>
@@ -604,10 +604,10 @@
           <input id="assistant-password-confirm" type="password" maxlength="512" autocomplete="new-password"></div>
         </div>
         <p>When the box has started, <span id="assistant-sign-in">sign in with this password and </span>let the assistant in from Settings → Access. Remote assistants use FTW Cloud; you choose whether to accept its terms.</p>
-        <button class="btn-primary" id="assistant-start" onclick="startAssistantSetup()">Start assistant setup</button>
+        <button type="submit" class="btn-primary" id="assistant-start">Start assistant setup</button>
         <p id="assistant-status" role="status" aria-live="polite"></p>
         <a id="assistant-resume" href="/?setup=assistant" hidden>Open the box</a>
-      </section>
+      </form>
     </div>
   </div>
 
@@ -839,6 +839,6 @@
 <script src="/lan-auth.js?v=password1"></script>
 <script src="/driver-control.js?v=readonly1"></script>
 <script src="/device-flow.js?v=flow1"></script>
-<script src="/setup.js?v=assistant1"></script>
+<script src="/setup.js?v=assistant2"></script>
 </body>
 </html>

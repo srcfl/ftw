@@ -36,7 +36,8 @@
     document.getElementById('assistant-open').setAttribute('aria-expanded', String(open));
     document.getElementById('assistant-password-fields').hidden = !!window.FTWHomeAssistant;
     document.getElementById('assistant-sign-in').hidden = !!window.FTWHomeAssistant;
-    if (open && !window.FTWHomeAssistant) document.getElementById('assistant-password').focus();
+    if (!open) return;
+    document.getElementById(window.FTWHomeAssistant ? 'assistant-start' : 'assistant-password').focus();
   };
 
   // Core answers with a path from the box's root. Under Home Assistant the
@@ -46,10 +47,21 @@
     return new URL('./' + next.replace(/^\//, ''), window.location.href).href;
   }
 
+  // A box that is still restarting may take a request and never answer it.
+  function shortWait() {
+    return typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(3000) : undefined;
+  }
+
+  function showOpenBox(text, next) {
+    var resume = document.getElementById('assistant-resume');
+    document.getElementById('assistant-status').textContent = text;
+    resume.href = next;
+    resume.hidden = false;
+  }
+
   window.startAssistantSetup = async function () {
     var btn = document.getElementById('assistant-start');
     var note = document.getElementById('assistant-status');
-    var resume = document.getElementById('assistant-resume');
     var body = {confirmed: true};
     if (!window.FTWHomeAssistant) {
       var password = document.getElementById('assistant-password').value;
@@ -61,13 +73,19 @@
       body.password = password;
     }
     btn.disabled = true;
-    resume.hidden = true;
+    document.getElementById('assistant-resume').hidden = true;
     note.textContent = 'Starting the box…';
     var next = boxPage();
     try {
       var reply = await fetch('/api/setup/assistant', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
       var answer = {};
       try { answer = await reply.json(); } catch (_) { /* Core's reason is optional. */ }
+      // Only the first-start server takes this call. It refuses a box that
+      // has settings (409); a box that runs has no such route (404).
+      if (reply.status === 409 || reply.status === 404) {
+        showOpenBox('This box already has settings. Open the box instead.', next);
+        return;
+      }
       if (!reply.ok) {
         note.textContent = answer.error || 'Could not start setup.';
         btn.disabled = false;
@@ -76,25 +94,31 @@
       next = boxPage(answer.next);
       document.getElementById('assistant-password').value = '';
       document.getElementById('assistant-password-confirm').value = '';
-    } catch (error) {
+    } catch (_) {
       // The box can restart before its reply arrives. Find the saved setup
       // before allowing another first-run write.
-      note.textContent = error.message + ' Checking whether the box started…';
+      note.textContent = 'The box is restarting. Checking whether it has started…';
     }
     for (var attempt = 0; attempt < 30; attempt++) {
       await new Promise(function (resolve) { setTimeout(resolve, 1000); });
       try {
-        var status = await fetch('/api/auth/status', {cache: 'no-store'});
+        var status = await fetch('/api/auth/status', {cache: 'no-store', signal: shortWait()});
         if (status.ok) {
           window.location.href = next;
           return;
         }
       } catch (_) { /* Wait for the same box to restart. */ }
     }
-    note.textContent = 'The box has not answered yet. Open it to see whether setup started before you try again.';
-    resume.href = next;
-    resume.hidden = false;
+    // Trying again is safe: Core refuses a second first-start write, and
+    // that answer says to open the box.
+    showOpenBox('The box has not answered yet. Open the box, or try again.', next);
+    btn.disabled = false;
   };
+
+  document.getElementById('assistant-setup').addEventListener('submit', function (event) {
+    if (event) event.preventDefault();
+    window.startAssistantSetup();
+  });
 
   // Collected state. Each device carries the driver block it saves, the
   // catalog entry it came from, and what its test found.

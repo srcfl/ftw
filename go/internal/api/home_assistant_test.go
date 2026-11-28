@@ -4,6 +4,7 @@ import (
 	"github.com/srcfl/ftw/go/internal/apiauth"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -114,6 +115,40 @@ func TestIngressAdaptsStaticURLsButNeverAPIData(t *testing.T) {
 	handler.ServeHTTP(w, ingressRequest("GET", "/api/config"))
 	if w.Body.String() != original {
 		t.Fatal("API data rewritten")
+	}
+}
+
+// The setup guide's assistant path calls the box by root URLs, which the
+// ingress must prefix. It builds the page it opens from Core's reply, which
+// the ingress never rewrites, out of relative parts the ingress must leave
+// alone, or Home Assistant would lose the prefix or get it twice.
+func TestIngressKeepsSetupAssistantPathsUnderHA(t *testing.T) {
+	js, err := os.ReadFile("../../../web/setup.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := os.ReadFile("../../../web/setup.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(ingressAsset(js, testIngressPrefix, false))
+	for _, want := range []string{
+		"fetch('" + testIngressPrefix + "/api/setup/assistant'",
+		"fetch('" + testIngressPrefix + "/api/auth/status', {cache: 'no-store', signal: shortWait()})",
+		"next = '?setup=assistant'",
+		"new URL('./' + next.replace(/^\\//, ''), window.location.href)",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("setup.js under ingress lacks %s", want)
+		}
+	}
+	// The prefix starts with /api/ too, so every call must carry it.
+	if strings.Count(script, "fetch('/api/") != strings.Count(script, "fetch('"+testIngressPrefix+"/api/") {
+		t.Error("setup.js calls the box outside the ingress prefix")
+	}
+	html := string(ingressAsset(page, testIngressPrefix, true))
+	if !strings.Contains(html, `<a id="assistant-resume" href="`+testIngressPrefix+`/?setup=assistant" hidden>`) {
+		t.Error("the Open the box link leaves the ingress prefix")
 	}
 }
 

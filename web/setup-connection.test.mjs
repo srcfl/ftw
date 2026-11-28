@@ -518,29 +518,38 @@ describe('setup devices — one flow with Settings', () => {
 
 // The welcome step on a new box: /api/auth/status answers 404 until the box
 // has settings, then 200 once it has restarted. setTimeout runs at once so
-// the wait for the restart takes no time.
-async function assistantStep(setup, globals = {}) {
+// the wait for the restart takes no time. setup is the reply to the call, or
+// a function that may throw as a lost reply does. With starts false the box
+// never comes back.
+async function assistantStep(setup, globals = {}, starts = true) {
   let started = false;
   const rig = wizard('', false, [], {
     '/api/auth/status': () => (started ? {} : { __status: 404 }),
     '/api/setup/assistant': opts => {
-      const answer = typeof setup === 'function' ? setup(opts) : setup;
-      if (!answer.__status) started = true;
+      const answer = typeof setup === 'function' ? setup(opts, () => { started = starts; }) : setup;
+      if (!answer.__status) started = starts;
       return answer;
     },
-  }, { setTimeout: fn => fn(), URL, location: { search: '', href: 'http://box.local/setup' }, ...globals });
+  }, { setTimeout: fn => fn(), URL, AbortSignal, location: { search: '', href: 'http://box.local/setup' }, ...globals });
   await flush();
   rig.setups = () => rig.requests.filter(r => r.path === '/api/setup/assistant').map(r => JSON.parse(r.opts.body));
+  rig.waits = () => rig.requests.filter(r => r.path === '/api/auth/status' && r.opts?.signal);
+  rig.fill = password => {
+    rig.sandbox.openAssistantSetup();
+    rig.elements['assistant-password'].value = password;
+    rig.elements['assistant-password-confirm'].value = password;
+  };
   return rig;
 }
+const startedReply = { saved: true, restart_pending: true, next: '/?setup=assistant' };
 
 describe('setup with ChatGPT or Claude', () => {
   it('offers one quiet link under Get started, with the form closed', async () => {
     const welcome = html.match(/<div class="step" id="step-1"[\s\S]*?<!-- Step 2/)[0];
     assert.match(welcome, /<button[^>]*class="btn-link"[^>]*id="assistant-open"[^>]*>Set up with ChatGPT or Claude instead<\/button>/);
-    assert.match(welcome, /<section id="assistant-setup"[^>]*hidden/);
+    assert.match(welcome, /<form id="assistant-setup"[^>]*hidden/);
     assert.equal((welcome.match(/class="btn-primary"/g) || []).length, 2, 'Get started, and the button inside the closed form');
-    const rig = await assistantStep({ saved: true, next: '/?setup=assistant' });
+    const rig = await assistantStep(startedReply);
     assert.equal(rig.elements['assistant-open'].hidden, false);
     assert.equal(rig.elements['assistant-setup'].hidden, true);
   });
@@ -552,18 +561,26 @@ describe('setup with ChatGPT or Claude', () => {
   });
 
   it('opens a house password form with a button FTW Cloud names', async () => {
-    const rig = await assistantStep({ saved: true, next: '/?setup=assistant' });
+    const rig = await assistantStep(startedReply);
     rig.sandbox.openAssistantSetup();
     assert.equal(rig.elements['assistant-setup'].hidden, false);
     assert.equal(rig.elements['assistant-open']['aria-expanded'], 'true');
     assert.equal(rig.elements['assistant-password-fields'].hidden, false);
     assert.equal(rig.elements['assistant-password'].focused, true);
     assert.ok(rig.elements['assistant-password-confirm']);
-    assert.match(html, /<button[^>]*id="assistant-start"[^>]*>Start assistant setup<\/button>/);
+    assert.match(html, /<button type="submit"[^>]*id="assistant-start"[^>]*>Start assistant setup<\/button>/);
+  });
+
+  it('starts from Enter in the form', async () => {
+    const rig = await assistantStep(startedReply);
+    rig.fill('kitchen door');
+    rig.elements['assistant-setup'].fire('submit');
+    await flush();
+    assert.deepEqual(rig.setups(), [{ confirmed: true, password: 'kitchen door' }]);
   });
 
   it('asks for the same password twice before it calls the box', async () => {
-    const rig = await assistantStep({ saved: true, next: '/?setup=assistant' });
+    const rig = await assistantStep(startedReply);
     rig.sandbox.openAssistantSetup();
     rig.elements['assistant-password'].value = 'kitchen door';
     rig.elements['assistant-password-confirm'].value = 'kitchen dor';
@@ -573,10 +590,8 @@ describe('setup with ChatGPT or Claude', () => {
   });
 
   it('starts the box with the password, then follows next', async () => {
-    const rig = await assistantStep({ saved: true, restart_pending: true, next: '/?setup=assistant' });
-    rig.sandbox.openAssistantSetup();
-    rig.elements['assistant-password'].value = 'kitchen door';
-    rig.elements['assistant-password-confirm'].value = 'kitchen door';
+    const rig = await assistantStep(startedReply);
+    rig.fill('kitchen door');
     await rig.sandbox.startAssistantSetup();
     assert.deepEqual(rig.setups(), [{ confirmed: true, password: 'kitchen door' }]);
     const call = rig.requests.find(r => r.path === '/api/setup/assistant');
@@ -584,37 +599,69 @@ describe('setup with ChatGPT or Claude', () => {
     assert.equal(call.opts.headers['Content-Type'], 'application/json');
     assert.equal(rig.elements['assistant-password'].value, '');
     assert.equal(rig.elements['assistant-password-confirm'].value, '');
+    assert.equal(rig.waits().length, 1, 'each wait for the restart has its own time limit');
     assert.equal(rig.sandbox.location.href, 'http://box.local/?setup=assistant');
   });
 
   it('stays on the box when next points elsewhere', async () => {
     const rig = await assistantStep({ saved: true, next: '//evil.example/' });
-    rig.sandbox.openAssistantSetup();
-    rig.elements['assistant-password'].value = 'kitchen door';
-    rig.elements['assistant-password-confirm'].value = 'kitchen door';
+    rig.fill('kitchen door');
     await rig.sandbox.startAssistantSetup();
     assert.equal(rig.sandbox.location.href, 'http://box.local/?setup=assistant');
   });
 
-  it("shows Core's reason when the box refuses", async () => {
-    const rig = await assistantStep({ __status: 409, error: 'config already exists' });
-    rig.sandbox.openAssistantSetup();
-    rig.elements['assistant-password'].value = 'kitchen door';
-    rig.elements['assistant-password-confirm'].value = 'kitchen door';
+  it('waits for the restart when the reply is lost, in plain words', async () => {
+    const rig = await assistantStep((opts, restart) => { restart(); throw new TypeError('Failed to fetch'); });
+    rig.fill('kitchen door');
     await rig.sandbox.startAssistantSetup();
-    assert.equal(rig.elements['assistant-status'].textContent, 'config already exists');
-    assert.equal(rig.elements['assistant-start'].disabled, false);
+    assert.equal(rig.elements['assistant-status'].textContent, 'The box is restarting. Checking whether it has started…');
+    assert.equal(rig.sandbox.location.href, 'http://box.local/?setup=assistant');
+  });
+
+  it('stops after 30 tries, links to the box and lets the owner try again', async () => {
+    const rig = await assistantStep(startedReply, {}, false);
+    rig.fill('kitchen door');
+    await rig.sandbox.startAssistantSetup();
+    assert.equal(rig.waits().length, 30);
     assert.equal(rig.sandbox.location.href, 'http://box.local/setup');
+    assert.equal(rig.elements['assistant-status'].textContent, 'The box has not answered yet. Open the box, or try again.');
+    assert.equal(rig.elements['assistant-resume'].hidden, false);
+    assert.equal(rig.elements['assistant-resume'].href, 'http://box.local/?setup=assistant');
+    assert.equal(rig.elements['assistant-start'].disabled, false);
+  });
+
+  for (const status of [409, 404]) {
+    it('sends a box that already has settings (' + status + ') to the box', async () => {
+      const rig = await assistantStep({ __status: status, error: 'existing data found at /data/state.db; refusing to overwrite' });
+      rig.fill('kitchen door');
+      await rig.sandbox.startAssistantSetup();
+      assert.equal(rig.elements['assistant-status'].textContent, 'This box already has settings. Open the box instead.');
+      assert.equal(rig.elements['assistant-resume'].hidden, false);
+      assert.equal(rig.elements['assistant-resume'].href, 'http://box.local/?setup=assistant');
+      assert.equal(rig.waits().length, 0);
+      assert.equal(rig.sandbox.location.href, 'http://box.local/setup');
+    });
+  }
+
+  it("shows Core's reason for any other refusal", async () => {
+    const rig = await assistantStep({ __status: 400, error: 'password is too long' });
+    rig.fill('kitchen door');
+    await rig.sandbox.startAssistantSetup();
+    assert.equal(rig.elements['assistant-status'].textContent, 'password is too long');
+    assert.equal(rig.elements['assistant-start'].disabled, false);
+    assert.equal(rig.elements['assistant-resume'].hidden, true);
   });
 
   it('asks no house password under Home Assistant and stays below its prefix', async () => {
-    const rig = await assistantStep({ saved: true, next: '/?setup=assistant' }, {
+    const rig = await assistantStep(startedReply, {
       FTWHomeAssistant: true,
       location: { search: '', href: 'http://ha.local:8123/api/hassio_ingress/abc/setup' },
     });
     rig.sandbox.openAssistantSetup();
     assert.equal(rig.elements['assistant-password-fields'].hidden, true);
     assert.equal(rig.elements['assistant-sign-in'].hidden, true);
+    assert.equal(rig.elements['assistant-start'].focused, true);
+    assert.notEqual(rig.elements['assistant-password'].focused, true);
     await rig.sandbox.startAssistantSetup();
     assert.deepEqual(rig.setups(), [{ confirmed: true }]);
     assert.equal(rig.sandbox.location.href, 'http://ha.local:8123/api/hassio_ingress/abc/?setup=assistant');
