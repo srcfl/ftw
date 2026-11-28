@@ -36,9 +36,10 @@ func (s *Store) statePath() (string, error) {
 
 // SnapshotState writes a fresh "<state.db>.snapshot" recovery copy atomically:
 // snapshot to a temp file, verify it with quick_check, then rename over the
-// previous snapshot. Reuses SnapshotTo, which already excludes the bulky
-// time-series tables. The snapshot retains the history generation binding;
-// recovering a missing history file requires a full backup.
+// previous snapshot. Reuses SnapshotTo, which excludes the bulky time-series
+// tables and paces its writes behind live commits. The snapshot retains the
+// history generation binding; recovering a missing history file requires a
+// full backup.
 func (s *Store) SnapshotState() error {
 	main, err := s.statePath()
 	if err != nil {
@@ -46,26 +47,36 @@ func (s *Store) SnapshotState() error {
 	}
 	final := main + ".snapshot"
 	tmp := main + ".snapshot.tmp"
-	_ = os.Remove(tmp) // SnapshotTo refuses to overwrite an existing file
+	// SnapshotTo refuses an existing file. A journal left by an interrupted
+	// copy would otherwise be rolled back into the next one.
+	removeSnapshotTemp(tmp)
 
 	if err := s.SnapshotTo(tmp); err != nil {
+		removeSnapshotTemp(tmp)
 		return fmt.Errorf("snapshot write: %w", err)
 	}
 	// Verify the temp snapshot before promoting it — never overwrite a good
-	// snapshot with a corrupt one.
+	// snapshot with a corrupt one. The check reads only the new file and
+	// holds no lock on state.db or history.db.
 	vdb, err := openRaw(tmp)
 	if err != nil {
-		_ = os.Remove(tmp)
+		removeSnapshotTemp(tmp)
 		return err
 	}
 	ok, qerr := quickCheck(vdb)
 	vdb.Close()
 	if qerr != nil || !ok {
-		_ = os.Remove(tmp)
+		removeSnapshotTemp(tmp)
 		return fmt.Errorf("snapshot failed integrity check")
 	}
 	if err := os.Rename(tmp, final); err != nil {
 		return fmt.Errorf("snapshot promote: %w", err)
 	}
 	return nil
+}
+
+func removeSnapshotTemp(tmp string) {
+	for _, suffix := range []string{"", "-journal", "-wal", "-shm"} {
+		_ = os.Remove(tmp + suffix)
+	}
 }

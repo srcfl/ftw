@@ -227,6 +227,20 @@ func EnsureDiskSpace(dir string, needed int64) error {
 // The selected history database is exported separately. The destination is
 // temporary until the complete backup has passed verification and fsync.
 func (s *Store) copyStateForBackup(ctx context.Context, path string) error {
+	excluded := map[string]bool{}
+	if s.history != nil {
+		for _, name := range sqliteHistoryTables {
+			excluded[name] = true
+		}
+	}
+	return s.copyStateTables(ctx, path, excluded)
+}
+
+// copyStateTables copies one read snapshot of state.db, less the excluded
+// tables and their indexes, into a new SQLite file at path. Rows go over in
+// short synced batches that are checked against the source, and a live
+// Store pauses between them so goal and history commits stay prompt.
+func (s *Store) copyStateTables(ctx context.Context, path string, excluded map[string]bool) error {
 	src, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -237,12 +251,6 @@ func (s *Store) copyStateForBackup(ctx context.Context, path string) error {
 		return err
 	}
 	var items []snapshotSchemaRow
-	excluded := map[string]bool{}
-	if s.history != nil {
-		for _, name := range sqliteHistoryTables {
-			excluded[name] = true
-		}
-	}
 	for rows.Next() {
 		var item snapshotSchemaRow
 		if err := rows.Scan(&item.objType, &item.name, &item.tblName, &item.sqlText); err != nil {
