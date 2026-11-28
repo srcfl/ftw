@@ -290,6 +290,15 @@ func validateStorageSpecs(p Params, assetIDs map[string]string) error {
 		if err := requireNonNegativePlanningValue(field+".max_discharge_w", storage.MaxDischargeW); err != nil {
 			return err
 		}
+		learned := storage.Learned
+		for _, l := range []struct {
+			name string
+			w    float64
+		}{{"charge_w", learned.ChargeW}, {"discharge_w", learned.DischargeW}, {"grid_import_w", learned.GridImportW}} {
+			if err := requireNonNegativePlanningValue(field+".learned."+l.name, l.w); err != nil {
+				return err
+			}
+		}
 		if err := requirePlanningEfficiency(field+".charge_efficiency", storage.ChargeEfficiency, false); err != nil {
 			return err
 		}

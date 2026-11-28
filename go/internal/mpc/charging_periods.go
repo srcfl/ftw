@@ -83,6 +83,11 @@ func (o *EnergyplanOptimizer) prepareEnergyplanRequest(ctx context.Context, requ
 			request.Settings.TimeLimitS = math.Min(o.cfg.Timeout.Seconds()*0.8, energyplanBudget(slots, p, true).Seconds())
 		}
 	}
+	// A worker without the feature plans each slot at the configured
+	// limits, as before; Core's own planner still holds the learned ones.
+	if optimizerHasFeature(info, "storage_slot_limits") {
+		addStorageSlotLimits(request, slots, p)
+	}
 	loads := p.activeLoadpoints()
 	needed := false
 	for _, lp := range loads {

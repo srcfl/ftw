@@ -123,6 +123,11 @@ type externalStorage struct {
 	DischargeEfficiency float64 `json:"discharge_efficiency"`
 	TerminalPriceOreKWh float64 `json:"terminal_price_per_kwh"`
 	CycleCostOreKWh     float64 `json:"cycle_cost_per_kwh"`
+	// What the battery can do in each slot, sent only to a worker that
+	// announces storage_slot_limits and only where it has shown less than
+	// its configured limit (storageSlotLimits).
+	MaxChargeWBySlot    []float64 `json:"max_charge_w_by_slot,omitempty"`
+	MaxDischargeWBySlot []float64 `json:"max_discharge_w_by_slot,omitempty"`
 }
 
 type externalDemandCharge struct {
@@ -271,6 +276,9 @@ func (o *ExternalOptimizer) Optimize(ctx context.Context, slots []Slot, p Params
 	}
 	if err := validateExternalAssets(request, response.Plan); err != nil {
 		return Plan{}, fmt.Errorf("optimizer contract rejected: %w", err)
+	}
+	if err := validateStorageSlotLimits(request, response.Plan); err != nil {
+		return Plan{}, fmt.Errorf("optimizer plan rejected: %w", err)
 	}
 	plan = response.toPlan(slots, p)
 	plan.OptimizerInput = append(json.RawMessage(nil), payload...)

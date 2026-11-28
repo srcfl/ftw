@@ -37,10 +37,12 @@ The handshake identifies the worker, its version, protocol range and features.
 Protocol compatibility and supported features govern use, not matching Core
 and Energyplan release numbers. Current features are `champion`,
 `forecast_reset`, `partial_slots`, `demand_charges`, `ev_duty`,
-`charging_periods`, `published_prices`, `hourly_import_caps` and
-`demand_elapsed_hours`; the worker also reports `forecast_protocol_version`.
-Core negotiates `charging_periods` before sending its optional fields, and
-`hourly_import_caps` before sending `hourly_import_caps`.
+`charging_periods`, `published_prices`, `hourly_import_caps`,
+`demand_elapsed_hours` and `storage_slot_limits`; the worker also reports
+`forecast_protocol_version`. Core negotiates `charging_periods` before
+sending its optional fields, `hourly_import_caps` before sending
+`hourly_import_caps`, and `storage_slot_limits` before sending a storage's
+per-slot limits.
 Core negotiates `demand_elapsed_hours` before sending a demand hour that
 starts before the first slot or ended by its execution start.
 
@@ -93,7 +95,21 @@ Physical zero and capacity remain hard limits throughout. Default wear cost
 is zero; charge/discharge efficiency remains in the physical model.
 
 Multiple batteries keep their own limits. Current execution requires a common
-charge/discharge direction in each slot. Demand-charge windows use explicit
+charge/discharge direction in each slot.
+
+A storage may carry `max_charge_w_by_slot` and `max_discharge_w_by_slot`:
+what it can charge or discharge in each slot, in W, when that is less than
+its `max_charge_w` or `max_discharge_w`. Each array is absent, or has one
+finite, nonnegative entry per slot in slot order. Core omits a field it does
+not send; `[]` and `null` are invalid. An entry above the scalar limit is
+held to it, so an array never raises a limit, and a request without the
+arrays plans as before. Every solver path holds each slot's battery power
+to these limits as hard limits, as it holds the scalars. Core derives them
+from what the battery has shown it can do, such as an inverter that holds
+grid import while it charges from the grid; they are planning limits, not
+commands. A worker without `storage_slot_limits` gets none of them, and Core
+checks its plan against the scalar limits only; Core's own planner still
+holds them. Core rejects a plan more than 2 W past a slot limit it sent. Demand-charge windows use explicit
 UTC intervals and elapsed import from Core; Core owns local calendar and
 daylight-saving conversion.
 

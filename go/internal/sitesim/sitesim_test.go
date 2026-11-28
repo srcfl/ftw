@@ -89,3 +89,35 @@ func TestPlantSignsAndDelays(t *testing.T) {
 		t.Fatalf("readback %v, want the draw from 6 s at 16 s", heard)
 	}
 }
+
+// A hybrid inverter that holds grid import while its battery charges, as
+// the home box's Sungrow does at 4.32 kW: the battery gets that import plus
+// PV less the house and the car, and no more; discharge is not held.
+func TestBatteryChargeHoldsTheInverterGridImport(t *testing.T) {
+	p := New(t0, 25)
+	p.HouseW = [3]float64{400, 400, 400}
+	p.Battery = &Battery{Phases: 3, MaxChargeW: 5000, MaxDischargeW: 5000, CapacityWh: 9600, SoC: .1, GridImportCapW: 4320}
+	p.Battery.Command(p.Now, 5000)
+	p.Step()
+	if p.Battery.W != 4320-1200 {
+		t.Fatalf("night charge %.0f W, want %.0f", p.Battery.W, 4320.-1200)
+	}
+	if grid := (p.A[0] + p.A[1] + p.A[2]) * p.Voltage; math.Abs(grid-4320) > 1e-6 {
+		t.Fatalf("grid import %.1f W, want the 4320 W the inverter holds", grid)
+	}
+	p.PVW = -3000
+	p.Step()
+	if p.Battery.W != 5000 {
+		t.Fatalf("with PV %.0f W, want the full 5000", p.Battery.W)
+	}
+	p.PVW, p.HouseW = 0, [3]float64{1600, 1600, 1600}
+	p.Step()
+	if p.Battery.W != 0 {
+		t.Fatalf("house over the import hold: %.0f W, want 0", p.Battery.W)
+	}
+	p.Battery.Command(p.Now, -5000)
+	p.Step()
+	if p.Battery.W != -5000 {
+		t.Fatalf("discharge %.0f W, want -5000", p.Battery.W)
+	}
+}

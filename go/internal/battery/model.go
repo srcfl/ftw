@@ -69,7 +69,8 @@ type Model struct {
 	ForgettingFactor float64 `json:"forgetting_factor"`
 
 	// Plateaus are the limits this battery has shown when short of an order.
-	// They explain Core's verdict only; nothing in control reads them.
+	// They explain Core's verdict and bound what the planner plans for the
+	// battery; nothing in control reads them.
 	Plateaus *Plateaus `json:"plateaus,omitempty"`
 }
 
