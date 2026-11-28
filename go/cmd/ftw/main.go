@@ -1113,9 +1113,10 @@ func main() {
 	}
 
 	// In the Home Assistant app, the app passes Home Assistant's own MQTT
-	// broker. A site that never set up the bridge then starts it with that
-	// broker; the default is saved only when the owner saves settings.
-	haBroker := haBundleBrokerFromEnv()
+	// broker, and Core asks Supervisor again if Mosquitto comes later. A site
+	// that never set up the bridge then starts it with that broker; the
+	// default is saved only when the owner saves settings.
+	haBroker := haAppBrokerFromEnv()
 	cfgMu.Lock()
 	cfg.HomeAssistant = haBroker.defaultSettings(cfg.HomeAssistant)
 	cfgMu.Unlock()
@@ -1124,7 +1125,7 @@ func main() {
 	// the broker did not accept. Its start closure reads the registry and
 	// control wiring only when it runs.
 	haOwner := newHABridgeOwner(func(c *config.HomeAssistant, names []string) (haBridgeHandle, error) {
-		b, err := ha.Start(c, tel, ctrl, ctrlMu, names, haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st), liveMeasurementOptions)
+		b, err := ha.Start(c, tel, ctrl, ctrlMu, names, haCallbacks(ctrl, ctrlMu, st, mpcSvc, plannerPrefs), mpcPlanSource(mpcSvc), haEnergySource(st), liveMeasurementOptions, Version)
 		if err != nil {
 			return nil, err
 		}
@@ -2702,6 +2703,7 @@ func main() {
 			return forecastSettings.Snapshot().Options
 		},
 		HA:               haOwner.Bridge,
+		HABroker:         haOwner.BrokerFor,
 		Registry:         reg,
 		DriverRepository: driverRepository,
 		Events:           bus,

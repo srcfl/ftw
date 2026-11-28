@@ -61,3 +61,28 @@ func TestHAStatusKeepsEnabledWhenBridgeFailedToStart(t *testing.T) {
 		t.Fatalf("broker = %v", body["broker"])
 	}
 }
+
+// In the Home Assistant app the saved broker is empty and the bridge uses
+// Home Assistant's. The status names the broker the owner resolved, and none
+// while Mosquitto is missing, so the page can say FTW is waiting.
+func TestHAStatusNamesTheResolvedBroker(t *testing.T) {
+	resolved := "core-mosquitto:1883"
+	deps := &Deps{
+		Version: "test",
+		CfgMu:   &sync.RWMutex{},
+		Cfg:     &config.Config{HomeAssistant: &config.HomeAssistant{Enabled: true, Port: 1883}},
+		HABroker: func(saved *config.HomeAssistant) string {
+			if saved == nil || !saved.Enabled {
+				t.Fatalf("HABroker got %+v, want the saved settings", saved)
+			}
+			return resolved
+		},
+	}
+	if body := homeAssistantStatus(t, deps); body["broker"] != resolved || body["connected"] != false {
+		t.Fatalf("status = %v, want Home Assistant's broker while not connected", body)
+	}
+	resolved = ""
+	if body := homeAssistantStatus(t, deps); body["broker"] != "" || body["enabled"] != true {
+		t.Fatalf("status = %v, want enabled with no broker while none is known", body)
+	}
+}

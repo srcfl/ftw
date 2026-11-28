@@ -104,6 +104,7 @@ type Bridge struct {
 	topicPrefix string // stable wire ID, e.g. "forty-two-watts"
 	discoPrefix string // e.g. "homeassistant"
 	deviceID    string
+	swVersion   string // Core's version, shown on Home Assistant's device page
 
 	lifecycleMu sync.Mutex // serializes Reload + Stop
 
@@ -124,6 +125,12 @@ type Bridge struct {
 	// EV charger and vehicle readers. Keys are driver names.
 	announcedEVDrivers      map[string]struct{}
 	announcedVehicleDrivers map[string]struct{}
+
+	// coverMu orders the legacy battery-cover switch's announce and removal,
+	// which both the connect handler and the publish loop send. coverShown is
+	// nil until the first send.
+	coverMu    sync.Mutex
+	coverShown *bool
 
 	// connectTimeout is the WaitTimeout passed to paho's Connect token.
 	// 0 means "use defaultConnectTimeout"; tests override to keep the
@@ -188,7 +195,8 @@ func (b *Bridge) SensorsAnnounced() int {
 // Stop() is called.
 //
 // plan may be nil when the MPC planner is not configured; plan sensors
-// are skipped in that case.
+// are skipped in that case. swVersion is Core's version for the device page;
+// empty leaves it out.
 func Start(
 	cfg *config.HomeAssistant,
 	tel *telemetry.Store,
@@ -198,6 +206,7 @@ func Start(
 	plan PlanSource,
 	energy EnergySource,
 	measurementOptions func() telemetry.ForecastOptions,
+	swVersion string,
 ) (*Bridge, error) {
 	b := &Bridge{
 		tel:                     tel,
@@ -210,6 +219,7 @@ func Start(
 		topicPrefix:             "forty-two-watts",
 		discoPrefix:             "homeassistant",
 		deviceID:                "forty_two_watts",
+		swVersion:               swVersion,
 		announcedMetrics:        make(map[string]struct{}),
 		announcedEVDrivers:      make(map[string]struct{}),
 		announcedVehicleDrivers: make(map[string]struct{}),
@@ -442,14 +452,29 @@ func (b *Bridge) driverDiscoveryTopic(kind, driver, object string) string {
 
 // discoveryDevice is the device block embedded in every discovery message
 // so HA groups all the sensors under one device page.
+//
+// It has no configuration_url. Under the Home Assistant app the only address
+// for FTW's pages is a path inside Home Assistant's own frontend, and that
+// path moved in October 2026 (hassio/addon/<slug> became config/app/<slug>),
+// so a fixed link breaks on one side of that change. On another host FTW
+// cannot know which of its addresses Home Assistant's users can reach.
 func (b *Bridge) discoveryDevice() map[string]any {
-	return map[string]any{
+	dev := map[string]any{
 		"identifiers":  []string{b.deviceID},
 		"name":         "FTW",
 		"manufacturer": "Sourceful",
 		"model":        "Home EMS",
 	}
+	if b.swVersion != "" {
+		dev["sw_version"] = b.swVersion
+	}
+	return dev
 }
+
+// categoryDiagnostic is Home Assistant's entity_category for entities that
+// show how FTW works rather than what the home does. Home Assistant keeps
+// them off its generated dashboards and lists them apart on the device page.
+const categoryDiagnostic = "diagnostic"
 
 // modeSelectOptions is the option list for the HA mode `select`. It MUST
 // cover every value publishState can emit on the mode state topic (which is
@@ -482,42 +507,49 @@ func (b *Bridge) publishDiscovery() {
 	total := 0
 
 	// ---- Site-level sensors ----
+	// category is empty for what the home does and diagnostic for FTW's own
+	// workings: setpoints that a number entity also shows, the planner's
+	// import ceiling and the meter's single phases.
+	diag := categoryDiagnostic
 	sensors := []struct {
 		id, name, unit, devClass, stateClass string
 		state                                string
+		category                             string
 	}{
 		// Real-time power flow
-		{"grid_power", "Grid Power", "W", "power", "measurement", b.stateTopic("grid_w")},
-		{"pv_power", "PV Power", "W", "power", "measurement", b.stateTopic("pv_w")},
-		{"battery_power", "Battery Power", "W", "power", "measurement", b.stateTopic("bat_w")},
-		{"ev_power", "EV Power", "W", "power", "measurement", b.stateTopic("ev_w")},
-		{"v2x_power", "V2X Power", "W", "power", "measurement", b.stateTopic("v2x_w")},
+		{"grid_power", "Grid Power", "W", "power", "measurement", b.stateTopic("grid_w"), ""},
+		{"pv_power", "PV Power", "W", "power", "measurement", b.stateTopic("pv_w"), ""},
+		{"battery_power", "Battery Power", "W", "power", "measurement", b.stateTopic("bat_w"), ""},
+		{"ev_power", "EV Power", "W", "power", "measurement", b.stateTopic("ev_w"), ""},
+		{"v2x_power", "V2X Power", "W", "power", "measurement", b.stateTopic("v2x_w"), ""},
 		// Live balance as the dashboard shows it.
-		{"load_power", "Load Power", "W", "power", "measurement", b.stateTopic("load_w")},
-		{"battery_soc", "Battery SoC", "%", "battery", "measurement", b.stateTopic("bat_soc_pct")},
-		// Control setpoints
-		{"grid_target", "Grid Target", "W", "power", "", b.stateTopic("grid_target_w")},
-		{"peak_limit", "Peak Limit", "W", "power", "", b.stateTopic("peak_limit_w")},
-		{"peak_import_ceiling", "Peak Import Ceiling", "W", "power", "", b.stateTopic("peak_import_ceiling_w")},
-		{"ev_charging", "EV Charging Power", "W", "power", "", b.stateTopic("ev_charging_w")},
+		{"load_power", "Load Power", "W", "power", "measurement", b.stateTopic("load_w"), ""},
+		{"battery_soc", "Battery SoC", "%", "battery", "measurement", b.stateTopic("bat_soc_pct"), ""},
+		// Control setpoints. The number entities below set and show them.
+		{"grid_target", "Grid Target", "W", "power", "", b.stateTopic("grid_target_w"), diag},
+		{"peak_limit", "Peak Limit", "W", "power", "", b.stateTopic("peak_limit_w"), diag},
+		{"peak_import_ceiling", "Peak Import Ceiling", "W", "power", "", b.stateTopic("peak_import_ceiling_w"), diag},
+		{"ev_charging", "EV Charging Power", "W", "power", "", b.stateTopic("ev_charging_w"), diag},
 		// Forecast from current MPC slot (only populated when plan is wired)
-		{"pv_predicted", "PV Power Predicted", "W", "power", "measurement", b.stateTopic("pv_w_predicted")},
-		{"load_predicted", "Load Power Predicted", "W", "power", "measurement", b.stateTopic("load_w_predicted")},
+		{"pv_predicted", "PV Power Predicted", "W", "power", "measurement", b.stateTopic("pv_w_predicted"), ""},
+		{"load_predicted", "Load Power Predicted", "W", "power", "measurement", b.stateTopic("load_w_predicted"), ""},
 		// Per-phase power (site meter, available when driver emits l1_w/l2_w/l3_w)
-		{"phase_1_power", "Phase L1 Power", "W", "power", "measurement", b.stateTopic("phase_1_w")},
-		{"phase_2_power", "Phase L2 Power", "W", "power", "measurement", b.stateTopic("phase_2_w")},
-		{"phase_3_power", "Phase L3 Power", "W", "power", "measurement", b.stateTopic("phase_3_w")},
+		{"phase_1_power", "Phase L1 Power", "W", "power", "measurement", b.stateTopic("phase_1_w"), diag},
+		{"phase_2_power", "Phase L2 Power", "W", "power", "measurement", b.stateTopic("phase_2_w"), diag},
+		{"phase_3_power", "Phase L3 Power", "W", "power", "measurement", b.stateTopic("phase_3_w"), diag},
 		// Per-phase current (site meter, available when driver emits l1_a/l2_a/l3_a)
-		{"phase_1_current", "Phase L1 Current", "A", "current", "measurement", b.stateTopic("phase_1_a")},
-		{"phase_2_current", "Phase L2 Current", "A", "current", "measurement", b.stateTopic("phase_2_a")},
-		{"phase_3_current", "Phase L3 Current", "A", "current", "measurement", b.stateTopic("phase_3_a")},
-		// Today's energy totals (accumulated since midnight, reset daily)
-		{"today_import", "Today Grid Import", "Wh", "energy", "total_increasing", b.stateTopic("today_import_wh")},
-		{"today_export", "Today Grid Export", "Wh", "energy", "total_increasing", b.stateTopic("today_export_wh")},
-		{"today_pv", "Today PV Generation", "Wh", "energy", "total_increasing", b.stateTopic("today_pv_wh")},
-		{"today_bat_charged", "Today Battery Charged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_charged_wh")},
-		{"today_bat_discharged", "Today Battery Discharged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_discharged_wh")},
-		{"today_load", "Today Load", "Wh", "energy", "total_increasing", b.stateTopic("today_load_wh")},
+		{"phase_1_current", "Phase L1 Current", "A", "current", "measurement", b.stateTopic("phase_1_a"), diag},
+		{"phase_2_current", "Phase L2 Current", "A", "current", "measurement", b.stateTopic("phase_2_a"), diag},
+		{"phase_3_current", "Phase L3 Current", "A", "current", "measurement", b.stateTopic("phase_3_a"), diag},
+		// Today's energy totals, read from the stored history. They return to
+		// zero at local midnight, the daily counter that total_increasing
+		// describes, and a restart does not lower them.
+		{"today_import", "Today Grid Import", "Wh", "energy", "total_increasing", b.stateTopic("today_import_wh"), ""},
+		{"today_export", "Today Grid Export", "Wh", "energy", "total_increasing", b.stateTopic("today_export_wh"), ""},
+		{"today_pv", "Today PV Generation", "Wh", "energy", "total_increasing", b.stateTopic("today_pv_wh"), ""},
+		{"today_bat_charged", "Today Battery Charged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_charged_wh"), ""},
+		{"today_bat_discharged", "Today Battery Discharged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_discharged_wh"), ""},
+		{"today_load", "Today Load", "Wh", "energy", "total_increasing", b.stateTopic("today_load_wh"), ""},
 	}
 	for _, s := range sensors {
 		msg := b.withAvail(map[string]any{
@@ -530,6 +562,9 @@ func (b *Bridge) publishDiscovery() {
 		})
 		if s.stateClass != "" {
 			msg["state_class"] = s.stateClass
+		}
+		if s.category != "" {
+			msg["entity_category"] = s.category
 		}
 		data, _ := json.Marshal(msg)
 		topic := fmt.Sprintf("%s/sensor/%s/%s/config", b.discoPrefix, b.deviceID, s.id)
@@ -600,22 +635,13 @@ func (b *Bridge) publishDiscovery() {
 	b.publish(fmt.Sprintf("%s/number/%s/ev_charging/config", b.discoPrefix, b.deviceID), data, true)
 	total++
 
-	// ---- Battery-covers-EV as HA switch ----
-	bceMsg := b.withAvail(map[string]any{
-		"name":          "Legacy Site-wide Battery Cover",
-		"unique_id":     b.deviceID + "_battery_covers_ev_cmd",
-		"state_topic":   b.stateTopic("battery_covers_ev"),
-		"command_topic": b.cmdTopic("battery_covers_ev"),
-		"payload_on":    "ON",
-		"payload_off":   "OFF",
-		"state_on":      "ON",
-		"state_off":     "OFF",
-		"icon":          "mdi:car-battery",
-		"device":        dev,
-	})
-	data, _ = json.Marshal(bceMsg)
-	b.publish(fmt.Sprintf("%s/switch/%s/battery_covers_ev/config", b.discoPrefix, b.deviceID), data, true)
-	total++
+	// ---- Older site-wide battery cover as HA switch, only while it is on ----
+	b.ctrlMu.Lock()
+	coverOn := b.ctrl.BatteryCoversEV
+	b.ctrlMu.Unlock()
+	if b.syncLegacyCover(dev, coverOn, true) {
+		total++
+	}
 
 	// ---- MPC plan + price + plan-stale sensors (only when planner is wired) ----
 	if b.plan != nil {
@@ -650,14 +676,15 @@ func (b *Bridge) publishDiscovery() {
 		// Plan-stale binary_sensor: "on" = planner fell back to self_consumption
 		// because the plan was missing or older than 30 min.
 		staleMsg := b.withAvail(map[string]any{
-			"name":         "Plan Stale",
-			"unique_id":    b.deviceID + "_plan_stale",
-			"state_topic":  b.stateTopic("plan_stale"),
-			"payload_on":   "true",
-			"payload_off":  "false",
-			"device_class": "problem",
-			"icon":         "mdi:calendar-alert",
-			"device":       dev,
+			"name":            "Plan Stale",
+			"unique_id":       b.deviceID + "_plan_stale",
+			"state_topic":     b.stateTopic("plan_stale"),
+			"payload_on":      "true",
+			"payload_off":     "false",
+			"device_class":    "problem",
+			"entity_category": categoryDiagnostic,
+			"icon":            "mdi:calendar-alert",
+			"device":          dev,
 		})
 		data, _ = json.Marshal(staleMsg)
 		b.publish(fmt.Sprintf("%s/binary_sensor/%s/plan_stale/config", b.discoPrefix, b.deviceID), data, true)
@@ -677,7 +704,7 @@ func (b *Bridge) publishDiscovery() {
 	b.mu.Unlock()
 
 	for _, name := range b.driverNames {
-		// Data sensors
+		// Data sensors: live power and state of charge, so measurement.
 		for _, s := range []struct{ id, label, unit, class string }{
 			{"meter_w", " Meter Power", "W", "power"},
 			{"pv_w", " PV Power", "W", "power"},
@@ -692,6 +719,7 @@ func (b *Bridge) publishDiscovery() {
 				"state_topic":         b.driverTopic(name, s.id),
 				"unit_of_measurement": s.unit,
 				"device_class":        s.class,
+				"state_class":         "measurement",
 				"device":              dev,
 			})
 			d, _ := json.Marshal(msg)
@@ -708,6 +736,7 @@ func (b *Bridge) publishDiscovery() {
 			"payload_on":            "true",
 			"payload_off":           "false",
 			"device_class":          "connectivity",
+			"entity_category":       categoryDiagnostic,
 			"icon":                  "mdi:lan-connect",
 			"device":                dev,
 		})
@@ -742,21 +771,62 @@ func (b *Bridge) publishDiscovery() {
 	b.mu.Unlock()
 }
 
+// syncLegacyCover shows the switch for the older site-wide battery cover
+// (battery_covers_ev) only while that setting is on. Per-loadpoint battery
+// boost replaced it, and FTW's own pages also show it only while it is on,
+// with a way to turn it off. Turning it off from Home Assistant therefore
+// removes the switch: an empty retained config deletes the entity, and the
+// same unique_id brings it back if the setting is turned on again. force
+// sends even when nothing changed, as on each connect, so a config an older
+// FTW left on the broker is replaced. It reports whether the switch is shown.
+func (b *Bridge) syncLegacyCover(dev map[string]any, on, force bool) bool {
+	b.coverMu.Lock()
+	defer b.coverMu.Unlock()
+	if !force && b.coverShown != nil && *b.coverShown == on {
+		return on
+	}
+	topic := fmt.Sprintf("%s/switch/%s/battery_covers_ev/config", b.discoPrefix, b.deviceID)
+	payload := []byte{}
+	if on {
+		payload, _ = json.Marshal(b.withAvail(map[string]any{
+			"name":          "Legacy Site-wide Battery Cover",
+			"unique_id":     b.deviceID + "_battery_covers_ev_cmd",
+			"state_topic":   b.stateTopic("battery_covers_ev"),
+			"command_topic": b.cmdTopic("battery_covers_ev"),
+			"payload_on":    "ON",
+			"payload_off":   "OFF",
+			"state_on":      "ON",
+			"state_off":     "OFF",
+			"icon":          "mdi:car-battery",
+			"device":        dev,
+		}))
+	}
+	b.publish(topic, payload, true)
+	b.coverShown = &on
+	return on
+}
+
 // announceMetric publishes a single HA discovery message for a driver emit_metric.
 // Called when a metric is seen for the first time and on every reconnect.
+// emit_metric is the host's call for diagnostics (temperatures, DC
+// voltages, fault bits), so these entities are diagnostic.
 func (b *Bridge) announceMetric(dev map[string]any, driver, metricName, explicitUnit string) {
 	unit, devClass := metricUnitAndClass(metricName, explicitUnit)
 	msg := b.withAvail(map[string]any{
-		"name":        driver + " " + strings.ReplaceAll(metricName, "_", " "),
-		"unique_id":   b.driverUniqueID(driver, "_"+metricName),
-		"state_topic": b.driverTopic(driver, metricName),
-		"device":      dev,
+		"name":            driver + " " + strings.ReplaceAll(metricName, "_", " "),
+		"unique_id":       b.driverUniqueID(driver, "_"+metricName),
+		"state_topic":     b.driverTopic(driver, metricName),
+		"entity_category": categoryDiagnostic,
+		"device":          dev,
 	})
 	if unit != "" {
 		msg["unit_of_measurement"] = unit
 	}
 	if devClass != "" {
 		msg["device_class"] = devClass
+	}
+	if sc := metricStateClass(metricName, unit, devClass); sc != "" {
+		msg["state_class"] = sc
 	}
 	d, _ := json.Marshal(msg)
 	b.publish(b.driverDiscoveryTopic("sensor", driver, metricName), d, true)
@@ -792,6 +862,8 @@ func metricUnitAndClass(name, explicitUnit string) (unit, devClass string) {
 	switch {
 	case strings.HasSuffix(name, "_w"):
 		return "W", "power"
+	case strings.HasSuffix(name, "_kwh"):
+		return "kWh", "energy"
 	case strings.HasSuffix(name, "_wh"):
 		return "Wh", "energy"
 	case strings.HasSuffix(name, "_c"):
@@ -809,6 +881,53 @@ func metricUnitAndClass(name, explicitUnit string) (unit, devClass string) {
 	default:
 		return "", ""
 	}
+}
+
+// metricStateClass is the state_class that lets Home Assistant keep long-term
+// statistics for a driver metric, or "" when no class fits its shape.
+//
+// Power, voltage, current, frequency, temperature and percentages are values
+// at one moment: measurement. An energy value gets total_increasing only when
+// its name marks a counter that never falls (a lifetime total or a meter's
+// import/export register). Other energy values have no class: a capacity,
+// one charging session's energy (ev_session_wh) or a vendor's heat-pump
+// point can fall without starting from zero, and Home Assistant would count
+// each rise after such a fall as new energy. A metric without a unit, such
+// as a fault bit field or a counter of events, has no class either.
+func metricStateClass(name, unit, devClass string) string {
+	switch devClass {
+	case "power", "voltage", "current", "frequency", "temperature", "battery":
+		return "measurement"
+	case "energy":
+		if lifetimeEnergyCounter(name) {
+			return "total_increasing"
+		}
+		return ""
+	}
+	if unit == "%" {
+		return "measurement"
+	}
+	return ""
+}
+
+// lifetimeEnergyCounter reports a metric name that drivers use for an energy
+// counter that only grows: ev_lifetime_wh (CTEK), ev_lifetime_kwh (Easee),
+// meter_total_import_wh and meter_total_export_wh (a meter's registers).
+// A meter register must end the name, before the unit: total_import_last_hour_wh
+// is not one.
+func lifetimeEnergyCounter(name string) bool {
+	for _, part := range strings.Split(name, "_") {
+		if part == "lifetime" {
+			return true
+		}
+	}
+	base := strings.TrimSuffix(strings.TrimSuffix(name, "_kwh"), "_wh")
+	for _, register := range []string{"total_import", "total_export"} {
+		if base == register || strings.HasSuffix(base, "_"+register) {
+			return true
+		}
+	}
+	return false
 }
 
 // ---- Command subscriber ----
@@ -974,6 +1093,7 @@ func (b *Bridge) publishState() {
 		bceState = "ON"
 	}
 	b.publishString("battery_covers_ev", bceState)
+	b.syncLegacyCover(b.discoveryDevice(), batteryCoversEV, false)
 
 	// ---- Per-phase power + current (from site meter DerReading.Data) ----
 	if r := b.tel.Get(siteMeter, telemetry.DerMeter); r != nil && len(r.Data) > 0 {
@@ -1173,6 +1293,7 @@ func (b *Bridge) announceEVDriver(dev map[string]any, driver string) {
 		"json_attributes_topic": b.driverTopic(driver, "ev_json"),
 		"unit_of_measurement":   "W",
 		"device_class":          "power",
+		"state_class":           "measurement",
 		"icon":                  "mdi:car-electric",
 		"device":                dev,
 	})
@@ -1189,6 +1310,7 @@ func (b *Bridge) announceVehicleDriver(dev map[string]any, driver string) {
 		"json_attributes_topic": b.driverTopic(driver, "vehicle_json"),
 		"unit_of_measurement":   "%",
 		"device_class":          "battery",
+		"state_class":           "measurement",
 		"icon":                  "mdi:car-electric",
 		"device":                dev,
 	})

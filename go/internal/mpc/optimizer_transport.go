@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -159,6 +160,24 @@ func (t *ProcessTransport) writeLocked(ctx context.Context, payload []byte) erro
 var errOptimizerWorkerMissing = errors.New(
 	"optimizer worker not found; the Energyplan worker from the release package is missing, so the built-in Go planner is used")
 
+// workerSecretEnv names Core's secrets that the solver never needs: the Home
+// Assistant app's Supervisor token, which reaches Supervisor's API, and the
+// Home Assistant broker login the app passes.
+var workerSecretEnv = []string{"SUPERVISOR_TOKEN", "HASSIO_TOKEN", "FTW_HA_MQTT_PASSWORD"}
+
+// workerEnv is Core's environment without workerSecretEnv.
+func workerEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if slices.Contains(workerSecretEnv, name) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
 func (t *ProcessTransport) ensureStartedLocked() error {
 	if t.cmd != nil {
 		return nil
@@ -171,7 +190,7 @@ func (t *ProcessTransport) ensureStartedLocked() error {
 	}
 	cmd := exec.Command(t.cfg.Command[0], t.cfg.Command[1:]...)
 	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	cmd.Env = workerEnv(os.Environ())
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("optimizer stdin: %w", err)

@@ -68,8 +68,10 @@ this app, because it needs FTW's own web port on your network.
 
 FTW's values appear as Home Assistant entities with nothing to type. Add the
 **Mosquitto broker** app and the **MQTT** integration that Home Assistant then
-offers. If FTW was already running when you added Mosquitto, restart FTW once.
-The app log then shows `Home Assistant's MQTT broker is core-mosquitto:1883`.
+offers. If you add Mosquitto while FTW runs, FTW finds it within a minute,
+with no restart. The app log shows `Home Assistant's MQTT broker is
+core-mosquitto:1883` when FTW starts, or `found Home Assistant's MQTT broker`
+when FTW finds it later.
 
 To turn this off, or to use another broker, open **Settings → Integrations**
 in FTW. See [Home Assistant integration](ha-integration.md).
@@ -100,7 +102,7 @@ This restores its version and data together. Keep other FTW instances stopped.
 | The app is not in the store | Check the repository URL, reload the page, or **⋮ → Check for updates**. |
 | Install fails | Open **Settings → System → Logs → Supervisor**. A download or checksum error means the package could not be fetched; try again later. |
 | Web UI does not open | Check the app **Log**. Open FTW with **Open Web UI** or from the sidebar; a bookmark to port 8080 does not work. Port 18099 on Home Assistant must be free. |
-| No FTW entities | Check that the Mosquitto broker app runs and the MQTT integration is added, then restart FTW. The app log says what it found. |
+| No FTW entities | Check that the Mosquitto broker app runs and the MQTT integration is added. FTW looks for the broker again within a minute. The app log says what it found. |
 | FTW cannot reach a device | Check the device's IP address and that it is on the same network. |
 | Two apps named **FTW (beta)** | The one with version 3.x is retired. See [Switch in Home Assistant](before.md#switch-in-home-assistant). |
 
