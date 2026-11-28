@@ -272,15 +272,16 @@ jobs:
         run: echo "Verified native packages without creating a tag or release."
 
   ha-addon:
-    name: Offer the published beta to the Home Assistant app
+    name: Offer the published release to the Home Assistant app
     needs: publish
-    if: ${{ !inputs.dry_run && inputs.channel == 'beta' }}
+    if: ${{ !inputs.dry_run }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
       - name: Verify publication and request a pin PR
         env:
+          CHANNEL: ${{ inputs.channel }}
           TAG: ${{ inputs.tag }}
           GH_TOKEN: ${{ github.token }}
           HA_ADDON_DISPATCH_TOKEN: ${{ secrets.HA_ADDON_DISPATCH_TOKEN }}
@@ -290,11 +291,17 @@ jobs:
             echo "::notice::HA_ADDON_DISPATCH_TOKEN is absent; pin the Home Assistant app manually."
             exit 0
           fi
-          [[ "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]
+          # A beta pins srcfl/home-assistant-addons' beta app; a stable pins its
+          # stable app, and the beta app too when it outranks the beta pin.
+          case "${CHANNEL}" in
+            beta) [[ "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+-beta\.[0-9]+$ ]]; prerelease=true ;;
+            stable) [[ "${TAG}" =~ ^v0\.[0-9]+\.[0-9]+$ ]]; prerelease=false ;;
+            *) exit 1 ;;
+          esac
           gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" \
             --json tagName,isDraft,isPrerelease,assets | \
-            jq -e --arg tag "${TAG}" '
-              .tagName == $tag and .isDraft == false and .isPrerelease == true and
+            jq -e --arg tag "${TAG}" --argjson prerelease "${prerelease}" '
+              .tagName == $tag and .isDraft == false and .isPrerelease == $prerelease and
               ([.assets[].name] | . as $names |
                 ["ftw-linux-amd64.tar.gz", "ftw-linux-amd64.tar.gz.sha256",
                  "ftw-linux-arm64.tar.gz", "ftw-linux-arm64.tar.gz.sha256",
@@ -304,13 +311,13 @@ jobs:
           trap 'rm -rf "${receipt_dir}"' EXIT
           gh release download "${TAG}" --repo "${GITHUB_REPOSITORY}" \
             --pattern ftw-native-release.json --dir "${receipt_dir}"
-          jq -e --arg tag "${TAG}" '
-            .schema == 1 and .channel == "beta" and .tag == $tag and
+          jq -e --arg tag "${TAG}" --arg channel "${CHANNEL}" '
+            .schema == 1 and .channel == $channel and .tag == $tag and
             (.sha256.amd64 | test("^[0-9a-f]{64}$")) and
             (.sha256.arm64 | test("^[0-9a-f]{64}$"))
           ' "${receipt_dir}/ftw-native-release.json" >/dev/null
-          jq -n --arg tag "${TAG}" \
-            '{event_type:"ftw-native-release", client_payload:{tag:$tag, channel:"beta"}}' \
+          jq -n --arg tag "${TAG}" --arg channel "${CHANNEL}" \
+            '{event_type:"ftw-native-release", client_payload:{tag:$tag, channel:$channel}}' \
             > "${receipt_dir}/dispatch.json"
           GH_TOKEN="${HA_ADDON_DISPATCH_TOKEN}" gh api --method POST \
             repos/srcfl/home-assistant-addons/dispatches --input "${receipt_dir}/dispatch.json"
