@@ -37,7 +37,8 @@ type ControlFeedback struct {
 	SiteEvidence         *ControlComparison `json:"site_evidence,omitempty"`
 	ToleranceW           *float64           `json:"tolerance_w"`
 	// Internal steps of the verdict; the API exposes their result above.
-	State              string   `json:"-"`
+	State              string `json:"-"`
+	pilotStale         bool
 	VerificationTier   *int     `json:"-"`
 	VerificationLost   bool     `json:"-"`
 	Escalated          bool     `json:"-"` // not following long enough to be an alarm
@@ -216,6 +217,7 @@ func (s *Server) controlFeedback(now time.Time) []ControlFeedback {
 			f.DynamicLimitA = d.DynamicLimitA
 			pilotAge, pilotValid := pilotReadingAge(d, now)
 			pilotFresh := pilotValid && pilotAge <= pilotFreshFor
+			f.pilotStale = pilotValid && !pilotFresh
 			if pilotFresh {
 				f.PilotA, f.PilotObservedAt, f.PilotConfirmedAtMs = d.PilotA, d.PilotObservedAt, *d.PilotConfirmedAtMs
 			}
@@ -766,6 +768,11 @@ func classifyControlFeedback(f *ControlFeedback, cmd telemetry.CommandEvidence, 
 			reason = "power_wrong_direction"
 		case math.Abs(*f.ActualW) < math.Abs(*f.SentW):
 			reason = "power_below_target"
+			if f.Kind == "ev" && cmd.Result == "accepted" && *f.SentW > 100 &&
+				*f.ActualW >= 100 && f.LimitA == nil && f.pilotStale {
+				set("waiting", "charger_pilot_stale", "info")
+				return
+			}
 		}
 		set("warning", reason, "warning")
 		// FTW cannot stop a charger that draws more than it is told. A car

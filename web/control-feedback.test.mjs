@@ -308,3 +308,10 @@ test('EV warnings show fresh pilot evidence with the measured charging power', (
   assert.doesNotMatch(controlStatus({...stopped, readings_fresh: false}).text, /signalled/);
   assert.doesNotMatch(controlStatus({...stopped, pilot_a: null}).text, /signalled/);
 });
+
+test('stale pilot calls for current evidence without attributing the limit', () => {
+  const status = controlStatus(row({kind:'ev',status:'waiting',reason:'charger_pilot_stale',
+    severity:'info',sent_w:8970,actual_w:5440}));
+  assert.equal(status.title, 'Waiting for current pilot data');
+  assert.match(status.text, /Waiting for a fresh pilot reading/);
+});

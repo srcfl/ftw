@@ -206,6 +206,13 @@ func TestFreshPilotExplainsTheDrawWhileTheDriverWithholdsItsLimit(t *testing.T) 
 				read(time.Now(), "")
 				e.tick(8970, "plan")
 				check("second confirmation without the limit", "limited", "charger_pilot_limit", "info")
+				for range int(pilotFreshFor/(5*time.Second)) + 1 {
+					e.tick(8970, "plan")
+				}
+				check("pilot confirmation expired", "waiting", "charger_pilot_stale", "info")
+				read(time.Now(), "")
+				e.tick(8970, "plan")
+				check("pilot confirmed again", "limited", "charger_pilot_limit", "info")
 			})
 		})
 	}

@@ -79,6 +79,7 @@ const REASON_TITLES = {
   charger_limit: 'Limited by FTW’s charger setting', device_limit: 'Charger limit', offered_current_lower: 'Charger offers less current',
   load_balancer_limit: 'Limited by the charger’s load balancing', charger_pilot_limit: 'Limited by the charger',
   load_balancer_wait: 'Waiting for load balancing',
+  charger_pilot_stale: 'Waiting for current pilot data',
   one_phase: 'Charging on one phase',
   battery_calibrating: 'Calibrating',
   device_fault: 'Device fault', telemetry_stale: 'No fresh readings', readings_lost: 'Lost control',
@@ -120,6 +121,7 @@ function sentence(row) {
     case 'offered_current_lower': return num(row.limit_a) && !(num(row.offered_a) && num(row.requested_a) && row.offered_a + 0.5 < row.requested_a)
       ? `The charger lets the car take ${amps(row.limit_a)}, below the ${amps(row.requested_a)} FTW asked for.`
       : `The charger offers ${amps(row.offered_a)}, below the ${amps(row.requested_a)} FTW asked for.`;
+    case 'charger_pilot_stale': return `Charging at ${controlPower(actual)} against ${target(row)}. Waiting for a fresh pilot reading to explain the difference.`;
     case 'charger_pilot_limit': return `The charger signals ${amps(row.pilot_a)} to the car. FTW asked for ${amps(row.requested_a)}; measured charging is ${controlPower(actual)}. The internal limiting cause is unknown.`;
     case 'load_balancer_limit': return `${row.make ? `${row.make} limits the charger to ${amps(row.limit_a)} (its load balancing)`
       : `The charger’s load balancing limits it to ${amps(row.limit_a)}`}. FTW asked for ${amps(row.requested_a)}; the car takes ${controlPower(actual)}.`;
