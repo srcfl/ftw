@@ -441,9 +441,58 @@ body.ftw-app .overview-health-dot {
 body.ftw-app .overview-health.is-connected {
   color: var(--fg-dim);
 }
+/* Light means live: the box answers, but a device does not, so the dot is
+   a ring and never green. */
 body.ftw-app .overview-health.is-connected .overview-health-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--fg-muted);
+}
+body.ftw-app .overview-health.is-live .overview-health-dot {
   background: var(--live);
   box-shadow: 0 0 0 3px color-mix(in oklch, var(--live) 14%, transparent);
+}
+body.ftw-app #overview-quiet {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
+  padding: 14px 16px;
+  border-color: color-mix(in oklch, var(--alarm) 45%, var(--line));
+}
+body.ftw-app #overview-quiet[hidden] {
+  display: none !important;
+}
+body.ftw-app #overview-quiet ul {
+  flex: 1 1 18rem;
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9rem;
+}
+body.ftw-app #overview-quiet li::before {
+  content: "▲ ";
+  color: var(--alarm);
+}
+body.ftw-app #overview-quiet small {
+  display: block;
+  margin-top: 2px;
+  color: var(--fg-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+body.ftw-app #overview-quiet button {
+  padding: 0.3rem 0;
+  border: 0;
+  background: none;
+  color: var(--accent-e);
+  font: inherit;
+  font-size: 0.9rem;
+  text-decoration: underline;
+  cursor: pointer;
 }
 body.ftw-app .section-kicker {
   margin: 0 0 3px;
@@ -753,6 +802,8 @@ body.ftw-app .val-discharging { color: var(--energy-gives); }
 body.ftw-app .val-neutral     { color: var(--fg); }
 body.ftw-app .val-ev-charging { color: var(--violet); }
 body.ftw-app .val-ev-connected{ color: var(--fg-dim); }
+/* "Unknown" is no reading, not an import or an export: no direction colour. */
+body.ftw-app .is-unknown      { color: var(--fg-muted); }
 
 /* Fuse — own row, one box per phase. */
 body.ftw-app .fuse-row {
@@ -1935,6 +1986,12 @@ body.ftw-app .more-action > span:last-child {
   gap: 2px;
 }
 body.ftw-app .more-action small { color: var(--fg-dim); }
+body.ftw-app .more-help-where {
+  margin: -6px 0 18px;
+  color: var(--fg-dim);
+  font-size: 0.9rem;
+}
+body.ftw-app .more-help-where a { color: var(--accent-e); }
 body.ftw-app .more-action-icon {
   display: grid;
   flex: 0 0 36px;

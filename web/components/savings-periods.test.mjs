@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import {
   SAVINGS_LOOKBACK_DAYS,
   buildSavingsPeriods,
   formatCompactMinor,
+  savingsBaseline,
 } from "./savings-periods.js";
 
 function priced(day, savedMinor) {
@@ -82,5 +84,35 @@ describe("compact monetary savings periods", () => {
     assert.equal(formatCompactMinor(123), "+1.23");
     assert.equal(formatCompactMinor(-1250), "−12.5");
     assert.equal(formatCompactMinor(12500), "+125");
+  });
+});
+
+// The no-solar figure counts what the panels bring as savings, so it is
+// named for what it is. A box in source-history mode (every box today)
+// sends no self-use figure; choosing self-use must not show a false zero.
+describe("which baseline the savings number is compared against", () => {
+  const legacy = { days: [priced("2026-11-27", 900), priced("2026-11-28", 400)] };
+  const ledger = { days: legacy.days.map((row) => ({ ...row, self_consumption_saved_ore: 12 })) };
+
+  it("names the grid-only baseline by default", () => {
+    for (const payload of [null, legacy, ledger]) {
+      const b = savingsBaseline(payload, "none");
+      assert.equal(b.self, false);
+      assert.equal(b.label, "Compared to no solar or battery");
+    }
+  });
+
+  it("compares with self-use only when the box sent it for every day", () => {
+    assert.equal(savingsBaseline(ledger, "self").self, true);
+    assert.equal(savingsBaseline(ledger, "self").label, "Compared to self-use");
+    assert.equal(savingsBaseline(legacy, "self").self, false);
+    assert.equal(savingsBaseline(legacy, "self").label, "Compared to no solar or battery");
+    const partial = { days: [ledger.days[0], legacy.days[1]] };
+    assert.equal(savingsBaseline(partial, "self").self, false);
+  });
+
+  it("never names the old \"no system\" baseline", () => {
+    const card = readFileSync(new URL("./ftw-savings-card.js", import.meta.url), "utf8");
+    assert.doesNotMatch(card, /no system/i);
   });
 });

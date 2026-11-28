@@ -15,8 +15,12 @@ test("today distinguishes a complete zero, a measured subtotal and no evidence",
 test("the energy cards and overview mark subtotals and clear the mark after a complete reading", () => {
   const elements = new Map();
   const group = {append(el) { elements.set(el.id, el); }};
-  for (const id of ["e-pv", "e-load", "overview-e-pv"]) {
-    elements.set(id, {closest() { return group; }});
+  for (const id of ["e-pv", "e-load", "overview-e-import", "overview-e-pv"]) {
+    const classes = new Set();
+    elements.set(id, {
+      closest() { return group; },
+      classList: {toggle(name, on) { if (on) classes.add(name); else classes.delete(name); }, contains: (name) => classes.has(name)},
+    });
   }
   const root = {getElementById(id) { return elements.get(id); }, createElement() { return {}; }};
   updateEnergyToday({pv_wh: null, load_wh: null, measured: {pv_wh: 600, load_wh: 1200}}, root);
@@ -39,5 +43,10 @@ test("the energy cards and overview mark subtotals and clear the mark after a co
   assert.match(elements.get("energy-today-quality").textContent, /Home use includes estimates/);
   updateEnergyToday(null, root);
   assert.equal(elements.get("e-pv").textContent, "Unknown");
+  // No reading is not an import: the red import colour gives way.
+  assert.equal(elements.get("overview-e-import").textContent, "Unknown");
+  assert.equal(elements.get("overview-e-import").classList.contains("is-unknown"), true);
   assert.equal(elements.get("energy-today-quality").textContent, "Today's energy is not available yet.");
+  updateEnergyToday(complete, root);
+  assert.equal(elements.get("overview-e-import").classList.contains("is-unknown"), false);
 });
