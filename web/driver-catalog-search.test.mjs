@@ -9,7 +9,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
+// Settings searches through device-flow.js, which the page loads first.
+const source = readFileSync(new URL("./device-flow.js", import.meta.url), "utf8") + "\n" +
+  readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
 
 function load() {
   const window = { FTWSettings: { tabs: {} } };
