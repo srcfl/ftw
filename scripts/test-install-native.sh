@@ -228,7 +228,168 @@ EOF
     fail "find_release did not fail offline"
   fi
   grep -q 'did not answer' "$work/err" || fail "find_release offline said $(cat "$work/err")"
+
+  # Port 8080 without ss: the kernel's socket tables. Only a listening
+  # socket on the port counts, not a connection to another box's 8080.
+  net="$work/net"
+  mkdir -p "$net"
+  header='  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode'
+  printf '%s\n%s\n%s\n' "$header" \
+    '   0: 0100007F:0035 00000000:0000 0A 00000000:00000000 00:00000000 00000000   101        0 1 1' \
+    '   1: 1701A8C0:D2F0 0201A8C0:1F90 01 00000000:00000000 00:00000000 00000000  1000        0 2 1' > "$net/tcp"
+  if proc_listening 8080 "$net"; then fail "proc_listening counted a connection to port 8080"; fi
+  printf '%s\n%s\n' "$header" \
+    '   0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000   999        0 3 1' > "$net/tcp6"
+  proc_listening 8080 "$net" || fail "proc_listening missed a listener in tcp6"
+  rm "$net/tcp6"
+  printf '%s\n' '   2: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000   999        0 4 1' >> "$net/tcp"
+  proc_listening 8080 "$net" || fail "proc_listening missed a listener in tcp"
+  if proc_listening 8081 "$net"; then fail "proc_listening found port 8081"; fi
+  if proc_listening 8080 "$work/no-such-dir"; then fail "proc_listening found a port without tables"; fi
+
+  # Addresses without ip: drop loopback, link-local, repeats and every
+  # network that a container bridge routes, as the ip path does by name.
+  printf 'Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n%s\n%s\n%s\n%s\n' \
+    'eth0	00000000	0101A8C0	0003	0	0	100	00000000	0	0	0' \
+    'eth0	0001A8C0	00000000	0001	0	0	100	00FFFFFF	0	0	0' \
+    'docker0	000011AC	00000000	0001	0	0	0	0000FFFF	0	0	0' \
+    'br-1a2b3c	0010A8C0	00000000	0001	0	0	0	00F0FFFF	0	0	0' > "$net/route"
+  got="$(printf '%s\n' 192.168.1.23 172.17.0.1 192.168.20.1 192.168.32.5 127.0.0.1 169.254.3.4 192.168.1.23 fe80::1 '' |
+    lan_only "$net/route" | tr '\n' ' ')"
+  [[ "$got" == '192.168.1.23 192.168.32.5 ' ]] || fail "lan_only kept $got"
+  got="$(printf '%s\n' 192.168.1.23 172.17.0.1 | lan_only "$work/no-such-route" | tr '\n' ' ')"
+  [[ "$got" == '192.168.1.23 172.17.0.1 ' ]] || fail "lan_only without routes kept $got"
+  cat > "$net/fib_trie" <<'EOF'
+Main:
+  +-- 0.0.0.0/0 3 0 5
+     |-- 0.0.0.0
+        /0 universe UNICAST
+     +-- 127.0.0.0/8 2 0 2
+        +-- 127.0.0.0/31 1 0 0
+           |-- 127.0.0.0
+              /8 host LOCAL
+           |-- 127.0.0.1
+              /32 host LOCAL
+        |-- 127.255.255.255
+           /32 link BROADCAST
+     +-- 192.168.1.0/24 2 0 2
+        |-- 192.168.1.0
+           /24 link UNICAST
+        |-- 192.168.1.23
+           /32 host LOCAL
+        |-- 192.168.1.255
+           /32 link BROADCAST
+Local:
+  +-- 192.168.1.0/24 2 0 2
+     |-- 192.168.1.23
+        /32 host LOCAL
+EOF
+  got="$(fib_trie_addresses "$net/fib_trie" | lan_only "$net/route" | tr '\n' ' ')"
+  [[ "$got" == '192.168.1.23 ' ]] || fail "fib_trie gave $got"
+  # With no address at all, the router's list of devices has it.
+  (
+    ipv4_addresses() { :; }
+    mdns_name() { return 1; }
+    setup_addresses /setup
+  ) > "$work/addresses"
+  grep -q "router's list of" "$work/addresses" && grep -q 'http://<address>:8080/setup' "$work/addresses" ||
+    fail "setup_addresses without an address said $(cat "$work/addresses")"
+
+  # A missing tool names its package and the command for this computer.
+  [[ "$(join_words tar)" == tar && "$(join_words tar gzip)" == 'tar and gzip' &&
+     "$(join_words tar gzip awk)" == 'tar, gzip and awk' ]] || fail "join_words"
+  [[ "$(tool_package sha256sum) $(tool_package awk) $(tool_package tar)" == 'coreutils gawk tar' ]] ||
+    fail "tool_package"
+  [[ "$(install_command apt 'sudo ' tar gawk)" == 'sudo apt update && sudo apt install -y tar gawk' &&
+     "$(install_command dnf '' tar)" == 'dnf install -y tar' &&
+     "$(install_command zypper 'sudo ' tar)" == 'sudo zypper install -y tar' &&
+     "$(install_command pacman 'sudo ' tar)" == 'sudo pacman -S --needed tar' &&
+     -z "$(install_command apk 'sudo ' tar)" ]] || fail "install_command"
+
+  # Free space: a small tmpfs or a full TMPDIR moves the download to
+  # /var/tmp, and too little room anywhere stops before it.
+  fakedf="$work/fakedf"
+  mkdir -p "$fakedf" "$work/tmpdir"
+  cat > "$fakedf/df" <<'EOF'
+#!/bin/sh
+case "$2" in
+  */tmpdir) free="$TMP_FREE" ;;
+  /var/tmp) free="$VAR_FREE" ;;
+  *) free=9999 ;;
+esac
+printf 'Filesystem 1048576-blocks Used Available Capacity Mounted on\n/dev/x 1000 1 %s 1%% /\n' "$free"
+EOF
+  printf '#!/bin/sh\necho "${FS_TYPE:-ext2/ext3}"\n' > "$fakedf/stat"
+  chmod 0755 "$fakedf/df" "$fakedf/stat"
+  room() {
+    TMPDIR="$work/tmpdir" TMP_FREE="$1" VAR_FREE="$2" FS_TYPE="$3" PATH="$fakedf:$PATH" staging_parent 250
+  }
+  [[ "$(room 900 900 ext2/ext3)" == "$work/tmpdir" ]] || fail "staging left a roomy TMPDIR"
+  [[ "$(room 100 900 ext2/ext3)" == /var/tmp ]] || fail "staging stayed in a full TMPDIR"
+  [[ "$(room 900 900 tmpfs)" == /var/tmp ]] || fail "staging stayed in a small tmpfs"
+  [[ "$(room 2000 900 tmpfs)" == "$work/tmpdir" ]] || fail "staging left a large tmpfs"
+  [[ "$(room 900 100 tmpfs)" == "$work/tmpdir" ]] || fail "staging left the only roomy place"
+  if room 100 100 ext2/ext3 > /dev/null; then fail "staging went on with too little room"; fi
+  [[ "$(TMPDIR="$work/tmpdir" TMP_FREE=42 PATH="$fakedf:$PATH" free_mb "$work/tmpdir/not/yet")" == 42 ]] ||
+    fail "free_mb did not climb to a folder that exists"
 )
+
+# Messages that stop the installer before it does anything, whatever runs
+# this test. Each tool is a stub in a PATH of its own; uname says what the
+# computer is.
+stubs="$work/path"
+mkdir -p "$stubs"
+for tool in curl tar gzip sha256sum grep awk mktemp sudo apt-get; do
+  printf '#!/bin/sh\nexit 0\n' > "$stubs/$tool"
+  chmod 0755 "$stubs/$tool"
+done
+printf '#!/bin/sh\ncase "$1" in -s) echo "$OS" ;; -m) echo "$ARCH" ;; esac\n' > "$stubs/uname"
+chmod 0755 "$stubs/uname"
+stopped() {  # OS ARCH: run the line and keep what it said
+  if OS="$1" ARCH="$2" PATH="$stubs" "$BASH" "$installer" --fresh-host > "$work/out" 2>&1; then
+    fail "installer went on for $1 $2"
+  fi
+}
+says() {
+  grep -qF -- "$1" "$work/out" || fail "installer said $(cat "$work/out"), want $1"
+}
+ways() {
+  says 'Raspberry Pi OS Lite (64-bit)'
+  says 'FTW app for Home Assistant'
+  says 'https://github.com/srcfl/ftw/blob/master/docs/install.md'
+}
+stopped Darwin arm64
+says 'this computer runs macOS'
+ways
+stopped Linux armv7l
+says 'and this one is armv7l'
+ways
+# The tools come before systemd, so a missing one is named first.
+rm "$stubs/tar" "$stubs/gzip"
+stopped Linux x86_64
+says 'needs tar and gzip, which this computer lacks'
+lead='sudo '
+if (( EUID == 0 )); then lead=''; fi
+says "  ${lead}apt update && ${lead}apt install -y tar gzip"
+if grep -q systemd "$work/out"; then fail "installer named systemd before the missing tools"; fi
+if (( EUID != 0 )); then
+  rm "$stubs/sudo"
+  stopped Linux x86_64
+  says 'needs tar, gzip and sudo'
+  says 'as root with this command'
+  says '  apt update && apt install -y tar gzip sudo'
+  printf '#!/bin/sh\nexit 0\n' > "$stubs/sudo"
+  chmod 0755 "$stubs/sudo"
+fi
+rm "$stubs/apt-get"
+stopped Linux x86_64
+says "with this computer's package manager (packages: tar and gzip)"
+printf '#!/bin/sh\nexit 0\n' > "$stubs/tar"
+printf '#!/bin/sh\nexit 0\n' > "$stubs/gzip"
+chmod 0755 "$stubs/tar" "$stubs/gzip"
+stopped Linux aarch64
+says 'This computer has no systemd'
+ways
 
 clean_host() {
   [[ ! -e /opt/ftw && ! -e /var/lib/ftw && ! -e /etc/ftw-native-install.pending ]] &&

@@ -49,6 +49,11 @@ Debian eller Ubuntu på en minidator eller en gammal laptop. Har du aldrig
 ställt in en Pi? [Pi-guiden](sv.md) visar varje steg med bilder, från
 minneskortet till den här raden.
 
+Installern behöver ungefär 250 MB ledigt utrymme och de här programmen:
+`curl`, `tar`, `gzip`, `sha256sum`, `grep`, `awk`, `mktemp` och, om du inte
+installerar som root, `sudo`. Raspberry Pi OS, Debian och Ubuntu har dem. Saknas
+ett av dem säger installern vilket och vilket kommando som lägger till det.
+
 Logga in på datorn, över SSH eller vid dess eget tangentbord, och kör:
 
 ```bash

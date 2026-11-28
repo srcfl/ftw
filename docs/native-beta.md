@@ -90,7 +90,12 @@ running Core; inspect containers and their restart rules. A service called
   64-bit (Bookworm or Trixie), Debian 12 or 13, or an x86_64 machine.
 - Running any older FTW already, perhaps from the Raspberry Pi image?
   Read [Coming from an older FTW](#coming-from-an-older-ftw) first.
-- Port 8080 free, `curl`, and `sudo`.
+- Port 8080 free and about 250 MB of free space.
+- The programs `curl`, `tar`, `gzip`, `sha256sum`, `grep`, `awk` and
+  `mktemp`, and `sudo` unless you install as root. Raspberry Pi OS, Debian
+  and Ubuntu come with them. If one is missing, the installer names its
+  package and the command that adds it, for example
+  `sudo apt update && sudo apt install -y tar`.
 - FTW needs no MQTT broker of its own. Ferroamp and CTEK equipment runs
   one itself, and FTW connects to it. Pixii and Heishamon publish to a
   broker you choose: use the one in Home Assistant, or
@@ -197,7 +202,9 @@ It checks the package's SHA-256, creates the `ftw` user, puts releases in
 and starts the `ftw` service. At the end it prints the addresses to open,
 `http://<address>:8080/setup`; set up the site there. If the install stops
 partway, run the same line with `--resume` in place of `--fresh-host`. It
-finishes the same release and keeps any data already saved.
+finishes the same release and keeps any data already saved. On a box it set
+up, the line changes nothing: it says FTW is already installed, prints the
+addresses and points to `ftw status` and `ftw update`.
 
 If it reports an error, stop and use [the error table](#if-you-already-got-an-error).
 Do not continue to the Docker instructions.
@@ -582,11 +589,21 @@ still describes your site, so share it privately if you prefer.
 
 ## Remove FTW
 
+To keep a copy of the home's settings and history, run
+`ftw backup --output-dir <folder>` first. Then:
+
 ```bash
 sudo systemctl disable --now ftw
 sudo rm -rf /opt/ftw /etc/systemd/system/ftw.service /usr/local/bin/ftw
 sudo systemctl daemon-reload
 ```
 
-Data stays in `/var/lib/ftw` until you remove it with
-`sudo rm -rf /var/lib/ftw` and `sudo userdel ftw`.
+The data stays in `/var/lib/ftw`, and the `ftw` account stays too. The
+installer will not install over them, and says so. To install again on this
+computer, back up the data if you may want it, then remove both:
+
+```bash
+sudo tar -czf ~/ftw-data-backup.tar.gz -C /var/lib ftw
+sudo rm -rf /var/lib/ftw
+sudo userdel ftw
+```
