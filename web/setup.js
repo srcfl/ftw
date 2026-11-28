@@ -289,7 +289,7 @@
     }
 
     if (kind === 'modbus' || kind === 'mqtt' || kind === 'host') {
-      var host = (driver.config && driver.config.host) || '';
+      var host = (driver.config && driver.config.host) || defaults.host || '';
       if (scan) host = isMDNSName(scan.hostname) ? scan.hostname : scan.ip;
       var hostInput = input('text', host, '192.168.1.10 or inverter.local');
       hostInput.addEventListener('input', updateHostHint);
