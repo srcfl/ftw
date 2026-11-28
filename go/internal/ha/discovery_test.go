@@ -2,6 +2,7 @@ package ha
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -88,28 +89,178 @@ func TestDiscoveryDeviceNamesCoreVersion(t *testing.T) {
 	}
 }
 
-// Names, object ids and unique ids are stable wire identifiers. This guards
-// the ones this change touched.
-func TestDiscoveryKeepsNamesAndUniqueIDs(t *testing.T) {
+// Every discovery message names one entity. Home Assistant puts the device
+// name "FTW" first, so a name never repeats it, reads in sentence case and
+// differs from every other name on the device, number twins included.
+// unique_ids never change: Home Assistant keeps the entity ID and history it
+// tied to each one.
+func TestDiscoveryNamesAndUniqueIDs(t *testing.T) {
 	b, client := discoveryBridge("inv")
 	b.ctrl.BatteryCoversEV = true
 	b.tel.EmitMetric("inv", "battery_temp_c", 21, "°C", "", "")
 	b.publishDiscovery()
-	for topic, want := range map[string][2]string{
-		sensorTopic("grid_target"):                                      {"Grid Target", "forty_two_watts_grid_target"},
-		sensorTopic("peak_import_ceiling"):                              {"Peak Import Ceiling", "forty_two_watts_peak_import_ceiling"},
-		sensorTopic("phase_1_current"):                                  {"Phase L1 Current", "forty_two_watts_phase_1_current"},
-		sensorTopic("today_import"):                                     {"Today Grid Import", "forty_two_watts_today_import"},
-		sensorTopic("inv_bat_w"):                                        {"inv Battery Power", "forty_two_watts_invbat_w"},
-		sensorTopic("inv_battery_temp_c"):                               {"inv battery temp c", "forty_two_watts_inv_battery_temp_c"},
-		"homeassistant/binary_sensor/forty_two_watts/inv_online/config": {"inv Online", "forty_two_watts_inv_online"},
-		"homeassistant/binary_sensor/forty_two_watts/plan_stale/config": {"Plan Stale", "forty_two_watts_plan_stale"},
-		"homeassistant/switch/forty_two_watts/battery_covers_ev/config": {"Legacy Site-wide Battery Cover", "forty_two_watts_battery_covers_ev_cmd"},
-		"homeassistant/number/forty_two_watts/grid_target/config":       {"Grid Target", "forty_two_watts_grid_target_cmd"},
-	} {
+	b.announceEVDriver(b.discoveryDevice(), "charger")
+	b.announceVehicleDriver(b.discoveryDevice(), "car")
+
+	const sensor, binary, number = "homeassistant/sensor/forty_two_watts/", "homeassistant/binary_sensor/forty_two_watts/", "homeassistant/number/forty_two_watts/"
+	want := map[string][2]string{
+		sensor + "grid_power":                                    {"Grid power", "forty_two_watts_grid_power"},
+		sensor + "pv_power":                                      {"PV power", "forty_two_watts_pv_power"},
+		sensor + "battery_power":                                 {"Battery power", "forty_two_watts_battery_power"},
+		sensor + "ev_power":                                      {"EV power", "forty_two_watts_ev_power"},
+		sensor + "v2x_power":                                     {"V2X power", "forty_two_watts_v2x_power"},
+		sensor + "load_power":                                    {"Load power", "forty_two_watts_load_power"},
+		sensor + "battery_soc":                                   {"Battery SoC", "forty_two_watts_battery_soc"},
+		sensor + "grid_target":                                   {"Grid target setpoint", "forty_two_watts_grid_target"},
+		sensor + "peak_limit":                                    {"Peak limit setpoint", "forty_two_watts_peak_limit"},
+		sensor + "peak_import_ceiling":                           {"Peak import ceiling", "forty_two_watts_peak_import_ceiling"},
+		sensor + "ev_charging":                                   {"EV charging setpoint", "forty_two_watts_ev_charging"},
+		sensor + "pv_predicted":                                  {"PV power predicted", "forty_two_watts_pv_predicted"},
+		sensor + "load_predicted":                                {"Load power predicted", "forty_two_watts_load_predicted"},
+		sensor + "phase_1_power":                                 {"Phase L1 power", "forty_two_watts_phase_1_power"},
+		sensor + "phase_2_power":                                 {"Phase L2 power", "forty_two_watts_phase_2_power"},
+		sensor + "phase_3_power":                                 {"Phase L3 power", "forty_two_watts_phase_3_power"},
+		sensor + "phase_1_current":                               {"Phase L1 current", "forty_two_watts_phase_1_current"},
+		sensor + "phase_2_current":                               {"Phase L2 current", "forty_two_watts_phase_2_current"},
+		sensor + "phase_3_current":                               {"Phase L3 current", "forty_two_watts_phase_3_current"},
+		sensor + "today_import":                                  {"Today grid import", "forty_two_watts_today_import"},
+		sensor + "today_export":                                  {"Today grid export", "forty_two_watts_today_export"},
+		sensor + "today_pv":                                      {"Today PV generation", "forty_two_watts_today_pv"},
+		sensor + "today_bat_charged":                             {"Today battery charged", "forty_two_watts_today_bat_charged"},
+		sensor + "today_bat_discharged":                          {"Today battery discharged", "forty_two_watts_today_bat_discharged"},
+		sensor + "today_load":                                    {"Today load", "forty_two_watts_today_load"},
+		sensor + "total_import":                                  {"Total grid import", "forty_two_watts_total_import"},
+		sensor + "total_export":                                  {"Total grid export", "forty_two_watts_total_export"},
+		sensor + "total_pv":                                      {"Total PV generation", "forty_two_watts_total_pv"},
+		sensor + "total_bat_charged":                             {"Total battery charged", "forty_two_watts_total_bat_charged"},
+		sensor + "total_bat_discharged":                          {"Total battery discharged", "forty_two_watts_total_bat_discharged"},
+		sensor + "total_load":                                    {"Total load", "forty_two_watts_total_load"},
+		sensor + "plan":                                          {"Plan", "forty_two_watts_plan"},
+		sensor + "price":                                         {"Electricity price", "forty_two_watts_price_ore"},
+		binary + "plan_stale":                                    {"Plan stale", "forty_two_watts_plan_stale"},
+		"homeassistant/select/forty_two_watts/mode":              {"Mode", "forty_two_watts_mode"},
+		number + "grid_target":                                   {"Grid target", "forty_two_watts_grid_target_cmd"},
+		number + "peak_limit":                                    {"Peak limit", "forty_two_watts_peak_limit_cmd"},
+		number + "ev_charging":                                   {"EV charging power", "forty_two_watts_ev_charging_cmd"},
+		"homeassistant/switch/forty_two_watts/battery_covers_ev": {"Legacy home-wide battery cover", "forty_two_watts_battery_covers_ev_cmd"},
+		// Driver entities start with the driver's own name.
+		sensor + "inv_meter_w":             {"inv meter power", "forty_two_watts_invmeter_w"},
+		sensor + "inv_pv_w":                {"inv PV power", "forty_two_watts_invpv_w"},
+		sensor + "inv_bat_w":               {"inv battery power", "forty_two_watts_invbat_w"},
+		sensor + "inv_bat_soc_pct":         {"inv battery SoC", "forty_two_watts_invbat_soc_pct"},
+		sensor + "inv_v2x_w":               {"inv V2X power", "forty_two_watts_invv2x_w"},
+		sensor + "inv_v2x_vehicle_soc_pct": {"inv V2X vehicle SoC", "forty_two_watts_invv2x_vehicle_soc_pct"},
+		sensor + "inv_battery_temp_c":      {"inv battery temp c", "forty_two_watts_inv_battery_temp_c"},
+		binary + "inv_online":              {"inv online", "forty_two_watts_inv_online"},
+		sensor + "charger_ev_w":            {"charger EV power", "forty_two_watts_charger_ev_w"},
+		sensor + "car_vehicle_soc":         {"car vehicle SoC", "forty_two_watts_car_vehicle_soc"},
+	}
+
+	names := map[string]string{}
+	for topic, raw := range client.payloads {
+		if !strings.HasSuffix(topic, "/config") || len(raw) == 0 {
+			continue
+		}
+		object := strings.TrimSuffix(topic, "/config")
+		w, ok := want[object]
+		if !ok {
+			t.Errorf("%s: entity missing from this test", object)
+			continue
+		}
 		msg := client.config(t, topic)
-		if msg["name"] != want[0] || msg["unique_id"] != want[1] {
-			t.Errorf("%s: name %v, unique_id %v; want %q, %q", topic, msg["name"], msg["unique_id"], want[0], want[1])
+		name, _ := msg["name"].(string)
+		if name != w[0] || msg["unique_id"] != w[1] {
+			t.Errorf("%s: name %q, unique_id %v; want %q, %q", object, name, msg["unique_id"], w[0], w[1])
+		}
+		if other, dup := names[strings.ToLower(name)]; dup {
+			t.Errorf("%s and %s share the name %q", object, other, name)
+		}
+		names[strings.ToLower(name)] = object
+		if strings.HasPrefix(strings.ToLower(name), "ftw") {
+			t.Errorf("%s: %q repeats the device name", object, name)
+		}
+		if _, ok := msg["has_entity_name"]; ok {
+			t.Errorf("%s: Home Assistant ignores has_entity_name in MQTT discovery; leave it out", object)
+		}
+	}
+	for object := range want {
+		if raw, ok := client.payloads[object+"/config"]; !ok || len(raw) == 0 {
+			t.Errorf("%s: not announced", object)
+		}
+	}
+}
+
+// Sentence case: a capital first letter, then lower case except the
+// abbreviations FTW uses. Driver entities start with the driver's name.
+func TestDiscoveryNamesAreSentenceCase(t *testing.T) {
+	b, client := discoveryBridge()
+	b.ctrl.BatteryCoversEV = true
+	b.publishDiscovery()
+	abbreviations := map[string]bool{"PV": true, "EV": true, "V2X": true, "SoC": true, "L1": true, "L2": true, "L3": true}
+	for topic, raw := range client.payloads {
+		if !strings.HasSuffix(topic, "/config") || len(raw) == 0 {
+			continue
+		}
+		name, _ := client.config(t, topic)["name"].(string)
+		for i, word := range strings.Fields(name) {
+			if abbreviations[word] {
+				continue
+			}
+			want := strings.ToLower(word)
+			if i == 0 {
+				want = strings.ToUpper(want[:1]) + want[1:]
+			}
+			if word != want {
+				t.Errorf("%s: %q is not sentence case", topic, name)
+				break
+			}
+		}
+	}
+}
+
+type fakeEnergy struct {
+	today, lifetime EnergyTotals
+	ready           bool
+}
+
+func (f fakeEnergy) TodayEnergy() (EnergyTotals, bool)    { return f.today, true }
+func (f fakeEnergy) LifetimeEnergy() (EnergyTotals, bool) { return f.lifetime, f.ready }
+
+// The lifetime totals are what Home Assistant's Energy dashboard wants:
+// kWh, total_increasing, and on no Diagnostic list.
+func TestLifetimeTotalsForTheEnergyDashboard(t *testing.T) {
+	b, client := discoveryBridge()
+	b.publishDiscovery()
+	for _, id := range []string{"total_import", "total_export", "total_pv", "total_bat_charged", "total_bat_discharged", "total_load"} {
+		msg := client.config(t, sensorTopic(id))
+		if msg["unit_of_measurement"] != "kWh" || msg["device_class"] != "energy" || msg["state_class"] != "total_increasing" {
+			t.Errorf("%s: unit %v, class %v, state_class %v; want kWh, energy, total_increasing", id, msg["unit_of_measurement"], msg["device_class"], msg["state_class"])
+		}
+		if c, ok := msg["entity_category"]; ok {
+			t.Errorf("%s: entity_category %v, want none", id, c)
+		}
+		if msg["state_topic"] != "forty-two-watts/state/"+id+"_kwh" {
+			t.Errorf("%s: state_topic %v", id, msg["state_topic"])
+		}
+	}
+
+	// Nothing goes out until the store knows the totals, so Home Assistant
+	// never starts a counter from a low value.
+	energy := &fakeEnergy{lifetime: EnergyTotals{ImportWh: 1234567.8, ExportWh: 5.4, PVWh: 999.9996, BatChargedWh: 10, BatDischargedWh: 20, LoadWh: 0}}
+	b.energy = energy
+	b.publishState()
+	if _, ok := client.payloads["forty-two-watts/state/total_import_kwh"]; ok {
+		t.Fatal("lifetime totals were published before they were known")
+	}
+	energy.ready = true
+	b.publishState()
+	for topic, want := range map[string]string{
+		"total_import_kwh": "1234.568", "total_export_kwh": "0.005", "total_pv_kwh": "1.000",
+		"total_bat_charged_kwh": "0.010", "total_bat_discharged_kwh": "0.020", "total_load_kwh": "0.000",
+	} {
+		got := string(client.payloads["forty-two-watts/state/"+topic])
+		if got != want || client.retained["forty-two-watts/state/"+topic] {
+			t.Errorf("%s = %q (retained %v), want %q, not retained", topic, got, client.retained["forty-two-watts/state/"+topic], want)
 		}
 	}
 }

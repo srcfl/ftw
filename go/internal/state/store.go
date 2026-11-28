@@ -114,6 +114,11 @@ type Store struct {
 	// read on that handle has ended.
 	forecastLongDropped *sql.DB
 	forecastLongStatus  *ForecastLongArchiveStatus
+
+	// lifetimeMu orders LifetimeEnergy reads; lifetimeShown is the highest
+	// total returned since the floor row was last saved.
+	lifetimeMu    sync.Mutex
+	lifetimeShown LifetimeEnergy
 }
 
 // Open initializes (or creates) the precious state.db at path plus the

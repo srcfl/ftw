@@ -4479,14 +4479,14 @@ func mpcPlanSource(svc *mpc.Service) ha.PlanSource {
 // stateEnergyBridge adapts *state.Store to ha.EnergySource.
 type stateEnergyBridge struct{ st *state.Store }
 
-func (b stateEnergyBridge) TodayEnergy() (ha.TodayEnergySnapshot, bool) {
+func (b stateEnergyBridge) TodayEnergy() (ha.EnergyTotals, bool) {
 	now := time.Now()
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 	d, err := b.st.DailyEnergy(midnight.UnixMilli(), now.UnixMilli())
 	if err != nil {
-		return ha.TodayEnergySnapshot{}, false
+		return ha.EnergyTotals{}, false
 	}
-	return ha.TodayEnergySnapshot{
+	return ha.EnergyTotals{
 		ImportWh:        d.ImportWh,
 		ExportWh:        d.ExportWh,
 		PVWh:            d.PVWh,
@@ -4494,6 +4494,24 @@ func (b stateEnergyBridge) TodayEnergy() (ha.TodayEnergySnapshot, bool) {
 		BatDischargedWh: d.BatDischargedWh,
 		LoadWh:          d.LoadWh,
 	}, d.Intervals > 0
+}
+
+// LifetimeEnergy reads the stored history's lifetime totals. Until they are
+// known, Home Assistant gets no value rather than a low one.
+func (b stateEnergyBridge) LifetimeEnergy() (ha.EnergyTotals, bool) {
+	l, ok, err := b.st.LifetimeEnergy(time.Now())
+	if err != nil {
+		slog.Debug("HA lifetime energy unavailable", "err", err)
+		return ha.EnergyTotals{}, false
+	}
+	return ha.EnergyTotals{
+		ImportWh:        l.ImportWh,
+		ExportWh:        l.ExportWh,
+		PVWh:            l.PVWh,
+		BatChargedWh:    l.BatChargedWh,
+		BatDischargedWh: l.BatDischargedWh,
+		LoadWh:          l.LoadWh,
+	}, ok
 }
 
 func haEnergySource(st *state.Store) ha.EnergySource {
