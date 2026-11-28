@@ -47,6 +47,11 @@ Ubuntu on a mini PC or an old laptop. Never set up a Pi? The
 [Pi guide](setup-guide/en.md) shows each step with pictures, from the memory
 card to this line.
 
+The installer needs about 250 MB of free space and these programs: `curl`,
+`tar`, `gzip`, `sha256sum`, `grep`, `awk`, `mktemp` and, unless you install
+as root, `sudo`. Raspberry Pi OS, Debian and Ubuntu come with them. If one is
+missing, the installer names it and the command that adds it.
+
 Log in to the computer, over SSH or at its own keyboard, and run:
 
 ```bash
@@ -64,6 +69,11 @@ the end it prints the addresses to open, for example:
 ```
 
 Open one of them in a browser on the same network.
+
+Running the line again on a box it set up changes nothing. It says FTW is
+already installed and prints the addresses. It exits 0 while FTW runs or
+starts and 1 when it does not, and then says how to start it. It ignores
+`--tag` and `--beta` on such a box: run `ftw update` for a newer release.
 
 If it stops with an error, stop there. Do not try another install method: look
 up the message in the [error table](native-beta.md#if-you-already-got-an-error)

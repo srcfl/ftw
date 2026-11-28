@@ -11,9 +11,9 @@ Esta guía es para ti que nunca has configurado una Raspberry Pi antes. Tranquil
 ## Lo que necesitas
 
 - Una **Raspberry Pi 3 o más nueva**
-- Una **tarjeta de memoria** — incluida si la compraste en un pack, si no, consigue una microSD aparte
-- Un **adaptador de corriente** — incluido si lo compraste en un pack, si no, consigue uno aparte
-- Una **caja** — opcional, salvo si tienes un RAK wireless o una Sourceful gateway (vienen ya con carcasa)
+- Una **tarjeta de memoria** (microSD)
+- Un **adaptador de corriente** para la Pi
+- Una **caja** — opcional
 - **Tu ordenador normal** (Windows o Mac)
 - Un **lector de tarjetas** en tu ordenador normal (ranura incorporada o un pequeño aparato USB)
 - **Internet en casa** (cable de red o Wi-Fi)
@@ -35,7 +35,7 @@ El programa se llama **Raspberry Pi Imager**. Ábrelo.
 
 Verás tres cuadros grandes. Haz clic en el de arriba y elige:
 
-- El modelo que tienes: **Raspberry Pi 3**, **4** o **5**. ¿Tienes un Sourceful gateway o RAK wireless? Entonces casi siempre es **Raspberry Pi 4**.
+- El modelo que tienes: **Raspberry Pi 3**, **4** o **5**.
 
 ![](images/pi-imager-step1.png)
 

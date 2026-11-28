@@ -43,14 +43,6 @@ A short code works once for five minutes. Five wrong tries cancel it.
 Making a new code cancels the previous code. The QR and link keep their
 existing expiry and single-use checks.
 
-The short-code exchange runs directly against the box's local, protected
-`POST /api/app-link/pairing` with `{"kind":"claim","code":"…"}`. It keeps
-the code's role and expiry and replaces it with a full enrollment token.
-The response carries the same v3 link as the QR. No short-code hash or box
-secret goes through a cloud lookup. Remote clients, proxies and app sessions
-cannot use this exchange. The existing house-password and browser-origin
-checks still apply.
-
 A code from this page first sends `POST /api/cloud/grant` with the current
 Cloud scopes and terms when `GET /api/cloud` reports them not yet accepted.
 The box applies the same checks as for the Cloud panel. If it refuses, the

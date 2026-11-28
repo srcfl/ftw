@@ -801,6 +801,25 @@ func TestACoreWaitingForSetupIsNamed(t *testing.T) {
 	if code != exitFailed || !strings.Contains(errOut, "waiting for setup; finish it at "+srv.URL+"/setup first") {
 		t.Fatalf("update %d %q", code, errOut)
 	}
+
+	// The setup wizard answers other paths with 404, and a POST with 405.
+	f.on("GET", "/api/backups", reply(404, "404 page not found"))
+	f.on("POST", "/api/backups", reply(405, "Method Not Allowed"))
+	f.on("GET", "/api/support/dump", reply(404, "404 page not found"))
+	code, out, errOut = runCLI(t, testEnv(), "backup", "--url", srv.URL)
+	if code != exitFailed || errOut != "ftw: Core is waiting for setup; finish it at "+srv.URL+"/setup first\n" ||
+		strings.Contains(out, "Making a full backup") || len(f.postedPaths()) != 0 {
+		t.Fatalf("backup %d %q %q, posted %v", code, out, errOut, f.postedPaths())
+	}
+	file := filepath.Join(t.TempDir(), "support.zip")
+	code, _, errOut = runCLI(t, testEnv(), "support", "--output", file, "--url", srv.URL)
+	if code != exitFailed || !strings.Contains(errOut, "waiting for setup; finish it at "+srv.URL+"/setup first; until then, journalctl -u ftw -n 100 shows its log") ||
+		strings.Contains(errOut, "HTTP 404") {
+		t.Fatalf("support %d %q", code, errOut)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("support left %s: %v", file, err)
+	}
 }
 
 func TestUpdateReportsHealthOnlyOnceItHolds(t *testing.T) {

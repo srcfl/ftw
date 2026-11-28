@@ -27,3 +27,5 @@
 ^go/tools/history-migrate/THIRD-PARTY-NOTICES\.txt:Portions of the following files are licensed under the MIT License:$
 # The HA discovery tests assert the stable wire IDs from the compatibility contract above.
 ^go/internal/ha/discovery_test\.go:.*"forty[-_]two[-_]watts".*$
+# The installer looks for a unit under the former service name before it calls a host clean.
+^scripts/install\.sh:.*systemd/system/\{ftw,forty-two-watts\}\.service.*$

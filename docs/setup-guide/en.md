@@ -11,9 +11,9 @@ This guide is for you if you've never set up a Raspberry Pi before. Relax — it
 ## What you'll need
 
 - A **Raspberry Pi 3 or newer**
-- A **memory card** — included if you bought it as a bundle, otherwise grab a separate microSD card
-- A **power adapter** — included if you bought it as a bundle, otherwise grab a separate one
-- A **case** — optional, unless you bought a RAK wireless or Sourceful gateway (those already come housed)
+- A **memory card** (microSD)
+- A **power adapter** for the Pi
+- A **case** — optional
 - **Your regular computer** (Windows or Mac)
 - A **card reader** on your regular computer (a built-in slot, or a small USB gadget)
 - **Internet at home** (a network cable or Wi-Fi)
@@ -35,7 +35,7 @@ The program is called **Raspberry Pi Imager**. Open it.
 
 You'll see three big boxes. Click the top one and select:
 
-- The model you have: **Raspberry Pi 3**, **4** or **5**. Got a Sourceful gateway or RAK wireless? Then it's almost always **Raspberry Pi 4**.
+- The model you have: **Raspberry Pi 3**, **4** or **5**.
 
 ![](images/pi-imager-step1.png)
 

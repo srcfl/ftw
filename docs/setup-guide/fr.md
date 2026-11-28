@@ -11,9 +11,9 @@ Ce guide est fait pour vous qui n'avez jamais configuré un Raspberry Pi. Pas de
 ## Ce dont vous avez besoin
 
 - Un **Raspberry Pi 3 ou plus récent**
-- Une **carte mémoire** — incluse si vous avez pris un pack, sinon procurez-vous une microSD séparée
-- Un **adaptateur secteur** — inclus si vous avez pris un pack, sinon procurez-vous-en un séparément
-- Un **boîtier** — optionnel, sauf si vous avez un RAK wireless ou une Sourceful gateway (ils sont déjà livrés en boîtier)
+- Une **carte mémoire** (microSD)
+- Un **adaptateur secteur** pour le Pi
+- Un **boîtier** — optionnel
 - **Votre ordinateur habituel** (Windows ou Mac)
 - Un **lecteur de carte** sur votre ordinateur habituel (fente intégrée ou petit appareil USB)
 - **Internet à la maison** (câble réseau ou Wi-Fi)
@@ -35,7 +35,7 @@ Le programme s'appelle **Raspberry Pi Imager**. Ouvrez-le.
 
 Vous voyez trois grandes cases. Cliquez sur celle du haut et choisissez :
 
-- Le modèle que vous avez : **Raspberry Pi 3**, **4** ou **5**. Vous avez un Sourceful gateway ou RAK wireless ? C'est alors presque toujours un **Raspberry Pi 4**.
+- Le modèle que vous avez : **Raspberry Pi 3**, **4** ou **5**.
 
 ![](images/pi-imager-step1.png)
 

@@ -11,9 +11,9 @@ Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi f
 ## Vad du behöver
 
 - En **Raspberry Pi 3 eller nyare**
-- Ett **minneskort** — medföljer om du köpte den i en bundle, annars behöver du ett separat microSD-kort
-- En **strömadapter** — medföljer om du köpte den i en bundle, annars behöver du en separat
-- Ett **chassi** — valfritt, om du inte har en RAK wireless eller Sourceful gateway (de kommer redan i ett chassi)
+- Ett **minneskort** (microSD)
+- En **strömadapter** till din Pi
+- Ett **chassi** — valfritt
 - **Din vanliga dator** (Windows eller Mac)
 - En **kortläsare** till din vanliga dator (inbyggt fack, eller en liten USB-pryl att stoppa i)
 - **Internet** hemma (nätverkskabel eller Wi-Fi)
@@ -35,7 +35,7 @@ Programmet heter **Raspberry Pi Imager**. Öppna det.
 
 Du ser tre stora rutor. Klicka på den översta och välj:
 
-- Modellen du har: **Raspberry Pi 3**, **4** eller **5**. Har du fått en Sourceful gateway eller RAK wireless? Då är det nästan alltid **Raspberry Pi 4**.
+- Modellen du har: **Raspberry Pi 3**, **4** eller **5**.
 
 ![](images/pi-imager-step1.png)
 

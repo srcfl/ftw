@@ -15,11 +15,110 @@
     // The answer can arrive after the last step is already on screen.
     var step = document.getElementById('house-password-step');
     if (step && currentStep === TOTAL_STEPS) step.hidden = !asksHousePassword();
+    // Only a new box answers /api/setup/assistant.
+    document.getElementById('assistant-open').hidden = !firstRun;
   }).catch(function () {});
 
   function asksHousePassword() {
     return firstRun && !window.FTWHomeAssistant;
   }
+
+  // --- Setup with ChatGPT or Claude ---
+  // The box starts empty with control off, then Settings → Access lets the
+  // assistant in through FTW Cloud. Home Assistant signs its users in, so
+  // there the box takes no house password. Ask when the form opens: Home
+  // Assistant's script runs after this one.
+
+  window.openAssistantSetup = function () {
+    var form = document.getElementById('assistant-setup');
+    var open = form.hidden;
+    form.hidden = !open;
+    document.getElementById('assistant-open').setAttribute('aria-expanded', String(open));
+    document.getElementById('assistant-password-fields').hidden = !!window.FTWHomeAssistant;
+    document.getElementById('assistant-sign-in').hidden = !!window.FTWHomeAssistant;
+    if (!open) return;
+    document.getElementById(window.FTWHomeAssistant ? 'assistant-start' : 'assistant-password').focus();
+  };
+
+  // Core answers with a path from the box's root. Under Home Assistant the
+  // page sits below an ingress prefix, so resolve it from the page's folder.
+  function boxPage(next) {
+    if (typeof next !== 'string' || next.charAt(0) !== '/' || next.charAt(1) === '/') next = '?setup=assistant';
+    return new URL('./' + next.replace(/^\//, ''), window.location.href).href;
+  }
+
+  // A box that is still restarting may take a request and never answer it.
+  function shortWait() {
+    return typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(3000) : undefined;
+  }
+
+  function showOpenBox(text, next) {
+    var resume = document.getElementById('assistant-resume');
+    document.getElementById('assistant-status').textContent = text;
+    resume.href = next;
+    resume.hidden = false;
+  }
+
+  window.startAssistantSetup = async function () {
+    var btn = document.getElementById('assistant-start');
+    var note = document.getElementById('assistant-status');
+    var body = {confirmed: true};
+    if (!window.FTWHomeAssistant) {
+      var password = document.getElementById('assistant-password').value;
+      if (!password || password !== document.getElementById('assistant-password-confirm').value) {
+        note.textContent = 'Choose a house password, and type the same one twice.';
+        document.getElementById('assistant-password').focus();
+        return;
+      }
+      body.password = password;
+    }
+    btn.disabled = true;
+    document.getElementById('assistant-resume').hidden = true;
+    note.textContent = 'Starting the box…';
+    var next = boxPage();
+    try {
+      var reply = await fetch('/api/setup/assistant', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+      var answer = {};
+      try { answer = await reply.json(); } catch (_) { /* Core's reason is optional. */ }
+      // Only the first-start server takes this call. It refuses a box that
+      // has settings (409); a box that runs has no such route (404).
+      if (reply.status === 409 || reply.status === 404) {
+        showOpenBox('This box already has settings. Open the box instead.', next);
+        return;
+      }
+      if (!reply.ok) {
+        note.textContent = answer.error || 'Could not start setup.';
+        btn.disabled = false;
+        return;
+      }
+      next = boxPage(answer.next);
+      document.getElementById('assistant-password').value = '';
+      document.getElementById('assistant-password-confirm').value = '';
+    } catch (_) {
+      // The box can restart before its reply arrives. Find the saved setup
+      // before allowing another first-run write.
+      note.textContent = 'The box is restarting. Checking whether it has started…';
+    }
+    for (var attempt = 0; attempt < 30; attempt++) {
+      await new Promise(function (resolve) { setTimeout(resolve, 1000); });
+      try {
+        var status = await fetch('/api/auth/status', {cache: 'no-store', signal: shortWait()});
+        if (status.ok) {
+          window.location.href = next;
+          return;
+        }
+      } catch (_) { /* Wait for the same box to restart. */ }
+    }
+    // Trying again is safe: Core refuses a second first-start write, and
+    // that answer says to open the box.
+    showOpenBox('The box has not answered yet. Open the box, or try again.', next);
+    btn.disabled = false;
+  };
+
+  document.getElementById('assistant-setup').addEventListener('submit', function (event) {
+    if (event) event.preventDefault();
+    window.startAssistantSetup();
+  });
 
   // Collected state. Each device carries the driver block it saves, the
   // catalog entry it came from, and what its test found.
@@ -1008,14 +1107,14 @@
   }
 
   // A short house password is the owner's choice: a word, not a refusal.
-  (function () {
-    var input = document.getElementById('house-password');
-    var hint = document.getElementById('house-password-hint');
+  ['house-password', 'assistant-password'].forEach(function (id) {
+    var input = document.getElementById(id);
+    var hint = document.getElementById(id + '-hint');
     input.addEventListener('input', function () {
       var n = Array.from(input.value).length;
       hint.textContent = n > 0 && n < 8 ? 'Short passwords are easy to guess. You can still use this one.' : '';
     });
-  })();
+  });
 
   document.getElementById('catalog-search').addEventListener('input', renderCatalog);
   document.getElementById('site-connection').addEventListener('change', chooseConnection);
