@@ -7,8 +7,9 @@
 //
 //   - the Noise static key, which the app pins optically and which must never
 //     change, because changing it invalidates every pairing at once;
-//   - the rendezvous secret, which is long-lived but replaceable, and which
-//     only ever feeds the HKDF that names this box on the relay;
+//   - the rendezvous secret, which named this box on the retired relay and
+//     now only fills the QR's fifth segment, so the apps' parsers still
+//     read the six segments they expect;
 //   - the pairing code, which is single-use with a short life and exists only
 //     so the box can tell the first handshake from a stranger's.
 //

@@ -239,7 +239,7 @@ func (s *Server) handleAppLinkPairing(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// The LAN hint is where the app would reach this box directly. It is
-	// advisory and unused today — the relay is the only carrier — but it is
+	// advisory and unused today — FTW Cloud is the only carrier — but it is
 	// part of the payload so a LAN carrier can be added without another
 	// payload version, and so a box that knows its address says so.
 	url, err := s.deps.AppEnroll.EnrollmentURL(code, s.appLinkLANHint(r))
@@ -445,8 +445,8 @@ func (s *Server) handleAppLinkDeviceRole(w http.ResponseWriter, r *http.Request)
 // A session request has no such host to offer. The passthrough builds it with
 // Host "localhost" so the API's trust boundary sees a local client, and
 // copying that into the payload would hand a guest an address pointing at
-// their own phone. No hint is the honest answer: the field is advisory, the
-// relay is the only carrier today, and a wrong hint is worse than none.
+// their own phone. No hint is the honest answer: the field is advisory, FTW
+// Cloud is the only carrier today, and a wrong hint is worse than none.
 func (s *Server) appLinkLANHint(r *http.Request) string {
 	if appLinkOverSession(r) {
 		return ""
