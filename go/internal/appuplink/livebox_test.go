@@ -28,8 +28,8 @@ import (
 
 // TestLiveBoxForTheiPhone is a box for the iPhone's live tests in
 // srcfl/ftw-app (LiveTunnelTests, LiveLatencyTests): the real uplink, cloud
-// link, tunnel table and handler, linked to a local ftwcloudd, with the
-// relay unreachable. Off unless FTW_LIVE_BOX names a directory.
+// link, tunnel table and handler, linked to a local ftwcloudd. Off unless
+// FTW_LIVE_BOX names a directory.
 //
 //	FTW_LIVE_BOX=<dir>   holds the service's ca.pem and service.pub; gets
 //	                     pair.url, arrivals.log and tun.log
@@ -107,7 +107,7 @@ func TestLiveBoxForTheiPhone(t *testing.T) {
 		})
 	}
 	arrivals := make(chan struct{}, 1)
-	uplink, err := New(Options{Endpoint: unreachable(t), Enroll: enroll, Handler: build, Arrivals: arrivals, Logger: logger})
+	uplink, err := New(Options{Enroll: enroll, Handler: build, Arrivals: arrivals, Logger: logger})
 	if err != nil {
 		t.Fatal(err)
 	}

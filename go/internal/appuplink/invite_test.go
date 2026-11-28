@@ -36,7 +36,7 @@ func TestInvitationWaitsForNoiseTransportProofOnTheRealTunnel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dev := deviceIDOf(app.staticPublic())
+	dev := cloudwire.DeviceID(app.staticPublic())
 	r.open(t, app, dev, 91, payload)
 	if len(r.enroll.Agents()) != 0 || r.enroll.AgentInvites()[0].State != "pending" {
 		t.Fatal("message 1 consumed invitation")

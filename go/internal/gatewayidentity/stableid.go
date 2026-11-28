@@ -15,9 +15,11 @@ const (
 	// It was uplink.home.sourceful.energy until Home Link was retired
 	// (Aug 2026) and its DNS record with it; a dead name here made every
 	// identity resolution fail on the lookup, before any route was read.
+	// It was relay.ftw.energy until Core stopped dialling the relay (Oct
+	// 2026); FTW Cloud is the name the box dials now.
 	// The MAC of the answering interface is the identity; the host never
 	// is, so this change re-derives the same identity over a live name.
-	SoftwareIdentityUplinkHost = "relay.ftw.energy"
+	SoftwareIdentityUplinkHost = "cloud.ftw.energy"
 	SoftwareIdentityUplinkPort = 443
 )
 

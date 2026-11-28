@@ -173,27 +173,6 @@ func TestAuthorisationSurvivesARestart(t *testing.T) {
 	}
 }
 
-func TestRotatingTheRendezvousSecretPersists(t *testing.T) {
-	id, keyPath := newIdentity(t)
-	before := id.RendezvousSecret()
-
-	after, err := id.RotateRendezvousSecret()
-	if err != nil {
-		t.Fatalf("RotateRendezvousSecret: %v", err)
-	}
-	if bytes.Equal(before, after) {
-		t.Fatal("rotation returned the same secret")
-	}
-
-	again, err := LoadOrCreate(keyPath)
-	if err != nil {
-		t.Fatalf("LoadOrCreate: %v", err)
-	}
-	if !bytes.Equal(again.RendezvousSecret(), after) {
-		t.Fatal("the rotated secret did not survive a restart")
-	}
-}
-
 // The QR is the app's only trust anchor, so its shape is checked against the
 // parser in srcfl/ftw-webapp rather than against this file's own opinion.
 func TestEnrollmentURLMatchesTheAppsParser(t *testing.T) {

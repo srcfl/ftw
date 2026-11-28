@@ -13,12 +13,14 @@ import (
 type fakeRouteAuthority struct {
 	ips        []net.IP
 	lookupErr  error
+	lookupHost string
 	routes     map[string]routeResult
 	routeErrs  map[string]error
 	interfaces map[int]physicalInterface
 }
 
-func (f *fakeRouteAuthority) LookupIP(context.Context, string) ([]net.IP, error) {
+func (f *fakeRouteAuthority) LookupIP(_ context.Context, host string) ([]net.IP, error) {
+	f.lookupHost = host
 	return append([]net.IP(nil), f.ips...), f.lookupErr
 }
 
@@ -56,7 +58,7 @@ func mustMAC(raw string) net.HardwareAddr {
 }
 
 func TestStableInterfaceUsesKernelResolvedOutputForEveryAddress(t *testing.T) {
-	if SoftwareIdentityUplinkHost != "relay.ftw.energy" {
+	if SoftwareIdentityUplinkHost != "cloud.ftw.energy" {
 		t.Fatalf("software identity uplink = %q", SoftwareIdentityUplinkHost)
 	}
 	authority := &fakeRouteAuthority{
@@ -78,6 +80,9 @@ func TestStableInterfaceUsesKernelResolvedOutputForEveryAddress(t *testing.T) {
 	)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if authority.lookupHost != "cloud.ftw.energy" {
+		t.Fatalf("route lookup used %q", authority.lookupHost)
 	}
 	if got.Index != 7 || got.Name != "enp1s0" ||
 		got.PermanentMAC.String() != "00:11:22:33:44:55" {

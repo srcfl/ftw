@@ -40,8 +40,9 @@ const (
 	// unguessable token, not a passphrase — nobody types it.
 	PairingCodeBytes = 16
 
-	// RendezvousSecretBytes matches the app's RENDEZVOUS_SECRET_BYTES. It is
-	// HKDF input keying material, and 32 bytes is what a SHA-256 PRF wants.
+	// RendezvousSecretBytes matches the app's RENDEZVOUS_SECRET_BYTES, which
+	// the clients' QR parsers still check. The relay handle it once fed is
+	// gone.
 	RendezvousSecretBytes = 32
 
 	// PairingTTL is how long a minted code stays usable.
@@ -504,33 +505,13 @@ func (i *Identity) StaticKey() appwire.KeyPair {
 	return i.static
 }
 
-// RendezvousSecret is the HKDF input the relay handle is derived from.
+// RendezvousSecret fills the QR payload's fifth segment. Nothing on the box
+// reads it since the relay went; the segment stays because the clients'
+// parsers expect it.
 func (i *Identity) RendezvousSecret() []byte {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	return append([]byte(nil), i.rendezvous...)
-}
-
-// RotateRendezvousSecret replaces the secret and returns the new one.
-//
-// Every paired phone has to be told the new value before it can find this box
-// again, so the caller owns that half. Provided because the alternative — a
-// secret fixed for the life of the box — is the thing hourly rotation exists
-// to avoid, one level up.
-func (i *Identity) RotateRendezvousSecret() ([]byte, error) {
-	secret := make([]byte, RendezvousSecretBytes)
-	if _, err := i.randRead(secret); err != nil {
-		return nil, fmt.Errorf("appenroll: minting a rendezvous secret: %w", err)
-	}
-
-	i.mu.Lock()
-	i.rendezvous = secret
-	i.mu.Unlock()
-
-	if err := i.save(); err != nil {
-		return nil, err
-	}
-	return append([]byte(nil), secret...), nil
 }
 
 // MintPairingCode issues a fresh single-use code and forgets any previous one.
