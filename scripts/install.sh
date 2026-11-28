@@ -305,6 +305,17 @@ free_mb() {
   df -Pm "$path" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }' || true
 }
 
+# Prints the free space for $1 in words, also when df cannot tell.
+space_of() {
+  local free
+  free="$(free_mb "$1")"
+  if [[ -n "$free" ]]; then
+    echo "$free MB"
+  else
+    echo "unknown (df could not check it)"
+  fi
+}
+
 # True unless df shows less than $2 MB free for $1.
 has_room() {
   local free
@@ -330,8 +341,11 @@ staging_parent() {
 
 # True when a program listens on TCP port $1.
 port_busy() {
-  if command -v ss >/dev/null 2>&1; then
-    ss -ltnH | awk -v port=":$1" 'substr($4, length($4) - length(port) + 1) == port { found = 1 } END { exit !found }'
+  local sockets
+  # An ss that fails, perhaps too old for -H, leaves the kernel's tables.
+  if command -v ss >/dev/null 2>&1 && sockets="$(ss -ltnH 2>/dev/null)"; then
+    printf '%s\n' "$sockets" |
+      awk -v port=":$1" 'substr($4, length($4) - length(port) + 1) == port { found = 1 } END { exit !found }'
   else
     proc_listening "$1" /proc/net
   fi
@@ -458,24 +472,33 @@ setup_addresses() {
   fi
 }
 
+# FTW_INSTALL_TEST_ROOT moves the paths that the next three functions read,
+# so tests can build a box in a folder. main clears it; leave it unset.
+
 # True when this script's own install is here: the release folder and the
 # service that starts its launcher.
 own_install() {
-  [[ -d /opt/ftw && -f /etc/systemd/system/ftw.service ]] &&
-    grep -q '^ExecStart=/opt/ftw/ftw-launcher -root /opt/ftw ' /etc/systemd/system/ftw.service
+  local root="${FTW_INSTALL_TEST_ROOT:-}"
+  [[ -d "$root/opt/ftw" && -f "$root/etc/systemd/system/ftw.service" ]] &&
+    grep -q '^ExecStart=/opt/ftw/ftw-launcher -root /opt/ftw ' "$root/etc/systemd/system/ftw.service"
 }
 
 # Says that FTW is installed already, where to open it and how to update
-# it, then exits: 0 while the service runs, 1 when it does not.
+# it, then exits: 0 while the service runs or starts, 1 when it does not.
 already_installed() {
-  local state health page=/ status=0
+  local root="${FTW_INSTALL_TEST_ROOT:-}" state sub health page=/ status=0 update
   state="$(systemctl is-active ftw.service 2>/dev/null || true)"
+  # A service that waits to start again after a crash counts as activating.
+  sub="$(systemctl show -p SubState --value ftw.service 2>/dev/null || true)"
   # 000 when nothing answers. Until setup is done, Core serves only the
   # setup page, so it answers 404 here.
   health="$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:8080/api/health 2>/dev/null || true)"
   # Without D-Bus, systemctl tells only root; Core's own answer counts too.
   if [[ -z "$state" && -n "$health" && "$health" != 000 ]]; then
     state=active
+  fi
+  if [[ "$sub" == auto-restart ]]; then
+    state=crashing
   fi
   case "$state" in
     active)
@@ -490,6 +513,11 @@ already_installed() {
     activating|reloading)
       echo "FTW is already installed on this computer and starting. In a minute, open it"
       echo "from a phone or computer on the same network:" ;;
+    crashing)
+      status=1
+      echo "FTW is already installed on this computer, but it keeps stopping;"
+      echo "${sudo_word}journalctl -u ftw -n 100 shows why. Once it runs, open it from a phone"
+      echo "or computer on the same network:" ;;
     *)
       status=1
       echo "FTW is already installed on this computer, but it is not running."
@@ -497,8 +525,18 @@ already_installed() {
       echo "Then open it from a phone or computer on the same network:" ;;
   esac
   setup_addresses "$page"
-  echo "Nothing was changed. On this computer, ftw status shows how FTW is doing and"
-  echo "ftw update installs a newer release."
+  echo "Nothing was changed."
+  if [[ -x "$root/usr/local/bin/ftw" ]]; then
+    echo "On this computer, ftw status shows how FTW is doing and ftw update installs"
+    echo "a newer release."
+    update="ftw update"
+  else
+    echo "On this computer, systemctl status ftw shows how the service is doing."
+    update="More → Version → Update FTW on the box's page"
+  fi
+  if [[ "${tag_given:-no}" == yes || "${beta:-no}" == yes ]]; then
+    echo "--tag and --beta change nothing on an installed box; use $update instead."
+  fi
   exit "$status"
 }
 
@@ -509,10 +547,12 @@ own_account() {
 }
 
 # Stops on what the documented removal leaves behind, /var/lib/ftw and the
-# ftw account, when nothing else of FTW is here.
+# ftw account, when nothing else of FTW is here. $@ are more paths that
+# mean another install.
 check_leftovers() {
-  local path data=no account=no
-  for path in /opt/ftw /usr/local/bin/ftw {/etc,/lib,/usr/lib}/systemd/system/{ftw,forty-two-watts}.service "$@"; do
+  local root="${FTW_INSTALL_TEST_ROOT:-}" path data=no account=no
+  for path in "$root/opt/ftw" "$root/usr/local/bin/ftw" \
+      "$root"{/etc,/lib,/usr/lib}/systemd/system/{ftw,forty-two-watts}.service "$@"; do
     if [[ -e "$path" || -L "$path" ]]; then
       return 0
     fi
@@ -520,7 +560,7 @@ check_leftovers() {
   if systemctl cat ftw.service >/dev/null 2>&1 || systemctl cat forty-two-watts.service >/dev/null 2>&1; then
     return 0
   fi
-  if [[ -d /var/lib/ftw && ! -L /var/lib/ftw ]]; then
+  if [[ -d "$root/var/lib/ftw" && ! -L "$root/var/lib/ftw" ]]; then
     data=yes
   fi
   if own_account; then
@@ -530,8 +570,9 @@ check_leftovers() {
   if [[ "$data" == yes ]]; then
     echo "FTW was removed from this computer, but its data is still in /var/lib/ftw:" >&2
     echo "the settings and history of the old install. The installer does not write over it." >&2
-    echo "If you may want it again, back it up first, for example to your home folder:" >&2
-    echo "  ${sudo_word}tar -czf ~/ftw-data-backup.tar.gz -C /var/lib ftw" >&2
+    echo "If you may want it again, back it up first. The copy holds the box's keys, so" >&2
+    echo "this command makes it readable only by you:" >&2
+    echo "  (umask 077; ${sudo_word}tar -czf - -C /var/lib ftw > ~/ftw-data-backup.tar.gz)" >&2
     echo "Then remove what is left and run the install line again:" >&2
     echo "  ${sudo_word}rm -rf /var/lib/ftw" >&2
   else
@@ -545,6 +586,7 @@ check_leftovers() {
 }
 
 main() {
+  unset FTW_INSTALL_TEST_ROOT
   mode=""
   tag=""
   tag_given=no
@@ -694,11 +736,12 @@ main() {
   # checked, and /opt/ftw keeps the release and the next update's.
   need_mb=250
   if ! staging="$(staging_parent "$need_mb")"; then
-    echo "FTW needs about $need_mb MB free to unpack the download. ${TMPDIR:-/tmp} has $(free_mb "${TMPDIR:-/tmp}") MB free and /var/tmp $(free_mb /var/tmp) MB. Free some space, then run the line again." >&2
+    echo "FTW needs about $need_mb MB free to unpack the download. Free space: ${TMPDIR:-/tmp} $(space_of "${TMPDIR:-/tmp}"), /var/tmp $(space_of /var/tmp). Free some space, then run the line again." >&2
     exit 2
   fi
-  if [[ "$mode" != --refresh ]] && ! has_room /opt "$need_mb"; then
-    echo "FTW needs about $need_mb MB free in /opt for its releases, and $(free_mb /opt) MB is free there. Free some space, then run the line again." >&2
+  # A resumed install may have copied most of its release already.
+  if [[ "$mode" == --fresh-host ]] && ! has_room /opt "$need_mb"; then
+    echo "FTW needs about $need_mb MB free in /opt for its releases, and /opt has $(space_of /opt) free. Free some space, then run the line again." >&2
     exit 2
   fi
   work="$(mktemp -d "$staging/ftw-install.XXXXXX")"

@@ -60,7 +60,9 @@ install methods.** Save the command and its output, and ask in
 
 | Message or symptom | What to do |
 |---|---|
-| `Existing FTW installation found` or `--fresh-host` refused | You are on a host/card with FTW data. Keep those files. For a Pi, shut down and use the prepared new card. Some published installers say “try 0.x beside it”; this does not mean Docker is the next step. |
+| `Existing FTW installation found` or `An FTW service already exists` | This host/card holds another FTW install, such as Docker, 3.x or an older native one. Keep those files. For a Pi, shut down and use the prepared new card. Some published installers say “try 0.x beside it”; this does not mean Docker is the next step. |
+| `FTW was removed from this computer, but its data is still in /var/lib/ftw` or `its ftw account is still here` | A native install was removed and left its data or account. Back up the data with the command the message gives; the copy holds the box's keys, so keep it private. Then run its clean-up commands and the install line again. See [Remove FTW](#remove-ftw). |
+| `FTW is already installed on this computer` | Not an error: the line changed nothing. Open the address it prints. Use `ftw update` for a newer release. |
 | `curl: (22)` / `404` | The download failed. Check the network and the line, or the tag if you gave one. Do not run an old `install.sh`, reuse old Compose files or continue to build. |
 | `ftw-local` already exists | An earlier attempt has left files. Stop and inspect that project before retrying; do not delete its data or overwrite its `.env`. |
 | `requires buildx plugin` | Docker is missing a build tool. Follow the Docker prerequisite below before building. |
@@ -169,7 +171,8 @@ its original files and version pin. Restore only the start rules you disabled.
 Each installation keeps its own data.
 
 The native installer refuses an existing site. Do not remove its checks or
-old files to make `--fresh-host` pass. Home Assistant users install the
+an old site's files to make `--fresh-host` pass. Only the data a removed
+native install leaves behind may go, after a backup; see [Remove FTW](#remove-ftw). Home Assistant users install the
 **FTW (beta)** app, version 0.x; the old app is not an intermediate upgrade. Stop its
 Core, Start on boot and Watchdog before the new site takes control. Keep a
 Home Assistant backup and the old app's data for recovery. The MQTT integration
@@ -204,7 +207,9 @@ and starts the `ftw` service. At the end it prints the addresses to open,
 partway, run the same line with `--resume` in place of `--fresh-host`. It
 finishes the same release and keeps any data already saved. On a box it set
 up, the line changes nothing: it says FTW is already installed, prints the
-addresses and points to `ftw status` and `ftw update`.
+addresses and points to `ftw status` and `ftw update`. It exits 0 while FTW
+runs or starts and 1 when it does not. It ignores `--tag` and `--beta` there;
+`ftw update` moves the box to a newer release.
 
 If it reports an error, stop and use [the error table](#if-you-already-got-an-error).
 Do not continue to the Docker instructions.
@@ -560,8 +565,9 @@ decisions about the site to you.
   `ftw backup --output-dir <a directory on another disk>`.
 - Change settings in the web UI or the API. Do not edit files in
   `/var/lib/ftw` while the service runs. Never change or delete anything
-  under `/opt/ftw`, never run `install.sh --fresh-host` on an installed box,
-  and never remove `/var/lib/ftw`.
+  under `/opt/ftw`, and never remove `/var/lib/ftw`. Running
+  `install.sh --fresh-host` again on an installed box only reports its state
+  and changes nothing; it is no way to update or repair it.
 - Do not command the battery, inverter or charger through other apps or
   APIs while FTW runs. Stop FTW first with `sudo systemctl stop ftw`; a
   clean stop hands the equipment back to its own mode.
@@ -600,10 +606,12 @@ sudo systemctl daemon-reload
 
 The data stays in `/var/lib/ftw`, and the `ftw` account stays too. The
 installer will not install over them, and says so. To install again on this
-computer, back up the data if you may want it, then remove both:
+computer, back up the data if you may want it, then remove both. The copy
+holds the box's keys, so the first line makes it readable only by you; keep
+it private.
 
 ```bash
-sudo tar -czf ~/ftw-data-backup.tar.gz -C /var/lib ftw
+(umask 077; sudo tar -czf - -C /var/lib ftw > ~/ftw-data-backup.tar.gz)
 sudo rm -rf /var/lib/ftw
 sudo userdel ftw
 ```

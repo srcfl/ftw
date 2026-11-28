@@ -72,6 +72,12 @@ skriv ditt eget. Sist skriver den ut adresserna att öppna, till exempel:
 
 Öppna en av dem i en webbläsare på samma nätverk.
 
+Kör du raden igen på en box som den redan har installerat ändrar den
+ingenting. Den säger att FTW redan är installerat och skriver ut adresserna.
+Den avslutar med 0 när FTW körs eller startar och med 1 när det inte gör det,
+och säger då hur du startar det. `--tag` och `--beta` gör ingenting på en sådan
+box: kör `ftw update` för en nyare version.
+
 Om den stannar med ett fel: stanna där. Prova inte ett annat sätt att
 installera. Leta upp felet i
 [feltabellen](update-sv.md#om-du-redan-har-fått-ett-fel) eller fråga i

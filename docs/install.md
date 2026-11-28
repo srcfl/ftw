@@ -70,6 +70,11 @@ the end it prints the addresses to open, for example:
 
 Open one of them in a browser on the same network.
 
+Running the line again on a box it set up changes nothing. It says FTW is
+already installed and prints the addresses. It exits 0 while FTW runs or
+starts and 1 when it does not, and then says how to start it. It ignores
+`--tag` and `--beta` on such a box: run `ftw update` for a newer release.
+
 If it stops with an error, stop there. Do not try another install method: look
 up the message in the [error table](native-beta.md#if-you-already-got-an-error)
 or ask in [Discord](https://discord.gg/UK2ygPBu8N). If the install was cut

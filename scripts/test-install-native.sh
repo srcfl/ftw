@@ -246,6 +246,16 @@ EOF
   proc_listening 8080 "$net" || fail "proc_listening missed a listener in tcp"
   if proc_listening 8081 "$net"; then fail "proc_listening found port 8081"; fi
   if proc_listening 8080 "$work/no-such-dir"; then fail "proc_listening found a port without tables"; fi
+  # An ss that answers counts; one that fails leaves the kernel's tables.
+  fakess="$work/fakess"
+  mkdir -p "$fakess"
+  printf '#!/bin/sh\necho "LISTEN 0 4096 0.0.0.0:8080 0.0.0.0:*"\nexit "${SS_EXIT:-0}"\n' > "$fakess/ss"
+  chmod 0755 "$fakess/ss"
+  PATH="$fakess:$PATH" port_busy 8080 || fail "port_busy missed what ss reported"
+  if PATH="$fakess:$PATH" port_busy 8081; then fail "port_busy found port 8081 in ss"; fi
+  if ! proc_listening 8080 /proc/net && SS_EXIT=1 PATH="$fakess:$PATH" port_busy 8080; then
+    fail "port_busy trusted an ss that failed"
+  fi
 
   # Addresses without ip: drop loopback, link-local, repeats and every
   # network that a container bridge routes, as the ip path does by name.
@@ -332,6 +342,130 @@ EOF
   if room 100 100 ext2/ext3 > /dev/null; then fail "staging went on with too little room"; fi
   [[ "$(TMPDIR="$work/tmpdir" TMP_FREE=42 PATH="$fakedf:$PATH" free_mb "$work/tmpdir/not/yet")" == 42 ]] ||
     fail "free_mb did not climb to a folder that exists"
+  [[ "$(TMP_FREE=42 PATH="$fakedf:$PATH" space_of "$work/tmpdir")" == '42 MB' ]] || fail "space_of with df"
+  printf '#!/bin/sh\nexit 1\n' > "$fakedf/df"
+  [[ "$(PATH="$fakedf:$PATH" space_of "$work/tmpdir")" == 'unknown (df could not check it)' ]] ||
+    fail "space_of without df said $(PATH="$fakedf:$PATH" space_of "$work/tmpdir")"
+
+  # A box built in a folder: what a second run and the leftover check say.
+  # systemctl, curl and getent are stubs that answer from the environment.
+  box="$work/box"
+  fakebox="$work/fakebox"
+  mkdir -p "$fakebox" "$box/opt/ftw" "$box/etc/systemd/system" "$box/usr/local/bin"
+  cat > "$fakebox/systemctl" <<'EOF'
+#!/bin/sh
+case "$1" in
+  is-active) [ -z "$STATE" ] || echo "$STATE"; [ "$STATE" = active ] ;;
+  show) [ -z "$STATE" ] || echo "$SUB" ;;
+  cat) [ -n "${UNIT:-}" ] ;;
+  *) exit 1 ;;
+esac
+EOF
+  printf '#!/bin/sh\nprintf %%s "${HEALTH:-000}"\n' > "$fakebox/curl"
+  printf '#!/bin/sh\n[ -z "${ACCOUNT_HOME:-}" ] || echo "ftw:x:999:999::$ACCOUNT_HOME:/usr/sbin/nologin"\n' > "$fakebox/getent"
+  chmod 0755 "$fakebox/systemctl" "$fakebox/curl" "$fakebox/getent"
+  unit="$box/etc/systemd/system/ftw.service"
+  printf '[Service]\nExecStart=/opt/ftw/ftw-launcher -root /opt/ftw -config /var/lib/ftw/config.yaml\n' > "$unit"
+  FTW_INSTALL_TEST_ROOT="$box" own_install || fail "own_install missed this script's install"
+  printf '[Service]\nExecStart=/usr/bin/docker compose up\n' > "$work/other.service"
+  cp "$unit" "$work/own.service"
+  cp "$work/other.service" "$unit"
+  if FTW_INSTALL_TEST_ROOT="$box" own_install; then fail "own_install took another service for its own"; fi
+  cp "$work/own.service" "$unit"
+  rmdir "$box/opt/ftw"
+  if FTW_INSTALL_TEST_ROOT="$box" own_install; then fail "own_install needs /opt/ftw"; fi
+  mkdir "$box/opt/ftw"
+  if own_install && [[ ! -d /opt/ftw ]]; then fail "own_install looked outside the test root"; fi
+
+  sudo_word='sudo ' tag_given=no beta=no
+  # rerun STATE SUB HEALTH: prints the exit status; the words go to $work/rerun.
+  rerun() {
+    local code=0
+    (
+      ipv4_addresses() { echo 192.0.2.10; }
+      mdns_name() { return 1; }
+      export STATE="$1" SUB="$2" HEALTH="$3" FTW_INSTALL_TEST_ROOT="$box" PATH="$fakebox:$PATH"
+      already_installed
+    ) > "$work/rerun" 2>&1 || code=$?
+    echo "$code"
+  }
+  said() { grep -qF -- "$1" "$work/rerun" || fail "a second run said $(cat "$work/rerun"), want $1"; }
+  printf '#!/bin/sh\n' > "$box/usr/local/bin/ftw"
+  chmod 0755 "$box/usr/local/bin/ftw"
+  [[ "$(rerun active running 404)" == 0 ]] || fail "a running box waiting for setup is no error"
+  said 'running. It waits for setup'
+  said 'http://192.0.2.10:8080/setup'
+  said 'Nothing was changed.'
+  said 'ftw status shows how FTW is doing and ftw update installs'
+  if grep -q -- '--tag' "$work/rerun"; then fail "a plain second run named --tag"; fi
+  [[ "$(rerun active running 200)" == 0 ]] || fail "a running box is no error"
+  said 'http://192.0.2.10:8080/'
+  if grep -q '/setup' "$work/rerun"; then fail "a box that is set up got the setup page"; fi
+  [[ "$(rerun '' '' 200)" == 0 ]] || fail "Core's own answer did not count without D-Bus"
+  said 'and running'
+  [[ "$(rerun '' '' 000)" == 1 ]] || fail "a box that does not answer is running"
+  said 'but it is not running'
+  said 'Start it with sudo systemctl start ftw'
+  [[ "$(rerun failed failed 000)" == 1 ]] || fail "a failed service is running"
+  said 'but it is not running'
+  [[ "$(rerun activating start 000)" == 0 ]] || fail "a starting service is an error"
+  said 'and starting'
+  [[ "$(rerun activating auto-restart 000)" == 1 ]] || fail "a crash loop counted as starting"
+  said 'but it keeps stopping'
+  said 'sudo journalctl -u ftw -n 100 shows why'
+  tag_given=yes
+  rerun active running 200 > /dev/null
+  said '--tag and --beta change nothing on an installed box; use ftw update instead.'
+  tag_given=no beta=yes
+  rm "$box/usr/local/bin/ftw"
+  rerun active running 200 > /dev/null
+  said 'systemctl status ftw shows how the service is doing'
+  said 'use More → Version → Update FTW'
+  if grep -q 'ftw update' "$work/rerun"; then fail "a box without the ftw command was told to run ftw update"; fi
+  beta=no
+
+  # leftovers [PATH...]: prints the exit status; the words go to $work/left.
+  leftovers() {
+    local code=0
+    (
+      export FTW_INSTALL_TEST_ROOT="$box" PATH="$fakebox:$PATH"
+      check_leftovers "$@"
+    ) > "$work/left" 2>&1 || code=$?
+    echo "$code"
+  }
+  left() { grep -qF -- "$1" "$work/left" || fail "the leftover check said $(cat "$work/left"), want $1"; }
+  rm -rf "$box"
+  mkdir -p "$box"
+  [[ "$(leftovers)" == 0 && ! -s "$work/left" ]] || fail "the leftover check stopped an empty computer: $(cat "$work/left")"
+  mkdir -p "$box/var/lib/ftw"
+  [[ "$(leftovers)" == 2 ]] || fail "the leftover check let data from a removed install pass"
+  left 'its data is still in /var/lib/ftw'
+  left "holds the box's keys"
+  left '  (umask 077; sudo tar -czf - -C /var/lib ftw > ~/ftw-data-backup.tar.gz)'
+  left '  sudo rm -rf /var/lib/ftw'
+  if grep -q userdel "$work/left"; then fail "the leftover check named an account that is not there"; fi
+  export ACCOUNT_HOME=/var/lib/ftw
+  [[ "$(leftovers)" == 2 ]] || fail "the leftover check let data and account pass"
+  left '  sudo userdel ftw'
+  rmdir "$box/var/lib/ftw"
+  [[ "$(leftovers)" == 2 ]] || fail "the leftover check let the account pass"
+  left 'its ftw account is still here'
+  left '  sudo userdel ftw'
+  if grep -q 'umask' "$work/left"; then fail "the leftover check named data that is not there"; fi
+  ACCOUNT_HOME=/home/ftw
+  [[ "$(leftovers)" == 0 ]] || fail "a login named ftw counted as a leftover account"
+  ACCOUNT_HOME=/var/lib/ftw
+  mkdir -p "$box/var/lib/ftw" "$box/opt/ftw"
+  [[ "$(leftovers)" == 0 ]] || fail "the leftover check took an install for leftovers"
+  rmdir "$box/opt/ftw"
+  mkdir -p "$box/lib/systemd/system"
+  touch "$box/lib/systemd/system/forty-two-watts.service"
+  [[ "$(leftovers)" == 0 ]] || fail "the leftover check missed an old unit file"
+  rm "$box/lib/systemd/system/forty-two-watts.service"
+  touch "$work/compose.yml"
+  [[ "$(leftovers "$work/compose.yml")" == 0 ]] || fail "the leftover check missed a Docker site"
+  [[ "$(UNIT=yes leftovers)" == 0 ]] || fail "the leftover check missed a unit systemd knows"
+  unset ACCOUNT_HOME
 )
 
 # Messages that stop the installer before it does anything, whatever runs

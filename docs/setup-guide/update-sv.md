@@ -65,7 +65,9 @@ komma förbi felet.** Spara kommandot och svaret. Be om hjälp i
 
 | Det du ser | Gör så här |
 |---|---|
-| `Existing FTW installation found` eller nekad `--fresh-host` | Du kör på en maskin eller ett kort med FTW-data. Behåll filerna. På Pi: stäng av och byt till det förberedda nya kortet. Äldre publicerade skript kan säga “try 0.x beside it”; det betyder inte att Docker är nästa steg. |
+| `Existing FTW installation found` eller `An FTW service already exists` | Maskinen eller kortet har en annan FTW-installation, till exempel Docker, 3.x eller en äldre native. Behåll filerna. På Pi: stäng av och byt till det förberedda nya kortet. Äldre publicerade skript kan säga “try 0.x beside it”; det betyder inte att Docker är nästa steg. |
+| `FTW was removed from this computer, but its data is still in /var/lib/ftw` eller `its ftw account is still here` | En borttagen native-installation lämnade kvar sina data eller sitt konto. Säkerhetskopiera datan med kommandot i meddelandet; kopian innehåller boxens nycklar, så håll den privat. Kör sedan kommandona som städar bort resten och installationsraden igen. |
+| `FTW is already installed on this computer` | Inget fel: raden ändrade ingenting. Öppna adressen den skriver ut. Kör `ftw update` för en nyare version. |
 | `curl: (22)` eller `404` | Nedladdningen misslyckades. Kontrollera nätet och raden, eller taggen om du angav en. Kör inte en gammal `install.sh` eller kvarlämnade Docker-filer. |
 | `ftw-local` finns redan | Ett tidigare försök har lämnat filer. Kontrollera projektet innan du gör mer. Radera inte data och skriv inte över `.env`. |
 | `requires buildx plugin` | Docker saknar ett byggverktyg. Ordna förkraven i Docker-guiden innan du bygger. |
