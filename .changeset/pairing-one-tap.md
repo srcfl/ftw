@@ -8,5 +8,6 @@ buttons says the app reaches the box through FTW Cloud and that pairing
 accepts its terms, and the tap accepts them through the same route as the
 Cloud panel before it shows the code. The page also shows the box address
 beside the QR. The app link switch and its restart show only while the link
-is off, and the FTW Cloud panel only while Cloud is in use. The page no
+is off; while it runs, a quiet **Turn off the app link…** below the pairing
+stops it. The FTW Cloud panel shows only while Cloud is in use. The page no
 longer suggests the app works at home without pairing.

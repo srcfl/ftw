@@ -78,6 +78,17 @@ describe("the app tab", () => {
     assert.match(render({ app_link: { enabled: false } }), /id="app-link-switch">/);
   });
 
+  // While the link runs, a quiet text button at the foot of the pairing
+  // section turns it off. It starts hidden; the status reveals it.
+  it("keeps a quiet off action below the pairing", () => {
+    const html = render({});
+    const hints = html.indexOf("Only one phone?");
+    const off = html.indexOf('<p id="app-link-off-row" class="app-link-off" hidden>');
+    assert.ok(hints >= 0 && off > hints, "the off action is not below the pairing");
+    assert.match(html, /class="btn-link" id="app-link-off">Turn off the app link…</);
+    assert.ok(off < html.indexOf("</fieldset>"), "the off action left the app section");
+  });
+
   // The app reaches the box through FTW Cloud, and Cloud keeps a copy
   // Sourceful can read. The page once said Sourceful could read nothing,
   // which stopped being true when pairing began to accept the Cloud terms.

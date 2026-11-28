@@ -32,7 +32,8 @@ uses.
 The pairing buttons work while the app link runs, which it does on a new
 box. If the page shows **Let the FTW app connect to this box**, the link is
 off: turn it on, choose **Save and restart FTW** and wait for the page to
-return. FTW pauses energy control while it restarts.
+return. FTW pauses energy control while it restarts. While the link runs,
+**Turn off the app link…** below the pairing stops it the same way.
 
 A short code works once for five minutes. Five wrong tries cancel it.
 Making a new code cancels the previous code. The QR and link keep their

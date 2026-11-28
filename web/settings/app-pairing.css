@@ -28,3 +28,7 @@
 #app-link-terms a {
   color: var(--accent-e);
 }
+
+.app-link-off {
+  margin: 12px 0 0;
+}

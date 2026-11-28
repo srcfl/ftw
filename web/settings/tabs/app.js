@@ -293,8 +293,9 @@
         var note = describe(saved, s.enabled);
         setStatus(note === null ? pairedText(s.paired_devices) : note);
         // The switch and its restart are for turning the app link on. While
-        // it is on and running there is nothing to do with them.
+        // it is on and running, a quiet action below the pairing stops it.
         setHidden("app-link-switch", saved && s.enabled);
+        setHidden("app-link-off-row", !(saved && s.enabled));
         var restart = document.getElementById("app-link-restart");
         if (restart) restart.className = saved !== s.enabled ? "btn-send" : "btn-ghost";
         setHidden("app-link-terms", !(s.enabled && cloudNeedsTerms(cloud)));
@@ -470,9 +471,12 @@
     slot.appendChild(button);
   }
 
-  async function restartAppLink(ctx, button) {
-    if (!confirm("Save settings and restart FTW? Energy control pauses until FTW is back.")) return;
-    var status = document.getElementById("app-link-restart-status");
+  // Saves the settings and restarts FTW, which is when the app link starts
+  // or stops: it connects at startup. statusId is the line beside the button
+  // that was pressed; confirmed says that button already asked.
+  async function restartAppLink(ctx, button, statusId, confirmed) {
+    if (!confirmed && !confirm("Save settings and restart FTW? Energy control pauses until FTW is back.")) return;
+    var status = document.getElementById(statusId || "app-link-restart-status");
     button.disabled = true;
     status.textContent = "Saving settings…";
     resumePairing(true);
@@ -497,7 +501,7 @@
         fetch("/api/health?_=" + Date.now(), { cache: "no-store" })
           .then(function (r) {
             if (!r.ok) throw new Error("not ready");
-            status.textContent = "FTW is back. Opening pairing…";
+            status.textContent = "FTW is back.";
             window.location.reload();
           })
           .catch(function () {
@@ -512,6 +516,18 @@
       status.textContent = "Could not restart FTW: " + error.message;
       button.disabled = false;
     }
+  }
+
+  // The quiet way to stop the app link while it runs, so the owner can
+  // always stop it at the box. It is the same saved setting and restart that
+  // turn it on, so it unticks the same switch.
+  function turnOffAppLink(ctx, button) {
+    if (!confirm("Turn off the app link? Paired phones cannot reach this box until you turn it on again. " +
+      "FTW saves and restarts; energy control pauses until it is back.")) return;
+    ctx.config.app_link.enabled = false;
+    var toggle = document.getElementById("app-link-enabled");
+    if (toggle) toggle.checked = false;
+    restartAppLink(ctx, button, "app-link-off-status", true);
   }
 
   function resumePairing(on) {
@@ -601,6 +617,8 @@
         });
         var restartButton = document.getElementById("app-link-restart");
         if (restartButton) restartButton.addEventListener("click", function () { restartAppLink(ctx, restartButton); });
+        var offButton = document.getElementById("app-link-off");
+        if (offButton) offButton.addEventListener("click", function () { turnOffAppLink(ctx, offButton); });
 
         var shareButton = document.getElementById("app-link-share");
         if (shareButton) {
@@ -627,8 +645,8 @@
         '<fieldset class="app-pairing"><legend>The FTW app</legend>' +
         '<p class="hint">This is not the Sourceful (Zap) app. The FTW app needs ' +
         "pairing, at home and away. A browser on your home Wi-Fi needs none.</p>" +
-        // Shown only while the app link is off: on a box where it runs, the
-        // switch and the restart have nothing to do.
+        // Shown only while the app link is off. On a box where it runs, the
+        // quiet off action at the foot of this section takes their place.
         '<div id="app-link-switch"' + (enabled ? " hidden" : "") + ">" +
         '<label><input type="checkbox" id="app-link-enabled" ' +
         'data-checkbox-path="app_link.enabled"' + (enabled ? " checked" : "") +
@@ -662,6 +680,9 @@
         "or choose Use a pairing code and enter it in the FTW app while on your home Wi-Fi. " +
         "If you set a house password, the app asks for it too. You can also choose a screenshot " +
         "of the QR in the FTW app. Only one code works at a time; making a new code cancels the last one.</p>" +
+        '<p id="app-link-off-row" class="app-link-off" hidden>' +
+        '<button type="button" class="btn-link" id="app-link-off">Turn off the app link…</button>' +
+        '<span id="app-link-off-status" class="hint" role="status"></span></p>' +
         "</fieldset>" +
         // FTW Cloud's own panel, below the pairing so it never pushes a code
         // out of view when it appears. Hidden while Cloud is off.

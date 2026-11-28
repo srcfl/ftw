@@ -80,6 +80,9 @@ const IDS = [
   "app-link-switch",
   "app-link-terms",
   "app-cloud-panel",
+  "app-link-off",
+  "app-link-off-row",
+  "app-link-off-status",
 ];
 
 // load runs app.js, renders the tab, and hands back the DOM it wired itself
@@ -170,8 +173,9 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null, save
   vm.runInContext(source, sandbox);
 
   const tab = sandbox.window.FTWSettings.tabs.app;
-  const html = tab.render({ config: { app_link: { enabled: saved } }, saveConfig });
-  return { html, calls, confirmed, copied, opened, session, shellRestarts: () => shellRestarts, reloaded: () => reloaded, el: (id) => byId.get(id) };
+  const config = { app_link: { enabled: saved } };
+  const html = tab.render({ config, saveConfig });
+  return { html, config, calls, confirmed, copied, opened, session, shellRestarts: () => shellRestarts, reloaded: () => reloaded, el: (id) => byId.get(id) };
 }
 
 // Lets the promise chains inside the tab settle. Two turns, because a button
@@ -676,6 +680,53 @@ describe("the app link switch", () => {
     const { el } = load();
     await settle();
     assert.equal(el("app-link-switch").hidden, true);
+  });
+
+  // The owner can always stop the app link at the box. While it runs, the
+  // switch gives way to a quiet action below the pairing, which saves the
+  // same setting and restarts.
+  it("offers a quiet way to turn it off while it runs", async () => {
+    const running = load();
+    await settle();
+    assert.equal(running.el("app-link-off-row").hidden, false, "no way to turn the app link off on the box");
+
+    const off = load({ saved: false, running: false });
+    await settle();
+    assert.equal(off.el("app-link-off-row").hidden, true, "two ways to change one switch on screen");
+  });
+
+  it("turns it off by saving the setting and restarting", async () => {
+    let savedEnabled = null;
+    const page = load({
+      saveConfig: async () => {
+        savedEnabled = page.config.app_link.enabled;
+        return { restart_required: false };
+      },
+    });
+    page.el("app-link-enabled").checked = true;
+    await settle();
+
+    page.el("app-link-off").click();
+    await settle();
+
+    assert.match(page.confirmed[0], /Turn off the app link\?/);
+    assert.match(page.confirmed[0], /energy control pauses/);
+    assert.equal(page.confirmed.length, 1, "asked twice for one action");
+    assert.equal(savedEnabled, false, "the restart came before the setting was saved off");
+    assert.equal(page.el("app-link-enabled").checked, false, "the switch still says on");
+    assert.ok(page.calls.some((c) => c.path === "/api/restart" && c.opts.method === "POST"));
+    assert.match(page.el("app-link-off-status").textContent, /FTW is back|Restarting/);
+  });
+
+  it("changes nothing when turning off is cancelled", async () => {
+    let saves = 0;
+    const page = load({ confirmRestart: false, saveConfig: async () => { saves++; return {}; } });
+    await settle();
+    page.el("app-link-off").click();
+    await settle();
+    assert.equal(saves, 0);
+    assert.equal(page.config.app_link.enabled, true);
+    assert.equal(page.calls.some((c) => c.path === "/api/restart"), false);
   });
 
   it("shows while the app link is off, or saved and not yet running", async () => {
