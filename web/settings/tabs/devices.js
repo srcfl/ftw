@@ -1480,7 +1480,7 @@
         var choices = S.chargerSetup ? entries.filter(function (entry) {
           return (entry.capabilities || []).indexOf('ev') >= 0;
         }) : entries;
-        var matches = searchCatalog(choices, query);
+        var matches = flow().search(choices, query);
 
         host.textContent = "";
         if (matches.length === 0) {
