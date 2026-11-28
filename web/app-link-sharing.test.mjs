@@ -77,11 +77,22 @@ const IDS = [
   "app-link-code",
   "app-link-restart",
   "app-link-restart-status",
+  "app-link-switch",
+  "app-link-terms",
+  "app-cloud-panel",
+  "app-link-off",
+  "app-link-off-row",
+  "app-link-off-status",
 ];
 
 // load runs app.js, renders the tab, and hands back the DOM it wired itself
 // into along with every request it made.
-function load({ devices = [], pairing = null, spoken = null, refuse = null, saveConfig = async () => ({ restart_required: false }), confirmRestart = true, resume = false, shellRestart = false } = {}) {
+// cloud is what GET /api/cloud answers, and grant what POST /api/cloud/grant
+// answers: { error } refuses it. The default is a box that cannot answer
+// /api/cloud, which has nothing to accept.
+const POLICY = { cloud_scopes: ["live.read", "history.read"], cloud_policy: "ftw-cloud-2026-10-v3" };
+
+function load({ devices = [], pairing = null, spoken = null, refuse = null, saveConfig = async () => ({ restart_required: false }), confirmRestart = true, resume = false, shellRestart = false, cloud = null, grant = null, saved = true, running = true, ha = false, policy = POLICY } = {}) {
   const byId = new Map();
   for (const id of IDS) {
     byId.set(id, element(id.startsWith("app-link-devices") || id.endsWith("slot") ? "div" : "button"));
@@ -137,7 +148,14 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null, save
         return answer(shape && Object.assign({}, shape, { role: asked.role }));
       }
       if (path === "/api/app-link/status") {
-        return answer({ enabled: true, paired_devices: devices.length });
+        return answer({ enabled: running, paired_devices: devices.length });
+      }
+      if (path === "/api/cloud") return cloud ? answer(cloud) : answer({ error: "unavailable" }, false);
+      if (path === "/api/cloud/stats-policy") return policy ? answer(policy) : answer({ error: "unavailable" }, false);
+      if (path === "/api/cloud/grant") {
+        if (grant && grant.error) return answer({ error: grant.error }, false);
+        cloud = Object.assign({}, cloud, { cloudTermsAccepted: true, link: "on", state: "on" });
+        return answer(cloud);
       }
       return answer({});
     },
@@ -150,13 +168,17 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null, save
     String,
     console,
   };
+  // home-assistant.js sets this flag on pages Core serves through Home
+  // Assistant's ingress.
+  if (ha) sandbox.window.FTWHomeAssistant = true;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
 
   const tab = sandbox.window.FTWSettings.tabs.app;
-  const html = tab.render({ config: { app_link: { enabled: true } }, saveConfig });
-  return { html, calls, confirmed, copied, opened, session, shellRestarts: () => shellRestarts, reloaded: () => reloaded, el: (id) => byId.get(id) };
+  const config = { app_link: { enabled: saved } };
+  const html = tab.render({ config, saveConfig });
+  return { html, config, calls, confirmed, copied, opened, session, shellRestarts: () => shellRestarts, reloaded: () => reloaded, el: (id) => byId.get(id) };
 }
 
 // Lets the promise chains inside the tab settle. Two turns, because a button
@@ -554,5 +576,244 @@ describe("pairing and restart on one phone", () => {
     canceled.el("app-link-restart").click();
     await settle();
     assert.equal(canceled.calls.some((c) => c.path === "/api/restart"), false);
+  });
+});
+
+// Pairing accepts the FTW Cloud terms, as it does in the app (Fredrik,
+// 23 November 2026). The box page used to refuse the button until the terms
+// were accepted in a separate panel; now one tap accepts them through the
+// same route and shows the code. The box stays the judge of both steps.
+describe("pairing in one tap", () => {
+  const fresh = { available: true, cloudTermsAccepted: false, link: "off", state: "off" };
+  const qr = { url: "https://app.ftw.energy/p#v3.a.b.c.d.e", expires_at_ms: Date.now() + 600000 };
+
+  it("accepts the terms, then shows the code", async () => {
+    const { el, calls } = load({ cloud: fresh, pairing: qr });
+    await settle();
+    el("app-link-pair").click();
+    await settle();
+
+    const paths = calls.map((c) => c.path);
+    const grant = calls.findIndex((c) => c.path === "/api/cloud/grant");
+    const mint = calls.findIndex((c) => c.path === "/api/app-link/pairing");
+    assert.ok(grant >= 0, `no terms were accepted: ${paths.join(", ")}`);
+    assert.ok(mint > grant, "the code was asked for before the terms were accepted");
+    assert.equal(calls[grant].opts.method, "POST");
+    const body = JSON.parse(calls[grant].opts.body);
+    assert.deepEqual(body.scopes, POLICY.cloud_scopes);
+    assert.equal(body.policy, POLICY.cloud_policy);
+    assert.match(el("app-link-slot").words(), /adds a phone that can change things/);
+  });
+
+  it("stops and says why when the box refuses the terms", async () => {
+    const { el, calls } = load({
+      cloud: fresh,
+      pairing: qr,
+      grant: { error: "log in with the house password to save this choice, or use the owner's app" },
+    });
+    await settle();
+    el("app-link-pair").click();
+    await settle();
+
+    assert.equal(calls.some((c) => c.path === "/api/app-link/pairing"), false, "a code was made after the box refused the terms");
+    assert.match(el("app-link-slot").words(), /house password/);
+    assert.equal(el("app-link-pair").disabled, false, "the button stays dead after a refusal");
+  });
+
+  // Terms the page could not read are not terms accepted. A code shown then
+  // would pair a phone while the box still holds no answer.
+  it("stops when the box's terms cannot be read", async () => {
+    const { el, calls } = load({ cloud: fresh, pairing: qr, policy: null });
+    await settle();
+    el("app-link-pair").click();
+    await settle();
+
+    assert.equal(calls.some((c) => c.path === "/api/cloud/grant"), false);
+    assert.equal(calls.some((c) => c.path === "/api/app-link/pairing"), false, "a code was made with the terms unaccepted");
+    assert.match(el("app-link-slot").words(), /Could not read the FTW Cloud terms/);
+    assert.equal(el("app-link-pair").disabled, false);
+  });
+
+  it("does not accept again once the terms are accepted", async () => {
+    const { el, calls } = load({ cloud: { available: true, cloudTermsAccepted: true, link: "on", state: "on" }, pairing: qr });
+    await settle();
+    el("app-link-code").click();
+    await settle();
+    assert.equal(calls.some((c) => c.path === "/api/cloud/grant"), false);
+    assert.ok(calls.some((c) => c.path === "/api/app-link/pairing"));
+  });
+
+  it("pairs without a grant on a build with no Cloud service", async () => {
+    const { el, calls } = load({ cloud: { available: false, cloudTermsAccepted: false, link: "off", state: "off" }, pairing: qr });
+    await settle();
+    el("app-link-pair").click();
+    await settle();
+    assert.equal(calls.some((c) => c.path === "/api/cloud/grant"), false);
+    assert.ok(calls.some((c) => c.path === "/api/app-link/pairing"));
+  });
+
+  it("shows the terms line by the buttons until the terms are accepted", async () => {
+    const page = load({ cloud: fresh, pairing: qr });
+    await settle();
+    assert.equal(page.el("app-link-terms").hidden, false, "the line that says pairing accepts the terms is missing");
+    page.el("app-link-pair").click();
+    await settle();
+    assert.equal(page.el("app-link-terms").hidden, true, "the line stays after the terms were accepted");
+
+    const accepted = load({ cloud: { available: true, cloudTermsAccepted: true, link: "on", state: "on" } });
+    await settle();
+    assert.equal(accepted.el("app-link-terms").hidden, true);
+
+    const stopped = load({ cloud: fresh, saved: false, running: false });
+    await settle();
+    assert.equal(stopped.el("app-link-terms").hidden, true, "a terms line beside buttons that cannot work");
+  });
+
+  it("shows the Cloud panel only while Cloud is in use", async () => {
+    const off = load({ cloud: fresh });
+    await settle();
+    assert.equal(off.el("app-cloud-panel").hidden, true, "a panel about Cloud while Cloud is off");
+
+    const on = load({ cloud: { available: true, cloudTermsAccepted: true, link: "on", state: "on" } });
+    await settle();
+    assert.equal(on.el("app-cloud-panel").hidden, false);
+
+    const ending = load({ cloud: { available: true, cloudTermsAccepted: false, link: "ending", state: "revoking" } });
+    await settle();
+    assert.equal(ending.el("app-cloud-panel").hidden, false, "Cloud's deletion is hidden");
+  });
+
+  it("shows the box address beside the QR", async () => {
+    const { el } = load({ pairing: qr });
+    await settle();
+    el("app-link-pair").click();
+    await settle();
+    assert.match(el("app-link-slot").words(), /Box address: http:\/\/ftw\.local:8080/);
+  });
+});
+
+describe("the app link switch", () => {
+  it("is hidden while the app link is on and running", async () => {
+    const { el } = load();
+    await settle();
+    assert.equal(el("app-link-switch").hidden, true);
+  });
+
+  // The owner can always stop the app link at the box. While it runs, the
+  // switch gives way to a quiet action below the pairing, which saves the
+  // same setting and restarts.
+  it("offers a quiet way to turn it off while it runs", async () => {
+    const running = load();
+    await settle();
+    assert.equal(running.el("app-link-off-row").hidden, false, "no way to turn the app link off on the box");
+
+    const off = load({ saved: false, running: false });
+    await settle();
+    assert.equal(off.el("app-link-off-row").hidden, true, "two ways to change one switch on screen");
+  });
+
+  it("turns it off by saving the setting and restarting", async () => {
+    let savedEnabled = null;
+    const page = load({
+      saveConfig: async () => {
+        savedEnabled = page.config.app_link.enabled;
+        return { restart_required: false };
+      },
+    });
+    page.el("app-link-enabled").checked = true;
+    await settle();
+
+    page.el("app-link-off").click();
+    await settle();
+
+    assert.match(page.confirmed[0], /Turn off the app link\?/);
+    assert.match(page.confirmed[0], /energy control pauses/);
+    assert.equal(page.confirmed.length, 1, "asked twice for one action");
+    assert.equal(savedEnabled, false, "the restart came before the setting was saved off");
+    assert.equal(page.el("app-link-enabled").checked, false, "the switch still says on");
+    assert.ok(page.calls.some((c) => c.path === "/api/restart" && c.opts.method === "POST"));
+    assert.match(page.el("app-link-off-status").textContent, /FTW is back|Restarting/);
+  });
+
+  // The save carries the setting. When it fails, the page must not go on
+  // saying off: a later Save elsewhere would then turn the link off unasked.
+  it("puts the switch back when the save fails", async () => {
+    const page = load({ saveConfig: async () => { throw new Error("the box said no"); } });
+    page.el("app-link-enabled").checked = true;
+    await settle();
+
+    page.el("app-link-off").click();
+    await settle();
+
+    assert.equal(page.config.app_link.enabled, true, "the page holds off while the box has it on");
+    assert.equal(page.el("app-link-enabled").checked, true, "the switch says off while nothing was saved");
+    assert.equal(page.calls.some((c) => c.path === "/api/restart"), false, "restarted after a failed save");
+    assert.match(page.el("app-link-off-status").textContent, /Could not save settings: the box said no/);
+    assert.equal(page.el("app-link-off").disabled, false);
+    assert.equal(page.session.has("ftw.pairing.resume"), false);
+  });
+
+  it("changes nothing when turning off is cancelled", async () => {
+    let saves = 0;
+    const page = load({ confirmRestart: false, saveConfig: async () => { saves++; return {}; } });
+    await settle();
+    page.el("app-link-off").click();
+    await settle();
+    assert.equal(saves, 0);
+    assert.equal(page.config.app_link.enabled, true);
+    assert.equal(page.calls.some((c) => c.path === "/api/restart"), false);
+  });
+
+  it("shows while the app link is off, or saved and not yet running", async () => {
+    const off = load({ saved: false, running: false });
+    await settle();
+    assert.equal(off.el("app-link-switch").hidden, false);
+    assert.match(off.el("app-link-status").textContent, /Off/);
+
+    const pending = load({ saved: true, running: false });
+    await settle();
+    assert.equal(pending.el("app-link-switch").hidden, false);
+    assert.match(pending.el("app-link-status").textContent, /Save and restart FTW/);
+
+    const stopping = load({ saved: false, running: true });
+    await settle();
+    assert.equal(stopping.el("app-link-switch").hidden, false);
+  });
+});
+
+// Inside Home Assistant the page's origin is Home Assistant's ingress URL
+// and the box's own port is closed. An address there would point nowhere,
+// and a short code is traded at that address, so both stay off the page.
+// The QR and the link go through FTW Cloud and work in both places.
+describe("pairing inside Home Assistant", () => {
+  const qr = { url: "https://app.ftw.energy/p#v3.a.b.c.d.e", expires_at_ms: Date.now() + 600000 };
+
+  it("shows the QR and link without an address or a short code", async () => {
+    const { el, html } = load({ ha: true, pairing: qr });
+    await settle();
+    assert.match(html, /id="app-link-code" disabled hidden>/, "the short-code button is offered in Home Assistant");
+    assert.doesNotMatch(html, /choose Use a pairing code/);
+
+    el("app-link-pair").click();
+    await settle();
+    const slot = el("app-link-slot");
+    assert.doesNotMatch(slot.words(), /Box address/, "an address that cannot work from Home Assistant");
+    const labels = slot.buttons().map((b) => b.textContent);
+    assert.ok(!labels.some((l) => /read a code out/i.test(l)), `a short code is offered: ${labels.join(", ")}`);
+    assert.ok(labels.includes("Copy pairing link"), "the link is missing");
+    assert.ok(slot.children.some((c) => c.tagName === "a" && c.href === qr.url), "the open link is missing");
+  });
+
+  it("keeps the address and the short code outside Home Assistant", async () => {
+    const { el, html } = load({ pairing: qr });
+    await settle();
+    assert.match(html, /id="app-link-code" disabled>/);
+    assert.match(html, /choose Use a pairing code/);
+
+    el("app-link-pair").click();
+    await settle();
+    const slot = el("app-link-slot");
+    assert.match(slot.words(), /Box address: http:\/\/ftw\.local:8080/);
+    assert.ok(slot.buttons().some((b) => /read a code out/i.test(b.textContent)));
   });
 });

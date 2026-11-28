@@ -43,8 +43,54 @@
       if (!saved) return "Running. It stops at the next restart.";
       return null; // The caller shows the pairing count instead.
     }
-    if (saved) return "Not running yet. Choose Save and restart FTW below to turn it on.";
+    if (saved) return "Not running yet. Choose Save and restart FTW to turn it on.";
     return "Off. Turn it on above, then choose Save and restart FTW.";
+  }
+
+  // The phone reaches this box through FTW Cloud, so pairing accepts its
+  // terms, as it does in the app (Fredrik, 23 November 2026). The page says
+  // so in one line by the buttons rather than sending anyone to a separate
+  // panel first. The box records the answer and is the judge of it: a box
+  // whose build names no Cloud service has nothing to accept.
+  function cloudNeedsTerms(cloud) {
+    return !!cloud && cloud.available === true && !cloud.cloudTermsAccepted;
+  }
+
+  // Cloud in use, or still being deleted: the only times its panel has
+  // something to show here. Off, pairing is the way in.
+  function cloudInUse(cloud) {
+    return !!cloud && ((cloud.link === "on" && !cloud.statisticsOnly) ||
+      cloud.link === "ending" || cloud.state === "revoking");
+  }
+
+  function readJSON(path) {
+    return fetch(path)
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .catch(function () { return null; });
+  }
+
+  // Accepts the current terms through the same route as the Cloud panel,
+  // POST /api/cloud/grant, and only when the box says they are not yet
+  // accepted. A refusal stops the pairing: the line by the button promised
+  // that pairing accepts them. So does terms the page could not read, since
+  // a code shown then would pair a phone with the terms still unaccepted.
+  function acceptCloudTerms() {
+    return Promise.all([readJSON("/api/cloud"), readJSON("/api/cloud/stats-policy")])
+      .then(function (v) {
+        var cloud = v[0], policy = v[1];
+        if (!cloudNeedsTerms(cloud)) return;
+        if (!policy) throw new Error("Could not read the FTW Cloud terms from the box. Try again.");
+        return fetch("/api/cloud/grant", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scopes: policy.cloud_scopes, policy: policy.cloud_policy }),
+        }).then(function (r) {
+          return r.json().then(function (body) {
+            if (!r.ok) throw new Error((body && body.error) || "Could not accept the FTW Cloud terms.");
+            if (window.FTWStatistics) window.FTWStatistics.refresh();
+          });
+        });
+      });
   }
 
   function agoText(ms) {
@@ -212,14 +258,22 @@
       .catch(function () {});
   }
 
+  function setHidden(id, hidden) {
+    var el = document.getElementById(id);
+    if (el) el.hidden = hidden;
+  }
+
   function refreshStatus(ctx) {
     var saved = !!(ctx && ctx.config.app_link && ctx.config.app_link.enabled);
 
-    fetch("/api/app-link/status")
-      .then(function (r) {
+    Promise.all([
+      fetch("/api/app-link/status").then(function (r) {
         return r.ok ? r.json() : null;
-      })
-      .then(function (s) {
+      }),
+      readJSON("/api/cloud"),
+    ])
+      .then(function (v) {
+        var s = v[0], cloud = v[1];
         // Both ways of letting a phone in, enabled together. Sharing is not a
         // separate feature that could still work with the app link off: it
         // mints the same code from the same endpoint.
@@ -231,15 +285,22 @@
         var setEnabled = function (on) {
           buttons.forEach(function (b) { if (b) b.disabled = !on; });
         };
+        setHidden("app-cloud-panel", !cloudInUse(cloud));
         if (!s) {
           setStatus("Pairing is available on your local network only.");
           setEnabled(false);
+          setHidden("app-link-terms", true);
           return;
         }
         var note = describe(saved, s.enabled);
         setStatus(note === null ? pairedText(s.paired_devices) : note);
+        // The switch and its restart are for turning the app link on. While
+        // it is on and running, a quiet action below the pairing stops it.
+        setHidden("app-link-switch", saved && s.enabled);
+        setHidden("app-link-off-row", !(saved && s.enabled));
         var restart = document.getElementById("app-link-restart");
         if (restart) restart.className = saved !== s.enabled ? "btn-send" : "btn-ghost";
+        setHidden("app-link-terms", !(s.enabled && cloudNeedsTerms(cloud)));
         setEnabled(s.enabled);
         if (s.enabled) refreshDevices();
       })
@@ -308,6 +369,30 @@
     return btn;
   }
 
+  // The address the app asks for beside a pairing code: this page's own,
+  // which demonstrably works from inside the house. The QR carries it too,
+  // so it is shown there as well, and nobody has to look in the router.
+  //
+  // Not inside Home Assistant: there the page's origin is Home Assistant's
+  // ingress URL, and the box's own port is closed, so neither that address
+  // nor a short code (which the app trades at that address) can work. The
+  // QR and the link go through FTW Cloud and work there as anywhere.
+  function inHomeAssistant() {
+    return !!window.FTWHomeAssistant;
+  }
+
+  function boxAddress() {
+    if (inHomeAssistant()) return "";
+    return (window.location && window.location.origin) || "";
+  }
+
+  function sayBoxAddress(slot) {
+    if (!boxAddress()) return;
+    var address = document.createElement("p");
+    address.textContent = "Box address: " + boxAddress();
+    slot.appendChild(address);
+  }
+
   function showCode(pairing) {
     var slot = document.getElementById("app-link-slot");
     if (!slot) return;
@@ -329,11 +414,9 @@
         "Enter this code and the box address shown below. " + expiryText(pairing) + " Five wrong tries and it " +
         "stops working, so ask for a new one rather than guessing.";
       slot.appendChild(how);
-      if (window.location && window.location.origin) {
-        var address = document.createElement("p");
-        address.textContent = "Box address: " + window.location.origin;
-        slot.appendChild(address);
-        copyButton(slot, "Copy pairing code and address", window.location.origin + "#" + pairing.code);
+      if (boxAddress()) {
+        sayBoxAddress(slot);
+        copyButton(slot, "Copy pairing code and address", boxAddress() + "#" + pairing.code);
       }
       if (slot.scrollIntoView) slot.scrollIntoView({ block: "nearest" });
       return;
@@ -343,6 +426,7 @@
     // it, whenever the encoder finishes.
     var picture = document.createElement("div");
     slot.appendChild(picture);
+    sayBoxAddress(slot);
     if (/^https:\/\/app\.ftw\.energy\/p#v[23]\./.test(pairing.url)) {
       var open = document.createElement("a");
       open.href = pairing.url;
@@ -352,7 +436,7 @@
       slot.appendChild(open);
       copyButton(slot, "Copy pairing link", pairing.url);
     }
-    slot.appendChild(spokenFallback(pairing.role));
+    if (!inHomeAssistant()) slot.appendChild(spokenFallback(pairing.role));
 
     // Loaded on demand: this tab is opened once per phone, and every other
     // page would otherwise carry the encoder for nothing.
@@ -369,7 +453,9 @@
       .catch(function () {
         var err = document.createElement("p");
         err.className = "hint app-link-error";
-        err.textContent = "Could not draw the code here — read one out instead.";
+        err.textContent = inHomeAssistant()
+          ? "Could not draw the code here. Open or copy the pairing link instead."
+          : "Could not draw the code here — read one out instead.";
         picture.appendChild(err);
         if (slot.scrollIntoView) slot.scrollIntoView({ block: "nearest" });
       });
@@ -399,14 +485,27 @@
     slot.appendChild(button);
   }
 
-  async function restartAppLink(ctx, button) {
-    if (!confirm("Save settings and restart FTW? Energy control pauses until FTW is back.")) return;
-    var status = document.getElementById("app-link-restart-status");
+  // Saves the settings and restarts FTW, which is when the app link starts
+  // or stops: it connects at startup. statusId is the line beside the button
+  // that was pressed; confirmed says that button already asked; unsaved runs
+  // when the save fails, so the page can put back what it changed for it.
+  async function restartAppLink(ctx, button, statusId, confirmed, unsaved) {
+    if (!confirmed && !confirm("Save settings and restart FTW? Energy control pauses until FTW is back.")) return;
+    var status = document.getElementById(statusId || "app-link-restart-status");
     button.disabled = true;
     status.textContent = "Saving settings…";
     resumePairing(true);
+    var result;
     try {
-      var result = await ctx.saveConfig();
+      result = await ctx.saveConfig();
+    } catch (error) {
+      if (unsaved) unsaved();
+      resumePairing(false);
+      status.textContent = "Could not save settings: " + error.message;
+      button.disabled = false;
+      return;
+    }
+    try {
       // Keep the shell's existing dialog and progress when saving opens it.
       var restart = document.getElementById("restart-now");
       if (result && result.restart_required && restart) {
@@ -426,7 +525,7 @@
         fetch("/api/health?_=" + Date.now(), { cache: "no-store" })
           .then(function (r) {
             if (!r.ok) throw new Error("not ready");
-            status.textContent = "FTW is back. Opening pairing…";
+            status.textContent = "FTW is back.";
             window.location.reload();
           })
           .catch(function () {
@@ -443,6 +542,25 @@
     }
   }
 
+  // The quiet way to stop the app link while it runs, so the owner can
+  // always stop it at the box. It is the same saved setting and restart that
+  // turn it on, so it unticks the same switch.
+  function turnOffAppLink(ctx, button) {
+    if (!confirm("Turn off the app link? Paired phones cannot reach this box until you turn it on again. " +
+      "FTW saves and restarts; energy control pauses until it is back.")) return;
+    // The save carries the setting, so it changes here, and changes back if
+    // the save fails: a page that says off while the box still has it on
+    // would let a later Save elsewhere turn it off unasked.
+    var toggle = document.getElementById("app-link-enabled");
+    var was = ctx.config.app_link.enabled;
+    ctx.config.app_link.enabled = false;
+    if (toggle) toggle.checked = false;
+    return restartAppLink(ctx, button, "app-link-off-status", true, function () {
+      ctx.config.app_link.enabled = was;
+      if (toggle) toggle.checked = was;
+    });
+  }
+
   function resumePairing(on) {
     try {
       if (on) window.sessionStorage.setItem("ftw.pairing.resume", "1");
@@ -454,12 +572,6 @@
   // a pairing code still on screen, and the reverse. Every button here goes
   // through this, so the rule is not something a caller has to remember.
   function requestCode(opts, button, busyText, doneText) {
-    if(window.FTWStatistics && !window.FTWStatistics.cloudAccepted()) {
-      setStatus("Accept the Cloud terms above before pairing a phone. Statistics are included with Cloud.");
-      window.FTWStatistics.refresh();
-      return;
-    }
-
     var slot = document.getElementById("app-link-slot");
     if (!button || !slot) return;
 
@@ -467,11 +579,14 @@
     button.textContent = busyText;
     slot.textContent = "";
 
-    fetch("/api/app-link/pairing", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(opts),
-    })
+    acceptCloudTerms()
+      .then(function () {
+        return fetch("/api/app-link/pairing", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(opts),
+        });
+      })
       .then(function (r) {
         return r.json().then(function (body) {
           if (!r.ok) throw new Error(body.error || "could not make a code");
@@ -516,6 +631,7 @@
     render: function (ctx) {
       if (!ctx.config.app_link) ctx.config.app_link = { enabled: true };
       var enabled = !!ctx.config.app_link.enabled;
+      var ha = inHomeAssistant();
       pairingCtx = ctx;
 
       // Wired after this string becomes the DOM.
@@ -533,6 +649,8 @@
         });
         var restartButton = document.getElementById("app-link-restart");
         if (restartButton) restartButton.addEventListener("click", function () { restartAppLink(ctx, restartButton); });
+        var offButton = document.getElementById("app-link-off");
+        if (offButton) offButton.addEventListener("click", function () { turnOffAppLink(ctx, offButton); });
 
         var shareButton = document.getElementById("app-link-share");
         if (shareButton) {
@@ -556,26 +674,29 @@
 
       return (
         '<link rel="stylesheet" href="/settings/app-pairing.css">' +
-        '<div data-project-statistics-settings></div>' +
         '<fieldset class="app-pairing"><legend>The FTW app</legend>' +
-        '<p class="hint">This is not the Sourceful (Zap) app. The FTW app at ' +
-        "app.ftw.energy talks to this box when you are away. On the same Wi-Fi you " +
-        "can just open this page in a browser — no pairing needed. Readings and " +
-        "commands are end-to-end encrypted. Sourceful can see your IP and when the " +
-        "box is connected, but cannot read them.</p>" +
+        '<p class="hint">This is not the Sourceful (Zap) app. The FTW app needs ' +
+        "pairing, at home and away. A browser on your home Wi-Fi needs none.</p>" +
+        // Shown only while the app link is off. On a box where it runs, the
+        // quiet off action at the foot of this section takes their place.
+        '<div id="app-link-switch"' + (enabled ? " hidden" : "") + ">" +
         '<label><input type="checkbox" id="app-link-enabled" ' +
         'data-checkbox-path="app_link.enabled"' + (enabled ? " checked" : "") +
         "> Let the FTW app connect to this box</label>" +
-        '<p class="hint">Changing this setting needs a restart. FTW pauses energy control briefly while it restarts.</p>' +
         '<button type="button" class="btn-send" id="app-link-restart">Save and restart FTW…</button>' +
         '<p id="app-link-restart-status" class="hint" role="status"></p>' +
+        "</div>" +
         '<p id="app-link-status" class="hint">checking…</p>' +
         '<div id="app-link-devices"></div>' +
         '<div class="app-link-actions">' +
         '<button type="button" class="btn-ghost" id="app-link-pair" disabled>Show pairing code</button>' +
-        '<button type="button" class="btn-ghost" id="app-link-code" disabled>Use a pairing code</button>' +
+        '<button type="button" class="btn-ghost" id="app-link-code" disabled' + (ha ? " hidden" : "") + ">Use a pairing code</button>" +
         '<button type="button" class="btn-ghost" id="app-link-share" hidden>Let someone see this home</button>' +
         "</div>" +
+        '<p id="app-link-terms" class="hint" hidden>The app reaches this box through FTW Cloud, ' +
+        "which keeps a readable copy of your energy data. Pairing accepts its " +
+        '<a href="https://ftw.sourceful.energy/privacy" target="_blank" rel="noopener">terms</a>. ' +
+        "The box runs without it.</p>" +
         // The slot sits right under the buttons that fill it. It used to sit
         // after the hint paragraphs below, which put the answer — QR, spoken
         // code, or a refusal — some 300 px under the button and usually below
@@ -587,11 +708,18 @@
         "once and expires in a few minutes, so ask for a new one when you need it. " +
         "Everything the app needs is in the code itself, which is why the app can " +
         "be sure it is talking to this box.</p>" +
-        '<p class="hint">Only one phone? Open the pairing link on this phone, ' +
-        "or choose Use a pairing code and enter it in the FTW app while on your home Wi-Fi. " +
-        "If you set a house password, the app asks for it too. You can also choose a screenshot " +
+        '<p class="hint">Only one phone? Open the pairing link on this phone' +
+        (ha ? ". " : ", or choose Use a pairing code and enter it in the FTW app while on your home Wi-Fi. " +
+          "If you set a house password, the app asks for it too. ") +
+        "You can also choose a screenshot " +
         "of the QR in the FTW app. Only one code works at a time; making a new code cancels the last one.</p>" +
+        '<p id="app-link-off-row" class="app-link-off" hidden>' +
+        '<button type="button" class="btn-link" id="app-link-off">Turn off the app link…</button>' +
+        '<span id="app-link-off-status" class="hint" role="status"></span></p>' +
         "</fieldset>" +
+        // FTW Cloud's own panel, below the pairing so it never pushes a code
+        // out of view when it appears. Hidden while Cloud is off.
+        '<div id="app-cloud-panel" hidden><div data-project-statistics-settings></div></div>' +
         fleetPanel(ctx)
       );
     },

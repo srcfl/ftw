@@ -70,19 +70,54 @@ describe("the app tab", () => {
     assert.match(render({}), /[Rr]estart/);
   });
 
-  it("states both the encrypted content and visible connection metadata", () => {
-    const html = render({});
-    assert.match(html, /end-to-end encrypted/);
-    assert.match(html, /IP/);
-    assert.match(html, /when the box is connected/);
-    assert.match(html, /cannot read/);
+  // The switch and its restart are for turning the app link on. A box where
+  // it is saved on starts with them hidden; the status reveals them if the
+  // link turns out not to be running.
+  it("hides the switch and restart while the setting is on", () => {
+    assert.match(render({ app_link: { enabled: true } }), /id="app-link-switch" hidden>/);
+    assert.match(render({ app_link: { enabled: false } }), /id="app-link-switch">/);
   });
 
-  it("says this is not the Sourceful app, and LAN use needs no pairing", () => {
+  // While the link runs, a quiet text button at the foot of the pairing
+  // section turns it off. It starts hidden; the status reveals it.
+  it("keeps a quiet off action below the pairing", () => {
+    const html = render({});
+    const hints = html.indexOf("Only one phone?");
+    const off = html.indexOf('<p id="app-link-off-row" class="app-link-off" hidden>');
+    assert.ok(hints >= 0 && off > hints, "the off action is not below the pairing");
+    assert.match(html, /class="btn-link" id="app-link-off">Turn off the app link…</);
+    assert.ok(off < html.indexOf("</fieldset>"), "the off action left the app section");
+  });
+
+  // The app reaches the box through FTW Cloud, and Cloud keeps a copy
+  // Sourceful can read. The page once said Sourceful could read nothing,
+  // which stopped being true when pairing began to accept the Cloud terms.
+  it("says pairing accepts the Cloud terms and what Cloud keeps", () => {
+    const html = render({});
+    assert.match(html, /id="app-link-terms" class="hint" hidden>/);
+    assert.match(html, /through FTW Cloud/);
+    assert.match(html, /readable copy of your energy data/);
+    assert.match(html, /Pairing accepts its <a href="https:\/\/ftw\.sourceful\.energy\/privacy"/);
+    assert.match(html, /The box runs without it/);
+    assert.doesNotMatch(html, /cannot read/);
+  });
+
+  // The app needs pairing at home too; only a browser on the home Wi-Fi does
+  // not. The page used to put the two side by side so the app sounded free
+  // of pairing at home.
+  it("says this is not the Sourceful app, and the app needs pairing at home too", () => {
     const html = render({});
     assert.match(html, /not the Sourceful/);
-    assert.match(html, /app\.ftw\.energy/);
-    assert.match(html, /no pairing needed/);
+    assert.match(html, /needs pairing, at home and away/);
+    assert.match(html, /browser on your home Wi-Fi needs none/);
+    assert.doesNotMatch(html, /when you are away/);
+  });
+
+  it("puts the Cloud panel after the pairing, hidden until Cloud is in use", () => {
+    const html = render({});
+    const pairing = html.indexOf('id="app-link-slot"');
+    const cloud = html.indexOf('<div id="app-cloud-panel" hidden><div data-project-statistics-settings>');
+    assert.ok(pairing >= 0 && cloud > pairing, "the Cloud panel can push a code out of view");
   });
 
   it("starts with the pairing button disabled", () => {
@@ -119,7 +154,8 @@ describe("the app tab", () => {
     vm.runInContext(fleetSource, sandbox);
 
     win.FTWSettings.tabs.app.afterSave();
-    assert.deepEqual([...asked].sort(), ["/api/app-link/status", "/api/cloud", "/api/cloud/stats-policy", "/api/fleet-ping"]);
+    // The app tab reads /api/cloud too, for the terms line and the panel.
+    assert.deepEqual([...asked].sort(), ["/api/app-link/status", "/api/cloud", "/api/cloud", "/api/cloud/stats-policy", "/api/fleet-ping"]);
   });
 
   it("does not leave a standalone Fleet ping destination behind", () => {
