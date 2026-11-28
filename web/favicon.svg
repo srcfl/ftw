@@ -1,26 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
-  <title>FTW logo</title>
-  <defs>
-    <linearGradient id="background" x1="32" y1="0" x2="32" y2="64" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#0b1b34"/>
-      <stop offset="1" stop-color="#030914"/>
-    </linearGradient>
-    <linearGradient id="gold" x1="32" y1="20" x2="32" y2="44" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#ffe33b"/>
-      <stop offset="0.3" stop-color="#ffbd00"/>
-      <stop offset="1" stop-color="#ff9d00"/>
-    </linearGradient>
-  </defs>
-  <rect width="64" height="64" rx="8" fill="url(#background)"/>
-  <path d="M6 20h16v6h-9v4h8v6h-8v9H6V20Z" fill="url(#gold)"/>
-  <path d="M23 20h16v6h-5v19h-6V26h-5v-6Z" fill="url(#gold)"/>
-  <path d="M38 20h6l2 15 3-8h4l3 8 1-15h6l-3 25h-6l-3-9-4 9h-6l-3-25Z" fill="url(#gold)"/>
-  <path d="M8 27h4l2-2h5M29 24h7M31 27v12M42 23l2 15 3 4M55 41l3-4 1-14" stroke="#19dcff" stroke-width="1.4"/>
-  <path d="M12 39h4l2-2h2M47 38l4-7 4 10" stroke="#7cf22f" stroke-width="1.4"/>
-  <g fill="#19dcff">
-    <rect x="16" y="23" width="1.4" height="1.4"/>
-    <rect x="18.5" y="23" width="1.4" height="1.4"/>
-    <rect x="34" y="22" width="1.4" height="1.4"/>
-    <rect x="57" y="38" width="1.4" height="1.4"/>
-  </g>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>FTW</title>
+  <!-- FTW's mark: the bolt from the FTW app icon on the icon's near-black
+       ground. logo.svg and favicon.svg are the same picture. -->
+  <rect width="1024" height="1024" rx="229" fill="#05080F"/>
+  <path d="M578 160 336 547.2h162.8L446 864l242-387.2H525.2z" fill="#FFB000"/>
 </svg>
