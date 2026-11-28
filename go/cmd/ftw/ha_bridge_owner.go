@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -27,11 +29,17 @@ const (
 // a capped backoff until a start succeeds, the config changes, or Stop runs.
 // A bridge from a retry gets the same Reload and Stop handling as one started
 // at once.
+//
+// In the Home Assistant app the broker itself may be missing: Mosquitto was
+// added after FTW started. The retry then asks Supervisor for it on each
+// attempt and connects once it is there. None of this runs on the control
+// loop; Apply runs at boot and on a settings save, and the waiting runs in
+// the retry goroutine.
 type haBridgeOwner struct {
 	start func(cfg *config.HomeAssistant, driverNames []string) (haBridgeHandle, error)
 	names func() []string
 	// broker fills an empty saved broker in the Home Assistant app.
-	broker   *haBundleBroker
+	broker   *haAppBroker
 	minDelay time.Duration
 	maxDelay time.Duration
 
@@ -70,7 +78,8 @@ func (o *haBridgeOwner) Apply(cfg *config.HomeAssistant) {
 		return
 	}
 	o.cancelRetry()
-	cfg = o.broker.fill(cfg)
+	saved := cfg
+	cfg, ready := o.broker.fill(saved)
 
 	o.mu.Lock()
 	bridge := o.bridge
@@ -82,20 +91,28 @@ func (o *haBridgeOwner) Apply(cfg *config.HomeAssistant) {
 		o.setBridge(nil)
 		bridge.Stop()
 		slog.Info("HA bridge stopped (disabled in config)")
+	case enabled && !ready:
+		// Home Assistant's broker is not known yet. A Reload or start
+		// now could only dial an empty address.
+		if bridge != nil {
+			o.setBridge(nil)
+			bridge.Stop()
+		}
+		o.startRetry(saved, errNoHABroker)
 	case bridge != nil:
 		if err := bridge.Reload(cfg, o.names()); err != nil {
 			// Reload leaves the bridge without a client. Drop it and retry
 			// as a fresh start, so the bridge comes back when the broker does.
 			o.setBridge(nil)
 			bridge.Stop()
-			o.startRetry(cfg, err)
+			o.startRetry(saved, err)
 			return
 		}
 		slog.Info("HA bridge reloaded", "broker", cfg.Broker)
 	case enabled:
 		b, err := o.start(cfg, o.names())
 		if err != nil {
-			o.startRetry(cfg, err)
+			o.startRetry(saved, err)
 			return
 		}
 		o.setBridge(b)
@@ -140,29 +157,46 @@ func (o *haBridgeOwner) cancelRetry() {
 	o.retryCancel, o.retryDone = nil, nil
 }
 
-// startRetry runs retry in the background. Caller holds lifecycleMu.
-func (o *haBridgeOwner) startRetry(cfg *config.HomeAssistant, firstErr error) {
-	slog.Warn("HA bridge start failed; retrying until the broker accepts",
-		"broker", cfg.Broker, "err", firstErr)
+// startRetry runs retry in the background with the saved settings, before
+// any fill, so each attempt can use the broker Supervisor names then. Caller
+// holds lifecycleMu.
+func (o *haBridgeOwner) startRetry(saved *config.HomeAssistant, firstErr error) {
+	if errors.Is(firstErr, errNoHABroker) {
+		slog.Info("HA bridge waits for Home Assistant's MQTT broker; add the Mosquitto broker app and FTW connects to it")
+	} else {
+		slog.Warn("HA bridge start failed; retrying until the broker accepts",
+			"broker", saved.Broker, "err", firstErr)
+	}
 	o.retryCancel = make(chan struct{})
 	o.retryDone = make(chan struct{})
-	go o.retry(cfg, firstErr, o.retryCancel, o.retryDone)
+	go o.retry(saved, firstErr, o.retryCancel, o.retryDone)
 }
 
-func (o *haBridgeOwner) retry(cfg *config.HomeAssistant, lastErr error, cancel, done chan struct{}) {
+func (o *haBridgeOwner) retry(saved *config.HomeAssistant, lastErr error, cancel, done chan struct{}) {
 	defer close(done)
+	// A Supervisor question in flight ends with the retry.
+	ctx, stopCtx := context.WithCancel(context.Background())
+	defer stopCtx()
+	go func() {
+		select {
+		case <-cancel:
+			stopCtx()
+		case <-ctx.Done():
+		}
+	}()
+
 	delay := o.minDelay
 	for attempt := 2; ; attempt++ {
 		timer := time.NewTimer(delay)
 		select {
 		case <-cancel:
 			timer.Stop()
-			slog.Info("HA bridge retry cancelled", "broker", cfg.Broker)
+			slog.Info("HA bridge retry cancelled", "broker", saved.Broker)
 			return
 		case <-timer.C:
 		}
 
-		b, err := o.start(cfg, o.names())
+		b, cfg, err := o.attempt(ctx, saved)
 		if err != nil {
 			// Log only when the reason changes, e.g. from "connection
 			// refused" to "not authorised", not on every attempt.
@@ -188,4 +222,22 @@ func (o *haBridgeOwner) retry(cfg *config.HomeAssistant, lastErr error, cancel, 
 		slog.Info("HA bridge started after retry", "broker", cfg.Broker, "attempt", attempt)
 		return
 	}
+}
+
+// attempt makes one start with the saved settings. A bridge that uses Home
+// Assistant's broker asks Supervisor for it first.
+func (o *haBridgeOwner) attempt(ctx context.Context, saved *config.HomeAssistant) (haBridgeHandle, *config.HomeAssistant, error) {
+	var lookupErr error
+	if o.broker.wants(saved) {
+		lookupErr = o.broker.refresh(ctx)
+	}
+	cfg, ready := o.broker.fill(saved)
+	if !ready {
+		if lookupErr == nil {
+			lookupErr = errNoHABroker
+		}
+		return nil, cfg, lookupErr
+	}
+	b, err := o.start(cfg, o.names())
+	return b, cfg, err
 }

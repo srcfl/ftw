@@ -87,7 +87,7 @@ func newRealHAOwner(modes chan<- string) *haBridgeOwner {
 		return nil
 	}}
 	o := newHABridgeOwner(func(c *config.HomeAssistant, names []string) (haBridgeHandle, error) {
-		b, err := ha.Start(c, tel, ctrl, ctrlMu, names, cb, nil, nil, nil)
+		b, err := ha.Start(c, tel, ctrl, ctrlMu, names, cb, nil, nil, nil, "")
 		if err != nil {
 			return nil, err
 		}

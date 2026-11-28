@@ -70,9 +70,10 @@ egen webbport på ditt nätverk.
 
 FTW:s värden syns som entiteter i Home Assistant utan att du skriver något.
 Lägg till appen **Mosquitto broker** och integrationen **MQTT** som Home
-Assistant då erbjuder. Körde FTW redan när du lade till Mosquitto, starta om
-FTW en gång. Appens logg visar då
-`Home Assistant's MQTT broker is core-mosquitto:1883`.
+Assistant då erbjuder. Lägger du till Mosquitto medan FTW körs hittar FTW den
+inom en minut, utan omstart. Appens logg visar
+`Home Assistant's MQTT broker is core-mosquitto:1883` när FTW startar, eller
+`found Home Assistant's MQTT broker` när FTW hittar den senare.
 
 Vill du stänga av det, eller använda en annan broker, öppna
 **Settings → Integrations** i FTW. Se [Home Assistant](../ha-integration.md)
@@ -105,7 +106,7 @@ Installera sedan **FTW** och ställ in den.
 | Appen syns inte i butiken | Kontrollera repo-URL:en, ladda om sidan eller välj **⋮ → Sök efter uppdateringar**. |
 | Installationen misslyckas | Se **Inställningar → System → Loggar → Supervisor**. Ett fel vid nedladdning eller kontrollsumma: försök igen senare. |
 | Webbgränssnittet öppnas inte | Kolla appens **Logg**. Öppna FTW med **Öppna webbgränssnittet** eller från sidofältet; ett bokmärke till port 8080 fungerar inte. Port 18099 på Home Assistant måste vara ledig. |
-| Inga FTW-entiteter | Kontrollera att appen Mosquitto broker körs och att MQTT-integrationen är tillagd, och starta sedan om FTW. Appens logg säger vad den hittade. |
+| Inga FTW-entiteter | Kontrollera att appen Mosquitto broker körs och att MQTT-integrationen är tillagd. FTW letar efter brokern igen inom en minut. Appens logg säger vad den hittade. |
 | FTW når inte en enhet | Kontrollera enhetens IP-adress och att den är på samma nätverk. |
 | Två appar heter **FTW (beta)** | Den med version 3.x är pensionerad. Se [Byt till nya FTW](update-sv.md). |
 
