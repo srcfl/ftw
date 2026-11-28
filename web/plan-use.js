@@ -23,10 +23,12 @@ function isPlannerMode(mode) {
 //            on in Settings and starts at the next restart
 //   hasPlan     a plan with steps exists
 //   hasBattery  the home has a battery the plan can use
-// Choices about a plan wait for the first plan. The planning style, battery
-// export and manual modes are all about a battery, so a home without one
-// gets none of them. A manual mode other than the default stays in reach
-// while it drives, so its button is on screen.
+// The planning style and battery export wait for the first plan, and a home
+// without a battery gets neither. Manual… is the way off the planner, so a
+// battery home in a planner mode always has it, plan or not: prices can be
+// missing for hours, or the battery offline. It waits only on a box that has
+// never planned and does not run a planner mode. A manual mode other than the
+// default stays in reach while it drives, so its button is on screen.
 export function planCardView({ mode = "", running = false, reason = "", hasPlan = false, hasBattery = true } = {}) {
   const plannerMode = isPlannerMode(mode);
   const canStart = running || !BLOCKED.has(reason);
@@ -36,7 +38,7 @@ export function planCardView({ mode = "", running = false, reason = "", hasPlan 
     useEnabled: canStart,
     styleVisible: hasPlan && hasBattery,
     exportVisible: hasPlan && hasBattery,
-    manualVisible: (hasPlan && hasBattery) || chosenManual,
+    manualVisible: (hasBattery && (hasPlan || plannerMode)) || chosenManual,
   };
 }
 
@@ -104,9 +106,22 @@ export async function startPlan({ api, say = () => {}, running = false, reason =
   const mode = isPlannerMode(mapped) ? mapped : PLANNER_FALLBACK_MODE;
   await answer(await postJSON(api, "/api/mode", { mode }));
   if (!restart) return "mode";
-  say("Restarting FTW to start the planner…");
-  await answer(await api("/api/restart", { method: "POST" }));
+  await restartForPlanner({ api, say });
   return "restart";
+}
+
+// restartForPlanner asks FTW to restart so the planner starts. The planner
+// setting and the mode are saved by then, so a failed restart is safe but
+// stuck: the error carries restart=true, and the card offers to try again.
+export async function restartForPlanner({ api, say = () => {} }) {
+  say("Restarting FTW to start the planner…");
+  try {
+    await answer(await api("/api/restart", { method: "POST" }));
+  } catch (e) {
+    const err = new Error(`FTW did not restart: ${e && e.message ? e.message : e}. The planner starts after a restart.`);
+    err.restart = true;
+    throw err;
+  }
 }
 
 // waitForPlanner polls until the restarted box runs the planner, or says

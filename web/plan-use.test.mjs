@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { planCardView, startPlan, waitForPlanner, PLANNER_FALLBACK_MODE } from "./plan-use.js";
+import { planCardView, restartForPlanner, startPlan, waitForPlanner, PLANNER_FALLBACK_MODE } from "./plan-use.js";
 
 // A box behind fetch: routes answer from a table, every call is recorded.
 function fakeBox(routes) {
@@ -57,10 +57,10 @@ describe("Plan card view", () => {
     }
   });
 
-  it("waits for the first plan before style, export and Manual…", () => {
+  it("waits for the first plan before style and export", () => {
     const preparing = planCardView({ mode: "planner_passive_arbitrage", running: true, hasPlan: false });
     assert.equal(preparing.styleVisible, false);
-    assert.equal(preparing.manualVisible, false);
+    assert.equal(preparing.exportVisible, false);
     const planned = planCardView({ mode: "planner_passive_arbitrage", running: true, hasPlan: true });
     assert.equal(planned.styleVisible, true);
     assert.equal(planned.manualVisible, true);
@@ -73,6 +73,21 @@ describe("Plan card view", () => {
     assert.equal(view.manualVisible, false);
     // A manual mode someone picked still shows, so it can be changed back.
     assert.equal(planCardView({ mode: "idle", hasPlan: true, hasBattery: false }).manualVisible, true);
+  });
+
+  it("keeps Manual… in a planner mode with no plan, so the planner can be left", () => {
+    // No prices for hours, or the battery offline: the planner mode stays,
+    // and Manual… is the only way off it on the Plan card.
+    for (const view of [
+      planCardView({ mode: "planner_passive_arbitrage", running: true, hasPlan: false }),
+      planCardView({ mode: "planner_passive_arbitrage", running: false, reason: "no-price-provider" }),
+      planCardView({ mode: "planner_arbitrage", running: false, reason: "planner-disabled" }),
+    ]) {
+      assert.equal(view.manualVisible, true);
+      assert.equal(view.styleVisible, false);
+    }
+    // A box that has never planned and runs the default waits for the plan.
+    assert.equal(planCardView({ mode: "self_consumption", running: true, hasPlan: false }).manualVisible, false);
   });
 
   it("keeps a chosen manual mode's buttons in reach", () => {
@@ -161,6 +176,20 @@ describe("Use the plan", () => {
     );
     assert.equal(box.calls.some((c) => c.path === "/api/mode"), false);
     assert.equal(box.calls.some((c) => c.path === "/api/restart"), false);
+  });
+
+  it("offers to restart again when the restart fails after the writes", async () => {
+    const box = offBox({ "POST /api/restart": { status: 503, json: { error: "restart not configured" } } });
+    await assert.rejects(
+      startPlan({ api: box.api, running: false, reason: "planner-disabled" }),
+      (err) => err.restart === true && /did not restart: restart not configured/.test(err.message),
+    );
+    // The setting and the mode are saved; only the restart is left.
+    const order = box.calls.filter((c) => c.method === "POST").map((c) => c.path);
+    assert.deepEqual(order, ["/api/config", "/api/planner/prefs", "/api/mode", "/api/restart"]);
+    const retry = offBox();
+    await restartForPlanner({ api: retry.api });
+    assert.deepEqual(retry.calls.map((c) => `${c.method} ${c.path}`), ["POST /api/restart"]);
   });
 
   it("shows the box's error when the write is refused", async () => {

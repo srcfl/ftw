@@ -52,7 +52,14 @@ describe("strategy mode picker", () => {
     assert.doesNotMatch(app, /plan-use-btn|plan-use-row/);
     assert.doesNotMatch(app, /\/api\/planner\/prefs/);
     assert.match(plan, /useBtn\.addEventListener\('click', usePlan\)/);
-    assert.match(plan, /show\('plan-use-row', view\.useVisible \|\| useBusy\)/);
+    assert.match(plan, /show\('plan-use-row', \(view\.useVisible \|\| useBusy\) && !restartRetry\)/);
+  });
+
+  it("offers Restart FTW in place when a restart fails", () => {
+    const strategy = html.match(/class="plan-strategy"[\s\S]*?class="chart-container"/)?.[0] || "";
+    assert.match(strategy, /id="plan-restart-btn"[^>]*>Restart FTW</);
+    assert.match(plan, /restartBtn\.addEventListener\('click', restartAgain\)/);
+    assert.match(plan, /showRestartRetry\(!!\(e && e\.restart\)\)/);
   });
 
   it("never names the selling mode on the way into the plan", () => {

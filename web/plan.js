@@ -5,7 +5,7 @@ import { plannedEVWatts, createChargingTimeline } from "./ev-plan.js";
 
 import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
 import { forecastStillLearning, batteryPresent } from "./plan-brief.js";
-import { planCardView, startPlan, waitForPlanner } from "./plan-use.js";
+import { planCardView, startPlan, restartForPlanner, waitForPlanner } from "./plan-use.js";
 import { forecastMargins, evShortfallWh } from "./plan-forecast.js";
 import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
@@ -217,6 +217,10 @@ import {
     state.priceCfg = (c && c.price) || null;
     state.status = s || {};
     if (s && typeof s.mode === 'string') state.mode = s.mode;
+    // A battery in the settings is still the home's battery while its
+    // driver is offline and reports nothing.
+    state.batteryConfigured = !!(c && Array.isArray(c.drivers) &&
+      c.drivers.some((d) => d && Number(d.battery_capacity_wh) > 0));
     state.loadpoints = l && Array.isArray(l.loadpoints) ? l.loadpoints : null;
     state.prefs = prefsFromStatus(s);
     state.enabled = {
@@ -1524,6 +1528,8 @@ import {
   // What the card offers for the box's state (planCardView). The mode comes
   // from the plan read and from the quicker hint read, whichever is newer.
   let useBusy = false;
+  // A restart failed after the planner setting and mode were saved.
+  let restartRetry = false;
   // When this page handed the house to the plan. For a short while after,
   // a planning error is the box's first try at a start, not a failure.
   let startedAt = 0;
@@ -1549,13 +1555,20 @@ import {
       running: !!state.enabled.mpc,
       reason: state.enabled.mpcReason || '',
       hasPlan: hasPlan(),
-      hasBattery: batteryPresent(state.status, state.plan),
+      hasBattery: !!state.batteryConfigured || batteryPresent(state.status, state.plan),
     });
   }
 
   function applyCardView() {
     const view = cardView();
     if (!view) return;
+    // Restarted another way (Settings, a power cut): nothing left to retry.
+    if (restartRetry && state.enabled.mpc) {
+      restartRetry = false;
+      const row = document.getElementById('plan-restart-row');
+      if (row) row.hidden = true;
+      sayUse('');
+    }
     const show = (id, on) => {
       const el = document.getElementById(id);
       if (el) el.hidden = !on;
@@ -1575,7 +1588,8 @@ import {
     }
     show('plan-manual', view.manualVisible);
     // A tap in progress keeps its button on screen until it has an answer.
-    show('plan-use-row', view.useVisible || useBusy);
+    // After a failed restart, "Restart FTW" is the one thing left to do.
+    show('plan-use-row', (view.useVisible || useBusy) && !restartRetry);
     // "Use the plan" carries no data-mode, so the mode-button loop never
     // sees it. It stays off where a tap cannot help: no prices or battery.
     const usePlan = document.getElementById('plan-use-btn');
@@ -1613,18 +1627,24 @@ import {
     return copy.action + '. ' + copy.nextStep + '.';
   }
 
-  // One tap: the planner on (and FTW restarted when it has to start), the
-  // house handed to it, and the plan shown as soon as the box has one.
-  async function usePlan() {
+  function showRestartRetry(on) {
+    restartRetry = on;
+    const row = document.getElementById('plan-restart-row');
+    if (row) row.hidden = !on;
+    applyCardView();
+  }
+
+  // Runs one way into the plan: the step resolves to "restart" when FTW
+  // restarted, and the card then waits for the planner. Any error shows in
+  // place; a failed restart also offers to restart again.
+  async function runStart(step) {
     if (useBusy) return;
     useBusy = true;
     sayUse('');
+    showRestartRetry(false);
     applyCardView();
-    const running = !!(state.enabled && state.enabled.mpc);
-    const reason = (state.enabled && state.enabled.mpcReason) || '';
     try {
-      const outcome = await startPlan({ api: apiFetch, say: sayUse, running, reason });
-      if (outcome === 'restart') {
+      if (await step() === 'restart') {
         const back = await waitForPlanner({
           api: apiFetch,
           sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -1637,12 +1657,32 @@ import {
       startedAt = Date.now();
       await fetchAll();
     } catch (e) {
-      sayUse(e && e.reason ? blockedWords(e.reason) : 'Could not start the plan: ' + (e && e.message ? e.message : e), true);
+      const message = e && e.message ? e.message : String(e);
+      sayUse(e && e.reason ? blockedWords(e.reason)
+        : e && e.restart ? message
+          : 'Could not start the plan: ' + message, true);
+      showRestartRetry(!!(e && e.restart));
       fetchAll();
     } finally {
       useBusy = false;
       applyCardView();
     }
+  }
+
+  // One tap: the planner on (and FTW restarted when it has to start), the
+  // house handed to it, and the plan shown as soon as the box has one.
+  function usePlan() {
+    const running = !!(state.enabled && state.enabled.mpc);
+    const reason = (state.enabled && state.enabled.mpcReason) || '';
+    return runStart(() => startPlan({ api: apiFetch, say: sayUse, running, reason }));
+  }
+
+  // The planner setting and the mode are saved; only the restart is left.
+  function restartAgain() {
+    return runStart(async () => {
+      await restartForPlanner({ api: apiFetch, say: sayUse });
+      return 'restart';
+    });
   }
 
   function renderStrategyHint() {
@@ -1722,6 +1762,8 @@ import {
     if (btn) btn.addEventListener('click', replan);
     const useBtn = document.getElementById('plan-use-btn');
     if (useBtn) useBtn.addEventListener('click', usePlan);
+    const restartBtn = document.getElementById('plan-restart-btn');
+    if (restartBtn) restartBtn.addEventListener('click', restartAgain);
     // Horizon toggle wiring. Each click flips state.horizon, persists
     // the choice, marks the right button active, and re-renders. The
     // visual style (.toggle .active) is shared with the VAT pill.
