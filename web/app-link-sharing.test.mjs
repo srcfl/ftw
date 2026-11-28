@@ -92,7 +92,7 @@ const IDS = [
 // /api/cloud, which has nothing to accept.
 const POLICY = { cloud_scopes: ["live.read", "history.read"], cloud_policy: "ftw-cloud-2026-10-v3" };
 
-function load({ devices = [], pairing = null, spoken = null, refuse = null, saveConfig = async () => ({ restart_required: false }), confirmRestart = true, resume = false, shellRestart = false, cloud = null, grant = null, saved = true, running = true, ha = false } = {}) {
+function load({ devices = [], pairing = null, spoken = null, refuse = null, saveConfig = async () => ({ restart_required: false }), confirmRestart = true, resume = false, shellRestart = false, cloud = null, grant = null, saved = true, running = true, ha = false, policy = POLICY } = {}) {
   const byId = new Map();
   for (const id of IDS) {
     byId.set(id, element(id.startsWith("app-link-devices") || id.endsWith("slot") ? "div" : "button"));
@@ -151,7 +151,7 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null, save
         return answer({ enabled: running, paired_devices: devices.length });
       }
       if (path === "/api/cloud") return cloud ? answer(cloud) : answer({ error: "unavailable" }, false);
-      if (path === "/api/cloud/stats-policy") return answer(POLICY);
+      if (path === "/api/cloud/stats-policy") return policy ? answer(policy) : answer({ error: "unavailable" }, false);
       if (path === "/api/cloud/grant") {
         if (grant && grant.error) return answer({ error: grant.error }, false);
         cloud = Object.assign({}, cloud, { cloudTermsAccepted: true, link: "on", state: "on" });
@@ -620,6 +620,20 @@ describe("pairing in one tap", () => {
     assert.equal(el("app-link-pair").disabled, false, "the button stays dead after a refusal");
   });
 
+  // Terms the page could not read are not terms accepted. A code shown then
+  // would pair a phone while the box still holds no answer.
+  it("stops when the box's terms cannot be read", async () => {
+    const { el, calls } = load({ cloud: fresh, pairing: qr, policy: null });
+    await settle();
+    el("app-link-pair").click();
+    await settle();
+
+    assert.equal(calls.some((c) => c.path === "/api/cloud/grant"), false);
+    assert.equal(calls.some((c) => c.path === "/api/app-link/pairing"), false, "a code was made with the terms unaccepted");
+    assert.match(el("app-link-slot").words(), /Could not read the FTW Cloud terms/);
+    assert.equal(el("app-link-pair").disabled, false);
+  });
+
   it("does not accept again once the terms are accepted", async () => {
     const { el, calls } = load({ cloud: { available: true, cloudTermsAccepted: true, link: "on", state: "on" }, pairing: qr });
     await settle();
@@ -719,6 +733,24 @@ describe("the app link switch", () => {
     assert.equal(page.el("app-link-enabled").checked, false, "the switch still says on");
     assert.ok(page.calls.some((c) => c.path === "/api/restart" && c.opts.method === "POST"));
     assert.match(page.el("app-link-off-status").textContent, /FTW is back|Restarting/);
+  });
+
+  // The save carries the setting. When it fails, the page must not go on
+  // saying off: a later Save elsewhere would then turn the link off unasked.
+  it("puts the switch back when the save fails", async () => {
+    const page = load({ saveConfig: async () => { throw new Error("the box said no"); } });
+    page.el("app-link-enabled").checked = true;
+    await settle();
+
+    page.el("app-link-off").click();
+    await settle();
+
+    assert.equal(page.config.app_link.enabled, true, "the page holds off while the box has it on");
+    assert.equal(page.el("app-link-enabled").checked, true, "the switch says off while nothing was saved");
+    assert.equal(page.calls.some((c) => c.path === "/api/restart"), false, "restarted after a failed save");
+    assert.match(page.el("app-link-off-status").textContent, /Could not save settings: the box said no/);
+    assert.equal(page.el("app-link-off").disabled, false);
+    assert.equal(page.session.has("ftw.pairing.resume"), false);
   });
 
   it("changes nothing when turning off is cancelled", async () => {

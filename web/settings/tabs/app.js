@@ -72,12 +72,14 @@
   // Accepts the current terms through the same route as the Cloud panel,
   // POST /api/cloud/grant, and only when the box says they are not yet
   // accepted. A refusal stops the pairing: the line by the button promised
-  // that pairing accepts them.
+  // that pairing accepts them. So does terms the page could not read, since
+  // a code shown then would pair a phone with the terms still unaccepted.
   function acceptCloudTerms() {
     return Promise.all([readJSON("/api/cloud"), readJSON("/api/cloud/stats-policy")])
       .then(function (v) {
         var cloud = v[0], policy = v[1];
-        if (!cloudNeedsTerms(cloud) || !policy) return;
+        if (!cloudNeedsTerms(cloud)) return;
+        if (!policy) throw new Error("Could not read the FTW Cloud terms from the box. Try again.");
         return fetch("/api/cloud/grant", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -485,15 +487,25 @@
 
   // Saves the settings and restarts FTW, which is when the app link starts
   // or stops: it connects at startup. statusId is the line beside the button
-  // that was pressed; confirmed says that button already asked.
-  async function restartAppLink(ctx, button, statusId, confirmed) {
+  // that was pressed; confirmed says that button already asked; unsaved runs
+  // when the save fails, so the page can put back what it changed for it.
+  async function restartAppLink(ctx, button, statusId, confirmed, unsaved) {
     if (!confirmed && !confirm("Save settings and restart FTW? Energy control pauses until FTW is back.")) return;
     var status = document.getElementById(statusId || "app-link-restart-status");
     button.disabled = true;
     status.textContent = "Saving settings…";
     resumePairing(true);
+    var result;
     try {
-      var result = await ctx.saveConfig();
+      result = await ctx.saveConfig();
+    } catch (error) {
+      if (unsaved) unsaved();
+      resumePairing(false);
+      status.textContent = "Could not save settings: " + error.message;
+      button.disabled = false;
+      return;
+    }
+    try {
       // Keep the shell's existing dialog and progress when saving opens it.
       var restart = document.getElementById("restart-now");
       if (result && result.restart_required && restart) {
@@ -536,10 +548,17 @@
   function turnOffAppLink(ctx, button) {
     if (!confirm("Turn off the app link? Paired phones cannot reach this box until you turn it on again. " +
       "FTW saves and restarts; energy control pauses until it is back.")) return;
-    ctx.config.app_link.enabled = false;
+    // The save carries the setting, so it changes here, and changes back if
+    // the save fails: a page that says off while the box still has it on
+    // would let a later Save elsewhere turn it off unasked.
     var toggle = document.getElementById("app-link-enabled");
+    var was = ctx.config.app_link.enabled;
+    ctx.config.app_link.enabled = false;
     if (toggle) toggle.checked = false;
-    restartAppLink(ctx, button, "app-link-off-status", true);
+    return restartAppLink(ctx, button, "app-link-off-status", true, function () {
+      ctx.config.app_link.enabled = was;
+      if (toggle) toggle.checked = was;
+    });
   }
 
   function resumePairing(on) {
