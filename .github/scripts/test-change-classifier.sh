@@ -62,7 +62,7 @@ assert_paths 'scripts/upgrade-paired-release.sh' \
 assert_paths 'scripts/test-upgrade-paired-release.sh' \
   'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 
-for path in deploy/docker/.dockerignore deploy/balena/docker-compose.yml deploy/balena/mdns/publish.sh scripts/test-balena-mdns.sh docs/native-beta.md docs/setup-guide/update-sv.md scripts/test_install_docs.py scripts/test-release-docker-context.sh scripts/ftwctl.py scripts/test_ftwctl.py; do
+for path in deploy/docker/.dockerignore deploy/balena/docker-compose.yml deploy/balena/mdns/publish.sh scripts/test-balena-mdns.sh docs/native-beta.md docs/setup-guide/update-sv.md scripts/test_install_docs.py scripts/test-release-docker-context.sh scripts/ftwctl.py scripts/test_ftwctl.py scripts/install.sh scripts/test-install-native.sh scripts/testdata/install/github-releases-page.json; do
   assert_paths "$path" \
     'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 done
