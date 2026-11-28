@@ -16,7 +16,7 @@ Have you run FTW before, here or on another computer? Read
 - Home Assistant OS (for example Home Assistant Green), amd64
   or aarch64. Home Assistant Container/Core has no apps; use a
   [separate computer](install.md#a-linux-computer) instead.
-- Keep at least 1 GB free for the first build, plus room for history and backups.
+- Room for history and backups.
 - Your inverter, battery, meter or charger on the same network.
 
 ## 1. Add the app repository
@@ -34,9 +34,8 @@ by hand:
 ## 2. Install
 
 1. Find **FTW (beta)** in the store and open it. Its version starts with `0.`.
-2. Choose **Install**. Home Assistant builds the app on your device from
-   FTW's release package and checks its checksum. The first build downloads
-   packages and can take several minutes; wait for it to finish.
+2. Choose **Install**. Home Assistant downloads FTW's prebuilt, signed image.
+   It takes about as long as the download.
 3. Turn on **Watchdog**, so Home Assistant restarts FTW when its health check
    fails. **Start on boot** is on already. Then choose **Start**.
 4. Open the **Log** tab. You should see `FTW starting`, then

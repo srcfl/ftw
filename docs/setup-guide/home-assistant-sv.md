@@ -15,7 +15,7 @@ Har du kört FTW förut, här eller på en annan dator? Läs
 - Home Assistant OS (till exempel Home Assistant Green), amd64 eller aarch64.
   Home Assistant Container/Core har inga appar; använd en
   [separat dator](install-sv.md#en-linux-dator) i stället.
-- Ha minst 1 GB ledigt för första bygget, plus plats för historik och backup.
+- Plats för historik och backup.
 - Växelriktare, batteri, elmätare eller laddbox på samma nätverk.
 
 ## 1. Lägg till app-repot
@@ -33,9 +33,8 @@ gör det för hand:
 ## 2. Installera
 
 1. Öppna **FTW (beta)** i butiken. Versionen börjar med `0.`.
-2. Välj **Installera**. Home Assistant bygger appen på enheten från FTW:s
-   releasepaket och kontrollerar kontrollsumman. Första bygget laddar ned paket
-   och kan ta flera minuter. Vänta tills det är klart.
+2. Välj **Installera**. Home Assistant laddar ned FTW:s färdiga, signerade
+   avbild. Det tar ungefär lika lång tid som nedladdningen.
 3. Slå på **Watchdog**, så att Home Assistant startar om FTW när dess
    hälsokontroll misslyckas. **Starta vid uppstart** är redan på. Välj sedan
    **Starta**.
