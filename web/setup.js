@@ -222,6 +222,19 @@
     return devices.some(function (d) { return d.driver.is_site_meter; });
   }
 
+  // Core balances the home against one meter at the grid connection, and
+  // refuses devices without one. A charger or a solar-only inverter cannot
+  // be it, so the guide says so here rather than failing at Start FTW.
+  var SITE_METER_NEEDED = 'FTW needs a meter for the whole home: add your electricity meter, a P1 reader, or an inverter that measures the grid.';
+
+  function needsSiteMeter() {
+    return devices.length > 0 && !hasSiteMeter();
+  }
+
+  function canMeasureHome(d) {
+    return (d.entry.capabilities || []).indexOf('meter') >= 0;
+  }
+
   function has(obj, key) {
     return !!obj && Object.prototype.hasOwnProperty.call(obj, key);
   }
@@ -545,6 +558,17 @@
       info.appendChild(label);
       info.appendChild(detail);
       info.appendChild(state);
+      // With no site meter, a device that can be one offers to be it.
+      if (needsSiteMeter() && canMeasureHome(d)) {
+        var use = document.createElement('button');
+        use.className = 'btn-secondary device-use-meter';
+        use.textContent = 'Measures the whole home';
+        use.addEventListener('click', function () {
+          d.driver.is_site_meter = true;
+          renderDeviceList();
+        });
+        info.appendChild(use);
+      }
       var btn = document.createElement('button');
       btn.className = 'btn-remove-sm';
       btn.textContent = 'Remove';
@@ -556,6 +580,9 @@
       item.appendChild(btn);
       container.appendChild(item);
     });
+    var line = document.getElementById('site-meter-needed');
+    line.textContent = SITE_METER_NEEDED;
+    line.hidden = !needsSiteMeter();
     document.getElementById('devices-next').textContent = devices.length ? 'Continue' : 'Continue without devices';
   }
 
@@ -732,6 +759,9 @@
     } else {
       html += '<div class="notice">No devices. FTW shows nothing live until you add one in Settings → Devices.</div>';
     }
+    if (needsSiteMeter()) {
+      html += '<div class="notice" id="review-site-meter">' + esc(SITE_METER_NEEDED) + '</div>';
+    }
 
     // HA
     var haEnabled = document.getElementById('ha-enabled').checked;
@@ -753,6 +783,7 @@
 
     document.getElementById('review-content').innerHTML = html;
     document.getElementById('house-password-step').hidden = !asksHousePassword();
+    document.getElementById('save-btn').disabled = needsSiteMeter();
     document.getElementById('save-error').style.display = 'none';
     document.getElementById('save-actions').style.display = 'flex';
     document.getElementById('save-success').style.display = 'none';
@@ -762,6 +793,7 @@
 
   window.saveConfig = function () {
     if (!validateConnection()) return;
+    if (needsSiteMeter()) return;
     // An empty device list is valid: the review says FTW shows nothing
     // live, and the owner adds devices later in Settings.
     var btn = document.getElementById('save-btn');
@@ -788,7 +820,8 @@
       body: JSON.stringify(cfg)
     })
       .then(function (r) {
-        if (!r.ok) return r.json().then(function (d) { throw new Error(d.error || 'Save failed'); });
+        // Core's own reason, said where the owner is looking.
+        if (!r.ok) return r.json().then(function (d) { throw new Error('FTW could not save: ' + (d.error || 'HTTP ' + r.status)); });
         return r.json();
       })
       .then(function () {

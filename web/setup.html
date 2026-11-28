@@ -410,6 +410,7 @@
     .device-advanced { margin: 0.5rem 0 0; }
     .device-advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--fg-dim); margin-bottom: 0.75rem; }
     .app-next { margin-top: 1.5rem; text-align: center; }
+    .device-use-meter { margin-top: 6px; padding: 5px 10px; font-size: 0.78rem; align-self: flex-start; }
     .step a { color: var(--fg); }
     .drivers-summary:empty { display: none; }
     .notice {
@@ -666,6 +667,7 @@
     <p>Add your meter, inverter, battery and charger. FTW tests each one as you add it.</p>
 
     <div id="device-list" class="drivers-summary" aria-live="polite"></div>
+    <p id="site-meter-needed" class="notice" role="status" hidden></p>
 
     <div id="device-find">
       <div class="scan-row">

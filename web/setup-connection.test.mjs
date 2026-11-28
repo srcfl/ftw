@@ -67,7 +67,11 @@ function wizard(search = '', zonesFail = false, catalog = [], replies = {}) {
       elements[match[1]].appendChild(opt);
     }
   }
-  const reply = body => Promise.resolve({ ok: true, status: 200, json: async () => body });
+  // A reply with __status answers with that HTTP status, as Core's 422 does.
+  const reply = body => {
+    const status = (body && body.__status) || 200;
+    return Promise.resolve({ ok: status < 400, status, json: async () => body });
+  };
   const sandbox = {
     location: { search }, scrollTo() {}, URLSearchParams, setTimeout() {}, console,
     document: {
@@ -259,7 +263,9 @@ const ZAP = { id: 'zap', name: 'Sourceful Zap', manufacturer: 'Sourceful', filen
 const EASEE = { id: 'easee_cloud', name: 'Easee Cloud', manufacturer: 'Easee', filename: 'easee_cloud.lua',
   path: 'drivers/easee_cloud.lua', protocols: ['http'], capabilities: ['ev'], http_hosts: ['api.easee.com'],
   config_secrets: ['password'] };
-const CATALOG = [SUNGROW, HUAWEI, SDM630, ZAP, EASEE];
+const SOLAREDGE_PV = { id: 'solaredge_pv', name: 'SolarEdge PV', manufacturer: 'SolarEdge', filename: 'solaredge_pv.lua',
+  path: 'drivers/solaredge_pv.lua', protocols: ['modbus'], capabilities: ['pv', 'pv-curtail'], connection_defaults: { port: 502, unit_id: 1 } };
+const CATALOG = [SUNGROW, HUAWEI, SDM630, ZAP, EASEE, SOLAREDGE_PV];
 const flush = async () => { for (let i = 0; i < 6; i++) await settled(); };
 const tags = card => card.children.find(c => c.className === 'drv-catalog-tags').children.map(t => t.textContent);
 
@@ -427,6 +433,78 @@ describe('setup devices — one flow with Settings', () => {
       assert.doesNotMatch(el.innerHTML, /<img|onfocus=/, 'no markup carries the key or the name');
     }
     assert.equal(rig.elements['device-title'].textContent, '<img src=x onerror=alert(1)>');
+  });
+
+  // Core refuses devices with no site meter. A home with only a charger or
+  // a solar-only inverter learns that on the device step, not as a 422.
+  for (const [what, add] of [
+    ['a charger', async rig => {
+      rig.card('easee_cloud').click();
+      rig.elements['dev-email'].value = 'owner@example.com';
+      rig.elements['dev-password'].value = 'pw';
+      rig.elements['dev-find-chargers'].click();
+      await flush();
+    }],
+    ['a solar-only inverter', async rig => {
+      rig.card('solaredge_pv').click();
+      rig.elements['dev-host'].value = '192.168.1.40';
+    }],
+  ]) {
+    it('stops at the device step with only ' + what + ', until a meter is added', async () => {
+      const rig = await devicesStep({
+        '/api/ev/chargers': [{ id: 'EH1', name: 'Garage' }],
+        '/api/drivers/test': { ok: true, readings: [{ type: 'meter', smoothed_w: 5 }] },
+      });
+      await add(rig);
+      assert.ok(!rig.elements['dev-site-meter'], 'it cannot be the site meter');
+      rig.sandbox.addDevice();
+      await flush();
+      const line = rig.elements['site-meter-needed'];
+      assert.equal(line.hidden, false);
+      assert.equal(line.textContent, 'FTW needs a meter for the whole home: add your electricity meter, a P1 reader, or an inverter that measures the grid.');
+      rig.go(4); rig.go(5);
+      assert.match(rig.elements['review-content'].innerHTML, /FTW needs a meter for the whole home/);
+      assert.equal(rig.elements['save-btn'].disabled, true);
+      rig.save();
+      assert.equal(rig.saved(), false, 'Start FTW never reaches Core');
+      rig.go(3);
+      rig.card('sdm630').click();
+      rig.elements['dev-host'].value = '192.168.1.41';
+      assert.equal(rig.elements['dev-site-meter'].checked, true);
+      rig.sandbox.addDevice();
+      await flush();
+      assert.equal(rig.elements['site-meter-needed'].hidden, true);
+      rig.go(4); rig.go(5);
+      assert.equal(rig.elements['save-btn'].disabled, false);
+      rig.save();
+      assert.deepEqual(rig.posted().drivers.map(d => d.is_site_meter), [false, true]);
+    });
+  }
+
+  it('lets a meter added unticked become the site meter from the list', async () => {
+    const rig = await devicesStep({ '/api/drivers/test': { ok: true, readings: [{ type: 'meter', smoothed_w: 5 }] } });
+    rig.card('sdm630').click();
+    rig.elements['dev-host'].value = '192.168.1.41';
+    rig.elements['dev-site-meter'].checked = false;
+    rig.sandbox.addDevice();
+    await flush();
+    assert.equal(rig.elements['site-meter-needed'].hidden, false);
+    const use = rig.elements['device-list'].children[0].children[0].children.find(c => c.textContent === 'Measures the whole home');
+    use.click();
+    assert.equal(rig.elements['site-meter-needed'].hidden, true);
+    rig.save();
+    assert.equal(rig.posted().drivers[0].is_site_meter, true);
+  });
+
+  it("shows Core's reason in place when it refuses the settings", async () => {
+    const rig = await devicesStep({ '/api/config': { __status: 422, error: 'driver "x": duplicate name' } });
+    rig.go(4); rig.go(5);
+    rig.save();
+    await flush();
+    const err = rig.elements['save-error'];
+    assert.equal(err.style.display, 'block');
+    assert.equal(err.textContent, 'FTW could not save: driver "x": duplicate name');
+    assert.equal(rig.elements['save-btn'].disabled, false);
   });
 
   it('has no list of chargers of its own', () => {
