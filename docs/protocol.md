@@ -23,7 +23,7 @@ not imply that the operations below already implement them. Extend the registry
 and Core/client implementations together with authorization, expiry, replay,
 revocation and result tests. Core still owns admission and physical dispatch.
 Temporary external control must expire; a saved household goal must survive
-client disconnect. Relay and escrow remain unable to read session contents.
+client disconnect. FTW Cloud cannot read session contents.
 
 ## Pairing by short code
 
@@ -63,7 +63,7 @@ the document is visible and 0.2 Hz while it is hidden. It never changes with
 the telemetry it carries. If the box has nothing to say it sends `tick` anyway.
 
 Through FTW Cloud's tunnel the box sends a padded frame when a reading lands,
-plus a beat while quiet. The relay's fixed cadence applies only to the relay.
+plus a beat while quiet.
 The tunnel's envelope, limits and session ids follow Core's
 [Cloud protocol](protocol-cloud.md#tunnel).
 The browser uses the same Noise and CBOR as iPhone over the service's existing
@@ -337,7 +337,7 @@ A route whose body replaces a whole document rather than editing part of one —
 `POST /api/config` is the one — is refused with `E_WHOLE_DOCUMENT` even for an
 owner who has stepped up. A body built from an older idea of that document
 silently drops every field the sender never knew about. On the LAN the browser
-had just loaded it from this box; a phone on a relay, possibly a year behind,
+had just loaded it from this box; a phone through FTW Cloud, possibly a year behind,
 has no such guarantee.
 
 A `local` route is refused with `E_LOCAL_ONLY`, before the role and before the

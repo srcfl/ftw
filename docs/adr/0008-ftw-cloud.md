@@ -473,6 +473,10 @@ build with the relay sends the fleet report to FTW Cloud only through it.
 release after the first that pins the relay. A collector the household set
 in `fleet_ping.endpoint` is still posted to directly.
 
+*Removed 28 November 2026:* `ftwcloudd` no longer serves `POST /v1/ohttp` or
+holds a gateway key (srcfl/ftw-cloud#72). No release had pinned a relay, so
+no box ever sent through it. A build that pins one needs a new gateway first.
+
 **Who sees what.** The relay sees the box's address, the time and a
 ciphertext of fixed length, never a report. Cloudflare's relay, if chosen,
 keeps those logs for about 124 days. The gateway sees each report, the

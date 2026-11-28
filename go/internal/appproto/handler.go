@@ -730,11 +730,12 @@ func (h *Handler) sendSnapshot() error {
 
 // Tick consumes one global one-second pulse. The handler gates that pulse to
 // this subscription's 1 Hz or 0.2 Hz cadence. On each due pulse it emits a
-// frame even when nothing changed, so the relay cannot distinguish an idle
+// frame even when nothing changed, so a carrier cannot distinguish an idle
 // house from an active one within the chosen cadence.
 //
-// Only a session over the relay ticks. A session that FTW Cloud carries is
-// streamed with Push and Beat instead (docs/protocol-cloud.md, "Tunnel").
+// The relay was the only caller, and it is gone: a session that FTW Cloud
+// carries is streamed with Push and Beat instead (docs/protocol-cloud.md,
+// "Tunnel"). Only the telemetry tests drive Tick now.
 func (h *Handler) Tick() error {
 	if h.isAgent() {
 		if err := h.agentTick(); err != nil {
