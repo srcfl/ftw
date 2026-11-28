@@ -1470,10 +1470,12 @@ body.ftw-app .plan-strategy .strategy-hint {
 /* "Use the plan" is the one action on this card while a manual mode
    drives, so it takes the accent the mode buttons do not — and only the
    width its label needs. */
-body.ftw-app #plan-use-row {
+body.ftw-app #plan-use-row,
+body.ftw-app #plan-restart-row {
   margin-top: 12px;
 }
-body.ftw-app .mode-buttons #plan-use-btn {
+body.ftw-app .mode-buttons #plan-use-btn,
+body.ftw-app .mode-buttons #plan-restart-btn {
   flex: 0 0 auto;
   background: var(--accent-e);
   border: 1px solid var(--accent-e);
@@ -1481,10 +1483,28 @@ body.ftw-app .mode-buttons #plan-use-btn {
   font-weight: 600;
   padding: 8px 16px;
 }
-body.ftw-app .mode-buttons #plan-use-btn:hover {
+body.ftw-app .mode-buttons #plan-use-btn:hover,
+body.ftw-app .mode-buttons #plan-restart-btn:hover {
   background: var(--accent-e);
   color: var(--on-accent);
   opacity: 0.9;
+}
+body.ftw-app .plan-use-status {
+  margin: 8px 0 0;
+  max-width: 70ch;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+}
+body.ftw-app .plan-use-status.is-error {
+  color: var(--alarm);
+}
+/* The card hides what does not apply yet (plan-use.js planCardView). Rows
+   here set their own display, which would otherwise win over [hidden]. */
+body.ftw-app .plan-strategy [hidden],
+body.ftw-app .plan-now [hidden] {
+  display: none;
 }
 body.ftw-app .engine-details {
   margin-top: 16px;

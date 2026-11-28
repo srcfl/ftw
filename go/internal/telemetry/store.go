@@ -715,6 +715,28 @@ func (s *Store) SumOnlineEVW() float64 {
 	return sum
 }
 
+// FreshBatterySoCOnline reports whether at least one battery has a charge
+// level no older than BatterySoCMaxAge at now, from a driver that is online
+// and not calibrating. These are the planner's own gates on its starting
+// charge (mpc currentSoC and onlineFleetParams), so a caller can wait for
+// the first battery reading the planner will accept.
+func (s *Store) FreshBatterySoCOnline(now time.Time) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, r := range s.readings {
+		if r.DerType != DerBattery || r.SoC == nil || r.SoCUpdatedAt.IsZero() {
+			continue
+		}
+		if h, ok := s.health[r.Driver]; !ok || !h.CanControl() {
+			continue
+		}
+		if age := now.Sub(r.SoCUpdatedAt); age >= 0 && age <= BatterySoCMaxAge {
+			return true
+		}
+	}
+	return false
+}
+
 // SumOnlineV2XW returns the summed SmoothedW across bidirectional V2X
 // chargers that are still reporting. Positive values mean vehicle
 // charging; negative values mean the vehicle is discharging into the

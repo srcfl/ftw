@@ -528,6 +528,7 @@
               <dd>
                 <strong id="plan-forecast-state">—</strong>
                 <small id="plan-forecast-detail">—</small>
+                <small id="plan-forecast-learning" hidden></small>
               </dd>
             </div>
             <div id="plan-soc-meta">
@@ -552,13 +553,14 @@
         <!-- Household planner prefs — forecast trust + battery export.
              Passive/Active are no longer primary buttons (HA/app keep
              those keys). Manual fallbacks stay behind Manual…. -->
-        <div class="plan-strategy">
-          <span class="card-label plan-strategy-label" id="plan-style-label">Planning style</span>
+        <div class="plan-strategy" id="plan-strategy">
+          <span class="card-label plan-strategy-label" id="plan-style-label" hidden>Planning style</span>
           <!-- Five styles on one stored number, safety_k (PLAN_STYLES in
                plan-prefs.js). Left keeps the most in the battery; right
                counts most on the forecast. Settings → Planner fine-tunes
-               the number itself. -->
-          <div class="plan-style" id="plan-style">
+               the number itself. Style and export wait for the first
+               plan (planCardView in plan-use.js). -->
+          <div class="plan-style" id="plan-style" hidden>
             <div class="plan-style-steps" id="plan-style-steps" role="radiogroup" aria-labelledby="plan-style-label">
               <button type="button" role="radio" aria-checked="false" data-style="very_careful">Very careful</button>
               <button type="button" role="radio" aria-checked="false" data-style="careful">Careful</button>
@@ -579,7 +581,7 @@
             </p>
             <p id="plan-style-status" class="plan-style-status" role="status" hidden></p>
           </div>
-          <div class="plan-export">
+          <div class="plan-export" id="plan-export" hidden>
             <div id="plan-export-banner" class="plan-export-banner" hidden>
               <p>FTW used to sell from the battery on high-price hours. Allow that to continue?</p>
               <div class="plan-export-banner-actions">
@@ -594,16 +596,20 @@
             <p class="plan-export-help">Solar still exports when this is off.</p>
             <p id="plan-export-unknown" class="plan-export-unknown" hidden>Not checked — battery export stays off.</p>
           </div>
-          <p id="plan-export-sentence" class="plan-export-sentence"></p>
-          <!-- The way back to the planner. Without it a house left in a
-               manual mode has no control here that starts planning again.
-               Which planner mode it lands on is the server's answer
-               (GET /api/planner/prefs → mapped_mode), so this button never
-               decides on its own whether the battery may sell. Shown only
-               while a manual mode is driving. -->
+          <p id="plan-export-sentence" class="plan-export-sentence" hidden></p>
+          <!-- The way into the plan. It turns the planner on when it is off
+               (the Settings → Planner write, then a restart) and hands the
+               house to it. Which planner mode it lands on is the server's
+               answer (GET /api/planner/prefs → mapped_mode), so this button
+               never decides on its own whether the battery may sell. Shown
+               while a manual mode drives or the planner is off. -->
           <div class="mode-buttons mode-buttons-primary" id="plan-use-row" hidden>
             <button type="button" id="plan-use-btn"
-                    title="Hand the battery back to the plan">Use the plan</button>
+                    title="Hand the house to the plan">Use the plan</button>
+          </div>
+          <p id="plan-use-status" class="plan-use-status" role="status" hidden></p>
+          <div class="mode-buttons mode-buttons-primary" id="plan-restart-row" hidden>
+            <button type="button" id="plan-restart-btn">Restart FTW</button>
           </div>
           <!-- Remaining /api/modes entries (manual) still render here.
                Planner keys are skipped in renderModeCatalog. -->
@@ -613,11 +619,14 @@
                They used to be `.advanced-only`, so the simple view hid both
                the current manual mode and the way back to a planner
                strategy. Keep them behind "Manual…" — that is already the
-               progressive disclosure. -->
-          <div class="mode-advanced-toggle">
-            <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
+               progressive disclosure. A new box waits for its first plan
+               before it shows them. -->
+          <div id="plan-manual" hidden>
+            <div class="mode-advanced-toggle">
+              <button class="btn-link" id="mode-advanced-btn" title="Show manual modes">Manual…</button>
+            </div>
+            <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
           </div>
-          <div class="mode-buttons mode-buttons-advanced" id="mode-buttons" style="display:none"></div>
         </div>
         <div class="chart-container">
           <canvas id="plan-chart" width="800" height="260"></canvas>

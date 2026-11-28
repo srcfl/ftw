@@ -609,6 +609,9 @@ func main() {
 		return
 	}
 
+	// Read before this boot is recorded: an empty event log is a box on its
+	// very first start (seedPlannerMode).
+	firstBoot := isFirstBoot(st)
 	if err := st.RecordEvent("startup"); err != nil {
 		slog.Warn("failed to persist startup event", "err", err)
 	}
@@ -656,6 +659,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	seedPlannerMode(ctrl, st, cfg, export, firstBoot)
 	if ctrl.Mode == control.ModePlannerArbitrage && export != config.BatteryExportAllowed {
 		ctrl.Mode = control.ModePlannerPassiveArbitrage
 		if err := st.SaveConfig("mode", string(ctrl.Mode)); err != nil {
@@ -1977,6 +1981,7 @@ func main() {
 		// telemetry, prices, and forecasts have settled. Observe ctx
 		// during the warm-up sleep so SIGTERM during startup doesn't
 		// keep this goroutine alive past shutdown.
+		firstPlanReady := planInputsReady(mpcSvc, tel, mpcSvc.Defaults.CapacityWh > 0)
 		go func() {
 			select {
 			case <-ctx.Done():
@@ -1988,6 +1993,7 @@ func main() {
 			}
 			_ = mpcSvc.ReplanWithReason(ctx, "startup")
 			slog.Info("mpc: startup replan completed")
+			firstPlanWhenReady(ctx, mpcSvc, firstPlanReady, firstPlanPoll, firstPlanLimit)
 		}()
 	}
 
