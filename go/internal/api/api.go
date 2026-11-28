@@ -1265,6 +1265,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"phases":   s.deps.Cfg.Fuse.Phases,
 		"voltage":  s.deps.Cfg.Fuse.Voltage,
 	}
+	priceNote := priceAreaNote(s.deps.Cfg.Price, s.deps.Prices)
 	s.deps.CfgMu.RUnlock()
 
 	phaseAmps := siteMeterPhaseAmps(s.deps.Tel, ctrl.SiteMeterDriver)
@@ -1335,6 +1336,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// prefers it to the plan's per-slot cap, so the Plan card needs it to say
 	// where extra sun goes.
 	resp["pv_surplus_absorb_soc_cap"] = ctrl.PVSurplusAbsorbSoCCap
+	if priceNote != "" {
+		resp["price_area_note"] = priceNote
+	}
 	// The import ceiling caps each clock hour's mean import: what is left of
 	// this hour's budget and the import limit it sets now. Null while off.
 	resp["peak_import_hour_left_wh"], resp["peak_import_limit_w"] = nil, nil
