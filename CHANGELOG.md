@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.170.1
+
+### Patch Changes
+
+- 05ddc29: Home Assistant keeps long-term statistics for FTW's driver values: power, current, voltage, temperature and state of charge are measurements, and a driver's lifetime energy totals count up. FTW's own workings (each driver's Online sensor and metrics, Plan Stale, the per-phase values, the peak ceiling and the setpoint sensors) move to the device page's Diagnostic group, and the device page shows FTW's version. The older switch that lets the home battery feed the car with no time limit shows only while it is on. In the Home Assistant app, FTW now finds the Mosquitto broker within a minute when you add it after FTW, with no restart. Entity names and ids do not change.
+- c1d443b: The installer and the first `ftw` commands speak plainly. On a box it set up,
+  the install line now says FTW is already installed, prints the addresses and
+  points to `ftw status` and `ftw update`. After the documented
+  removal it names the data left behind and the commands that back it up and
+  clear it. It names a missing tool with the command that adds it, finds the
+  address without `ip` or `hostname -I`, checks port 8080 without `ss`, checks
+  free space before the download and unpacks it in `/var/tmp` when `/tmp` is a
+  small tmpfs. On macOS, a 32-bit system or a computer without systemd it points
+  to Raspberry Pi OS Lite (64-bit), the FTW app for Home Assistant and the
+  install guide. `ftw backup` and `ftw support` say that Core waits for setup
+  instead of printing HTTP 405 or 404.
+- aa4a676: A new box's welcome step again offers setup with ChatGPT or Claude, as one quiet link under Get started. It opens the house password and the Start assistant setup button that FTW Cloud's texts name; under Home Assistant it asks for no password. The guide's last step says you can connect an assistant later from Settings → Access.
+
 ## 0.170.0
 
 ### Minor Changes
