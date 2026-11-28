@@ -28,8 +28,10 @@ const (
 // A bridge from a retry gets the same Reload and Stop handling as one started
 // at once.
 type haBridgeOwner struct {
-	start    func(cfg *config.HomeAssistant, driverNames []string) (haBridgeHandle, error)
-	names    func() []string
+	start func(cfg *config.HomeAssistant, driverNames []string) (haBridgeHandle, error)
+	names func() []string
+	// broker fills an empty saved broker in the Home Assistant app.
+	broker   *haBundleBroker
 	minDelay time.Duration
 	maxDelay time.Duration
 
@@ -68,6 +70,7 @@ func (o *haBridgeOwner) Apply(cfg *config.HomeAssistant) {
 		return
 	}
 	o.cancelRetry()
+	cfg = o.broker.fill(cfg)
 
 	o.mu.Lock()
 	bridge := o.bridge

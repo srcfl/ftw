@@ -1108,6 +1108,14 @@ func main() {
 		}
 	}
 
+	// In the Home Assistant app, the app passes Home Assistant's own MQTT
+	// broker. A site that never set up the bridge then starts it with that
+	// broker; the default is saved only when the owner saves settings.
+	haBroker := haBundleBrokerFromEnv()
+	cfgMu.Lock()
+	cfg.HomeAssistant = haBroker.defaultSettings(cfg.HomeAssistant)
+	cfgMu.Unlock()
+
 	// haOwner starts, reloads and stops the HA bridge, and retries a start
 	// the broker did not accept. Its start closure reads the registry and
 	// control wiring only when it runs.
@@ -1118,6 +1126,7 @@ func main() {
 		}
 		return b, nil
 	}, func() []string { return reg.Names() })
+	haOwner.broker = haBroker
 
 	// deps is the API server's runtime dependency container. Forward-
 	// declared as a *Deps so the hot-reload Applier closure can capture
