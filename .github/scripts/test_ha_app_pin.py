@@ -49,9 +49,9 @@ class CompareTest(unittest.TestCase):
                   release("v0.159.0-beta.1", days(5))]]
         behind, report = ha_app_pin.check(pages, config("0.159.0-beta.1"), NOW)
         self.assertTrue(behind)
-        self.assertIn("app pin:      v0.159.0-beta.1", report)
-        self.assertIn("newest beta:  v0.163.0-beta.1", report)
-        self.assertIn("4 beta(s) behind. The oldest has waited 52 hours.", report)
+        self.assertIn("app pin:         v0.159.0-beta.1", report)
+        self.assertIn("newest release:  v0.163.0-beta.1", report)
+        self.assertIn("4 release(s) behind. The oldest has waited 52 hours.", report)
         for minor in (160, 161, 162, 163):
             self.assertIn(f"  v0.{minor}.0-beta.1", report)
 
@@ -59,7 +59,7 @@ class CompareTest(unittest.TestCase):
         pages = [[release("v0.163.0-beta.1", days(2)), release("v0.162.0-beta.1", days(2))]]
         behind, report = ha_app_pin.check(pages, config("0.163.0-beta.1"), NOW)
         self.assertFalse(behind)
-        self.assertIn("The app pins the newest beta that has had time to land.", report)
+        self.assertIn("The app pins the newest release that has had time to land.", report)
 
     def test_a_fresh_beta_gets_time_to_land(self):
         pages = [[release("v0.164.0-beta.1", minutes(20)), release("v0.163.0-beta.1", days(2))]]
@@ -72,7 +72,7 @@ class CompareTest(unittest.TestCase):
                   release("v0.162.0-beta.1", days(3))]]
         behind, report = ha_app_pin.check(pages, config("0.162.0-beta.1"), NOW)
         self.assertTrue(behind)
-        self.assertIn("1 beta(s) behind", report)
+        self.assertIn("1 release(s) behind", report)
         self.assertIn("  v0.163.0-beta.1", report)
 
     def test_the_grace_period_ends(self):
@@ -81,16 +81,37 @@ class CompareTest(unittest.TestCase):
             with self.subTest(age=age):
                 self.assertEqual(ha_app_pin.check(pages, config("0.163.0-beta.1"), NOW)[0], expected)
 
-    def test_only_published_new_line_betas_count(self):
+    def test_only_published_new_line_releases_count(self):
         pages = [[release("v0.200.0-beta.1", days(1), draft=True),  # a draft
-                  release("v0.164.0", days(1)),                     # a stable
                   release("v0.130.9-beta.1", days(1)),              # the old line
+                  release("v0.130.4", days(1)),
                   release("v3.8.0-beta.1", days(1)),
+                  release("v3.8.0", days(1)),
                   release("drivers-beta", days(1)),
+                  release("drivers-stable", days(1)),
                   release("v0.163.0-beta.1", days(2))]]
         behind, report = ha_app_pin.check(pages, config("0.163.0-beta.1"), NOW)
         self.assertFalse(behind)
-        self.assertIn("newest beta:  v0.163.0-beta.1", report)
+        self.assertIn("newest release:  v0.163.0-beta.1", report)
+
+    def test_a_stable_that_outranks_every_beta_is_the_pin_to_follow(self):
+        pages = [[release("v0.164.0", days(1)), release("v0.164.0-beta.2", days(3)),
+                  release("v0.163.0-beta.1", days(5))]]
+        behind, report = ha_app_pin.check(pages, config("0.164.0-beta.2"), NOW)
+        self.assertTrue(behind)
+        self.assertIn("newest release:  v0.164.0", report)
+        self.assertIn("  v0.164.0\n", report + "\n")
+        behind, report = ha_app_pin.check(pages, config("0.164.0"), NOW)
+        self.assertFalse(behind, report)
+        self.assertIn("app pin:         v0.164.0", report)
+
+    def test_a_stable_below_the_beta_pin_is_not_missed(self):
+        pages = [[release("v0.163.0", days(1)), release("v0.164.0-beta.1", days(2))]]
+        self.assertFalse(ha_app_pin.check(pages, config("0.164.0-beta.1"), NOW)[0])
+
+    def test_release_order_across_channels(self):
+        tags = ["v0.164.0-beta.1", "v0.164.0-beta.10", "v0.164.0", "v0.164.1-beta.1", "v0.164.1", "v0.165.0-beta.1"]
+        self.assertEqual(sorted(reversed(tags), key=ha_app_pin.rank), tags)
 
     def test_versions_compare_as_numbers(self):
         pages = [[release("v0.163.10-beta.1", days(1)), release("v0.163.9-beta.2", days(2))]]
@@ -107,12 +128,13 @@ class CompareTest(unittest.TestCase):
     def test_input_that_cannot_be_judged_is_an_error(self):
         good = [[release("v0.163.0-beta.1", days(2))]]
         cases = {
-            "no beta in the list": ([[release("drivers-beta", days(1))]], config("0.163.0-beta.1")),
+            "no 0.x release in the list": ([[release("drivers-beta", days(1))]], config("0.163.0-beta.1")),
             "an API error object": ({"message": "Not Found"}, config("0.163.0-beta.1")),
             "an entry without a tag": ([[{"draft": False}]], config("0.163.0-beta.1")),
             "no publication time": ([[{"tag_name": "v0.163.0-beta.1"}]], config("0.163.0-beta.1")),
             "an empty config": (good, ""),
             "an old-line pin": (good, config("3.8.0-beta.1")),
+            "an old-line stable pin": (good, config("0.130.4")),
         }
         for name, (pages, text) in cases.items():
             with self.subTest(name), self.assertRaises(ValueError):
@@ -138,7 +160,7 @@ class ExitCodeTest(unittest.TestCase):
         self.config.write_text(config("0.159.0-beta.1"))
         behind = self.run_check(str(self.pages), str(self.config))
         self.assertEqual(behind.returncode, 1)
-        self.assertIn("1 beta(s) behind", behind.stdout)
+        self.assertIn("1 release(s) behind", behind.stdout)
 
     def test_anything_that_cannot_be_judged_is_2_never_1(self):
         self.config.write_text(config("0.163.0-beta.1"))
@@ -198,16 +220,16 @@ class WorkflowStepTest(unittest.TestCase):
 
     def test_behind_opens_one_issue_and_then_rewrites_it(self):
         name = "Open or update the tracking issue"
-        result, calls = self.run_step(name, REPORT="app pin:      v0.159.0-beta.1", RUN_URL="https://example.invalid/run/1")
+        result, calls = self.run_step(name, REPORT="app pin:         v0.159.0-beta.1", RUN_URL="https://example.invalid/run/1")
         self.assertEqual(result.returncode, 0, result.stderr)
         created = [call for call in calls if call[:2] == ["issue", "create"]]
         self.assertEqual(len(created), 1)
         body = created[0][created[0].index("--body") + 1]
-        self.assertIn("```\napp pin:      v0.159.0-beta.1\n```", body)
+        self.assertIn("```\napp pin:         v0.159.0-beta.1\n```", body)
         self.assertIn("`HA_ADDON_DISPATCH_TOKEN`", body)
         self.assertIn("From https://example.invalid/run/1", body)
 
-        result, calls = self.run_step(name, REPORT="app pin:      v0.160.0-beta.1", RUN_URL="https://example.invalid/run/2")
+        result, calls = self.run_step(name, REPORT="app pin:         v0.160.0-beta.1", RUN_URL="https://example.invalid/run/2")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse([call for call in calls if call[:2] == ["issue", "create"]])
         edited = [call for call in calls if call[:2] == ["issue", "edit"]]
