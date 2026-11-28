@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.170.0
+
+### Minor Changes
+
+- 61691d5: In the Home Assistant app, FTW's entities now appear in Home Assistant without typing a broker. The app passes Home Assistant's own MQTT broker (the Mosquitto broker app) to Core. A site that never set up the Home Assistant bridge starts it with that broker, and an empty broker field means that broker. A broker you typed yourself still wins, and **Settings → Integrations → Enabled** still turns the bridge off. Outside the Home Assistant app nothing changes.
+- 51b3dca: Install FTW on a Linux computer with one pasted line and no version to copy. Without `--tag`, `install.sh --fresh-host` takes the newest stable release, or the newest beta while no stable exists; `--beta` takes the newest beta when it is newer. The script also runs safely from `curl … | bash`. It ends with the addresses to open, one per IPv4 address, such as `http://192.168.1.23:8080/setup`, plus the `.local` name when Avahi or systemd-resolved announces one. A fresh run that finds an install cut short says to finish it with `--resume`, which now takes the release from that install. In a container or WSL without systemd, it says so before it changes anything.
+- 655fcca: The setup guide adds devices the way Settings does and tests each one when it is added. A device that does not answer stays out until you fix it or choose Add anyway, and the driver's setup hint says what to turn on. Chargers are added as devices. A new box starts with the planner on and without selling from the battery. The guide asks the price area once and chooses none for you; with no area it saves no prices and says so, and a box whose area is not set now says "Price area not set, using SE3" in its status. The guide ends with a line to the FTW app for iPhone.
+
+### Patch Changes
+
+- 144d45d: The bundled drivers carry a setup hint: one sentence on what to switch on in the device before FTW can reach it, such as Modbus TCP on the inverter. Fifteen bundled drivers have one (ctek, ctek_hybrid, ctek_v2, esphome_dsmr, fronius, goodwe, huawei, kostal, nibe_local, sma, sma_pv, solis, sungrow, victron, zap). Only the version and the hint changed in each.
+- 93f55e7: The overview names each configured device that does not answer, with what Core knows about it and a link to its settings. LIVE is green only while every device answers, graded as the apps grade it; `/api/status` now carries each driver's `src_state` and `last_ok_age_ms`. A device on a wrong port no longer leaves a green LIVE beside empty circles. A driver that only reads a car (`vehicle_only`) counts only when it reports an error, so a car away from home does not dim LIVE. When Core prices by an area nobody chose, the price card says so in one line that opens Settings → Price. "Unknown" energy shows in a neutral colour. The savings card names its baseline, "no solar or battery", since that number includes what the panels bring. More → Get help says to ask in the FTW Discord with the file.
+- 48d9b62: Pairing a phone on the box takes one tap. **Show pairing code** no longer
+  asks for the FTW Cloud terms in a separate panel first: a line beside the
+  buttons says the app reaches the box through FTW Cloud and that pairing
+  accepts its terms, and the tap accepts them through the same route as the
+  Cloud panel before it shows the code. The page also shows the box address
+  beside the QR. The app link switch and its restart show only while the link
+  is off; while it runs, a quiet **Turn off the app link…** below the pairing
+  stops it. The FTW Cloud panel shows only while Cloud is in use. Inside the
+  Home Assistant app the page offers the QR and the link only, with no box
+  address or short code, since the box's own port is closed there. The page
+  no longer suggests the app works at home without pairing.
+- 4b95589: "Use the plan" on the Plan tab now turns the planner on when it is off. It saves the same setting as Settings → Planner → Enabled, restarts FTW so the planner starts, hands the house to the plan and shows the plan when the box has one, about 8 s later on a test box. If prices or a battery are missing, the card says so where the button is.
+  
+  A new box with the planner on in its config starts in the planner mode its battery-export answer maps to, so the plan drives from its first start. "New" means the box's event log is empty when it starts: every start of FTW records one, and the setup wizard records none. An existing box keeps the mode it runs, also when it never stored one. The first plan no longer waits up to 15 minutes when the startup replan ran before the first battery reading or prices: FTW replans once as soon as they are in, about 5 s after start on a test box.
+  
+  The planning style, battery export and Manual… wait for the first plan. A home without a battery gets none of them and no longer reads about a battery. While FTW still learns the home, the plan's forecast says so, and a plan without the extra forecast margin is not shown as a warning then. A box that never sold from the battery no longer asks whether selling may continue: a new box stores "not allowed", and turning the planner on from off records that answer for a box that stored "not checked". A box that sold through active arbitrage before its upgrade is still asked.
+- 4fd1d43: The daily recovery copy of the settings database no longer holds up live history writes. It used to copy each table in one large write, and on an SD card a history save could wait more than five seconds behind it, past its deadline; this happened two minutes after boot and once a day. The copy now writes short synced batches from one point in time and pauses between them, as a backup does. It also keeps the control journal's next id, so a restored copy never reuses one.
+
 ## 0.169.1
 
 ### Patch Changes
