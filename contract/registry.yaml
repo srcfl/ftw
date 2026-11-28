@@ -189,8 +189,9 @@ roles:
 # box sends no device inventory, names or capabilities to FTW Cloud.
 #
 # cloud_purposes are what the data may be used for. serve is the owner's own
-# phones and widgets. stats is household statistics, a separate consent that
-# is off unless the owner turns it on.
+# phones and widgets. stats is household statistics. Under the current Cloud
+# terms a grant carries both, with no separate switch for statistics; a box
+# without Cloud keeps its own statistics answer.
 # ---------------------------------------------------------------------------
 cloud_scopes: [ftw.live.read, ftw.history.read, ftw.plan.read, ftw.health.read, ftw.events.read]
 cloud_purposes: [serve, stats]
