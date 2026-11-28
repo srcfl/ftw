@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.171.1
+
+### Patch Changes
+
+- f6fe62a: The privacy and terms links in the box page now point to ftw.energy, the one public domain. Old links to ftw.sourceful.energy still work.
+- b7b9a6a: Remove the retired relay client: the relay dial, hourly handle rotation, dead man's switch and their tests. Phone sessions and watch exchanges keep running through FTW Cloud. The network route lookup that binds software identity now asks for cloud.ftw.energy. The pairing QR keeps its shape.
+
 ## 0.171.0
 
 ### Minor Changes
