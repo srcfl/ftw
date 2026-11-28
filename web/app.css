@@ -1486,6 +1486,22 @@ body.ftw-app .mode-buttons #plan-use-btn:hover {
   color: var(--on-accent);
   opacity: 0.9;
 }
+body.ftw-app .plan-use-status {
+  margin: 8px 0 0;
+  max-width: 70ch;
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.45;
+}
+body.ftw-app .plan-use-status.is-error {
+  color: var(--alarm);
+}
+/* The card hides what does not apply yet (plan-use.js planCardView). Rows
+   here set their own display, which would otherwise win over [hidden]. */
+body.ftw-app .plan-strategy [hidden] {
+  display: none;
+}
 body.ftw-app .engine-details {
   margin-top: 16px;
   border-top: 1px solid var(--line);

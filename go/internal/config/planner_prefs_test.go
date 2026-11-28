@@ -40,8 +40,12 @@ func TestDeriveBatteryExport(t *testing.T) {
 		{"planner_passive_arbitrage", BatteryExportNotAllowed},
 		{"planner_self", BatteryExportNotAllowed},
 		{"planner_cheap", BatteryExportNotAllowed},
-		{"idle", BatteryExportUnknown},
-		{"", BatteryExportUnknown},
+		// Manual modes and a new box never sold from the battery.
+		{"idle", BatteryExportNotAllowed},
+		{"self_consumption", BatteryExportNotAllowed},
+		{"peak_shaving", BatteryExportNotAllowed},
+		{"charge", BatteryExportNotAllowed},
+		{"", BatteryExportNotAllowed},
 	}
 	for _, tc := range cases {
 		if got := DeriveBatteryExport(tc.mode); got != tc.want {
@@ -136,6 +140,22 @@ func TestResolvePlannerPrefsActiveUpgradeAsks(t *testing.T) {
 	}
 	if !missing {
 		t.Error("empty sqlite should be missingStored")
+	}
+}
+
+// A new box starts in self_consumption with nothing stored. It never sold
+// from the battery, so it must not ask whether selling may continue.
+func TestResolvePlannerPrefsNewBoxDoesNotAsk(t *testing.T) {
+	_, export, _, missing := ResolvePlannerPrefs("", "", "", "self_consumption", "", "", nil)
+	if export != BatteryExportNotAllowed {
+		t.Errorf("export=%s, want not_allowed", export)
+	}
+	if !missing {
+		t.Error("empty sqlite should be missingStored, so the answer is saved")
+	}
+	// A stored unknown is an answer already given at an earlier boot; it stays.
+	if _, export, _, _ := ResolvePlannerPrefs("", "unknown", "", "self_consumption", "", "", nil); export != BatteryExportUnknown {
+		t.Errorf("stored unknown → %s, want it kept", export)
 	}
 }
 

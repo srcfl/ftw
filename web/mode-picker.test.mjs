@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 const webRoot = dirname(fileURLToPath(import.meta.url));
 const html = readFileSync(join(webRoot, "index.html"), "utf8");
 const app = readFileSync(join(webRoot, "app.js"), "utf8");
+const plan = readFileSync(join(webRoot, "plan.js"), "utf8");
+const use = readFileSync(join(webRoot, "plan-use.js"), "utf8");
 
 describe("strategy mode picker", () => {
   it("keeps Manual… on the Plan card in simple view", () => {
@@ -43,30 +45,21 @@ describe("strategy mode picker", () => {
     assert.match(strategy, /Use the plan/);
   });
 
-  it("shows Use the plan only while the planner is not driving", () => {
-    assert.match(app, /var plannerActive = \(data\.mode \|\| ""\)\.indexOf\("planner_"\) === 0;/);
-    assert.match(app, /planUseBtn\.hidden = plannerActive;/);
-    assert.match(app, /planUseRow\.hidden = plannerActive;/);
+  it("leaves Use the plan to the Plan card's own script", () => {
+    // plan.js knows whether the planner runs, so it alone shows the button
+    // (planCardView). A second writer here hid it whenever a planner mode
+    // was set, even with the planner off.
+    assert.doesNotMatch(app, /plan-use-btn|plan-use-row/);
+    assert.doesNotMatch(app, /\/api\/planner\/prefs/);
+    assert.match(plan, /useBtn\.addEventListener\('click', usePlan\)/);
+    assert.match(plan, /show\('plan-use-row', view\.useVisible \|\| useBusy\)/);
   });
 
-  it("takes the planner mode from the household's own prefs", () => {
-    // The server maps prefs to a planner key; reading mapped_mode keeps the
-    // dashboard from deciding whether this battery may sell.
-    assert.match(app, /apiFetch\("\/api\/planner\/prefs"/);
-    assert.match(app, /var mapped = prefs && prefs\.mapped_mode;/);
-    assert.match(app, /setMode\(typeof mapped === "string"/);
-  });
-
-  it("falls back to the passive planner, never to selling", () => {
-    assert.match(app, /var PLANNER_FALLBACK_MODE = "planner_passive_arbitrage";/);
-    // Both the unusable answer and the failed read take that fallback.
-    assert.match(app, /\?\s*mapped\s*:\s*PLANNER_FALLBACK_MODE\);/);
-    assert.match(app, /\.catch\(function \(\) \{\s*setMode\(PLANNER_FALLBACK_MODE\);/);
-    // Whatever else the file grows, no path here may name the exporting
-    // mode outright: permission to sell comes from the household, through
-    // mapped_mode, or not at all.
-    const useBlock = app.slice(app.indexOf("PLANNER_FALLBACK_MODE"), app.indexOf("mode-advanced-btn"));
-    assert.doesNotMatch(useBlock, /"planner_arbitrage"/);
+  it("never names the selling mode on the way into the plan", () => {
+    // Permission to sell comes from the household, through mapped_mode, or
+    // not at all.
+    assert.doesNotMatch(use, /"planner_arbitrage"/);
+    assert.match(use, /PLANNER_FALLBACK_MODE = "planner_passive_arbitrage"/);
   });
 
   it("marks the tapped mode before the POST returns", () => {

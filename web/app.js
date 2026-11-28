@@ -769,12 +769,8 @@
     revealManualModes(activeMode);
     // When planner is driving, grey out the grid-target slider and show a hint.
     var plannerActive = (data.mode || "").indexOf("planner_") === 0;
-    // "Use the plan" is the way out of a manual mode. It has nothing to
-    // offer while the planner already drives, so it only shows when it does.
-    var planUseRow = document.getElementById("plan-use-row");
-    var planUseBtn = document.getElementById("plan-use-btn");
-    if (planUseBtn) planUseBtn.hidden = plannerActive;
-    if (planUseRow) planUseRow.hidden = plannerActive;
+    // "Use the plan" belongs to plan.js, which also knows whether the
+    // planner runs.
     var gridSlider = document.getElementById("grid-target-slider");
     var gridSend = document.getElementById("grid-target-send");
     var gridHint = document.getElementById("grid-target-hint");
@@ -2677,34 +2673,8 @@
       }
     });
   }
-  // Permission to sell from the battery is a deliberate household answer, so
-  // a prefs read that fails or answers with nothing usable lands on the mode
-  // that never exports.
-  var PLANNER_FALLBACK_MODE = "planner_passive_arbitrage";
-  // "Use the plan" — the one control that hands a manually-driven house back
-  // to the planner. Which planner mode that is follows from the household's
-  // own prefs, and the server already maps them (mapped_mode), so the two
-  // surfaces cannot drift. setMode() from here on, so the optimistic paint,
-  // the pending-mode hold and the drawer all behave as they do for a tap.
-  var planUseBtn = document.getElementById("plan-use-btn");
-  if (planUseBtn) {
-    planUseBtn.addEventListener("click", function () {
-      apiFetch("/api/planner/prefs", { headers: { Accept: "application/json" } })
-        .then(function (r) {
-          if (!r.ok) throw new Error("HTTP " + r.status);
-          return r.json();
-        })
-        .then(function (prefs) {
-          var mapped = prefs && prefs.mapped_mode;
-          setMode(typeof mapped === "string" && mapped.indexOf("planner_") === 0
-            ? mapped
-            : PLANNER_FALLBACK_MODE);
-        })
-        .catch(function () {
-          setMode(PLANNER_FALLBACK_MODE);
-        });
-    });
-  }
+  // "Use the plan" lives in plan.js (plan-use.js): it may have to turn the
+  // planner on and restart FTW before it hands the house to the plan.
   var advBtn = document.getElementById("mode-advanced-btn");
   if (advBtn) {
     advBtn.addEventListener("click", function () {

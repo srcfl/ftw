@@ -128,9 +128,6 @@ func (e BatteryExport) PlannerModeKey() string {
 	return "planner_passive_arbitrage"
 }
 
-// DeriveBatteryExport maps a persisted control mode onto an export permission
-// when SQLite has never stored one. Active arbitrage becomes unknown so the
-// household must confirm selling; it does not keep selling in silence.
 // ExportFromPlannerMode updates the permission when the operator picks a
 // planner mode (HA, app, /api/mode). Manual modes return ok=false.
 func ExportFromPlannerMode(mode string) (BatteryExport, bool) {
@@ -144,15 +141,17 @@ func ExportFromPlannerMode(mode string) (BatteryExport, bool) {
 	}
 }
 
+// DeriveBatteryExport maps a persisted control mode onto an export permission
+// when SQLite has never stored one. Only active arbitrage sold from the
+// battery, so it becomes unknown: the household confirms selling, and FTW
+// does not keep selling in silence. Every other mode, and a new box with no
+// mode yet, never sold, so the answer is not_allowed and nothing asks whether
+// selling may "continue".
 func DeriveBatteryExport(persistedMode string) BatteryExport {
-	switch persistedMode {
-	case "planner_arbitrage":
-		return BatteryExportUnknown
-	case "planner_passive_arbitrage", "planner_self", "planner_cheap":
-		return BatteryExportNotAllowed
-	default:
+	if persistedMode == "planner_arbitrage" {
 		return BatteryExportUnknown
 	}
+	return BatteryExportNotAllowed
 }
 
 // TrustFromSafetyK maps a numeric haircut scale onto the nearest trust step.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { derivePlanBrief } from "./plan-brief.js";
+import { batteryPresent, derivePlanBrief, forecastStillLearning, unavailablePlannerCopy } from "./plan-brief.js";
 
 const now = new Date(2026, 6, 24, 10, 7, 0, 0).getTime();
 const slot = (offsetMinutes, overrides = {}) => ({
@@ -450,6 +450,93 @@ describe("plan brief normalization", () => {
 
     assert.equal(brief.state.key, "manual");
     assert.equal(brief.next.action, "Manual control is active");
+  });
+
+  it("never sends anyone to Settings to turn the planner on", () => {
+    // "Use the plan" turns it on itself.
+    for (const mode of ["self_consumption", "planner_passive_arbitrage"]) {
+      const brief = derivePlanBrief({ enabled: false, unavailableReason: "planner-disabled", status: { mode }, now });
+      const words = [brief.next.action, brief.next.time, brief.reason, brief.planner.detail].join(" ");
+      assert.doesNotMatch(words, /Settings/, mode);
+      assert.match(words, /Use the plan/, mode);
+    }
+    for (const field of ["nextStep", "why", "detail"]) {
+      assert.doesNotMatch(unavailablePlannerCopy("planner-disabled")[field], /Settings/);
+    }
+  });
+
+  it("names what is missing in a manual mode too, where a tap cannot help", () => {
+    const brief = derivePlanBrief({ enabled: false, unavailableReason: "no-price-provider", status: { mode: "self_consumption" }, now });
+    assert.equal(brief.state.key, "blocked");
+    assert.match(brief.next.time, /Settings → Price/);
+  });
+});
+
+describe("plan brief for a home without a battery", () => {
+  // Energyplan plans a home with no battery and still fills soc with 0.
+  const plan = { capacity_wh: 0, initial_soc: 0, actions: [slot(-5, { soc: 0, reason: "idle" }), slot(10, { soc: 0 })], solver: {} };
+
+  it("does not talk about a battery", () => {
+    const brief = derivePlanBrief({ enabled: true, plan, now, status: { mode: "planner_passive_arbitrage", drivers: { p1: { meter_w: 850 } } } });
+    assert.equal(brief.next.action, "No change planned");
+    assert.equal(brief.soc, null);
+    assert.equal(batteryPresent({ drivers: { p1: { meter_w: 850 } } }, plan), false);
+  });
+
+  it("keeps the battery when one reports, whatever the plan says", () => {
+    assert.equal(batteryPresent({ bat_soc: 0.4 }, plan), true);
+  });
+});
+
+describe("plan brief right after the owner starts the plan", () => {
+  const error = "Waiting for an online battery with capacity and charge level";
+
+  it("reads the box's first try as preparing, and says what it waits for", () => {
+    const brief = derivePlanBrief({ enabled: true, plan: null, now, planning: { error }, starting: true,
+      status: { mode: "planner_passive_arbitrage" } });
+    assert.equal(brief.state.key, "preparing");
+    assert.equal(brief.constraint, error);
+  });
+
+  it("calls a new plan ready, not old, until the control loop takes it", () => {
+    const plan = { actions: [slot(-5), slot(10)], solver: {} };
+    const status = { mode: "planner_passive_arbitrage", plan_stale: true };
+    const starting = derivePlanBrief({ enabled: true, plan, now, status, starting: true });
+    assert.equal(starting.state.key, "ready");
+    assert.doesNotMatch(starting.constraint, /old/);
+    assert.equal(derivePlanBrief({ enabled: true, plan, now, status }).state.key, "stale");
+  });
+
+  it("still reports the failure on any other visit", () => {
+    const brief = derivePlanBrief({ enabled: true, plan: null, now, planning: { error },
+      status: { mode: "planner_passive_arbitrage" } });
+    assert.equal(brief.state.label, "Cannot plan");
+  });
+});
+
+describe("plan brief while FTW learns the home", () => {
+  const plan = { actions: [slot(-5), slot(10)], solver: {} };
+  const line = "FTW learns your home over the first days.";
+
+  it("says so where the plan explains its forecast", () => {
+    const brief = derivePlanBrief({ enabled: true, plan, now, status: { mode: "planner_passive_arbitrage" }, learning: true });
+    assert.equal(brief.forecast.learning, line);
+    const preparing = derivePlanBrief({ enabled: true, plan: null, now, status: { mode: "planner_passive_arbitrage" }, learning: true });
+    assert.equal(preparing.forecast.learning, line);
+  });
+
+  it("says nothing once the models are ready, or while the planner is off", () => {
+    assert.equal(derivePlanBrief({ enabled: true, plan, now, status: {} }).forecast.learning, undefined);
+    assert.equal(derivePlanBrief({ enabled: false, now, status: { mode: "self_consumption" }, learning: true }).forecast.learning, undefined);
+  });
+
+  it("reads learning from the box's model status", () => {
+    const model = (status, enabled = true) => ({ enabled, learning: { status } });
+    assert.equal(forecastStillLearning(model("cold_start"), model("ready")), true);
+    assert.equal(forecastStillLearning(model("ready"), model("learning")), true);
+    assert.equal(forecastStillLearning(model("ready"), model("ready")), false);
+    assert.equal(forecastStillLearning(model("unavailable"), null), false);
+    assert.equal(forecastStillLearning(model("learning", false), { enabled: false }), false);
   });
 });
 

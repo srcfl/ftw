@@ -33,7 +33,7 @@ function readableReason(reason) {
   return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-function actionLabel(action) {
+function actionLabel(action, hasBattery = true) {
   if (!action) return "Hold current operation";
   if (plannedEVWatts(action) > 100) {
     return `Charge EV at ${(plannedEVWatts(action) / 1000).toFixed(1)} kW`;
@@ -47,7 +47,7 @@ function actionLabel(action) {
   if ((action.battery_w || 0) < -100) {
     return `Use battery at ${(Math.abs(action.battery_w) / 1000).toFixed(1)} kW`;
   }
-  return "Keep the battery steady";
+  return hasBattery ? "Keep the battery steady" : "No change planned";
 }
 
 function briefPower(watts) {
@@ -103,7 +103,7 @@ function carChargeForecast(actions, next) {
   return { nextSoc, finalSoc };
 }
 
-function batteryIsPresent(status, actions) {
+function batteryIsPresent(status, actions, plan) {
   if (Number.isFinite(status.bat_soc)) return true;
   const drivers = status.drivers || {};
   if (Object.values(drivers).some((driver) => (
@@ -111,7 +111,15 @@ function batteryIsPresent(status, actions) {
   ))) {
     return true;
   }
+  // A plan for a home without a battery still fills soc with 0.
+  if (plan && plan.capacity_wh === 0) return false;
   return actions.some((action) => Number.isFinite(action && action.soc));
+}
+
+// Whether the Plan card should talk about a home battery at all.
+export function batteryPresent(status = {}, plan = null) {
+  const actions = plan && Array.isArray(plan.actions) ? plan.actions : [];
+  return batteryIsPresent(status || {}, actions, plan);
 }
 
 function socPercent(frac) {
@@ -140,9 +148,9 @@ export function unavailablePlannerCopy(reason) {
     "planner-disabled": {
       label: "Planner off",
       action: "Planning is turned off",
-      nextStep: "Turn the planner on in Settings → Planner",
-      why: "The planner is disabled in Settings",
-      detail: "Enable it under Settings → Planner to create a schedule",
+      nextStep: "Use the plan turns it on",
+      why: "The planner is turned off",
+      detail: "Use the plan turns it on",
       summary: "Planner is turned off",
     },
   };
@@ -182,9 +190,23 @@ function manualBrief(status, hasBattery) {
     soc: batterySocNow(status, hasBattery, "Expected charge needs an active plan"),
     planner: {
       label: "Planner off",
-      detail: "Use the plan to enable it",
+      detail: "Use the plan turns it on",
     },
   };
+}
+
+// While the box still learns how this home uses and makes energy, the plan
+// says so where it explains its forecast. Core owns that state
+// (GET /api/loadmodel and /api/pvmodel → learning.status).
+const LEARNING_LINE = "FTW learns your home over the first days.";
+
+// True while either forecast model is still in its first period. A model
+// that is off, unreadable or ready says nothing.
+export function forecastStillLearning(...models) {
+  return models.some((model) => {
+    const status = model && model.enabled && model.learning && model.learning.status;
+    return status === "cold_start" || status === "learning";
+  });
 }
 
 function blockedBrief(status, hasBattery, reason) {
@@ -257,27 +279,41 @@ export function derivePlanBrief({
   now = Date.now(),
   socOpts = {},
   planning = {},
+  learning = false,
+  starting = false,
 } = {}) {
   fillPlanSoC(plan, socOpts);
   const actions = plan && Array.isArray(plan.actions) ? plan.actions : [];
-  const hasBattery = batteryIsPresent(status, actions);
+  const hasBattery = batteryIsPresent(status, actions, plan);
   const plannerMode = String(status.mode || "").startsWith("planner_");
 
   if (!enabled) {
-    if (plannerMode) return blockedBrief(status, hasBattery, unavailableReason);
+    // A missing price source or battery stops planning in any mode, and
+    // "Use the plan" cannot fix it, so the card says what is missing.
+    const blocked = unavailableReason === "no-price-provider" || unavailableReason === "no-battery-capacity";
+    if (plannerMode || blocked) return blockedBrief(status, hasBattery, unavailableReason);
     return manualBrief(status, hasBattery);
   }
-  if (planning.error && !planning.replanning) return failedBrief(status, hasBattery, planning.error);
+  // Just after the owner started the plan, the box's first try often waits
+  // for the drivers' first readings and retries within seconds. Until then
+  // it is still preparing; the error shows as the reason it waits.
+  const waitingFirst = starting && !actions.length;
+  if (planning.error && !planning.replanning && !waitingFirst) return failedBrief(status, hasBattery, planning.error);
   const warningList = Array.isArray(planning.warnings) ? planning.warnings : [];
   const warnings = warningList.join(' ');
   if (!actions.length) {
     const brief = preparingBrief(status, hasBattery);
     if (warnings) brief.constraint = warnings;
+    if (waitingFirst && planning.error) brief.constraint = planning.error;
+    if (learning) brief.forecast.learning = LEARNING_LINE;
     return brief;
   }
 
   const solver = plan.solver || {};
-  const stale = Boolean(status.plan_stale);
+  // Just after a start the control loop takes a new plan on its next tick;
+  // until then the plan is ready, not old.
+  const taking = starting && Boolean(status.plan_stale);
+  const stale = Boolean(status.plan_stale) && !taking;
   // The household asked for forecast caution and this plan uses the point
   // forecast instead. The planning warnings say why.
   const cautionOff = Boolean(plan.caution_off);
@@ -292,7 +328,7 @@ export function derivePlanBrief({
       ? { key: "fallback", label: "Built-in plan active", tone: "warn" }
       : cautionOff
         ? { key: "caution_off", label: "Plan without extra forecast margin", tone: "warn" }
-        : plannerActive
+        : plannerActive && !taking
           ? { key: "active", label: "Plan active", tone: "active" }
           : { key: "ready", label: "Plan ready", tone: "idle" };
 
@@ -344,6 +380,7 @@ export function derivePlanBrief({
   if (cautionOff) {
     forecast.detail = `FTW will try to include the extra margin when it replans. ${forecast.detail}`;
   }
+  if (learning) forecast.learning = LEARNING_LINE;
   // Expected charge follows the next step. Charging the car reports that
   // car's planned SoC. The home battery on the same slot (start SoC in
   // the header) is a different number — a car at 76% must not read as
@@ -381,7 +418,7 @@ export function derivePlanBrief({
     next: offPlan
       ? { label: "Now", action: offPlan.now, time: offPlan.plan }
       : {
-          action: actionLabel(next),
+          action: actionLabel(next, hasBattery),
           time: next
             ? isNow
               ? `Now, until ${formatClock(nextEnd)}`

@@ -4,6 +4,8 @@ import { plannedEVWatts, createChargingTimeline } from "./ev-plan.js";
 // the middle, SoC + PV line on bottom. Refreshes every 30s.
 
 import { derivePlanBrief, unavailablePlannerCopy } from "./plan-brief.js";
+import { forecastStillLearning, batteryPresent } from "./plan-brief.js";
+import { planCardView, startPlan, waitForPlanner } from "./plan-use.js";
 import { forecastMargins, evShortfallWh } from "./plan-forecast.js";
 import { fillPlanSoC } from "./plan-soc.js";
 import { setActiveCurrency, toDisplay, unitFor } from "./components/price-units.js";
@@ -29,6 +31,12 @@ import {
 
   const PLAN_REFRESH_MS = 30000;
   const HINT_REFRESH_MS = 5000;
+  // While the planner runs without a plan yet, look again soon, so the
+  // first plan shows as soon as the box has one.
+  const FIRST_PLAN_REFRESH_MS = 3000;
+  // Forecast learning moves over days; a slow read is enough.
+  const LEARNING_REFRESH_MS = 10 * 60 * 1000;
+  const LEARNING_RETRY_MS = 60 * 1000;
 
   function apiFetch(path, opts) {
     return fetch(path, opts);
@@ -208,6 +216,7 @@ import {
     // stacked as spot + grid tariff + VAT instead of one opaque number.
     state.priceCfg = (c && c.price) || null;
     state.status = s || {};
+    if (s && typeof s.mode === 'string') state.mode = s.mode;
     state.loadpoints = l && Array.isArray(l.loadpoints) ? l.loadpoints : null;
     state.prefs = prefsFromStatus(s);
     state.enabled = {
@@ -217,11 +226,56 @@ import {
       mpcReason: (m && m.reason) || "",
     };
     state.lastUpdate = new Date();
+    if (state.enabled.mpc) await refreshLearning();
     window.dispatchEvent(new CustomEvent("ftw-plan-data", {
       detail: { plan: state.plan },
     }));
     applyPlannerModeAvailability();
     render();
+    // Right after a start the control loop takes the new plan on its next
+    // tick, so a stale mark then is seconds old; look again soon for both.
+    const settling = !hasPlan() ||
+      (isStarting() && ((state.status && state.status.plan_stale) || !learningSettled));
+    if (state.enabled.mpc && settling) watchForFirstPlan();
+    else firstPlanSince = 0;
+  }
+
+  function hasPlan() {
+    return !!(state.plan && Array.isArray(state.plan.actions) && state.plan.actions.length);
+  }
+
+  // A few minutes of quick reads at most; the normal poll carries on from
+  // there. Right after a start the first try often fails while the drivers
+  // report their first readings, and the box retries within seconds, so an
+  // error does not end the watch.
+  const FIRST_PLAN_WATCH_MS = 3 * 60 * 1000;
+  let firstPlanTimer = null;
+  let firstPlanSince = 0;
+  function watchForFirstPlan() {
+    if (!firstPlanSince) firstPlanSince = Date.now();
+    if (Date.now() - firstPlanSince > FIRST_PLAN_WATCH_MS) return;
+    if (firstPlanTimer !== null || document.hidden) return;
+    firstPlanTimer = setTimeout(function () {
+      firstPlanTimer = null;
+      fetchAll();
+    }, FIRST_PLAN_REFRESH_MS);
+  }
+
+  // Whether the box still learns this home's use and solar. Read now and
+  // then, and only while the planner runs, since only the plan says it.
+  // Just after a start a model may not know its stage yet; ask again soon.
+  let learningNextAt = 0;
+  let learningSettled = false;
+  const learningKnown = (model) => !!model && (!model.enabled ||
+    ['cold_start', 'learning', 'ready'].includes(model.learning && model.learning.status));
+  async function refreshLearning() {
+    if (Date.now() < learningNextAt) return;
+    learningNextAt = Date.now() + (isStarting() ? FIRST_PLAN_REFRESH_MS : LEARNING_RETRY_MS);
+    const read = (path) => apiFetch(path).then(r => r.ok ? r.json() : null).catch(() => null);
+    const [pv, load] = await Promise.all([read('/api/pvmodel'), read('/api/loadmodel')]);
+    state.learning = forecastStillLearning(pv, load);
+    learningSettled = state.learning || (learningKnown(pv) && learningKnown(load));
+    if (learningSettled) learningNextAt = Date.now() + LEARNING_REFRESH_MS;
   }
 
   async function replan() {
@@ -297,6 +351,8 @@ import {
       status: state.status || {},
       socOpts: state.socOpts,
       planning: state.planMeta || {},
+      learning: !!state.learning,
+      starting: isStarting(),
     });
     applyStateBadge('plan-state-badge', brief.state);
     setText('plan-next-label', brief.next.label || 'Next');
@@ -307,6 +363,11 @@ import {
     renderPlanWarningDetails(brief);
     setText('plan-forecast-state', brief.forecast.label);
     setText('plan-forecast-detail', brief.forecast.detail);
+    const learningLine = document.getElementById('plan-forecast-learning');
+    if (learningLine) {
+      learningLine.hidden = !brief.forecast.learning;
+      learningLine.textContent = brief.forecast.learning || '';
+    }
     setText('plan-solver-state', brief.planner.label);
     setText('plan-solver-detail', brief.planner.detail);
 
@@ -849,7 +910,7 @@ import {
     if (summary) {
       if (!state.enabled || !state.enabled.mpc) {
         summary.textContent = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason).summary;
-      } else if (state.planMeta && state.planMeta.error && !state.planMeta.replanning) {
+      } else if (state.planMeta && state.planMeta.error && !state.planMeta.replanning && !(isStarting() && !plan)) {
         summary.textContent = 'Cannot plan · ' + state.planMeta.error;
       } else if (!plan) {
         const visibleInputs = [];
@@ -1297,6 +1358,8 @@ import {
         actions,
         exportPermission: p.battery_export,
       });
+      const view = cardView();
+      sentence.hidden = !(view && view.exportVisible) || !sentence.textContent;
     }
   }
 
@@ -1448,13 +1511,123 @@ import {
       replan.disabled = !enabled;
       replan.title = enabled ? 'Force a fresh plan' : copy.summary;
     }
-    // "Use the plan" carries no data-mode, so the loop above never sees it.
-    // Offering it while the planner cannot run would hand the house to a
-    // mode that then has to explain why it is not planning.
+    applyCardView();
+  }
+
+  // What the card offers for the box's state (planCardView). The mode comes
+  // from the plan read and from the quicker hint read, whichever is newer.
+  let useBusy = false;
+  // When this page handed the house to the plan. For a short while after,
+  // a planning error is the box's first try at a start, not a failure.
+  let startedAt = 0;
+  const STARTING_MS = 2 * 60 * 1000;
+  function isStarting() {
+    return startedAt > 0 && Date.now() - startedAt < STARTING_MS;
+  }
+  function cardMode() {
+    return state.mode || (state.status && state.status.mode) || '';
+  }
+
+  function cardView() {
+    if (!state.enabled) return null;
+    return planCardView({
+      mode: cardMode(),
+      running: !!state.enabled.mpc,
+      reason: state.enabled.mpcReason || '',
+      hasPlan: hasPlan(),
+      hasBattery: batteryPresent(state.status, state.plan),
+    });
+  }
+
+  function applyCardView() {
+    const view = cardView();
+    if (!view) return;
+    const show = (id, on) => {
+      const el = document.getElementById(id);
+      if (el) el.hidden = !on;
+    };
+    show('plan-style-label', view.styleVisible);
+    show('plan-style', view.styleVisible);
+    show('plan-export', view.exportVisible);
+    // The dashboard opens the manual drawer for a manual mode, also while
+    // it waits hidden here. When the plan has taken over by the time it
+    // shows, nobody saw it open, so it shows closed.
+    const manual = document.getElementById('plan-manual');
+    if (manual && manual.hidden && view.manualVisible && cardMode().indexOf('planner_') === 0) {
+      const drawer = document.getElementById('mode-buttons');
+      const toggle = document.getElementById('mode-advanced-btn');
+      if (drawer) drawer.style.display = 'none';
+      if (toggle) toggle.textContent = 'Manual…';
+    }
+    show('plan-manual', view.manualVisible);
+    // A tap in progress keeps its button on screen until it has an answer.
+    show('plan-use-row', view.useVisible || useBusy);
+    // "Use the plan" carries no data-mode, so the mode-button loop never
+    // sees it. It stays off where a tap cannot help: no prices or battery.
     const usePlan = document.getElementById('plan-use-btn');
     if (usePlan) {
-      usePlan.disabled = !enabled;
-      usePlan.title = enabled ? 'Hand the battery back to the plan' : copy.detail;
+      usePlan.disabled = useBusy || !view.useEnabled;
+      usePlan.title = view.useEnabled
+        ? 'Hand the battery to the plan'
+        : unavailablePlannerCopy(state.enabled && state.enabled.mpcReason).detail;
+    }
+    showStrategyBox();
+  }
+
+  function sayUse(text, isError) {
+    const el = document.getElementById('plan-use-status');
+    if (!el) return;
+    el.hidden = !text;
+    el.textContent = text || '';
+    el.classList.toggle('is-error', !!(text && isError));
+    showStrategyBox();
+  }
+
+  // The bordered box under the briefing goes when everything in it waits
+  // or has nothing to say, rather than stay as an empty strip.
+  function showStrategyBox() {
+    const box = document.getElementById('plan-strategy');
+    if (!box) return;
+    const shown = Array.from(box.children).some(function (el) {
+      return !el.hidden && el.style.display !== 'none' && el.textContent.trim() !== '';
+    });
+    box.hidden = !shown;
+  }
+
+  function blockedWords(reason) {
+    const copy = unavailablePlannerCopy(reason);
+    return copy.action + '. ' + copy.nextStep + '.';
+  }
+
+  // One tap: the planner on (and FTW restarted when it has to start), the
+  // house handed to it, and the plan shown as soon as the box has one.
+  async function usePlan() {
+    if (useBusy) return;
+    useBusy = true;
+    sayUse('');
+    applyCardView();
+    const running = !!(state.enabled && state.enabled.mpc);
+    const reason = (state.enabled && state.enabled.mpcReason) || '';
+    try {
+      const outcome = await startPlan({ api: apiFetch, say: sayUse, running, reason });
+      if (outcome === 'restart') {
+        const back = await waitForPlanner({
+          api: apiFetch,
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        });
+        if (!back.running) throw Object.assign(new Error(''), { reason: back.reason });
+      }
+      sayUse('');
+      learningNextAt = 0;
+      learningSettled = false;
+      startedAt = Date.now();
+      await fetchAll();
+    } catch (e) {
+      sayUse(e && e.reason ? blockedWords(e.reason) : 'Could not start the plan: ' + (e && e.message ? e.message : e), true);
+      fetchAll();
+    } finally {
+      useBusy = false;
+      applyCardView();
     }
   }
 
@@ -1463,6 +1636,8 @@ import {
     apiFetch('/api/status')
       .then(function (r) { return r.json(); })
       .then(function (d) {
+        if (d && typeof d.mode === 'string') state.mode = d.mode;
+        applyCardView();
         const el = document.getElementById('strategy-hint');
         if (!el) return;
         // The status read can finish before the first plan batch.
@@ -1470,15 +1645,19 @@ import {
         const enabled = !!(state.enabled && state.enabled.mpc);
         const plannerMode = String(d.mode || '').indexOf('planner_') === 0;
         if (!enabled && plannerMode) {
-          const copy = unavailablePlannerCopy(state.enabled && state.enabled.mpcReason);
-          el.textContent = copy.action + '. ' + copy.nextStep + '.';
+          el.textContent = blockedWords(state.enabled && state.enabled.mpcReason);
+          showStrategyBox();
           return;
         }
-        if (plannerMode) {
+        // The manual description belongs with the manual buttons, so it
+        // waits with them for the first plan.
+        const view = cardView();
+        if (plannerMode || (view && !view.manualVisible)) {
           el.textContent = '';
-          return;
+        } else {
+          el.textContent = STRATEGY_DESC[d.mode] || '';
         }
-        el.textContent = STRATEGY_DESC[d.mode] || '';
+        showStrategyBox();
       })
       .catch(function () {});
   }
@@ -1527,6 +1706,8 @@ import {
     window.addEventListener('ftw-theme-change', render);
     const btn = document.getElementById('plan-replan');
     if (btn) btn.addEventListener('click', replan);
+    const useBtn = document.getElementById('plan-use-btn');
+    if (useBtn) useBtn.addEventListener('click', usePlan);
     // Horizon toggle wiring. Each click flips state.horizon, persists
     // the choice, marks the right button active, and re-renders. The
     // visual style (.toggle .active) is shared with the VAT pill.

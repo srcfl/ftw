@@ -6,6 +6,7 @@ import * as brief from './plan-brief.js';
 import * as soc from './plan-soc.js';
 import * as units from './components/price-units.js';
 import * as prefs from './plan-prefs.js';
+import * as use from './plan-use.js';
 
 const source = readFileSync(new URL('./plan.js', import.meta.url), 'utf8')
   .replace(/^import[\s\S]*?from "[^"]+";\n/gm, '');
@@ -23,7 +24,7 @@ function rigPlan() {
     addEventListener(name, fn) { listeners.set(name, fn); },
   };
   const sandbox = {
-    ...brief, ...soc, ...units, ...prefs, document,
+    ...brief, ...soc, ...units, ...prefs, ...use, document,
     window: { addEventListener() {}, dispatchEvent() {} },
     CustomEvent: class { constructor(name, options) { this.type = name; this.detail = options.detail; } },
     fetch(path) {
