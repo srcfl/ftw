@@ -7,11 +7,12 @@ On the home Wi-Fi, open the box's dashboard in Safari and choose
 **Settings → FTW app**.
 
 The app reaches the box through FTW Cloud, which keeps a readable copy of
-your energy data. The first code you make accepts the
+your energy data while it is on. The first code you make accepts the
 [FTW Cloud terms](https://ftw.sourceful.energy/privacy), as pairing does in
 the app. Until then, a line beside the buttons says so. The box runs
 without Cloud. Once Cloud is on, the same page offers **Turn FTW Cloud
-off**, below the pairing.
+off**, below the pairing. The copy has no switch of its own: turning
+Cloud off is how you stop it.
 
 Choose one way to connect:
 

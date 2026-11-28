@@ -224,7 +224,7 @@ FTW spans several repositories. This one is Core; the others are:
 | [`srcfl/device-simulator`](https://github.com/srcfl/device-simulator) | Simulated house: inverters, batteries, chargers and meters over Modbus TCP, MQTT and OCPP. |
 | `srcfl/ftw-webapp` (private) | Installable everyday client at [app.ftw.energy](https://app.ftw.energy), closed source since 10 November 2026. Earlier open versions are in [`srcfl/ftw-webapp-source-archive`](https://github.com/srcfl/ftw-webapp-source-archive). |
 | `srcfl/ftw-app` (private) | Native iOS and Android app, closed source since 10 November 2026. Earlier open versions are in [`srcfl/ftw-app-source-archive`](https://github.com/srcfl/ftw-app-source-archive). |
-| `srcfl/ftw-cloud` (private) | Opt-in, box-signed, read-only copy of each home's state for the apps, closed source since 10 November 2026. |
+| `srcfl/ftw-cloud` (private) | FTW Cloud: carries the apps' encrypted sessions with the box and, while Cloud is on, keeps a box-signed, readable copy of each home's state. Closed source since 10 November 2026. |
 | [`srcfl/home-assistant-addons`](https://github.com/srcfl/home-assistant-addons) | Home Assistant app packaging of each FTW release. |
 | [`srcfl/ftw-web`](https://github.com/srcfl/ftw-web) | The project website. |
 | [`srcfl/energyplan-demo`](https://github.com/srcfl/energyplan-demo) | Browser demo running the Energyplan worker in WebAssembly against a simulated home. |
