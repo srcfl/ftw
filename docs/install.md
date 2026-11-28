@@ -29,8 +29,7 @@ Assistant Container and Core have no apps; use a
    Install app → ⋮ → Repositories**, paste
    `https://github.com/srcfl/home-assistant-addons` and choose **Add**.
 2. Open **FTW (beta)** in the app store (its version starts with `0.`) and
-   choose **Install**. Home Assistant builds the app on your device. The first
-   build can take several minutes.
+   choose **Install**. Home Assistant downloads FTW's prebuilt image.
 3. Turn on **Watchdog**, then choose **Start**. **Start on boot** is on
    already.
 4. Choose **Open Web UI**. FTW opens inside Home Assistant. Go on to

@@ -31,8 +31,7 @@ inloggning. Home Assistant Container och Core har inga appar; använd en
    Installera app → ⋮ → Git-arkiv**, klistra in
    `https://github.com/srcfl/home-assistant-addons` och välj **Lägg till**.
 2. Öppna **FTW (beta)** i appbutiken (versionen börjar med `0.`) och välj
-   **Installera**. Home Assistant bygger appen på din enhet. Första bygget kan
-   ta flera minuter.
+   **Installera**. Home Assistant laddar ned FTW:s färdiga avbild.
 3. Slå på **Watchdog** och välj sedan **Starta**. **Starta vid uppstart** är
    redan på.
 4. Välj **Öppna webbgränssnittet**. FTW öppnas inne i Home Assistant. Gå
