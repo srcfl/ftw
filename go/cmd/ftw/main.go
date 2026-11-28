@@ -2594,8 +2594,8 @@ func main() {
 	// The bundled drivers dir is deliberately not passed: which drivers this
 	// build ships with is compiled in, not discovered on disk. See
 	// fleetCatalogue for what that buys.
-	migrateStatistics(cfg, cfgMu, st, cloudLink)
-	answer := statsAnswer{st: st, link: cloudLink}
+	retireLocalStatistics(st, cloudLink)
+	answer := statsAnswer{link: cloudLink}
 	fleetPinger, fleetPingErr := startFleetPing(
 		ctx, cfg, cfgMu, st, answer, tel, selfUpdater, Version, config.ManagedDriversDirOverride,
 	)

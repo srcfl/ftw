@@ -96,7 +96,7 @@ describe("the app tab", () => {
     const html = render({});
     assert.match(html, /id="app-link-terms" class="hint" hidden>/);
     assert.match(html, /through FTW Cloud/);
-    assert.match(html, /readable copy of your energy data/);
+    assert.match(html, /readable copy of your energy data and takes anonymous statistics/);
     assert.match(html, /Pairing accepts its <a href="https:\/\/ftw\.sourceful\.energy\/privacy"/);
     assert.match(html, /The box runs without it/);
     assert.doesNotMatch(html, /cannot read/);
@@ -126,13 +126,14 @@ describe("the app tab", () => {
     assert.match(render({}), /id="app-link-pair"[^>]*disabled/);
   });
 
-  it("keeps statistics with the app, but independent of its switch", () => {
+  it("keeps statistics with the app, with no switch of their own", () => {
     const appWithFleet = loadTab(true);
     const config = { app_link: { enabled: false } };
     const html = appWithFleet.render({ config });
 
     assert.match(html, /<legend>Anonymous statistics<\/legend>/);
-    assert.match(html, /id="statistics-share"/);
+    assert.match(html, /id="statistics-share-note"/);
+    assert.doesNotMatch(html, /id="statistics-share"/);
     assert.doesNotMatch(html, /data-checkbox-path="fleet_ping\.enabled"/);
     assert.equal(config.fleet_ping, undefined, "statistics are not a config field");
     assert.doesNotMatch(html, /id="app-link-enabled"[^>]*checked/);
@@ -155,7 +156,7 @@ describe("the app tab", () => {
 
     win.FTWSettings.tabs.app.afterSave();
     // The app tab reads /api/cloud too, for the terms line and the panel.
-    assert.deepEqual([...asked].sort(), ["/api/app-link/status", "/api/cloud", "/api/cloud", "/api/cloud/stats-policy", "/api/fleet-ping"]);
+    assert.deepEqual([...asked].sort(), ["/api/app-link/status", "/api/cloud", "/api/cloud", "/api/fleet-ping"]);
   });
 
   it("does not leave a standalone Fleet ping destination behind", () => {

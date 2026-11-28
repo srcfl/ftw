@@ -218,12 +218,16 @@ describe("what the owner grants", () => {
     // Renewing Sourceful offers nothing past its 14 days.
     assert.deepEqual(P.lengthOptions(P.longestS(box, "support")), [day, 7 * day]);
     assert.equal(P.lengthText(365 * day), "1 year");
-    // The page still starts at a week.
-    assert.equal(P.defaultLength(P.lengthOptions(365 * day)), 7 * day);
+    // The page starts at 90 days, as the apps do (Fredrik, 28 November 2026).
+    assert.equal(P.defaultLength(P.lengthOptions(365 * day)), 90 * day);
+    // A box that names no longest takes 30 days, so that is where it starts.
+    assert.equal(P.defaultLength(P.lengthOptions(Math.min(365 * day, P.longestS({}, "agent")))), 30 * day);
   });
 
-  it("chooses a week unless the offer asks for less", () => {
-    assert.equal(P.defaultLength(P.lengthOptions(30 * 86400)), 7 * 86400);
+  it("chooses 90 days unless the offer or the box takes less", () => {
+    assert.equal(P.defaultLength(P.lengthOptions(365 * 86400)), 90 * 86400);
+    assert.equal(P.defaultLength(P.lengthOptions(90 * 86400)), 90 * 86400);
+    assert.equal(P.defaultLength(P.lengthOptions(30 * 86400)), 30 * 86400);
     assert.equal(P.defaultLength(P.lengthOptions(3 * 86400)), 86400);
     assert.equal(P.defaultLength(P.lengthOptions(3600)), 3600);
   });
@@ -235,6 +239,16 @@ describe("what the owner grants", () => {
       const g = P.chosenGrant({ reads: [], ops: ["loadpoint.hold"], holdMin: 30, maxKW: P.kwExact(w), ttlS: 86400 }, 6, registry);
       assert.equal(g.caps.maxW, w, String(w));
       assert.equal(P.choiceProblem(g, { holdS: 1800, maxW: w }), "", String(w));
+    }
+  });
+});
+
+describe("FTW Cloud for an assistant", () => {
+  it("is ready once Cloud runs under the current terms, wherever they were accepted", () => {
+    assert.equal(P.cloudReady({ link: "on", cloudTermsAccepted: true, statisticsOnly: false }), true);
+    for (const cloud of [null, { link: "off" }, { link: "ending" }, { link: "on", cloudTermsAccepted: false },
+      { link: "on", cloudTermsAccepted: true, statisticsOnly: true }]) {
+      assert.equal(P.cloudReady(cloud), false, JSON.stringify(cloud));
     }
   });
 });

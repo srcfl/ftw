@@ -1182,7 +1182,7 @@ func TestStatisticsComeWithTheCurrentCloudTerms(t *testing.T) {
 	if strings.Join(r.Grant.Purposes, ",") != "serve,stats" || r.RosterSeq <= first.RosterSeq || len(r.Grant.StatsID) != statsIDBytes {
 		t.Fatalf("roster under the current terms: %+v", r.Grant)
 	}
-	if st := h.link.Status(); !st.Statistics || !st.StatisticsRequired || st.StatisticsNeedTerms || !h.link.SaidYesToStatistics() {
+	if st := h.link.Status(); !st.Statistics || !st.StatisticsRequired || st.StatisticsNeedTerms || !h.link.SharesStatistics() {
 		t.Fatalf("status under the current terms: %+v", st)
 	}
 
@@ -1202,22 +1202,22 @@ func TestStatisticsComeWithTheCurrentCloudTerms(t *testing.T) {
 	}
 }
 
-// While a Cloud that was turned off waits for its deletion receipt, the box's
-// own answer can still change. It touches nothing in the grant being deleted.
-func TestTheLocalAnswerChangesWhileTheCopyIsBeingDeleted(t *testing.T) {
+// While a copy that was turned off waits for its deletion receipt, nothing
+// is shared and asking for statistics is refused: they come only with Cloud
+// on. The grant being deleted stays as it was.
+func TestNothingIsSharedWhileTheCopyIsBeingDeleted(t *testing.T) {
 	svc := newFakeService(t)
 	h := newHarness(t, svc)
 	h.grant(t)
 	if err := h.link.Revoke("test"); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.link.Stats(StatsRequest{Policy: "p"}); !errors.Is(err, ErrNotGranted) {
-		t.Fatalf("an unknown policy: %v", err)
+	for _, policy := range []string{"p", cloudwire.StatsPolicy} {
+		if err := h.link.Stats(StatsRequest{Policy: policy}); !errors.Is(err, ErrNotGranted) {
+			t.Fatalf("statistics under %q while revoking: %v", policy, err)
+		}
 	}
-	if err := h.link.Stats(StatsRequest{Policy: cloudwire.StatsPolicy}); err != nil {
-		t.Fatalf("statistics while revoking: %v", err)
-	}
-	if g := h.record(t); !g.Revoked || len(g.StatsID) != 0 || !h.link.SharesStatistics() {
+	if g := h.record(t); !g.Revoked || len(g.StatsID) != 0 || h.link.SharesStatistics() {
 		t.Fatalf("grant while revoking: %+v", g)
 	}
 	if err := h.link.StopStats("lan"); err != nil || h.link.SharesStatistics() {
@@ -1226,8 +1226,8 @@ func TestTheLocalAnswerChangesWhileTheCopyIsBeingDeleted(t *testing.T) {
 }
 
 // A stored grant counts only when the link honours it. With a cloud.key that
-// is not the one the grant was made with, the box's own answer stands, and a
-// box that only shares by default has said no yes.
+// is not the one the grant was made with, the box shares nothing, whatever an
+// earlier release stored as its local answer.
 func TestOnlyAGrantTheLinkHonoursCounts(t *testing.T) {
 	svc := newFakeService(t)
 	h := newHarness(t, svc)
@@ -1235,11 +1235,11 @@ func TestOnlyAGrantTheLinkHonoursCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.nextRoster(t)
-	if err := h.kv.SaveConfig(statsShareKey, "default"); err != nil {
+	if err := h.kv.SaveConfig(statsShareKey, "on"); err != nil {
 		t.Fatal(err)
 	}
-	if !h.link.SaidYesToStatistics() {
-		t.Fatal("the current terms are not a yes")
+	if !h.link.SharesStatistics() {
+		t.Fatal("the current terms do not share")
 	}
 	if err := os.Remove(h.keyPath); err != nil {
 		t.Fatal(err)
@@ -1251,25 +1251,27 @@ func TestOnlyAGrantTheLinkHonoursCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reopened.Status().State != "off" || reopened.SaidYesToStatistics() || !reopened.SharesStatistics() {
+	if reopened.Status().State != "off" || reopened.SharesStatistics() || reopened.Status().Statistics {
 		t.Fatalf("a grant made with another key counted: %+v", reopened.Status())
 	}
 }
 
-// Without Cloud the statistics answer is the box's own, so a build with no
-// service still records it. It still names the policy the owner read.
-func TestABuildWithoutAServiceStillRecordsTheLocalAnswer(t *testing.T) {
+// A build with no service has no Cloud, so it shares nothing and refuses
+// statistics, whatever policy is named.
+func TestABuildWithoutAServiceSharesNothing(t *testing.T) {
 	kv := &memKV{}
 	link, err := New(Options{Site: &fakeSite{}, Roster: fakeRoster{}, KV: kv,
 		KeyPath: filepath.Join(t.TempDir(), "cloud.key"), ServiceKeys: []*ecdsa.PublicKey{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := link.Stats(StatsRequest{Policy: "p"}); !errors.Is(err, ErrNotGranted) {
-		t.Fatalf("an unknown policy: %v", err)
+	for _, policy := range []string{"p", cloudwire.StatsPolicy} {
+		if err := link.Stats(StatsRequest{Policy: policy}); !errors.Is(err, ErrNotGranted) {
+			t.Fatalf("statistics under %q: %v", policy, err)
+		}
 	}
-	if err := link.Stats(StatsRequest{Policy: cloudwire.StatsPolicy}); err != nil || !SharesStatistics(kv) {
-		t.Fatalf("statistics: %v", err)
+	if link.SharesStatistics() || link.Status().Statistics {
+		t.Fatal("a build without a service shares")
 	}
 }
 

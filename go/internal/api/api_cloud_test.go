@@ -402,8 +402,9 @@ func TestStatisticsRefusalsKeepTheirMeaning(t *testing.T) {
 	}
 }
 
-// The consent screen's whole round trip on a real link: on, statistics on,
-// GET shows both purposes, statistics off, FTW Cloud off.
+// The consent screen's whole round trip on a real link: statistics refused
+// without Cloud and under older terms, both purposes under the current
+// terms with no separate off, and nothing once FTW Cloud is off.
 func TestTheConsentRoundTripShowsThePurposes(t *testing.T) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -447,10 +448,11 @@ func TestTheConsentRoundTripShowsThePurposes(t *testing.T) {
 	if st := call(s.handleCloudRevoke, http.MethodDelete, "/api/cloud/grant", "", http.StatusOK); st.State != "revoking" {
 		t.Fatalf("status after FTW Cloud off: %+v", st)
 	}
-	// While the copy is deleted, the box's own answer can still change.
+	// Without Cloud there is no statistics answer to give.
 	call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", statsBody, http.StatusConflict)
-	if st := call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", current, http.StatusOK); !st.Statistics {
-		t.Fatalf("status after the local yes: %+v", st)
+	call(s.handleCloudStats, http.MethodPost, "/api/cloud/stats", current, http.StatusConflict)
+	if st := call(s.handleCloudStatus, http.MethodGet, "/api/cloud", "", http.StatusOK); st.Statistics || st.StatisticsRequired {
+		t.Fatalf("status after FTW Cloud off: %+v", st)
 	}
 }
 
@@ -495,5 +497,22 @@ func TestWholeCloudOffUsesTheExistingNarrowingAccessRule(t *testing.T) {
 		if w.Code != http.StatusOK || len(c.revoked) != 1 {
 			t.Fatal("whole Cloud off failed", w.Code)
 		}
+	}
+}
+
+// The statistics terms say they are part of FTW Cloud's and offer no choice
+// outside Cloud. Clients check the policy ids and cloud_includes_statistics.
+func TestTheStatisticsTermsComeOnlyWithCloud(t *testing.T) {
+	s := New(&Deps{Cloud: &stubCloud{}})
+	w := httptest.NewRecorder()
+	s.handleCloudStatsPolicy(w, sessionRequest(http.MethodGet, "/api/cloud/stats-policy", ""))
+	var got map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("%d %v", w.Code, err)
+	}
+	if got["policy"] != cloudwire.StatsPolicy || got["cloud_policy"] != cloudwire.CloudTermsPolicy ||
+		got["cloud_includes_statistics"] != true || got["cloud_required"] != true ||
+		got["standalone"] != false || got["local_optional"] != false || got["local_default"] != "off" {
+		t.Fatalf("stats-policy = %v", got)
 	}
 }

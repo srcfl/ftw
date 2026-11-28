@@ -120,7 +120,10 @@ func (s *Server) CloudStatistics(ctx context.Context, now time.Time) (cloudwire.
 	return out, true
 }
 
-// The owner reads this before POST /api/cloud/stats with this policy id.
+// The statistics terms, which are part of FTW Cloud's: clients show them
+// beside the Cloud terms and check that both policy ids are the ones they
+// carry. There is no statistics choice outside Cloud (Fredrik, 28 November
+// 2026), so standalone and local_optional are false.
 func (s *Server) handleCloudStatsPolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.cloudGate(w, r, false) {
 		return
@@ -132,14 +135,14 @@ func (s *Server) handleCloudStatsPolicy(w http.ResponseWriter, r *http.Request) 
 		"cloud_scopes":               protocol.CloudScopes,
 		"cloud_policy":               cloudwire.CloudTermsPolicy,
 		"cloud_includes_statistics":  true,
-		"standalone":                 true,
+		"standalone":                 false,
 		"purpose":                    "Publish group totals for FTW use and energy; improve planning. No ads or household decisions.",
 		"fields":                     cloudwire.StatsMetricKeys,
 		"meaning":                    "One reporting installation, configured flexible power and solar ratings, battery capacity, and recorded closed-hour energy. Configured limits do not prove physical control. Missing readings are unknown.",
 		"resolution":                 "Closed UTC hours, energy rounded to 10 Wh, capacities and limits rounded to 10 Wh or W. No names, addresses, device ids or location.",
-		"retention":                  "48 hours. Leaving Cloud or stopping local sharing deletes unpublished household rows; published group totals remain.",
+		"retention":                  "48 hours. Turning FTW Cloud off deletes unpublished household rows; published group totals remain.",
 		"publication_minimum_homes":  cloudwire.StatsMinimumHomes,
 		"publication_max_home_share": 0.3,
-		"controller":                 "sourceful", "local_default": "on", "local_optional": true, "cloud_required": true,
+		"controller":                 "sourceful", "local_default": "off", "local_optional": false, "cloud_required": true,
 	})
 }

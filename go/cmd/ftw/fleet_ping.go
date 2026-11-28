@@ -175,63 +175,32 @@ func fleetProvider(endpoint string, relay *statsrelay.Client) (fleetping.Provide
 }
 
 // statsAnswer is the one answer for both anonymous daily reports, the fleet
-// report and the energy report: part of FTW Cloud, and on for a box without
-// it until the owner turns it off. One reader, so the two reports cannot come
-// to read different answers. It asks the running Cloud link, which counts a
-// grant only with the key it was made with; with no link, the box's own
-// answer alone. fleet_ping.enabled is no longer a second switch;
-// migrateStatistics read it once.
+// report and the energy report: part of FTW Cloud and nothing else (Fredrik,
+// 28 November 2026). One reader, so the two reports cannot come to read
+// different answers. It asks the running Cloud link, which counts a grant
+// only with the key it was made with. With no link, nothing is sent.
 type statsAnswer struct {
-	st   *state.Store
 	link *cloudlink.Link
 }
 
 func (a statsAnswer) shares() bool {
-	if a.link != nil {
-		return a.link.SharesStatistics()
-	}
-	return a.st != nil && cloudlink.SharesStatistics(a.st)
+	return a.link != nil && a.link.SharesStatistics()
 }
 
-func (a statsAnswer) saidYes() bool {
-	if a.link != nil {
-		return a.link.SaidYesToStatistics()
-	}
-	return a.st != nil && cloudlink.SaidYesToStatistics(a.st)
-}
-
-// migrateStatistics turns what an earlier release stored into the one
-// answer, once: a fleet report switched off in the config stays off. Then
-// the Cloud grant follows it, so an answer that came out off also stops an
-// hourly upload the grant still carried.
-func migrateStatistics(cfg *config.Config, cfgMu *sync.RWMutex, st *state.Store, link *cloudlink.Link) {
-	if st == nil {
-		return
-	}
-	if err := cloudlink.MigrateStatistics(st, !fleetPingEnabled(cfg, cfgMu)()); err != nil {
-		slog.Warn("could not record the statistics answer; nothing is sent until it is", "err", err)
-		return
-	}
-	if link != nil {
-		if err := link.ReconcileStatistics("statistics answer"); err != nil {
-			slog.Warn("could not make the FTW Cloud grant follow the statistics answer", "err", err)
+// retireLocalStatistics handles what earlier releases stored for statistics
+// without FTW Cloud: the box's own answer, written "off" once, and a
+// statistics-only Cloud link, which ends. fleet_ping.enabled is no longer
+// read: a box without Cloud sends nothing whatever it says.
+func retireLocalStatistics(st *state.Store, link *cloudlink.Link) {
+	if st != nil {
+		if err := cloudlink.RetireLocalStatistics(st); err != nil {
+			slog.Warn("could not retire the local statistics answer; nothing reads it", "err", err)
 		}
 	}
-}
-
-// fleetPingEnabled reads the old switch under the config lock. Since the one
-// statistics answer it is read once, by migrateStatistics.
-//
-// On() and not a second reading of nil. A config posted to /api/config never
-// passes through applyDefaults and configreload.Apply swaps it in whole, so a
-// client that saves a config with no fleet_ping object hands the box a nil
-// section. Read here as "off", that would stop the ping the first time a
-// household saved anything at all, and keep it off until the next reboot.
-func fleetPingEnabled(cfg *config.Config, cfgMu *sync.RWMutex) func() bool {
-	return func() bool {
-		cfgMu.RLock()
-		defer cfgMu.RUnlock()
-		return cfg.FleetPing.On()
+	if link != nil {
+		if err := link.ReconcileStatistics("statistics are part of FTW Cloud"); err != nil {
+			slog.Warn("could not end statistics outside the current FTW Cloud terms", "err", err)
+		}
 	}
 }
 

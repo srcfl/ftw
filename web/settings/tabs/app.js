@@ -48,10 +48,11 @@
   }
 
   // The phone reaches this box through FTW Cloud, so pairing accepts its
-  // terms, as it does in the app (Fredrik, 23 November 2026). The page says
-  // so in one line by the buttons rather than sending anyone to a separate
-  // panel first. The box records the answer and is the judge of it: a box
-  // whose build names no Cloud service has nothing to accept.
+  // terms, anonymous statistics included, as it does in the app (Fredrik, 23
+  // and 28 November 2026). The page says so in one line by the buttons
+  // rather than sending anyone to a separate panel first, and asks nothing
+  // more. The box records the answer and is the judge of it: a box whose
+  // build names no Cloud service has nothing to accept.
   function cloudNeedsTerms(cloud) {
     return !!cloud && cloud.available === true && !cloud.cloudTermsAccepted;
   }
@@ -622,7 +623,7 @@
   S.tabs.app = {
     afterSave: function () {
       // These share a page, not a state. The app link has its own restart
-      // boundary; the statistics switch writes at once.
+      // boundary; the statistics line follows FTW Cloud.
       var panel = S.fleetPing;
       if (panel && panel.afterSave) panel.afterSave();
       refreshStatus(pairingCtx);
@@ -694,7 +695,7 @@
         '<button type="button" class="btn-ghost" id="app-link-share" hidden>Let someone see this home</button>' +
         "</div>" +
         '<p id="app-link-terms" class="hint" hidden>The app reaches this box through FTW Cloud, ' +
-        "which keeps a readable copy of your energy data. Pairing accepts its " +
+        "which keeps a readable copy of your energy data and takes anonymous statistics. Pairing accepts its " +
         '<a href="https://ftw.sourceful.energy/privacy" target="_blank" rel="noopener">terms</a>. ' +
         "The box runs without it.</p>" +
         // The slot sits right under the buttons that fill it. It used to sit

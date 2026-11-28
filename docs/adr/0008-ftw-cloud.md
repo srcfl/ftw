@@ -342,6 +342,9 @@ statistics cannot be turned off alone; `DELETE /api/cloud` ends Cloud,
 requests home deletion and remembers the off choice across restarts.
 Phones can need pairing again after the home key is deleted. An app user
 who declines its terms pauses Cloud on that phone and keeps its local keys.
+(The local statistics consent is replaced on 28 November 2026: statistics
+come only with Cloud; see the amendment to "Anonymous daily reports and one
+statistics answer" below.)
 
 The daily anonymous report also waits for the current project choice.
 Its saved config switch cannot bypass a missing answer or a local No.
@@ -400,6 +403,32 @@ anonymous daily reports, with no second setting:
   statistics is refused until the owner accepts the current terms.
 - A stored grant counts only through the running link, which honours it only
   with the key it was made with.
+
+**Amended 28 November 2026.** Statistics are part of FTW Cloud and nothing
+else. Fredrik: "Either you use no cloud at all, or you use FTW Cloud, and
+then sharing the anonymous statistics is included." So:
+
+- With FTW Cloud on under the current terms, the box sends the hourly upload
+  and both daily reports, as above. Cloud under older terms sends none.
+- Without Cloud the box sends no statistics: no fleet report, no energy
+  report, no hourly upload, and it does not fetch the public driver counts.
+  There is no switch. Settings → FTW app → Anonymous statistics says which
+  case holds and still shows each message. A collector set in
+  `fleet_ping.endpoint` gets a report only while Cloud is on, too.
+- The owner accepts the terms once, when pairing on the box page, in the
+  app or in the web app, and the box does not ask again. Only Cloud under
+  older terms is offered the current ones, in Settings, never as a prompt
+  on the Overview.
+- Stored state: the local answer (`statistics/share_v1`) is written "off"
+  once (`cloudlink.RetireLocalStatistics`) and read by nothing, so a
+  rollback cannot start sending from a box without Cloud. A statistics-only
+  link still running ends at the next start, and the service deletes its
+  rows. A grant under older terms loses a leftover stats purpose.
+  `fleet_ping.enabled` is not read at all.
+- `POST /api/cloud/stats` keeps its route: 200 under the current terms,
+  409 under older terms or without Cloud. `GET /api/cloud/stats-policy`
+  says `standalone: false`, `local_optional: false` and
+  `local_default: "off"`.
 
 **Two reports, never one message.** Each leaves at its own random time:
 

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/srcfl/ftw/go/internal/cloudlink"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/energyreport"
 	"github.com/srcfl/ftw/go/internal/fleetping"
@@ -22,11 +21,19 @@ type silentProvider string
 func (silentProvider) Send(context.Context, fleetping.Payload) error { return nil }
 func (p silentProvider) EndpointURL() string                         { return string(p) }
 
+// fleetPingServer is a box with FTW Cloud on under the current terms, so it
+// shares statistics.
 func fleetPingServer(t *testing.T, cfg *config.Config) *Server {
-	return fleetPingServerAt(t, cfg, config.DefaultFleetPingEndpoint)
+	return fleetPingServerWith(t, cfg, config.DefaultFleetPingEndpoint, true)
 }
 
 func fleetPingServerAt(t *testing.T, cfg *config.Config, endpoint string) *Server {
+	return fleetPingServerWith(t, cfg, endpoint, true)
+}
+
+// fleetPingServerWith is a box whose one statistics answer, which only FTW
+// Cloud under the current terms makes true, is shares.
+func fleetPingServerWith(t *testing.T, cfg *config.Config, endpoint string, shares bool) *Server {
 	t.Helper()
 	st, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
@@ -34,7 +41,7 @@ func fleetPingServerAt(t *testing.T, cfg *config.Config, endpoint string) *Serve
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	pinger, err := fleetping.New(fleetping.Options{
-		Enabled:  func() bool { return cloudlink.SharesStatistics(st) },
+		Enabled:  func() bool { return shares },
 		Provider: silentProvider(endpoint),
 		Facts: func() fleetping.Facts {
 			return fleetping.FactsFromConfig(cfg, "v1.4.0",
@@ -44,11 +51,6 @@ func fleetPingServerAt(t *testing.T, cfg *config.Config, endpoint string) *Serve
 	})
 	if err != nil {
 		t.Fatalf("fleetping.New: %v", err)
-	}
-	// The box's one statistics answer, written from this config the way
-	// Core writes it once at start.
-	if err := cloudlink.MigrateStatistics(st, !cfg.FleetPing.On()); err != nil {
-		t.Fatal(err)
 	}
 	return New(&Deps{CfgMu: &sync.RWMutex{}, Cfg: cfg, FleetPing: pinger, State: st})
 }
@@ -92,16 +94,16 @@ func TestFleetPingShowsTheRealPayload(t *testing.T) {
 	}
 }
 
-func TestFleetPingStillShowsThePayloadWhenSwitchedOff(t *testing.T) {
-	// Seeing the message while it is off is most of the point: somebody
-	// deciding whether to turn it on needs to read it first.
+func TestFleetPingStillShowsThePayloadWithoutFTWCloud(t *testing.T) {
+	// Seeing the message while nothing is sent is most of the point:
+	// somebody deciding whether to turn FTW Cloud on needs to read it first.
 	cfg := &config.Config{
-		FleetPing: &config.FleetPing{Enabled: false, Endpoint: config.DefaultFleetPingEndpoint},
+		FleetPing: &config.FleetPing{Enabled: true, Endpoint: config.DefaultFleetPingEndpoint},
 		Price:     &config.Price{Zone: "SE3"},
 	}
 
 	w := httptest.NewRecorder()
-	fleetPingServer(t, cfg).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/fleet-ping", nil))
+	fleetPingServerWith(t, cfg, config.DefaultFleetPingEndpoint, false).Handler().ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/fleet-ping", nil))
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", w.Code, w.Body.String())
@@ -114,7 +116,7 @@ func TestFleetPingStillShowsThePayloadWhenSwitchedOff(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if got.Enabled {
-		t.Error("reported enabled while switched off")
+		t.Error("reported enabled on a box without FTW Cloud")
 	}
 	if got.Payload["schema"] != fleetping.Schema {
 		t.Errorf("payload = %v, want the message it would send", got.Payload)
