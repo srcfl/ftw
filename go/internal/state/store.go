@@ -464,14 +464,6 @@ func (s *Store) RecordHealEvent(ev HealEvent) {
 	s.healMu.Unlock()
 }
 
-// SnapshotTo writes a self-contained, defragmented copy of the database
-// to dstPath. The source DB remains open for the duration; readers and writers
-// continue unimpeded. This compact copy is for automatic corruption recovery;
-// it intentionally omits bulky time-series tables. User-visible update
-// rollback must use BackupToCompressed instead.
-//
-// dstPath must not exist — SQLite refuses to overwrite an existing file.
-// Safe to call while the Store is serving live traffic.
 // snapshotExcludedTables lists tables whose contents are intentionally
 // dropped from compact recovery snapshots. They're the bulky time-series stores
 // — recoverable from cold parquet roll-off, so excluding them from
@@ -492,100 +484,27 @@ var snapshotExcludedTables = map[string]bool{
 	"planner_diagnostics": true,
 }
 
+// SnapshotTo writes a compact copy of state.db to dstPath for automatic
+// corruption recovery. It omits snapshotExcludedTables; update rollback
+// must use BackupToCompressed instead. dstPath must not exist.
+//
+// The copy reads one SQLite snapshot and writes it the way a live backup
+// copies state: short synced batches, checked against the source, with a
+// pause between them. One unbounded INSERT ... SELECT per table left tens of
+// megabytes dirty for a single fsync, and on an SD card live history commits
+// waited behind it past their deadline (#1554).
 func (s *Store) SnapshotTo(dstPath string) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("store: snapshot on nil store")
 	}
-	// Single-quote escape for ATTACH DATABASE path literal — bind
-	// parameters aren't honoured at the SQL grammar level. The caller
-	// constructs dstPath, but defence in depth.
-	escaped := strings.ReplaceAll(dstPath, "'", "''")
-
-	// Refuse to overwrite an existing destination. The old VACUUM INTO
-	// path errored implicitly; the ATTACH path would happily append
-	// into a pre-existing schema, which would silently corrupt a stale
-	// snapshot. The caller builds a unique path per snapshot, so a
-	// collision is a bug worth surfacing.
+	// Never write into an older file: a stale schema would merge with this copy.
 	if _, err := os.Stat(dstPath); err == nil {
 		return fmt.Errorf("snapshot: destination already exists: %s", dstPath)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("snapshot: stat dst %s: %w", dstPath, err)
 	}
-
-	// Use a single connection so ATTACH state survives across statements.
-	// db.Exec acquires a fresh connection each call, which would break
-	// the ATTACH binding.
-	conn, err := s.db.Conn(context.Background())
-	if err != nil {
-		return fmt.Errorf("snapshot: acquire conn: %w", err)
-	}
-	defer conn.Close()
-
-	ctx := context.Background()
-	if _, err := conn.ExecContext(ctx, fmt.Sprintf("ATTACH DATABASE '%s' AS snap", escaped)); err != nil {
-		return fmt.Errorf("snapshot: attach %s: %w", dstPath, err)
-	}
-	// Detach on every exit path so the connection is clean when returned
-	// to the pool.
-	defer func() { _, _ = conn.ExecContext(ctx, "DETACH DATABASE snap") }()
-
-	// Walk the source schema, replay each essential CREATE on snap, and
-	// stream the rows over. sqlite_master.sql carries the original
-	// CREATE text — we rewrite the leading identifier so it lands in
-	// the attached DB instead of main. Strict-mode tables and WITHOUT
-	// ROWID survive unchanged because the substring is purely
-	// "TABLE name" → "TABLE snap.name", before any column / option
-	// clauses.
-	rows, err := conn.QueryContext(ctx,
-		`SELECT type, name, tbl_name, sql FROM main.sqlite_master
-		 WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%'
-		 ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, name`)
-	if err != nil {
-		return fmt.Errorf("snapshot: list schema: %w", err)
-	}
-	var items []snapshotSchemaRow
-	for rows.Next() {
-		var r snapshotSchemaRow
-		if err := rows.Scan(&r.objType, &r.name, &r.tblName, &r.sqlText); err != nil {
-			_ = rows.Close()
-			return fmt.Errorf("snapshot: scan schema: %w", err)
-		}
-		items = append(items, r)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("snapshot: close schema rows: %w", err)
-	}
-
-	for _, r := range items {
-		// Skip objects belonging to excluded tables — their CREATE
-		// statements would otherwise re-introduce empty placeholder
-		// tables on the destination.
-		if snapshotExcludedTables[r.name] || snapshotExcludedTables[r.tblName] {
-			continue
-		}
-		snapSQL, err := rewriteCreateForAttachedDB(r.sqlText, r.objType, r.name)
-		if err != nil {
-			return fmt.Errorf("snapshot: rewrite CREATE for %s: %w", r.name, err)
-		}
-		if _, err := conn.ExecContext(ctx, snapSQL); err != nil {
-			return fmt.Errorf("snapshot: create %s on snap: %w", r.name, err)
-		}
-	}
-
-	// Copy each essential table's rows over in parent-before-child order.
-	// Alphabetic sqlite_master order is not safe when a schema contains FKs.
-	copyItems, err := snapshotTableCopyOrder(ctx, conn, items, snapshotExcludedTables)
-	if err != nil {
-		return fmt.Errorf("snapshot: order tables: %w", err)
-	}
-	for _, r := range copyItems {
-		if r.objType != "table" {
-			continue
-		}
-		if _, err := conn.ExecContext(ctx,
-			fmt.Sprintf("INSERT INTO snap.%q SELECT * FROM main.%q", r.name, r.name)); err != nil {
-			return fmt.Errorf("snapshot: copy table %s: %w", r.name, err)
-		}
+	if err := s.copyStateTables(context.Background(), dstPath, snapshotExcludedTables); err != nil {
+		return fmt.Errorf("snapshot: %w", err)
 	}
 	return nil
 }
@@ -787,121 +706,8 @@ type snapshotSchemaRow struct {
 	sqlText string
 }
 
-func snapshotTableCopyOrder(ctx context.Context, conn *sql.Conn, items []snapshotSchemaRow, excluded map[string]bool) ([]snapshotSchemaRow, error) {
-	tables := make([]snapshotSchemaRow, 0)
-	byName := make(map[string]snapshotSchemaRow)
-	for _, r := range items {
-		if r.objType != "table" || excluded[r.name] {
-			continue
-		}
-		tables = append(tables, r)
-		byName[r.name] = r
-	}
-
-	deps := make(map[string][]string, len(tables))
-	for _, r := range tables {
-		rows, err := conn.QueryContext(ctx, "PRAGMA main.foreign_key_list("+sqliteIdent(r.name)+")")
-		if err != nil {
-			return nil, fmt.Errorf("foreign_key_list %s: %w", r.name, err)
-		}
-		for rows.Next() {
-			var id, seq int
-			var parent, from, to, onUpdate, onDelete, match string
-			if err := rows.Scan(&id, &seq, &parent, &from, &to, &onUpdate, &onDelete, &match); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("scan foreign_key_list %s: %w", r.name, err)
-			}
-			if parent != r.name && !excluded[parent] {
-				deps[r.name] = append(deps[r.name], parent)
-			}
-		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("close foreign_key_list %s: %w", r.name, err)
-		}
-	}
-
-	visiting := make(map[string]bool, len(tables))
-	visited := make(map[string]bool, len(tables))
-	ordered := make([]snapshotSchemaRow, 0, len(tables))
-	var visit func(string) error
-	visit = func(name string) error {
-		if visited[name] {
-			return nil
-		}
-		if visiting[name] {
-			return fmt.Errorf("foreign-key cycle involving %s", name)
-		}
-		row, ok := byName[name]
-		if !ok {
-			return nil
-		}
-		visiting[name] = true
-		for _, dep := range deps[name] {
-			if err := visit(dep); err != nil {
-				return err
-			}
-		}
-		visiting[name] = false
-		visited[name] = true
-		ordered = append(ordered, row)
-		return nil
-	}
-	for _, r := range tables {
-		if err := visit(r.name); err != nil {
-			return nil, err
-		}
-	}
-	return ordered, nil
-}
-
 func sqliteIdent(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
-}
-
-// rewriteCreateForAttachedDB rewrites the leading object identifier
-// in a CREATE statement so it targets the attached snap database
-// instead of main. SQLite's sqlite_master.sql column stores the
-// statement verbatim, without an explicit database prefix; we add
-// "snap." before the object name without touching any of the column
-// definitions or table options that follow.
-func rewriteCreateForAttachedDB(stmt, objType, name string) (string, error) {
-	// Find the object-type keyword and the name token that follows it.
-	// Case-insensitive search keeps the rewrite robust against future
-	// migrations that capitalise differently.
-	lower := strings.ToLower(stmt)
-	kw := strings.ToLower(objType)
-	idx := strings.Index(lower, " "+kw+" ")
-	if idx < 0 {
-		// Try start-of-string in case the prefix shape changes.
-		if strings.HasPrefix(lower, kw+" ") {
-			idx = -1
-		} else {
-			return "", fmt.Errorf("cannot locate %q in CREATE statement", objType)
-		}
-	}
-	// idx points to the space before the keyword; skip past the
-	// keyword token to land on the column where the identifier starts.
-	afterKw := idx + 1 + len(kw) + 1
-	if idx < 0 {
-		afterKw = len(kw) + 1
-	}
-	// IF NOT EXISTS clause precedes the name; advance past it.
-	rest := stmt[afterKw:]
-	restLower := strings.ToLower(rest)
-	if strings.HasPrefix(restLower, "if not exists ") {
-		afterKw += len("if not exists ")
-		rest = stmt[afterKw:]
-	}
-	// Find the unquoted name in `rest`. SQLite identifiers can be
-	// bare, quoted with double quotes, or backticked — sqlite_master
-	// almost always returns the bare form for our migrations. Locate
-	// the first occurrence of `name` and prefix it with "snap.".
-	nameIdx := strings.Index(rest, name)
-	if nameIdx < 0 {
-		return "", fmt.Errorf("cannot locate name %q in CREATE statement", name)
-	}
-	rewritten := stmt[:afterKw+nameIdx] + "snap." + stmt[afterKw+nameIdx:]
-	return rewritten, nil
 }
 
 func (s *Store) migrate() error {
