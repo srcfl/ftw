@@ -64,9 +64,9 @@ func runBootstrap(configPath, webDir, driverDir string) {
 	})
 	// The guide names what the scan finds and tests each device as it is
 	// added, before anything is saved, as Settings does.
-	probes := firstRunProbeDeps(configPath, driverDir)
-	mux.Handle("POST /api/drivers/test", api.FirstRunDriverTest(probes))
-	mux.Handle("GET /api/scan", api.FirstRunScan(probes))
+	driverTest, scan := api.FirstRunProbes(firstRunProbeDeps(configPath, driverDir))
+	mux.Handle("POST /api/drivers/test", driverTest)
+	mux.Handle("GET /api/scan", scan)
 	mux.HandleFunc("GET /api/ev/providers", func(w http.ResponseWriter, _ *http.Request) {
 		writeBootstrapJSON(w, http.StatusOK, evcloud.Describe())
 	})
