@@ -25,6 +25,19 @@ revocation and result tests. Core still owns admission and physical dispatch.
 Temporary external control must expire; a saved household goal must survive
 client disconnect. Relay and escrow remain unable to read session contents.
 
+## Pairing by short code
+
+A phone pairs before it has a session. [Pair with one iPhone](pairing.md)
+has the owner's steps.
+
+The short-code exchange runs directly against the box's local, protected
+`POST /api/app-link/pairing` with `{"kind":"claim","code":"…"}`. It keeps
+the code's role and expiry and replaces it with a full enrollment token.
+The response carries the same v3 link as the QR. No short-code hash or box
+secret goes through a cloud lookup. Remote clients, proxies and app sessions
+cannot use this exchange. The existing house-password and browser-origin
+checks still apply.
+
 ## Frames
 
 Each Noise transport message carries exactly one frame.
