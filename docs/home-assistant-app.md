@@ -73,6 +73,10 @@ with no restart. The app log shows `Home Assistant's MQTT broker is
 core-mosquitto:1883` when FTW starts, or `found Home Assistant's MQTT broker`
 when FTW finds it later.
 
+For Home Assistant's **Energy dashboard**, pick FTW's **Total grid import**,
+**Total grid export**, **Total PV generation**, **Total battery charged** and
+**Total battery discharged** sensors.
+
 To turn this off, or to use another broker, open **Settings → Integrations**
 in FTW. See [Home Assistant integration](ha-integration.md).
 

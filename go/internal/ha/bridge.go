@@ -46,15 +46,19 @@ type PlanSource interface {
 	LatestActions() []PlanAction
 }
 
-// EnergySource is the minimal interface for today's running Wh totals.
+// EnergySource is the minimal interface for the stored energy totals.
 // Pass an adapter wrapping *state.Store at construction; nil disables energy sensors.
 type EnergySource interface {
-	TodayEnergy() (TodayEnergySnapshot, bool)
+	// TodayEnergy is the energy since local midnight.
+	TodayEnergy() (EnergyTotals, bool)
+	// LifetimeEnergy is the energy since the box's stored history began. It
+	// never falls, also across restarts; false means not known yet.
+	LifetimeEnergy() (EnergyTotals, bool)
 }
 
-// TodayEnergySnapshot is today's accumulated energy since midnight (local time).
-// All values are in Wh, site convention (ExportWh and PVWh are positive magnitudes).
-type TodayEnergySnapshot struct {
+// EnergyTotals is accumulated energy in Wh, site convention (ExportWh and
+// PVWh are positive magnitudes).
+type EnergyTotals struct {
 	ImportWh        float64
 	ExportWh        float64
 	PVWh            float64
@@ -453,6 +457,15 @@ func (b *Bridge) driverDiscoveryTopic(kind, driver, object string) string {
 // discoveryDevice is the device block embedded in every discovery message
 // so HA groups all the sensors under one device page.
 //
+// Home Assistant's MQTT integration sets has_entity_name on every entity
+// with a device, and ignores the key in a discovery message. So each name
+// below describes only the entity, in sentence case, and Home Assistant puts
+// the device name first: "FTW Grid power". A new entity's ID comes from the
+// same names, sensor.ftw_grid_power, unless the owner chose other ID parts.
+// Home Assistant keeps the ID it already gave a unique_id, so renaming an
+// entity here never moves an existing install's IDs or history; unique_ids
+// must never change.
+//
 // It has no configuration_url. Under the Home Assistant app the only address
 // for FTW's pages is a path inside Home Assistant's own frontend, and that
 // path moved in October 2026 (hassio/addon/<slug> became config/app/<slug>),
@@ -517,39 +530,49 @@ func (b *Bridge) publishDiscovery() {
 		category                             string
 	}{
 		// Real-time power flow
-		{"grid_power", "Grid Power", "W", "power", "measurement", b.stateTopic("grid_w"), ""},
-		{"pv_power", "PV Power", "W", "power", "measurement", b.stateTopic("pv_w"), ""},
-		{"battery_power", "Battery Power", "W", "power", "measurement", b.stateTopic("bat_w"), ""},
-		{"ev_power", "EV Power", "W", "power", "measurement", b.stateTopic("ev_w"), ""},
-		{"v2x_power", "V2X Power", "W", "power", "measurement", b.stateTopic("v2x_w"), ""},
+		{"grid_power", "Grid power", "W", "power", "measurement", b.stateTopic("grid_w"), ""},
+		{"pv_power", "PV power", "W", "power", "measurement", b.stateTopic("pv_w"), ""},
+		{"battery_power", "Battery power", "W", "power", "measurement", b.stateTopic("bat_w"), ""},
+		{"ev_power", "EV power", "W", "power", "measurement", b.stateTopic("ev_w"), ""},
+		{"v2x_power", "V2X power", "W", "power", "measurement", b.stateTopic("v2x_w"), ""},
 		// Live balance as the dashboard shows it.
-		{"load_power", "Load Power", "W", "power", "measurement", b.stateTopic("load_w"), ""},
+		{"load_power", "Load power", "W", "power", "measurement", b.stateTopic("load_w"), ""},
 		{"battery_soc", "Battery SoC", "%", "battery", "measurement", b.stateTopic("bat_soc_pct"), ""},
-		// Control setpoints. The number entities below set and show them.
-		{"grid_target", "Grid Target", "W", "power", "", b.stateTopic("grid_target_w"), diag},
-		{"peak_limit", "Peak Limit", "W", "power", "", b.stateTopic("peak_limit_w"), diag},
-		{"peak_import_ceiling", "Peak Import Ceiling", "W", "power", "", b.stateTopic("peak_import_ceiling_w"), diag},
-		{"ev_charging", "EV Charging Power", "W", "power", "", b.stateTopic("ev_charging_w"), diag},
+		// Control setpoints. The number entities below set and show them, so
+		// these carry "setpoint" and the numbers keep the short name.
+		{"grid_target", "Grid target setpoint", "W", "power", "", b.stateTopic("grid_target_w"), diag},
+		{"peak_limit", "Peak limit setpoint", "W", "power", "", b.stateTopic("peak_limit_w"), diag},
+		{"peak_import_ceiling", "Peak import ceiling", "W", "power", "", b.stateTopic("peak_import_ceiling_w"), diag},
+		{"ev_charging", "EV charging setpoint", "W", "power", "", b.stateTopic("ev_charging_w"), diag},
 		// Forecast from current MPC slot (only populated when plan is wired)
-		{"pv_predicted", "PV Power Predicted", "W", "power", "measurement", b.stateTopic("pv_w_predicted"), ""},
-		{"load_predicted", "Load Power Predicted", "W", "power", "measurement", b.stateTopic("load_w_predicted"), ""},
+		{"pv_predicted", "PV power predicted", "W", "power", "measurement", b.stateTopic("pv_w_predicted"), ""},
+		{"load_predicted", "Load power predicted", "W", "power", "measurement", b.stateTopic("load_w_predicted"), ""},
 		// Per-phase power (site meter, available when driver emits l1_w/l2_w/l3_w)
-		{"phase_1_power", "Phase L1 Power", "W", "power", "measurement", b.stateTopic("phase_1_w"), diag},
-		{"phase_2_power", "Phase L2 Power", "W", "power", "measurement", b.stateTopic("phase_2_w"), diag},
-		{"phase_3_power", "Phase L3 Power", "W", "power", "measurement", b.stateTopic("phase_3_w"), diag},
+		{"phase_1_power", "Phase L1 power", "W", "power", "measurement", b.stateTopic("phase_1_w"), diag},
+		{"phase_2_power", "Phase L2 power", "W", "power", "measurement", b.stateTopic("phase_2_w"), diag},
+		{"phase_3_power", "Phase L3 power", "W", "power", "measurement", b.stateTopic("phase_3_w"), diag},
 		// Per-phase current (site meter, available when driver emits l1_a/l2_a/l3_a)
-		{"phase_1_current", "Phase L1 Current", "A", "current", "measurement", b.stateTopic("phase_1_a"), diag},
-		{"phase_2_current", "Phase L2 Current", "A", "current", "measurement", b.stateTopic("phase_2_a"), diag},
-		{"phase_3_current", "Phase L3 Current", "A", "current", "measurement", b.stateTopic("phase_3_a"), diag},
+		{"phase_1_current", "Phase L1 current", "A", "current", "measurement", b.stateTopic("phase_1_a"), diag},
+		{"phase_2_current", "Phase L2 current", "A", "current", "measurement", b.stateTopic("phase_2_a"), diag},
+		{"phase_3_current", "Phase L3 current", "A", "current", "measurement", b.stateTopic("phase_3_a"), diag},
 		// Today's energy totals, read from the stored history. They return to
 		// zero at local midnight, the daily counter that total_increasing
 		// describes, and a restart does not lower them.
-		{"today_import", "Today Grid Import", "Wh", "energy", "total_increasing", b.stateTopic("today_import_wh"), ""},
-		{"today_export", "Today Grid Export", "Wh", "energy", "total_increasing", b.stateTopic("today_export_wh"), ""},
-		{"today_pv", "Today PV Generation", "Wh", "energy", "total_increasing", b.stateTopic("today_pv_wh"), ""},
-		{"today_bat_charged", "Today Battery Charged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_charged_wh"), ""},
-		{"today_bat_discharged", "Today Battery Discharged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_discharged_wh"), ""},
-		{"today_load", "Today Load", "Wh", "energy", "total_increasing", b.stateTopic("today_load_wh"), ""},
+		{"today_import", "Today grid import", "Wh", "energy", "total_increasing", b.stateTopic("today_import_wh"), ""},
+		{"today_export", "Today grid export", "Wh", "energy", "total_increasing", b.stateTopic("today_export_wh"), ""},
+		{"today_pv", "Today PV generation", "Wh", "energy", "total_increasing", b.stateTopic("today_pv_wh"), ""},
+		{"today_bat_charged", "Today battery charged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_charged_wh"), ""},
+		{"today_bat_discharged", "Today battery discharged", "Wh", "energy", "total_increasing", b.stateTopic("today_bat_discharged_wh"), ""},
+		{"today_load", "Today load", "Wh", "energy", "total_increasing", b.stateTopic("today_load_wh"), ""},
+		// Lifetime totals for Home Assistant's Energy dashboard: the stored
+		// history since it began. They never return to zero, so Home
+		// Assistant sees no reset at midnight or on a restart.
+		{"total_import", "Total grid import", "kWh", "energy", "total_increasing", b.stateTopic("total_import_kwh"), ""},
+		{"total_export", "Total grid export", "kWh", "energy", "total_increasing", b.stateTopic("total_export_kwh"), ""},
+		{"total_pv", "Total PV generation", "kWh", "energy", "total_increasing", b.stateTopic("total_pv_kwh"), ""},
+		{"total_bat_charged", "Total battery charged", "kWh", "energy", "total_increasing", b.stateTopic("total_bat_charged_kwh"), ""},
+		{"total_bat_discharged", "Total battery discharged", "kWh", "energy", "total_increasing", b.stateTopic("total_bat_discharged_kwh"), ""},
+		{"total_load", "Total load", "kWh", "energy", "total_increasing", b.stateTopic("total_load_kwh"), ""},
 	}
 	for _, s := range sensors {
 		msg := b.withAvail(map[string]any{
@@ -587,7 +610,7 @@ func (b *Bridge) publishDiscovery() {
 
 	// ---- Grid target as HA number ----
 	targetMsg := b.withAvail(map[string]any{
-		"name":                "Grid Target",
+		"name":                "Grid target",
 		"unique_id":           b.deviceID + "_grid_target_cmd",
 		"state_topic":         b.stateTopic("grid_target_w"),
 		"command_topic":       b.cmdTopic("grid_target_w"),
@@ -603,7 +626,7 @@ func (b *Bridge) publishDiscovery() {
 
 	// ---- Peak limit as HA number ----
 	peakMsg := b.withAvail(map[string]any{
-		"name":                "Peak Limit",
+		"name":                "Peak limit",
 		"unique_id":           b.deviceID + "_peak_limit_cmd",
 		"state_topic":         b.stateTopic("peak_limit_w"),
 		"command_topic":       b.cmdTopic("peak_limit_w"),
@@ -620,7 +643,7 @@ func (b *Bridge) publishDiscovery() {
 
 	// ---- EV charging target as HA number ----
 	evMsg := b.withAvail(map[string]any{
-		"name":                "EV Charging Power",
+		"name":                "EV charging power",
 		"unique_id":           b.deviceID + "_ev_charging_cmd",
 		"state_topic":         b.stateTopic("ev_charging_w"),
 		"command_topic":       b.cmdTopic("ev_charging_w"),
@@ -661,7 +684,7 @@ func (b *Bridge) publishDiscovery() {
 		// Current electricity price sensor: state = total consumer price (öre/kWh),
 		// attrs = spot_ore, cost_ore, reason, ems_mode.
 		priceMsg := b.withAvail(map[string]any{
-			"name":                  "Electricity Price",
+			"name":                  "Electricity price",
 			"unique_id":             b.deviceID + "_price_ore",
 			"state_topic":           b.stateTopic("price_ore"),
 			"json_attributes_topic": b.stateTopic("price_json"),
@@ -676,7 +699,7 @@ func (b *Bridge) publishDiscovery() {
 		// Plan-stale binary_sensor: "on" = planner fell back to self_consumption
 		// because the plan was missing or older than 30 min.
 		staleMsg := b.withAvail(map[string]any{
-			"name":            "Plan Stale",
+			"name":            "Plan stale",
 			"unique_id":       b.deviceID + "_plan_stale",
 			"state_topic":     b.stateTopic("plan_stale"),
 			"payload_on":      "true",
@@ -706,12 +729,12 @@ func (b *Bridge) publishDiscovery() {
 	for _, name := range b.driverNames {
 		// Data sensors: live power and state of charge, so measurement.
 		for _, s := range []struct{ id, label, unit, class string }{
-			{"meter_w", " Meter Power", "W", "power"},
-			{"pv_w", " PV Power", "W", "power"},
-			{"bat_w", " Battery Power", "W", "power"},
-			{"bat_soc_pct", " Battery SoC", "%", "battery"},
-			{"v2x_w", " V2X Power", "W", "power"},
-			{"v2x_vehicle_soc_pct", " V2X Vehicle SoC", "%", "battery"},
+			{"meter_w", " meter power", "W", "power"},
+			{"pv_w", " PV power", "W", "power"},
+			{"bat_w", " battery power", "W", "power"},
+			{"bat_soc_pct", " battery SoC", "%", "battery"},
+			{"v2x_w", " V2X power", "W", "power"},
+			{"v2x_vehicle_soc_pct", " V2X vehicle SoC", "%", "battery"},
 		} {
 			msg := b.withAvail(map[string]any{
 				"name":                name + s.label,
@@ -729,7 +752,7 @@ func (b *Bridge) publishDiscovery() {
 
 		// Health binary_sensor: online/offline with JSON attributes for rich diagnostics.
 		healthMsg := b.withAvail(map[string]any{
-			"name":                  name + " Online",
+			"name":                  name + " online",
 			"unique_id":             b.driverUniqueID(name, "_online"),
 			"state_topic":           b.driverTopic(name, "online"),
 			"json_attributes_topic": b.driverTopic(name, "health_json"),
@@ -789,7 +812,7 @@ func (b *Bridge) syncLegacyCover(dev map[string]any, on, force bool) bool {
 	payload := []byte{}
 	if on {
 		payload, _ = json.Marshal(b.withAvail(map[string]any{
-			"name":          "Legacy Site-wide Battery Cover",
+			"name":          "Legacy home-wide battery cover",
 			"unique_id":     b.deviceID + "_battery_covers_ev_cmd",
 			"state_topic":   b.stateTopic("battery_covers_ev"),
 			"command_topic": b.cmdTopic("battery_covers_ev"),
@@ -1127,7 +1150,7 @@ func (b *Bridge) publishState() {
 		}
 	}
 
-	// ---- Today's energy totals (since midnight local time) ----
+	// ---- Today's energy totals (since midnight local time) and lifetime totals ----
 	if b.energy != nil {
 		if snap, ok := b.energy.TodayEnergy(); ok {
 			b.publishValue("today_import_wh", snap.ImportWh)
@@ -1136,6 +1159,14 @@ func (b *Bridge) publishState() {
 			b.publishValue("today_bat_charged_wh", snap.BatChargedWh)
 			b.publishValue("today_bat_discharged_wh", snap.BatDischargedWh)
 			b.publishValue("today_load_wh", snap.LoadWh)
+		}
+		if snap, ok := b.energy.LifetimeEnergy(); ok {
+			b.publishKWh("total_import_kwh", snap.ImportWh)
+			b.publishKWh("total_export_kwh", snap.ExportWh)
+			b.publishKWh("total_pv_kwh", snap.PVWh)
+			b.publishKWh("total_bat_charged_kwh", snap.BatChargedWh)
+			b.publishKWh("total_bat_discharged_kwh", snap.BatDischargedWh)
+			b.publishKWh("total_load_kwh", snap.LoadWh)
 		}
 	}
 
@@ -1287,7 +1318,7 @@ func vehicleAttrs(r *telemetry.DerReading) map[string]any {
 // announceEVDriver publishes HA discovery for an EV charger reader.
 func (b *Bridge) announceEVDriver(dev map[string]any, driver string) {
 	msg := b.withAvail(map[string]any{
-		"name":                  driver + " EV Power",
+		"name":                  driver + " EV power",
 		"unique_id":             b.driverUniqueID(driver, "_ev_w"),
 		"state_topic":           b.driverTopic(driver, "ev_w"),
 		"json_attributes_topic": b.driverTopic(driver, "ev_json"),
@@ -1304,7 +1335,7 @@ func (b *Bridge) announceEVDriver(dev map[string]any, driver string) {
 // announceVehicleDriver publishes HA discovery for a vehicle SoC reader.
 func (b *Bridge) announceVehicleDriver(dev map[string]any, driver string) {
 	msg := b.withAvail(map[string]any{
-		"name":                  driver + " Vehicle SoC",
+		"name":                  driver + " vehicle SoC",
 		"unique_id":             b.driverUniqueID(driver, "_vehicle_soc"),
 		"state_topic":           b.driverTopic(driver, "vehicle_soc_pct"),
 		"json_attributes_topic": b.driverTopic(driver, "vehicle_json"),
@@ -1377,6 +1408,12 @@ func planActionLabel(batteryW float64) string {
 
 func (b *Bridge) publishValue(name string, v float64) {
 	b.publish(b.stateTopic(name), []byte(strconv.FormatFloat(v, 'f', 2, 64)), false)
+}
+
+// publishKWh sends a Wh total as kWh to the watt-hour. Rounding keeps a
+// total that never falls from falling.
+func (b *Bridge) publishKWh(name string, wh float64) {
+	b.publish(b.stateTopic(name), []byte(strconv.FormatFloat(wh/1000, 'f', 3, 64)), false)
 }
 func (b *Bridge) publishString(name string, s string) {
 	b.publish(b.stateTopic(name), []byte(s), false)

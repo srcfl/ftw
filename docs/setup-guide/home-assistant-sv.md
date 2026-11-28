@@ -75,6 +75,10 @@ inom en minut, utan omstart. Appens logg visar
 `Home Assistant's MQTT broker is core-mosquitto:1883` när FTW startar, eller
 `found Home Assistant's MQTT broker` när FTW hittar den senare.
 
+I Home Assistants panel **Energi** väljer du FTW:s sensorer
+**Total grid import**, **Total grid export**, **Total PV generation**,
+**Total battery charged** och **Total battery discharged**.
+
 Vill du stänga av det, eller använda en annan broker, öppna
 **Settings → Integrations** i FTW. Se [Home Assistant](../ha-integration.md)
 (på engelska).

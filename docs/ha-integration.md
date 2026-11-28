@@ -12,7 +12,10 @@ The bridge is optional and does not participate in the local safety loop.
 
 > **Compatibility contract:** the MQTT prefix `forty-two-watts`, discovery
 > identifier `forty_two_watts`, client ID `forty-two-watts-ha`, and existing
-> entity IDs are stable wire identifiers. They are intentionally not renamed.
+> unique IDs are stable wire identifiers. They are intentionally not renamed.
+> Home Assistant keeps the entity ID it first gave each unique ID, so when
+> FTW renames an entity only the shown name changes. Entity IDs, history and
+> names you set yourself stay.
 
 ## Setup
 
@@ -42,23 +45,43 @@ manually in this document.
 
 ## How the entities look
 
+- Home Assistant puts the device name first, so entities read
+  **FTW Grid power** or **FTW Total grid import**. A new install gets entity
+  IDs from the same words, such as `sensor.ftw_grid_power`, unless you
+  changed how Home Assistant builds new entity IDs. An updated install keeps
+  the IDs it has.
+- The number entities **Grid target**, **Peak limit** and **EV charging
+  power** set those values. The sensors that show the same values end in
+  **setpoint**.
 - The **FTW** device page shows Core's version. It has no link to FTW's
   pages: under the app, that path inside Home Assistant changed in October
   2026, and on its own box FTW cannot know which address you can reach.
 - Power, current, voltage, frequency, temperature, state of charge and
   other percentages have `state_class: measurement`, so Home Assistant keeps
   long-term statistics for them.
+- For Home Assistant's **Energy dashboard**, use the **Total …** sensors:
+  grid import and export, PV generation, battery charged and discharged,
+  and load, in kWh with `total_increasing`. They are the box's stored
+  energy history since it began, the same history as FTW's daily totals.
+  They never go down and never return to zero, and a restart counts no
+  energy twice. They appear a few minutes after an update, once FTW has
+  added up the history it already holds. Only an empty history, as on a new
+  box, starts them at zero. A full backup holds the history but not the
+  totals, so a restore adds them up again from that history. Restoring an
+  older backup therefore takes them back to that backup's totals; fix the
+  jump this makes in Home Assistant under **Developer tools → Statistics**.
+  An older FTW drops the totals if it rebuilds its history file; after the
+  next update they add up again from the stored history.
 - The `Today …` energy sensors are `total_increasing`: they count from local
   midnight and return to zero there. A driver's energy metric is
   `total_increasing` only when it is a lifetime total or a meter's
   import/export register. Energy that can fall, such as one charging
   session's energy or a battery's capacity, has no state class.
 - Entities about FTW's own workings are in the device page's
-  **Diagnostic** group, not on generated dashboards: each driver's Online
-  sensor and emitted metrics, Plan Stale, Peak Import Ceiling, the
-  per-phase power and current, and the Grid Target, Peak Limit and EV
-  Charging Power sensors, whose number entities set and show the same values.
-- **Legacy Site-wide Battery Cover** appears only while that older setting
+  **Diagnostic** group, not on generated dashboards: each driver's online
+  sensor and emitted metrics, Plan stale, Peak import ceiling, the
+  per-phase power and current, and the three setpoint sensors.
+- **Legacy home-wide battery cover** appears only while that older setting
   is on. Per-charger battery boost replaced it. Turn it off and the switch
   goes away; FTW's own pages show it the same way.
 
