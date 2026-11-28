@@ -124,7 +124,7 @@ func (c *client) nativeInfo(ctx context.Context) (versionInfo, error) {
 	var info versionInfo
 	if err := c.get(ctx, "/api/version/check", &info); err != nil {
 		if c.waitingForSetup(ctx) {
-			return info, fmt.Errorf("Core is waiting for setup; finish it at %s/setup first", c.base)
+			return info, c.setupFirst()
 		}
 		if selfUpdateOff(err) {
 			return info, errors.New(notNative)

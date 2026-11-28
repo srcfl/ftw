@@ -127,6 +127,11 @@ func (c *client) waitingForSetup(ctx context.Context) bool {
 	return true
 }
 
+// setupFirst is the answer of a command that needs a Core that is set up.
+func (c *client) setupFirst() error {
+	return fmt.Errorf("Core is waiting for setup; finish it at %s/setup first", c.base)
+}
+
 // selfUpdateOff reports Core's answer when it does not manage its own
 // updates: a container, the Home Assistant add-on or a plain binary.
 func selfUpdateOff(err error) bool {

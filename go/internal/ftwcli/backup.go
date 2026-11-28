@@ -79,7 +79,11 @@ func runBackup(args []string, out io.Writer, e env) error {
 	c := newClient(base, e)
 	ctx := context.Background()
 	var before backupList
-	if c.get(ctx, "/api/backups", &before) == nil && before.Dir != "" {
+	err = c.get(ctx, "/api/backups", &before)
+	if err != nil && c.waitingForSetup(ctx) {
+		return c.setupFirst()
+	}
+	if err == nil && before.Dir != "" {
 		line := before.Dir
 		if before.FreeBytes > 0 {
 			line += " (" + formatBytes(before.FreeBytes) + " free)"
@@ -241,6 +245,13 @@ func runSupport(args []string, out io.Writer, e env) error {
 	defer cancel()
 	resp, err := c.open(ctx, "/api/support/dump")
 	if err != nil {
+		// A Core waiting for setup has no support file; its log may help.
+		if c.waitingForSetup(ctx) {
+			if e.systemd {
+				return fmt.Errorf("%w; until then, journalctl -u ftw -n 100 shows its log", c.setupFirst())
+			}
+			return c.setupFirst()
+		}
 		return err
 	}
 	defer resp.Body.Close()

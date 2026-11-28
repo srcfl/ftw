@@ -49,6 +49,11 @@ Debian eller Ubuntu på en minidator eller en gammal laptop. Har du aldrig
 ställt in en Pi? [Pi-guiden](sv.md) visar varje steg med bilder, från
 minneskortet till den här raden.
 
+Installern behöver ungefär 250 MB ledigt utrymme och de här programmen:
+`curl`, `tar`, `gzip`, `sha256sum`, `grep`, `awk`, `mktemp` och, om du inte
+installerar som root, `sudo`. Raspberry Pi OS, Debian och Ubuntu har dem. Saknas
+ett av dem säger installern vilket och vilket kommando som lägger till det.
+
 Logga in på datorn, över SSH eller vid dess eget tangentbord, och kör:
 
 ```bash
@@ -66,6 +71,12 @@ skriv ditt eget. Sist skriver den ut adresserna att öppna, till exempel:
 ```
 
 Öppna en av dem i en webbläsare på samma nätverk.
+
+Kör du raden igen på en box som den redan har installerat ändrar den
+ingenting. Den säger att FTW redan är installerat och skriver ut adresserna.
+Den avslutar med 0 när FTW körs eller startar och med 1 när det inte gör det,
+och säger då hur du startar det. `--tag` och `--beta` gör ingenting på en sådan
+box: kör `ftw update` för en nyare version.
 
 Om den stannar med ett fel: stanna där. Prova inte ett annat sätt att
 installera. Leta upp felet i

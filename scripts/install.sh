@@ -206,16 +206,225 @@ find_release() {
   printf '%s\n' "$answer"
 }
 
-# Each IPv4 address that others on the network can reach: not loopback,
-# not link-local and not a container bridge on this computer.
-ipv4_addresses() {
-  if command -v ip >/dev/null 2>&1; then
-    ip -4 -o addr show scope global 2>/dev/null |
-      awk '$2 !~ /^(docker|br-|veth|virbr|cni|podman)/ { sub(/\/.*/, "", $4); print $4 }' || true
-  elif command -v hostname >/dev/null 2>&1; then
-    hostname -I 2>/dev/null | tr ' ' '\n' |
-      grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | grep -vE '^(127|169\.254)\.' || true
+docs_url=https://github.com/srcfl/ftw/blob/master/docs/install.md
+
+# The line after a refusal that leaves no way forward on this computer.
+other_ways() {
+  echo "On a Raspberry Pi, use Raspberry Pi OS Lite (64-bit). With Home Assistant, use the FTW app for Home Assistant. Every way to run FTW: $docs_url" >&2
+}
+
+# Prints the package that holds tool $1.
+tool_package() {
+  case "$1" in
+    sha256sum|mktemp) echo coreutils ;;
+    awk) echo gawk ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# Prints the package manager this computer uses: apt, dnf, zypper or pacman.
+package_family() {
+  local family
+  for family in apt-get dnf zypper pacman; do
+    if command -v "$family" >/dev/null 2>&1; then
+      echo "${family%-get}"
+      return 0
+    fi
+  done
+}
+
+# Prints the command that installs packages $3... with package manager $1,
+# each step led by $2 (sudo or nothing). It prints nothing for another one.
+install_command() {
+  local family="$1" lead="$2"
+  shift 2
+  case "$family" in
+    apt) echo "${lead}apt update && ${lead}apt install -y $*" ;;
+    dnf) echo "${lead}dnf install -y $*" ;;
+    zypper) echo "${lead}zypper install -y $*" ;;
+    pacman) echo "${lead}pacman -S --needed $*" ;;
+  esac
+}
+
+# Joins words as a person would: "a", "a and b", "a, b and c".
+join_words() {
+  local text="$1"
+  shift
+  while (( $# > 1 )); do
+    text="$text, $1"
+    shift
+  done
+  (( $# == 0 )) || text="$text and $1"
+  printf '%s\n' "$text"
+}
+
+# Stops with the command that adds any tool the installer needs. tar needs
+# gzip for the package.
+check_tools() {
+  local tool package lead=""
+  local tools=(curl tar gzip sha256sum grep awk mktemp) missing=() packages=()
+  if (( EUID != 0 )); then
+    tools+=(sudo)
   fi
+  for tool in "${tools[@]}"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      missing+=("$tool")
+      package="$(tool_package "$tool")"
+      if [[ " ${packages[*]-} " != *" $package "* ]]; then
+        packages+=("$package")
+      fi
+    fi
+  done
+  (( ${#missing[@]} > 0 )) || return 0
+  local them=them command
+  (( ${#missing[@]} > 1 )) || them=it
+  if (( EUID != 0 )) && command -v sudo >/dev/null 2>&1; then
+    lead="sudo "
+  fi
+  command="$(install_command "$(package_family)" "$lead" "${packages[@]}")"
+  echo "The installer needs $(join_words "${missing[@]}"), which this computer lacks." >&2
+  if [[ -z "$command" ]]; then
+    echo "Add $them with this computer's package manager (packages: $(join_words "${packages[@]}")), then run the line again." >&2
+  elif (( EUID != 0 )) && [[ -z "$lead" ]]; then
+    echo "Add $them as root with this command, then run the line again, or run the line itself as root:" >&2
+    echo "  $command" >&2
+  else
+    echo "Add $them with this command, then run the line again:" >&2
+    echo "  $command" >&2
+  fi
+  exit 2
+}
+
+# Prints the MB free in the file system that holds $1, or its nearest
+# parent that exists; nothing when df cannot tell.
+free_mb() {
+  local path="$1"
+  while [[ ! -e "$path" && "$path" != / ]]; do
+    path="$(dirname "$path")"
+  done
+  df -Pm "$path" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }' || true
+}
+
+# Prints the free space for $1 in words, also when df cannot tell.
+space_of() {
+  local free
+  free="$(free_mb "$1")"
+  if [[ -n "$free" ]]; then
+    echo "$free MB"
+  else
+    echo "unknown (df could not check it)"
+  fi
+}
+
+# True unless df shows less than $2 MB free for $1.
+has_room() {
+  local free
+  free="$(free_mb "$1")"
+  [[ -z "$free" ]] || (( free >= $2 ))
+}
+
+# Prints the folder to unpack the download in, for $1 MB. A tmpfs keeps its
+# files in memory; when it is small, as on a Raspberry Pi 3, /var/tmp on
+# disk comes first.
+staging_parent() {
+  local base="${TMPDIR:-/tmp}" need="$1" move=no
+  if ! has_room "$base" "$need" ||
+     { [[ "$(stat -f -c %T "$base" 2>/dev/null)" == tmpfs ]] && ! has_room "$base" 1024; }; then
+    move=yes
+  fi
+  if [[ "$move" == yes && "$base" != /var/tmp && -d /var/tmp && -w /var/tmp ]] && has_room /var/tmp "$need"; then
+    base=/var/tmp
+  fi
+  has_room "$base" "$need" || return 1
+  printf '%s\n' "$base"
+}
+
+# True when a program listens on TCP port $1.
+port_busy() {
+  local sockets
+  # An ss that fails, perhaps too old for -H, leaves the kernel's tables.
+  if command -v ss >/dev/null 2>&1 && sockets="$(ss -ltnH 2>/dev/null)"; then
+    printf '%s\n' "$sockets" |
+      awk -v port=":$1" 'substr($4, length($4) - length(port) + 1) == port { found = 1 } END { exit !found }'
+  else
+    proc_listening "$1" /proc/net
+  fi
+}
+
+# True when the kernel's socket tables, tcp and tcp6 in folder $2, show a
+# program listening on TCP port $1. Minimal systems may lack ss.
+proc_listening() {
+  local dir="$2" file files=()
+  for file in "$dir/tcp" "$dir/tcp6"; do
+    if [[ -r "$file" ]]; then
+      files+=("$file")
+    fi
+  done
+  (( ${#files[@]} > 0 )) || return 1
+  # Each row is "slot local remote state ...", the local port in hex after
+  # the colon, and state 0A is listening.
+  LC_ALL=C awk -v port="$(printf '%04X' "$1")" '
+    $4 == "0A" && substr($2, length($2) - 3) == port { found = 1 }
+    END { exit !found }' "${files[@]}"
+}
+
+# Prints the local IPv4 addresses in a copy of /proc/net/fib_trie ($1).
+fib_trie_addresses() {
+  [[ -r "$1" ]] || return 0
+  LC_ALL=C awk '/\/32 host LOCAL/ { print last } { last = $2 }' "$1"
+}
+
+# Reads IPv4 addresses and prints, once each, those others on the network
+# can reach: not loopback, not link-local and not on a container bridge. The
+# routes in /proc/net/route, or in $1 for tests, name each network's
+# interface, as ip does.
+lan_only() {
+  local routes="${1:-/proc/net/route}"
+  [[ -r "$routes" ]] || routes=/dev/null
+  LC_ALL=C awk -v rf="$routes" '
+    # The kernel prints each address as a little-endian hex number.
+    function byte(hex, i,   digits) {
+      digits = "0123456789ABCDEF"
+      hex = toupper(substr(hex, 9 - 2 * i, 2))
+      return (index(digits, substr(hex, 1, 1)) - 1) * 16 + index(digits, substr(hex, 2, 1)) - 1
+    }
+    FILENAME == rf {
+      if ($1 ~ /^(docker|br-|veth|virbr|cni|podman)/ && length($8) == 8 && $8 ~ /^[0-9A-Fa-f]+$/ && $8 != "00000000") {
+        n++
+        for (i = 1; i <= 4; i++) { net[n, i] = byte($2, i); mask[n, i] = byte($8, i) }
+      }
+      next
+    }
+    $1 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ && $1 !~ /^(127|169\.254)\./ && !seen[$1]++ {
+      split($1, a, ".")
+      for (r = 1; r <= n; r++) {
+        inside = 1
+        for (i = 1; i <= 4; i++)
+          if (a[i] - a[i] % (256 - mask[r, i]) != net[r, i]) inside = 0
+        if (inside) next
+      }
+      print $1
+    }' "$routes" -
+}
+
+# Each IPv4 address that others on the network can reach. Minimal systems
+# may lack ip and hostname -I, so the kernel's own tables come next.
+ipv4_addresses() {
+  local found=""
+  if command -v ip >/dev/null 2>&1; then
+    found="$(ip -4 -o addr show scope global 2>/dev/null |
+      awk '$2 !~ /^(docker|br-|veth|virbr|cni|podman)/ { sub(/\/.*/, "", $4); print $4 }')" || true
+  fi
+  if [[ -z "$found" ]] && command -v hostname >/dev/null 2>&1; then
+    found="$(hostname -I 2>/dev/null | tr ' ' '\n' | lan_only)" || true
+  fi
+  if [[ -z "$found" ]]; then
+    found="$(fib_trie_addresses /proc/net/fib_trie | lan_only)" || true
+  fi
+  if [[ -z "$found" ]] && command -v getent >/dev/null 2>&1; then
+    found="$(getent ahostsv4 "$(uname -n)" 2>/dev/null | awk '{ print $1 }' | lan_only)" || true
+  fi
+  [[ -z "$found" ]] || printf '%s\n' "$found"
 }
 
 # Prints the .local name that Avahi or systemd-resolved announces for this
@@ -245,23 +454,139 @@ mdns_name() {
   printf '%s\n' "$name"
 }
 
+# Prints the addresses of page $1 on this computer's port 8080.
 setup_addresses() {
-  local ip name found=no
+  local page="$1" ip name found=no
   while IFS= read -r ip; do
     [[ -n "$ip" ]] || continue
-    echo "  http://$ip:8080/setup"
+    echo "  http://$ip:8080$page"
     found=yes
   done < <(ipv4_addresses)
   if name="$(mdns_name)"; then
-    echo "  http://$name:8080/setup"
+    echo "  http://$name:8080$page"
     found=yes
   fi
   if [[ "$found" == no ]]; then
-    echo "  http://<this computer's address>:8080/setup"
+    echo "  This computer did not report its address. Find it in your router's list of"
+    echo "  devices, then open http://<address>:8080$page with that address."
   fi
 }
 
+# FTW_INSTALL_TEST_ROOT moves the paths that the next three functions read,
+# so tests can build a box in a folder. main clears it; leave it unset.
+
+# True when this script's own install is here: the release folder and the
+# service that starts its launcher.
+own_install() {
+  local root="${FTW_INSTALL_TEST_ROOT:-}"
+  [[ -d "$root/opt/ftw" && -f "$root/etc/systemd/system/ftw.service" ]] &&
+    grep -q '^ExecStart=/opt/ftw/ftw-launcher -root /opt/ftw ' "$root/etc/systemd/system/ftw.service"
+}
+
+# Says that FTW is installed already, where to open it and how to update
+# it, then exits: 0 while the service runs or starts, 1 when it does not.
+already_installed() {
+  local root="${FTW_INSTALL_TEST_ROOT:-}" state sub health page=/ status=0 update
+  state="$(systemctl is-active ftw.service 2>/dev/null || true)"
+  # A service that waits to start again after a crash counts as activating.
+  sub="$(systemctl show -p SubState --value ftw.service 2>/dev/null || true)"
+  # 000 when nothing answers. Until setup is done, Core serves only the
+  # setup page, so it answers 404 here.
+  health="$(curl -s -o /dev/null -m 5 -w '%{http_code}' http://127.0.0.1:8080/api/health 2>/dev/null || true)"
+  # Without D-Bus, systemctl tells only root; Core's own answer counts too.
+  if [[ -z "$state" && -n "$health" && "$health" != 000 ]]; then
+    state=active
+  fi
+  if [[ "$sub" == auto-restart ]]; then
+    state=crashing
+  fi
+  case "$state" in
+    active)
+      if [[ "$health" == 404 ]]; then
+        page=/setup
+        echo "FTW is already installed on this computer and running. It waits for setup;"
+        echo "open one of these from a phone or computer on the same network:"
+      else
+        echo "FTW is already installed on this computer and running. Open it from a phone"
+        echo "or computer on the same network:"
+      fi ;;
+    activating|reloading)
+      echo "FTW is already installed on this computer and starting. In a minute, open it"
+      echo "from a phone or computer on the same network:" ;;
+    crashing)
+      status=1
+      echo "FTW is already installed on this computer, but it keeps stopping;"
+      echo "${sudo_word}journalctl -u ftw -n 100 shows why. Once it runs, open it from a phone"
+      echo "or computer on the same network:" ;;
+    *)
+      status=1
+      echo "FTW is already installed on this computer, but it is not running."
+      echo "Start it with ${sudo_word}systemctl start ftw; ${sudo_word}journalctl -u ftw -n 100 shows why it stopped."
+      echo "Then open it from a phone or computer on the same network:" ;;
+  esac
+  setup_addresses "$page"
+  echo "Nothing was changed."
+  if [[ -x "$root/usr/local/bin/ftw" ]]; then
+    echo "On this computer, ftw status shows how FTW is doing and ftw update installs"
+    echo "a newer release."
+    update="ftw update"
+  else
+    echo "On this computer, systemctl status ftw shows how the service is doing."
+    update="More → Version → Update FTW on the box's page"
+  fi
+  if [[ "${tag_given:-no}" == yes || "${beta:-no}" == yes ]]; then
+    echo "--tag and --beta change nothing on an installed box; use $update instead."
+  fi
+  exit "$status"
+}
+
+# The service account that this script made: a system user at home in
+# /var/lib/ftw.
+own_account() {
+  [[ "$(getent passwd ftw 2>/dev/null | cut -d: -f6)" == /var/lib/ftw ]]
+}
+
+# Stops on what the documented removal leaves behind, /var/lib/ftw and the
+# ftw account, when nothing else of FTW is here. $@ are more paths that
+# mean another install.
+check_leftovers() {
+  local root="${FTW_INSTALL_TEST_ROOT:-}" path data=no account=no
+  for path in "$root/opt/ftw" "$root/usr/local/bin/ftw" \
+      "$root"{/etc,/lib,/usr/lib}/systemd/system/{ftw,forty-two-watts}.service "$@"; do
+    if [[ -e "$path" || -L "$path" ]]; then
+      return 0
+    fi
+  done
+  if systemctl cat ftw.service >/dev/null 2>&1 || systemctl cat forty-two-watts.service >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ -d "$root/var/lib/ftw" && ! -L "$root/var/lib/ftw" ]]; then
+    data=yes
+  fi
+  if own_account; then
+    account=yes
+  fi
+  [[ "$data" == yes || "$account" == yes ]] || return 0
+  if [[ "$data" == yes ]]; then
+    echo "FTW was removed from this computer, but its data is still in /var/lib/ftw:" >&2
+    echo "the settings and history of the old install. The installer does not write over it." >&2
+    echo "If you may want it again, back it up first. The copy holds the box's keys, so" >&2
+    echo "this command makes it readable only by you:" >&2
+    echo "  (umask 077; ${sudo_word}tar -czf - -C /var/lib ftw > ~/ftw-data-backup.tar.gz)" >&2
+    echo "Then remove what is left and run the install line again:" >&2
+    echo "  ${sudo_word}rm -rf /var/lib/ftw" >&2
+  else
+    echo "FTW was removed from this computer, but its ftw account is still here." >&2
+    echo "Remove it and run the install line again:" >&2
+  fi
+  if [[ "$account" == yes ]]; then
+    echo "  ${sudo_word}userdel ftw" >&2
+  fi
+  exit 2
+}
+
 main() {
+  unset FTW_INSTALL_TEST_ROOT
   mode=""
   tag=""
   tag_given=no
@@ -292,32 +617,41 @@ main() {
     exit 2
   fi
 
-  if [[ "$(uname -s)" != Linux ]]; then
-    echo "The native installer requires Linux and systemd." >&2
+  # What a person types before a command that needs root.
+  sudo_word="sudo "
+  if (( EUID == 0 )); then
+    sudo_word=""
+  fi
+
+  os="$(uname -s)"
+  if [[ "$os" != Linux ]]; then
+    [[ "$os" != Darwin ]] || os=macOS
+    echo "FTW installs on Linux with systemd, and this computer runs $os." >&2
+    other_ways
     exit 2
   fi
   case "$(uname -m)" in
     aarch64|arm64) arch=arm64 ;;
     x86_64|amd64) arch=amd64 ;;
-    *) echo "A 64-bit ARM or AMD64 computer is required." >&2; exit 2 ;;
+    *)
+      echo "FTW needs a 64-bit ARM or AMD64 system, and this one is $(uname -m)." >&2
+      other_ways
+      exit 2 ;;
   esac
+  check_tools
   # FTW runs as a systemd service. Most containers, and WSL unless told
   # otherwise, start another program as process 1.
   if ! command -v systemctl >/dev/null 2>&1; then
     echo "This computer has no systemd. FTW runs as a systemd service; use Raspberry Pi OS, Debian, Ubuntu or another Linux that starts with systemd." >&2
+    other_ways
     exit 2
   fi
   if [[ ! -d /run/systemd/system ]]; then
     init="$(cat /proc/1/comm 2>/dev/null || echo unknown)"
     echo "systemd is installed, but it does not run this computer: process 1 is $init. This is usual in a container, and in WSL without systemd turned on. FTW runs as a systemd service, so install it on a computer or virtual machine that starts with systemd." >&2
+    other_ways
     exit 2
   fi
-  for tool in curl tar sha256sum mktemp grep awk; do
-    if ! command -v "$tool" >/dev/null 2>&1; then
-      echo "Missing required tool: $tool" >&2
-      exit 2
-    fi
-  done
 
   pending=/etc/ftw-native-install.pending
   # These checks catch common layouts. --fresh-host also covers a stopped
@@ -340,6 +674,12 @@ main() {
       echo "An earlier install on this computer stopped partway. To finish it, run the same command again with --resume in place of --fresh-host. Its data stays in place." >&2
       exit 2
     fi
+    # Running the line again on a box it set up is no error. Other layouts,
+    # Docker or 3.x among them, get the refusal below.
+    if own_install; then
+      already_installed
+    fi
+    check_leftovers "${legacy_paths[@]}"
     existing_paths=(/opt/ftw /var/lib/ftw /etc/systemd/system/ftw.service /usr/local/bin/ftw
       /etc/systemd/system/forty-two-watts.service "$pending" "${legacy_paths[@]}")
   else
@@ -369,8 +709,7 @@ main() {
     echo "A user named ftw already exists. FTW runs as its own ftw account, so install from a login with another name; on a fresh Raspberry Pi card, choose a different username. Keep any card containing an existing FTW site and follow docs/native-beta.md." >&2
     exit 2
   fi
-  if [[ "$mode" != --refresh ]] && command -v ss >/dev/null 2>&1 &&
-     ss -ltnH | awk '$4 ~ /:8080$/ { found = 1 } END { exit !found }'; then
+  if [[ "$mode" != --refresh ]] && port_busy 8080; then
     echo "Port 8080 is already in use; refusing a fresh install." >&2
     exit 2
   fi
@@ -393,7 +732,19 @@ main() {
     fi
   }
 
-  work="$(mktemp -d)"
+  # The download and its unpacked release take about 120 MB while they are
+  # checked, and /opt/ftw keeps the release and the next update's.
+  need_mb=250
+  if ! staging="$(staging_parent "$need_mb")"; then
+    echo "FTW needs about $need_mb MB free to unpack the download. Free space: ${TMPDIR:-/tmp} $(space_of "${TMPDIR:-/tmp}"), /var/tmp $(space_of /var/tmp). Free some space, then run the line again." >&2
+    exit 2
+  fi
+  # A resumed install may have copied most of its release already.
+  if [[ "$mode" == --fresh-host ]] && ! has_room /opt "$need_mb"; then
+    echo "FTW needs about $need_mb MB free in /opt for its releases, and /opt has $(space_of /opt) free. Free some space, then run the line again." >&2
+    exit 2
+  fi
+  work="$(mktemp -d "$staging/ftw-install.XXXXXX")"
   trap 'rm -rf "$work"' EXIT
   archive="ftw-linux-${arch}.tar.gz"
 
@@ -520,8 +871,7 @@ main() {
     echo "An FTW service or account appeared during package verification; refusing to install." >&2
     exit 2
   fi
-  if command -v ss >/dev/null 2>&1 &&
-     ss -ltnH | awk '$4 ~ /:8080$/ { found = 1 } END { exit !found }'; then
+  if port_busy 8080; then
     echo "Port 8080 is now in use; refusing to install." >&2
     exit 2
   fi
@@ -605,7 +955,7 @@ main() {
   echo
   echo "FTW $tag is running. To set it up, open one of these from a phone or"
   echo "computer on the same network:"
-  setup_addresses
+  setup_addresses /setup
   echo "Check the reported version, storage health and live device readings before use."
   if [[ "$operator_command" == yes ]]; then
     echo "On this machine, ftw status shows its state, ftw update installs a newer release"
