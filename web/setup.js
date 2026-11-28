@@ -442,7 +442,9 @@
     el.hidden = false;
     el.className = 'device-test failed';
     el.textContent = 'FTW could not read this device. Check the address. If the device is off now, add it anyway.';
+    // The driver's hint moves here, beside the error, rather than twice.
     var hint = flow().setupHint(pick.entry);
+    document.getElementById('device-hint').hidden = true;
     if (hint) {
       var h = document.createElement('span');
       h.className = 'device-test-hint';

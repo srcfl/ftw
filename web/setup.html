@@ -129,6 +129,7 @@
     .form-group input[type="text"],
     .form-group input[type="number"],
     .form-group input[type="password"],
+    .form-group input[type="search"],
     .form-group select {
       width: 100%;
       padding: 10px 36px 10px 12px;
@@ -358,18 +359,7 @@
     }
 
     /* ---- Host addressing hint (mDNS name vs fixed IP) ---- */
-    .host-hint {
-      margin: 0 0 1rem;
-      padding: 10px 12px;
-      background: var(--ink-raised);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      font-size: 0.78rem;
-      color: var(--fg-dim);
-      line-height: 1.5;
-    }
-
-    .host-hint { margin: 6px 0 0; }
+    .host-hint { margin: 6px 0 0; font-size: 0.8rem; }
 
     /* ---- Devices: the catalog cards Settings uses (app.css) ---- */
     .scan-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 1rem; }
@@ -420,6 +410,8 @@
     .device-advanced { margin: 0.5rem 0 0; }
     .device-advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--fg-dim); margin-bottom: 0.75rem; }
     .app-next { margin-top: 1.5rem; text-align: center; }
+    .step a { color: var(--fg); }
+    .drivers-summary:empty { display: none; }
     .notice {
       padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
       font-size: 0.85rem; color: var(--fg); margin-bottom: 1.25rem;
@@ -593,10 +585,10 @@
   <!-- Step 2: Your home -->
   <div class="step" id="step-2" data-step="2">
     <h2>Your home</h2>
-    <p>Your electricity contract has these.</p>
+    <p>Your electricity contract has most of these.</p>
 
     <div class="form-group">
-      <label for="site-name">Site name</label>
+      <label for="site-name">Home name</label>
       <input type="text" id="site-name" value="My Home" placeholder="My Home">
     </div>
 
