@@ -8,7 +8,6 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 
-const setup = readFileSync(new URL('./setup.js', import.meta.url), 'utf8');
 const settings = readFileSync(new URL('./settings.js', import.meta.url), 'utf8');
 const devices = readFileSync(new URL('./settings/tabs/devices.js', import.meta.url), 'utf8');
 
@@ -37,36 +36,8 @@ function fakeElement(tag) {
   };
 }
 
-test('setup wizard builds secret inputs as nodes, not markup from the key', () => {
-  const start = setup.indexOf("var secretsGroup = document.getElementById('drv-secrets-group');");
-  assert.ok(start >= 0, 'the secrets block must exist');
-  const loop = setup.indexOf('secrets.forEach(', start);
-  const end = setup.indexOf('\n    });', loop);
-  assert.ok(loop > start && end > loop, 'the secrets loop must exist');
-  const block = setup.slice(start, end + '\n    });'.length);
-
-  const group = fakeElement('div');
-  const made = [];
-  const document = {
-    getElementById: (id) => (id === 'drv-secrets-group' ? group : null),
-    createElement: (tag) => { const el = fakeElement(tag); made.push(el); return el; },
-  };
-  const esc = (s) => serializeText(String(s));
-  vm.runInNewContext(block, { document, esc, selectedCatalog: { config_secrets: [HOSTILE] } });
-
-  for (const el of [group, ...made]) {
-    for (const html of el.markup) {
-      assert.ok(!html.includes('onfocus'), 'the key must not be written as markup: ' + html);
-    }
-  }
-  const input = made.find((el) => el.tag === 'input');
-  const label = made.find((el) => el.tag === 'label');
-  assert.ok(input && label, 'a label and an input must be made for the key');
-  assert.equal(input.id, 'drv-secret-' + HOSTILE, 'saveDriver reads the input back by this id');
-  assert.equal(input.type, 'password');
-  assert.equal(label.htmlFor, input.id);
-  assert.equal(group.children.length, 1);
-});
+// The setup guide's secret inputs run in setup-connection.test.mjs, against
+// the real guide with a hostile key.
 
 test('settings escHtml is safe inside a quoted attribute', () => {
   const match = settings.match(/function escHtml\(s\) \{[\s\S]*?\n  \}/);

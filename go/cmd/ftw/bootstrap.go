@@ -12,11 +12,13 @@ import (
 	"sync"
 
 	"github.com/srcfl/ftw/go/internal/api"
+	"github.com/srcfl/ftw/go/internal/arp"
 	"github.com/srcfl/ftw/go/internal/config"
 	"github.com/srcfl/ftw/go/internal/drivers"
 	"github.com/srcfl/ftw/go/internal/evcloud"
+	modbuscli "github.com/srcfl/ftw/go/internal/modbus"
+	mqttcli "github.com/srcfl/ftw/go/internal/mqtt"
 	"github.com/srcfl/ftw/go/internal/prices"
-	"github.com/srcfl/ftw/go/internal/scanner"
 )
 
 // runBootstrap serves the setup wizard when config.yaml does not exist yet.
@@ -60,14 +62,11 @@ func runBootstrap(configPath, webDir, driverDir string) {
 		}
 		writeBootstrapJSON(w, http.StatusOK, map[string]any{"path": driverDir, "entries": entries})
 	})
-	mux.HandleFunc("GET /api/scan", func(w http.ResponseWriter, r *http.Request) {
-		devices, err := scanner.Scan(r.Context())
-		if err != nil {
-			writeBootstrapJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-		writeBootstrapJSON(w, http.StatusOK, devices)
-	})
+	// The guide names what the scan finds and tests each device as it is
+	// added, before anything is saved, as Settings does.
+	driverTest, scan := api.FirstRunProbes(firstRunProbeDeps(configPath, driverDir))
+	mux.Handle("POST /api/drivers/test", driverTest)
+	mux.Handle("GET /api/scan", scan)
 	mux.HandleFunc("GET /api/ev/providers", func(w http.ResponseWriter, _ *http.Request) {
 		writeBootstrapJSON(w, http.StatusOK, evcloud.Describe())
 	})
@@ -108,6 +107,24 @@ func runBootstrap(configPath, webDir, driverDir string) {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		slog.Error("bootstrap server", "err", err)
 		os.Exit(1)
+	}
+}
+
+// firstRunProbeDeps gives the guide's scan and device test the same Modbus
+// and MQTT clients and the same drivers the running box uses.
+func firstRunProbeDeps(configPath, driverDir string) api.Deps {
+	modbusEngine := modbuscli.NewEngine()
+	return api.Deps{
+		ConfigPath:    configPath,
+		DriverDir:     driverDir,
+		UserDriverDir: config.UserDriversDirOverride,
+		DriverMQTTFactory: func(name string, c *config.MQTTConfig) (drivers.MQTTCap, error) {
+			return mqttcli.DialWithOptions(c.Host, c.Port, c.Username, c.Password, "ftw-"+name, c.AllowUnverifiedLocal)
+		},
+		DriverModbusFactory: func(name string, c *config.ModbusConfig) (drivers.ModbusCap, error) {
+			return modbusEngine.Open(c.Host, c.Port, c.UnitID, c.AllowUnverifiedLocal)
+		},
+		DriverARPLookup: arp.Lookup,
 	}
 }
 

@@ -106,10 +106,9 @@
       line-height: 1.58;
     }
 
-    .assistant-setup {text-align:left;margin-top:2rem;padding:1.5rem;border:1px solid var(--line);border-radius:12px}
-    .assistant-setup p {margin:0.8rem 0 1.1rem}
-    .assistant-setup h3 {font-size:1rem}
-    .assistant-setup button {width:100%}
+    .password-setup {text-align:left;margin-top:2rem;padding:1.5rem;border:1px solid var(--line);border-radius:12px}
+    .password-setup p {margin:0.8rem 0 1.1rem}
+    .password-setup h3 {font-size:1rem}
     .password-hint {margin:0.4rem 0 0;color:var(--text-dim);font-size:0.85rem}
     .password-hint:empty {display:none}
     /* ---- Form elements ---- */
@@ -130,6 +129,7 @@
     .form-group input[type="text"],
     .form-group input[type="number"],
     .form-group input[type="password"],
+    .form-group input[type="search"],
     .form-group select {
       width: 100%;
       padding: 10px 36px 10px 12px;
@@ -359,19 +359,64 @@
     }
 
     /* ---- Host addressing hint (mDNS name vs fixed IP) ---- */
-    .host-hint {
-      margin: 0 0 1rem;
-      padding: 10px 12px;
-      background: var(--ink-raised);
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      font-size: 0.78rem;
-      color: var(--fg-dim);
-      line-height: 1.5;
-    }
+    .host-hint { margin: 6px 0 0; font-size: 0.8rem; }
 
-    .host-hint.mdns { border-color: color-mix(in srgb, var(--live) 45%, var(--line)); }
-    .host-hint.dhcp { border-color: color-mix(in srgb, var(--alarm) 55%, var(--line)); }
+    /* ---- Devices: the catalog cards Settings uses (app.css) ---- */
+    .scan-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 1rem; }
+    .scan-row .scan-status { margin: 0; }
+    .scan-results { display: flex; flex-direction: column; gap: 6px; margin: 0 0 1rem; }
+    .scan-found {
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+      font-family: var(--mono); font-size: 0.8rem;
+    }
+    .drv-catalog-results {
+      display: grid; gap: 8px;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      margin: 8px 0 4px; max-height: 360px; overflow-y: auto; padding-right: 4px;
+    }
+    .drv-catalog-card {
+      background: transparent; border: 1px solid var(--line); border-radius: 8px;
+      color: var(--fg); cursor: pointer; display: flex; flex-direction: column;
+      gap: 6px; padding: 10px 12px; text-align: left; font-family: var(--sans);
+    }
+    .drv-catalog-card:hover { border-color: var(--fg-dim); }
+    .drv-catalog-title { font-size: 0.88rem; font-weight: 500; line-height: 1.25; }
+    .drv-catalog-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+    .drv-catalog-tag {
+      border: 1px solid var(--line-soft); border-radius: 999px; color: var(--fg-muted);
+      font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.06em;
+      padding: 1px 7px; text-transform: uppercase;
+    }
+    .drv-catalog-unproven { border-color: var(--line); color: var(--fg); }
+    .drv-catalog-foot { color: var(--fg-muted); font-family: var(--mono); font-size: 0.66rem; line-height: 1.35; }
+    .drv-catalog-setup { color: var(--fg-dim); font-size: 0.75rem; line-height: 1.4; }
+    .device-form {
+      border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin-bottom: 1rem;
+    }
+    .device-form h3 { font-size: 1rem; margin-bottom: 0.4rem; }
+    .device-form .device-hint { color: var(--fg); margin-bottom: 1rem; }
+    .device-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 1rem; }
+    .device-test { margin-top: 0.75rem; font-size: 0.85rem; color: var(--fg-dim); }
+    .device-test.failed {
+      color: var(--fg); padding: 10px 12px; border-radius: 8px;
+      border: 1px solid color-mix(in srgb, var(--alarm) 35%, var(--line));
+      background: color-mix(in srgb, var(--alarm) 8%, transparent);
+    }
+    .device-test .device-error { display: block; margin-top: 4px; color: var(--fg-muted); font-family: var(--mono); font-size: 0.72rem; word-break: break-word; }
+    .device-test .device-test-hint { display: block; margin-top: 6px; }
+    .device-state { font-size: 0.75rem; color: var(--fg-dim); }
+    .device-state.ok { color: var(--live); }
+    .device-advanced { margin: 0.5rem 0 0; }
+    .device-advanced summary { cursor: pointer; font-size: 0.85rem; color: var(--fg-dim); margin-bottom: 0.75rem; }
+    .app-next { margin-top: 1.5rem; text-align: center; }
+    .device-use-meter { margin-top: 6px; padding: 5px 10px; font-size: 0.78rem; align-self: flex-start; }
+    .step a { color: var(--fg); }
+    .drivers-summary:empty { display: none; }
+    .notice {
+      padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px;
+      font-size: 0.85rem; color: var(--fg); margin-bottom: 1.25rem;
+    }
 
     /* ---- Driver picker ---- */
     .driver-desc {
@@ -535,29 +580,16 @@
       <h2>Welcome to FTW</h2>
       <p>Let's set up your home energy system in a few steps.</p>
       <button class="btn-primary" onclick="goStep(2)">Get started</button>
-      <section class="assistant-setup" aria-labelledby="assistant-title">
-      <h3 id="assistant-title">Set up with your AI assistant</h3>
-      <p>Use ChatGPT or another MCP client to configure this box. FTW starts with no equipment and keeps control off while you set it up.</p>
-      <p>Set a house password to claim this new box. After it starts, sign in and approve the assistant here. Remote assistants use FTW Cloud; you choose whether to accept its terms.</p>
-      <div class="form-group"><label for="assistant-password">House password</label>
-      <input id="assistant-password" type="password" maxlength="512" autocomplete="new-password">
-      <p class="password-hint" id="assistant-password-hint" aria-live="polite"></p></div>
-      <div class="form-group"><label for="assistant-password-confirm">Repeat house password</label>
-      <input id="assistant-password-confirm" type="password" maxlength="512" autocomplete="new-password"></div>
-      <button class="btn-primary" id="assistant-start" onclick="startAssistantSetup()">Start assistant setup</button>
-      <p id="assistant-status" role="status" aria-live="polite"></p>
-      <a id="assistant-resume" href="/?setup=assistant" hidden>Open the box and continue setup</a>
-      </section>
     </div>
   </div>
 
-  <!-- Step 2: Site basics -->
+  <!-- Step 2: Your home -->
   <div class="step" id="step-2" data-step="2">
-    <h2>Site basics</h2>
-    <p>Tell us about your electrical installation.</p>
+    <h2>Your home</h2>
+    <p>Your electricity contract has most of these.</p>
 
     <div class="form-group">
-      <label for="site-name">Site name</label>
+      <label for="site-name">Home name</label>
       <input type="text" id="site-name" value="My Home" placeholder="My Home">
     </div>
 
@@ -608,14 +640,18 @@
     </details>
     <p id="connection-error" class="error-msg" role="alert" hidden></p>
 
-    <div class="form-group">
-      <label for="price-zone">Electricity price zone</label>
-      <select id="price-zone">
+    <!-- The price area is asked here and nowhere else. Nothing is chosen
+         for the owner: a wrong area gives another area's prices. -->
+    <div class="form-group" id="price-zone-group">
+      <label for="price-zone">Price area</label>
+      <select id="price-zone" aria-describedby="price-zone-help">
+        <option value="" selected>Choose your price area</option>
         <option value="SE1">SE1 · Luleå</option>
         <option value="SE2">SE2 · Sundsvall</option>
-        <option value="SE3" selected>SE3 · Stockholm</option>
+        <option value="SE3">SE3 · Stockholm</option>
         <option value="SE4">SE4 · Malmö</option>
       </select>
+      <p class="connection-hint" id="price-zone-help">Your electricity bill names it.</p>
     </div>
 
     <div class="wizard-actions">
@@ -624,197 +660,56 @@
     </div>
   </div>
 
-  <!-- Step 3: Find devices -->
+  <!-- Step 3: Devices. The same flow as Settings → Devices, from
+       device-flow.js: find the driver, give the address, test on add. -->
   <div class="step" id="step-3" data-step="3">
-    <h2>Find devices</h2>
-    <p>Scan your network for inverters, batteries, and meters.</p>
+    <h2>Your devices</h2>
+    <p>Add your meter, inverter, battery and charger. FTW tests each one as you add it.</p>
 
-    <div id="scan-controls">
-      <button class="btn-primary" id="scan-btn" onclick="startScan()">Scan network</button>
-      <button class="btn-skip" id="manual-ip-toggle" onclick="showManualIP()">I know my device IP</button>
-    </div>
+    <div id="device-list" class="drivers-summary" aria-live="polite"></div>
+    <p id="site-meter-needed" class="notice" role="status" hidden></p>
 
-    <div id="scan-status" class="scan-status" style="display:none"></div>
-
-    <div id="scan-results" style="display:none">
-      <table class="scan-table">
-        <thead>
-          <tr><th>Address</th><th>Port</th><th>Protocol</th><th>Detected device</th><th></th></tr>
-        </thead>
-        <tbody id="scan-tbody"></tbody>
-      </table>
-    </div>
-
-    <div id="manual-ip-form" style="display:none">
-      <div class="form-row">
-        <div class="form-group">
-          <label for="manual-ip">IP address or hostname</label>
-          <input type="text" id="manual-ip" placeholder="192.168.1.10 or inverter.local">
-        </div>
-        <div class="form-group">
-          <label for="manual-port">Port</label>
-          <input type="number" id="manual-port" value="502" min="1" max="65535">
-        </div>
+    <div id="device-find">
+      <div class="scan-row">
+        <button class="btn-secondary" id="scan-btn" onclick="startScan()">Scan network</button>
+        <span id="scan-status" class="scan-status" role="status"></span>
       </div>
-      <button class="btn-primary" onclick="useManualDevice()" style="margin-top:0.5rem">Use this device</button>
+      <div id="scan-results" class="scan-results" hidden></div>
+
+      <div class="form-group">
+        <label for="catalog-search">Find your device</label>
+        <input type="search" id="catalog-search" placeholder="e.g. SH10RT, Ferroamp, Easee" autocomplete="off">
+      </div>
+      <p id="catalog-for" class="connection-hint" hidden></p>
+      <div id="catalog-results" class="drv-catalog-results">Loading…</div>
+      <p class="connection-hint">Not listed? Ask for a driver in the
+        <a href="https://github.com/srcfl/device-drivers/issues" target="_blank" rel="noopener">driver issue tracker</a>,
+        or continue without it.</p>
+    </div>
+
+    <div id="device-form" class="device-form" hidden>
+      <h3 id="device-title"></h3>
+      <p id="device-hint" class="device-hint" hidden></p>
+      <p id="device-readonly" class="connection-hint" hidden></p>
+      <div id="device-fields"></div>
+      <div id="device-test" class="device-test" role="status" aria-live="polite" hidden></div>
+      <div class="device-actions">
+        <button class="btn-primary" id="device-add" onclick="addDevice()">Add and test</button>
+        <button class="btn-secondary" id="device-add-anyway" onclick="addDeviceAnyway()" hidden>Add anyway</button>
+        <button class="btn-skip" onclick="closeDeviceForm()">Choose another</button>
+      </div>
     </div>
 
     <div class="wizard-actions">
       <button class="btn-secondary" onclick="goStep(2)">Back</button>
-      <button class="btn-skip" onclick="goStep(7)">Skip (no devices)</button>
+      <button class="btn-primary" id="devices-next" onclick="goStep(4)">Continue</button>
     </div>
   </div>
 
-  <!-- Step 4: Pick driver -->
+  <!-- Step 4: Prices and Home Assistant. Chargers are devices (step 3). -->
   <div class="step" id="step-4" data-step="4">
-    <h2>Pick driver</h2>
-    <p>Select the driver that matches your device.</p>
-
-    <div class="form-group">
-      <label for="driver-select">Driver</label>
-      <select id="driver-select" onchange="onDriverSelected()">
-        <option value="">-- Select a driver --</option>
-      </select>
-    </div>
-
-    <div id="driver-description" class="driver-desc" style="display:none"></div>
-
-    <div id="driver-not-listed" class="driver-desc" style="display:none">
-      <p>This list is what's installed on this gateway. More drivers can be
-        installed from the signed driver repository after setup, in
-        <strong>Settings &rarr; Devices</strong>.</p>
-      <p style="margin-top:8px">No driver for your device anywhere? Ask for one in the
-        <a href="https://github.com/srcfl/device-drivers/issues" target="_blank" rel="noopener">driver
-        repository's issue tracker</a> &mdash; include the device make, model
-        and how it talks (Modbus, MQTT, HTTP&hellip;).</p>
-      <button class="btn-primary" style="margin-top:12px" onclick="skipUnlistedDevice()">Continue
-        without this device</button>
-    </div>
-
-    <div class="wizard-actions">
-      <button class="btn-secondary" onclick="goStep(3)">Back</button>
-      <button class="btn-primary" id="driver-next-btn" onclick="goStep(5)" disabled>Continue</button>
-    </div>
-  </div>
-
-  <!-- Step 5: Configure driver -->
-  <div class="step" id="step-5" data-step="5">
-    <h2>Configure driver</h2>
-    <p>Fine-tune the connection settings.</p>
-
-    <div class="form-group">
-      <label for="drv-name">Name</label>
-      <input type="text" id="drv-name" placeholder="sungrow">
-    </div>
-
-    <div class="form-row">
-      <div class="form-group">
-        <label for="drv-ip">IP address or hostname</label>
-        <input type="text" id="drv-ip" placeholder="192.168.1.10">
-      </div>
-      <div class="form-group">
-        <label for="drv-port">Port</label>
-        <input type="number" id="drv-port" value="502" min="1" max="65535">
-      </div>
-    </div>
-
-    <p class="host-hint" id="drv-host-hint" style="display:none"></p>
-
-    <div class="form-group" id="drv-unitid-group">
-      <label for="drv-unitid">Unit ID (Modbus)</label>
-      <input type="number" id="drv-unitid" value="1" min="0" max="255">
-    </div>
-
-    <div class="form-check">
-      <input type="checkbox" id="drv-site-meter" checked>
-      <label for="drv-site-meter">This is my site meter</label>
-    </div>
-
-    <div class="form-group" id="drv-battery-group" style="display:none">
-      <label for="drv-battery-kwh">Battery capacity (kWh)</label>
-      <input type="number" id="drv-battery-kwh" value="10" min="0" step="0.1">
-    </div>
-
-    <!-- Dynamic per-driver secret inputs (Auth-Token etc.). prefillDriverConfig
-         populates this from the catalog entry's config_secrets list. -->
-    <div id="drv-secrets-group"></div>
-
-    <div class="wizard-actions">
-      <button class="btn-secondary" onclick="goStep(4)">Back</button>
-      <button class="btn-primary" onclick="saveDriver()">Add device</button>
-    </div>
-  </div>
-
-  <!-- Step 6: Add more? -->
-  <div class="step" id="step-6" data-step="6">
-    <h2>Configured devices</h2>
-    <p>Review your devices or add more.</p>
-
-    <div class="drivers-summary" id="drivers-summary"></div>
-
-    <div class="wizard-actions">
-      <button class="btn-secondary" onclick="addAnotherDevice()">Add another device</button>
-      <button class="btn-primary" onclick="goStep(7)">Continue</button>
-    </div>
-  </div>
-
-  <!-- Step 7: Optional integrations -->
-  <div class="step" id="step-7" data-step="7">
-    <h2>Optional integrations</h2>
-    <p>Connect additional services. All fields are optional.</p>
-
-    <div class="integration-section">
-      <h3>EV Charger</h3>
-      <div class="form-group">
-        <label for="ev-provider">Provider</label>
-        <select id="ev-provider">
-          <option value="">None</option>
-        </select>
-      </div>
-      <div id="ev-fields" style="display:none">
-        <div id="ev-fields-http" style="display:none">
-          <div class="form-group">
-            <label for="ev-username" id="ev-username-label">Username</label>
-            <input type="text" id="ev-username" placeholder="user@example.com">
-          </div>
-          <div class="form-group">
-            <label for="ev-password">Password</label>
-            <input type="password" id="ev-password">
-          </div>
-        </div>
-        <div id="ev-fields-http-local" style="display:none">
-          <div class="form-group">
-            <label for="ev-http-host">IP address or hostname</label>
-            <input type="text" id="ev-http-host" placeholder="192.168.1.50">
-          </div>
-          <p class="hint">Tesla Wall Connector Gen 3 on the LAN. No account. The box reports power and plug state; current is set by the car (tesla_vehicle) or the Tesla app.</p>
-        </div>
-        <div id="ev-fields-modbus" style="display:none">
-          <div class="form-group">
-            <label for="ev-mb-host">IP address</label>
-            <input type="text" id="ev-mb-host" placeholder="192.168.1.190">
-          </div>
-          <div class="form-row">
-            <div class="form-group">
-              <label for="ev-mb-port">Port</label>
-              <input type="number" id="ev-mb-port" placeholder="502">
-            </div>
-            <div class="form-group">
-              <label for="ev-mb-unit">Unit ID</label>
-              <input type="number" id="ev-mb-unit" placeholder="1">
-            </div>
-          </div>
-        </div>
-        <div class="form-group">
-          <button type="button" class="btn-secondary" id="ev-load-chargers" onclick="loadEVChargers()">Load chargers</button>
-          <span id="ev-chargers-status" class="scan-status" style="display:none; margin-left: 10px;"></span>
-        </div>
-        <div class="form-group" id="ev-serial-group" style="display:none">
-          <label for="ev-serial">Charger</label>
-          <select id="ev-serial"></select>
-        </div>
-      </div>
-    </div>
+    <h2>Prices and Home Assistant</h2>
+    <p>Both have defaults that work. Change them only if you need to.</p>
 
     <div class="integration-section">
       <h3>Home Assistant</h3>
@@ -864,18 +759,18 @@
     </div>
 
     <div class="wizard-actions">
-      <button class="btn-secondary" onclick="goStepBack7()">Back</button>
-      <button class="btn-primary" onclick="goStep(8)">Continue</button>
+      <button class="btn-secondary" onclick="goStep(3)">Back</button>
+      <button class="btn-primary" onclick="goStep(5)">Continue</button>
     </div>
   </div>
 
-  <!-- Step 8: Review + Save -->
-  <div class="step" id="step-8" data-step="8">
-    <h2>Review and save</h2>
-    <p>Confirm your configuration before starting.</p>
+  <!-- Step 5: Review + Save -->
+  <div class="step" id="step-5" data-step="5">
+    <h2>Review and start</h2>
+    <p>Check this before FTW starts.</p>
 
     <div id="review-content"></div>
-    <section id="house-password-step" class="assistant-setup" aria-labelledby="house-password-title" hidden>
+    <section id="house-password-step" class="password-setup" aria-labelledby="house-password-title" hidden>
       <h3 id="house-password-title">House password</h3>
       <p>Choose a password for this box. Other devices on your Wi-Fi need it to change settings or let an assistant in. Live numbers stay visible without it.</p>
       <div class="form-group"><label for="house-password">House password</label>
@@ -887,16 +782,21 @@
     <div id="save-error" style="display:none"></div>
 
     <div id="save-actions" class="wizard-actions">
-      <button class="btn-secondary" onclick="goStep(7)">Back</button>
+      <button class="btn-secondary" onclick="goStep(4)">Back</button>
       <button class="btn-primary" id="save-btn" onclick="saveConfig()">Start FTW</button>
     </div>
 
     <div id="save-success" class="success-screen" style="display:none">
       <div class="checkmark">&#10003;</div>
-      <h2>Configuration saved!</h2>
-      <p>Restarting... you will be redirected to the dashboard.</p>
+      <h2>Saved</h2>
+      <p>FTW is starting. The overview opens in a moment.</p>
       <p id="save-success-password" hidden>When the box asks, sign in with the house password you chose.</p>
     </div>
+    <!-- One line from the guide to the phone app. The link is the one
+         ftw.energy uses. -->
+    <p class="connection-hint app-next" id="app-next">Next, get the
+      <a href="https://apps.apple.com/app/ftw-energy/id6822024949" target="_blank" rel="noopener">FTW app for iPhone</a>
+      and pair it from Settings → FTW app.</p>
   </div>
 
 </div>
@@ -909,6 +809,7 @@
 <script type="module" src="/components/ftw-update-check.js?v=native1"></script>
 <script src="/lan-auth.js?v=password1"></script>
 <script src="/driver-control.js?v=readonly1"></script>
-<script src="/setup.js?v=readonly1"></script>
+<script src="/device-flow.js?v=flow1"></script>
+<script src="/setup.js?v=flow1"></script>
 </body>
 </html>

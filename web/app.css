@@ -2442,6 +2442,14 @@ body.ftw-app .drv-catalog-foot {
   font-size: 0.66rem;
   line-height: 1.35;
 }
+/* What the driver says to turn on at the device before FTW can read it. */
+body.ftw-app .drv-catalog-setup,
+body.ftw-app .driver-test-hint {
+  color: var(--fg-dim);
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+body.ftw-app .driver-test-hint { margin-top: 6px; }
 
 /* The driver editor: its own surface over everything else. A driver is tens of
    kilobytes of Lua, and the settings modal is not the shape for reading it. */

@@ -17,7 +17,10 @@ import vm from "node:vm";
 // fetch chain behind it. Let the microtasks drain.
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-const source = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
+// devices.js finds, adds and tests devices through device-flow.js, which
+// the page loads first.
+const source = readFileSync(new URL("./device-flow.js", import.meta.url), "utf8") + "\n" +
+  readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
 
 function element(tag) {
   const listeners = new Map();

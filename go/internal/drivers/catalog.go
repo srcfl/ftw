@@ -36,6 +36,7 @@ type CatalogEntry struct {
 	HTTPHosts          []string       `json:"http_hosts,omitempty"`
 	WSHosts            []string       `json:"ws_hosts,omitempty"`
 	Description        string         `json:"description,omitempty"`
+	SetupHint          string         `json:"setup_hint,omitempty"` // what to turn on at the device, one sentence
 	Homepage           string         `json:"homepage,omitempty"`
 	ConnectionDefaults map[string]any `json:"connection_defaults,omitempty"`
 	// UsedBy names the enabled configured drivers that run this file, so a
@@ -235,6 +236,7 @@ func parseCatalogEntry(path string) (CatalogEntry, error) {
 		e.HostAPIMax = e.HostAPIMin
 	}
 	e.Description = pickString(block, "description")
+	e.SetupHint = strings.TrimSpace(pickString(block, "setup_hint"))
 	e.Homepage = pickString(block, "homepage")
 	e.Protocols = pickList(block, "protocols")
 	e.Capabilities = pickList(block, "capabilities")

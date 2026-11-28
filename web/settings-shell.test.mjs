@@ -403,6 +403,7 @@ async function profileShell() {
   const original = { site: { name: "Home" }, drivers: [{ name: "GoodWe", lua: "drivers/goodwe.lua",
     capabilities: { modbus: { unit_id: 1 } }, config: {} }] };
   const rig = await formShell(original);
+  rig.loadTab("./device-flow.js");
   rig.loadTab("./settings/tabs/devices.js");
   rig.responses["/api/drivers/catalog"] = { entries: [{ id: "goodwe", path: "drivers/goodwe.lua", version: "1.0.2" }] };
   const unit = Object.assign(stubElement(), { dataset: { path: "drivers.0.capabilities.modbus.unit_id" },

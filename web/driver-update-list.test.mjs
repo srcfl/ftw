@@ -4,10 +4,22 @@
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import vm from "node:vm";
 import test from "node:test";
 
 const badge = readFileSync(new URL("./update-badge.js", import.meta.url), "utf8");
 const devices = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
+const flowSource = readFileSync(new URL("./device-flow.js", import.meta.url), "utf8");
+
+// The shared catalog and new-device code that Settings and the setup guide
+// both run.
+function deviceFlow() {
+  const el = () => ({ children: [], className: "", textContent: "", appendChild(c) { this.children.push(c); return c; }, addEventListener() {} });
+  const window = {};
+  vm.runInNewContext(flowSource, { window, document: { createElement: el } });
+  return window.FTWDeviceFlow;
+}
+const tagsOf = (card) => card.children.find((c) => c.className === "drv-catalog-tags").children.map((t) => t.textContent);
 const system = readFileSync(new URL("./settings/tabs/system.js", import.meta.url), "utf8");
 
 test("the version dialog lists no driver versions and offers no driver actions", () => {
@@ -38,7 +50,10 @@ test("adding a device lists channel driver types in the same list, marked by ori
   assert.match(devices, /fetchCatalog\("\/api\/device_repository\/catalog\?channel=beta"\)/);
   // One channel being unreachable does not hide what the other lists.
   assert.match(devices, /Promise\.allSettled\(\[/);
-  assert.match(devices, /e\.channel === "beta" \? "beta" : "from the driver channel"/);
+  const flow = deviceFlow();
+  assert.deepEqual(tagsOf(flow.card({ id: "a", channel: "beta" }, { hideCapabilities: true })), ["beta"]);
+  assert.deepEqual(tagsOf(flow.card({ id: "b", channel: "stable" }, { hideCapabilities: true })), ["from the driver channel"]);
+  assert.deepEqual(tagsOf(flow.card({ id: "c" }, { hideCapabilities: true })), []);
   // The release's own drivers are added as they are; a channel driver is
   // fetched from its channel when the device is added.
   assert.match(devices, /populateCatalogPicker\(entries, "release"\)/);
@@ -47,14 +62,16 @@ test("adding a device lists channel driver types in the same list, marked by ori
 });
 
 test("Devices configure the GoodWe register profile without editing YAML", () => {
-  assert.match(devices, /DRIVER_CONFIG_PROFILES\s*=\s*\{/);
-  assert.match(devices, /goodwe:\s*\[/);
-  assert.match(devices, /value: "community-v1"/);
-  assert.match(devices, /value: "gw8kn-et-hk3000"/);
   assert.match(devices, /id="driver-catalog-profile"/);
   assert.match(devices, /data-path="drivers\.' \+ dIdx \+ '\.config\.profile"/);
-  assert.match(devices, /driver\.config = \{ profile: selectedProfile\.value \}/);
-  assert.match(devices, /unit_id = selectedProfile\.unitId/);
+  const flow = deviceFlow();
+  const goodwe = { id: "goodwe", version: "1.0.2", path: "drivers/goodwe.lua", protocols: ["modbus"] };
+  const plain = (v) => JSON.parse(JSON.stringify(v));
+  assert.deepEqual(plain(flow.configProfiles(goodwe).map((p) => p.value)), ["community-v1", "gw8kn-et-hk3000"]);
+  assert.equal(flow.configProfiles({ id: "goodwe", version: "1.0.1" }).length, 0, "an older driver gets no profile");
+  const driver = flow.newDriver(goodwe, { name: "gw", profile: "gw8kn-et-hk3000" });
+  assert.deepEqual(plain(driver.config), { profile: "gw8kn-et-hk3000" });
+  assert.equal(driver.capabilities.modbus.unit_id, 247);
 });
 
 test("Devices links to repository support data without traffic-light claims", () => {

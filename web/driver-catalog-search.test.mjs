@@ -9,7 +9,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import vm from "node:vm";
 
-const source = readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
+// Settings searches through device-flow.js, which the page loads first.
+const source = readFileSync(new URL("./device-flow.js", import.meta.url), "utf8") + "\n" +
+  readFileSync(new URL("./settings/tabs/devices.js", import.meta.url), "utf8");
 
 function load() {
   const window = { FTWSettings: { tabs: {} } };
@@ -108,4 +110,49 @@ test("searching is not case sensitive", () => {
   const api = load();
   assert.equal(names(api.searchCatalog(CATALOG, "sh10rt")), "sungrow");
   assert.equal(names(api.searchCatalog(CATALOG, "FERROAMP")), "ferroamp");
+});
+
+// Run the real Devices tab: it fetches the catalog and draws one card per
+// driver. A name left behind when the search moved to device-flow.js once
+// stopped this at "Loading catalog…" while the unit tests above passed.
+test("Settings draws the catalog cards and narrows them as you type", async () => {
+  const byId = {};
+  const el = (tag) => {
+    const node = {
+      tag, children: [], dataset: {}, style: {}, className: "", value: "", handlers: {},
+      options: [], selectedIndex: 0, text: "",
+      // As in a browser, setting the text replaces the children.
+      get textContent() { return node.text; },
+      set textContent(v) { node.text = v; node.children = []; },
+      set innerHTML(v) { node.children = []; node.options = []; },
+      appendChild(child) { node.children.push(child); if (tag === "select") node.options.push(child); return child; },
+      addEventListener(name, fn) { node.handlers[name] = fn; },
+      dispatchEvent() {},
+      querySelector() { return null; },
+      insertBefore(child) { node.children.unshift(child); return child; },
+    };
+    return node;
+  };
+  for (const id of ["driver-catalog-picker", "driver-catalog-results", "driver-catalog-search"]) {
+    byId[id] = el(id === "driver-catalog-picker" ? "select" : "div");
+  }
+  const window = { FTWSettings: { tabs: {} } };
+  const sandbox = {
+    window, Event: class { constructor(type) { this.type = type; } },
+    document: { createElement: el, getElementById: (id) => byId[id] || null },
+    fetch: async (path) => ({ ok: true, json: async () => (path === "/api/drivers/catalog" ? { entries: CATALOG } : {}) }),
+  };
+  sandbox.window.document = sandbox.document;
+  vm.runInNewContext(source, sandbox);
+  window.FTWSettings.tabs.devices.after({
+    config: { drivers: [] }, escHtml: String, help: () => "",
+    bodyEl: { querySelectorAll: () => [], querySelector: () => null },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  const titles = () => byId["driver-catalog-results"].children.map((card) => card.children[0].textContent);
+  assert.equal(titles().length, CATALOG.length);
+  byId["driver-catalog-search"].value = "SH10RT";
+  byId["driver-catalog-search"].handlers.input();
+  assert.deepEqual(titles(), ["Sungrow SH Hybrid Inverter"]);
 });

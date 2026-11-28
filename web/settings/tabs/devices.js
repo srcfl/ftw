@@ -9,6 +9,12 @@
     return fetch(path, opts);
   }
 
+  // Finding, adding and testing a device are shared with the setup guide in
+  // device-flow.js, so a device is added the same way in both places.
+  function flow() {
+    return window.FTWDeviceFlow;
+  }
+
   function catalogEntryForLua(lua) {
     return lua ? (S.catalogByLua || {})[lua] : null;
   }
@@ -128,34 +134,10 @@
 
   S.writeFeed = { fill: fillWriteSlot };
 
-  // Some drivers expose more than one fixed register map. Keep these choices
-  // in the UI until the signed driver catalog grows a general config-schema
-  // field. Version gating prevents an older bundled GoodWe driver from being
-  // offered a profile it cannot load.
-  var DRIVER_CONFIG_PROFILES = {
-    goodwe: [
-      { value: "community-v1", label: "Community v1", unitId: 1 },
-      { value: "gw8kn-et-hk3000", label: "GW8KN-ET + HK3000", unitId: 247 }
-    ]
-  };
-
-  function versionAtLeast(version, minimum) {
-    var got = String(version || "").match(/^(\d+)\.(\d+)\.(\d+)/);
-    var want = String(minimum || "").match(/^(\d+)\.(\d+)\.(\d+)/);
-    if (!got || !want) return false;
-    for (var i = 1; i <= 3; i++) {
-      var g = parseInt(got[i], 10);
-      var w = parseInt(want[i], 10);
-      if (g !== w) return g > w;
-    }
-    return true;
-  }
-
   // How many boxes ran exactly this version the last closed day, in the same
-  // words the setup wizard uses. Nothing when the counts are not known.
+  // words the setup guide uses. Nothing when the counts are not known.
   function usageLabel(count) {
-    if (typeof count !== "number") return "";
-    return count === 1 ? "1 home runs this version" : count + " homes run this version";
+    return flow().usageLabel(count);
   }
 
   // The fleet's counts per "driver@version", from the catalog reply.
@@ -299,47 +281,6 @@
   // /versions payload. The previous version of this code read the wrong field
   // and rendered nothing; the test that covered it matched the source with a
   // regex, so it passed while the panel was empty on screen.
-  // Everything an operator might type: the manufacturer, the driver's name,
-  // and the models it has been run against. tested_models is the one that
-  // matters -- you know you own an SH10RT, not that you need "Sungrow SH
-  // Hybrid Inverter".
-  function catalogHaystack(e) {
-    return [e.name, e.manufacturer, e.id, e.filename]
-      .concat(e.tested_models || [])
-      .concat(e.protocols || [])
-      .join(" ").toLowerCase();
-  }
-
-  // The ones most homes run first: that is what a count is for.
-  function catalogRank(e) {
-    return typeof e.run_by === "number" ? -e.run_by : 1;
-  }
-
-  // Every term has to match somewhere, so "sungrow hybrid" narrows rather
-  // than widens.
-  function searchCatalog(entries, query) {
-    var terms = String(query || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
-    var matches = (entries || []).filter(function (e) {
-      if (terms.length === 0) return true;
-      var hay = catalogHaystack(e);
-      return terms.every(function (t) { return hay.indexOf(t) >= 0; });
-    });
-    return matches.sort(function (a, b) {
-      var byRank = catalogRank(a) - catalogRank(b);
-      if (byRank !== 0) return byRank;
-      return String(a.name || "").localeCompare(String(b.name || ""));
-    });
-  }
-
-  // Several drivers already begin with the manufacturer, which read as
-  // "CTEK CTEK Chargestorm".
-  function catalogTitle(e) {
-    var name = e.name || e.filename || e.id || "";
-    var maker = e.manufacturer || "";
-    if (!maker || name.toLowerCase().indexOf(maker.toLowerCase()) === 0) return name;
-    return maker + " " + name;
-  }
-
   S.driverVersions = {
     runtimeVerified: runtimeVerified,
     runningSummary: runningSummary,
@@ -353,8 +294,8 @@
     unifiedDiff: function (before, after, context) { return unifiedDiff(before, after, context); },
     suggestUpstreamURL: function (body, edited) { return suggestUpstreamURL(body, edited); },
     maxSuggestionURL: function () { return MAX_SUGGESTION_URL; },
-    searchCatalog: function (entries, query) { return searchCatalog(entries, query); },
-    catalogTitle: function (entry) { return catalogTitle(entry); }
+    searchCatalog: function (entries, query) { return flow().search(entries, query); },
+    catalogTitle: function (entry) { return flow().title(entry); }
   };
 
   // One list of everything this driver could run, and one click to switch.
@@ -1079,16 +1020,14 @@
     });
   }
 
+  // Some drivers expose more than one fixed register map; device-flow.js
+  // keeps the list until the signed catalog grows a general config schema.
   function configProfilesFor(entry) {
-    if (!entry || entry.id !== "goodwe" || !versionAtLeast(entry.version, "1.0.2")) return [];
-    return DRIVER_CONFIG_PROFILES.goodwe;
+    return flow().configProfiles(entry);
   }
 
   function profileByValue(profiles, value) {
-    for (var i = 0; i < profiles.length; i++) {
-      if (profiles[i].value === value) return profiles[i];
-    }
-    return profiles[0] || null;
+    return flow().profileByValue(profiles, value);
   }
 
   S.tabs.devices = {
@@ -1471,83 +1410,9 @@
         };
       }
 
-      function fmtW(v) {
-        if (!Number.isFinite(v)) return "—";
-        return Math.abs(v) >= 1000 ? (v / 1000).toFixed(2) + " kW" : v.toFixed(0) + " W";
-      }
-
-      function fmtNum(v) {
-        if (!Number.isFinite(v)) return "—";
-        return Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(2);
-      }
-
-      function fmtAge(ms) {
-        if (!Number.isFinite(ms) || ms < 0) return "—";
-        var s = Math.floor(ms / 1000);
-        return s < 60 ? s + "s ago" : Math.floor(s / 60) + "m ago";
-      }
-
+      // The full test reply, in the shared words of device-flow.js.
       function renderProbeOutput(res) {
-        var readings = res.readings || res.Readings || [];
-        var metrics = res.metrics || res.Metrics || [];
-        var health = res.health || res.Health || {};
-        var identity = res.identity || res.Identity || {};
-        var html = '<div class="driver-test-kv">';
-        html += '<span>status</span><strong>' + escHtml(res.ok ? "connected" : "failed") + '</strong>';
-        html += '<span>elapsed</span><strong>' + escHtml(String(res.elapsed_ms || res.ElapsedMs || 0)) + ' ms</strong>';
-        if (health.TickCount != null) {
-          html += '<span>ticks</span><strong>' + escHtml(String(health.TickCount)) + '</strong>';
-        }
-        if (identity.make || identity.sn || identity.endpoint) {
-          html += '<span>identity</span><strong>' + escHtml([identity.make, identity.sn, identity.endpoint].filter(Boolean).join(" · ")) + '</strong>';
-        }
-        html += '</div>';
-        if (res.error) {
-          html += '<div class="driver-test-error">' + escHtml(res.error) + '</div>';
-        }
-        if (readings.length) {
-          html += '<div class="driver-test-values">';
-          readings.forEach(function (r) {
-            var soc = r.soc != null ? " · SoC " + (r.soc * 100).toFixed(1) + "%" : "";
-            var age = r.updated_at_ms ? " · " + fmtAge(Date.now() - r.updated_at_ms) : "";
-            html += '<div><span>' + escHtml(r.type) + '</span><strong>' + escHtml(fmtW(r.smoothed_w)) + '</strong><small>raw ' + escHtml(fmtW(r.raw_w)) + soc + age + '</small></div>';
-          });
-          html += '</div>';
-        }
-        if (metrics.length) {
-          html += '<div class="driver-test-metrics">';
-          metrics.slice(0, 12).forEach(function (m) {
-            var label = m.name;
-            var value = fmtNum(m.value);
-            if (m.name === "vehicle_soc_pct") {
-              label = "Vehicle SoC";
-              if (Number.isFinite(m.value)) value = m.value + " %";
-            } else if (m.name === "vehicle_soc_measured_at_unix_s") {
-              label = "SoC measured at";
-              var measuredAt = new Date(m.value * 1000);
-              if (Number.isFinite(m.value) && Number.isFinite(measuredAt.getTime())) {
-                value = measuredAt.toLocaleString();
-              }
-            } else if (m.name === "vehicle_soc_age_s") {
-              label = "SoC age at test";
-              if (Number.isFinite(m.value)) {
-                var seconds = Math.floor(Math.max(0, m.value));
-                var hours = Math.floor(seconds / 3600);
-                var minutes = Math.floor((seconds % 3600) / 60);
-                value = hours + " h " + minutes + " min " + (seconds % 60) + " s";
-              }
-            }
-            html += '<span>' + escHtml(label) + '</span><strong>' + escHtml(value) + '</strong>';
-          });
-          if (metrics.length > 12) {
-            html += '<span>more</span><strong>' + escHtml(String(metrics.length - 12)) + '</strong>';
-          }
-          html += '</div>';
-        }
-        if (!readings.length && !metrics.length && !res.error) {
-          html += '<div class="driver-test-empty">No values returned.</div>';
-        }
-        return html;
+        return flow().probeHTML(res, escHtml);
       }
 
       // Driver catalog picker — fetch async, render into select.
@@ -1615,7 +1480,7 @@
         var choices = S.chargerSetup ? entries.filter(function (entry) {
           return (entry.capabilities || []).indexOf('ev') >= 0;
         }) : entries;
-        var matches = searchCatalog(choices, query);
+        var matches = flow().search(choices, query);
 
         host.textContent = "";
         if (matches.length === 0) {
@@ -1633,66 +1498,18 @@
       }
 
       function catalogCard(e, picker, host, entries) {
-        var card = document.createElement("button");
-        card.type = "button";
-        card.className = "drv-catalog-card";
-        if (picker.value === e.path) card.classList.add("is-chosen");
-
-        var title = document.createElement("div");
-        title.className = "drv-catalog-title";
-        title.textContent = catalogTitle(e);
-        card.appendChild(title);
-
-        var tags = document.createElement("div");
-        tags.className = "drv-catalog-tags";
-        (S.chargerSetup ? [] : (e.capabilities || [])).forEach(function (cap) {
-          var tag = document.createElement("span");
-          tag.className = "drv-catalog-tag";
-          tag.textContent = cap;
-          tags.appendChild(tag);
+        return flow().card(e, {
+          chosen: picker.value === e.path,
+          // Choosing a charger needs its name, not a list of DER kinds.
+          hideCapabilities: !!S.chargerSetup,
+          onChoose: function () {
+            picker.value = e.path;
+            // The rest of the form listens to the select, so tell it the value
+            // moved rather than only setting it.
+            picker.dispatchEvent(new Event("change", {bubbles: true}));
+            renderCatalogCards(entries);
+          }
         });
-        if (e.channel === "beta" || e.channel === "stable") {
-          var origin = document.createElement("span");
-          origin.className = "drv-catalog-tag" + (e.channel === "beta" ? " drv-catalog-unproven" : "");
-          origin.textContent = e.channel === "beta" ? "beta" : "from the driver channel";
-          tags.appendChild(origin);
-        }
-        var usage = usageLabel(e.run_by);
-        if (usage) {
-          var badge = document.createElement("span");
-          badge.className = "drv-catalog-tag";
-          badge.textContent = usage;
-          tags.appendChild(badge);
-        }
-        // Said before it is added, not found out after: a charger this
-        // driver only reads is one FTW will never steer.
-        var readOnly = readOnlyNote(e);
-        if (readOnly) {
-          var readOnlyTag = document.createElement("span");
-          readOnlyTag.className = "drv-catalog-tag drv-catalog-unproven";
-          readOnlyTag.textContent = "reads only, no control";
-          readOnlyTag.title = readOnlySentence(readOnly);
-          tags.appendChild(readOnlyTag);
-        }
-        card.appendChild(tags);
-
-        // The models this has actually been run against — the thing an
-        // operator can compare with the label on their own unit.
-        var models = (e.tested_models || []).slice(0, 3).join(", ");
-        var foot = document.createElement("div");
-        foot.className = "drv-catalog-foot";
-        foot.textContent = [(e.protocols || []).join(" + "), e.version ? "v" + e.version : "", models]
-          .filter(Boolean).join(" · ");
-        card.appendChild(foot);
-
-        card.addEventListener("click", function () {
-          picker.value = e.path;
-          // The rest of the form listens to the select, so tell it the value
-          // moved rather than only setting it.
-          picker.dispatchEvent(new Event("change", {bubbles: true}));
-          renderCatalogCards(entries);
-        });
-        return card;
       }
 
       apiFetch("/api/drivers/catalog").then(function (r) { return r.json(); }).then(function (data) {
@@ -2037,69 +1854,13 @@
         }
         ctx.captureCurrentTab();
         var chosen = sel.options[sel.selectedIndex];
-        var protocols = (chosen.dataset.protocols || "").split("+");
         var name = (nameEl.value || "").trim() || chosen.dataset.id || ("driver-" + config.drivers.length);
-        var driver = { name: name, lua: sel.value };
-        driver.capabilities = {};
-        if (protocols.indexOf("mqtt") >= 0) driver.capabilities.mqtt = { host: "", port: 1883 };
-        if (protocols.indexOf("modbus") >= 0) driver.capabilities.modbus = { host: "", port: 502, unit_id: 1 };
+        var entry = (S.catalogEntries || []).filter(function (e) { return e.path === sel.value; })[0] ||
+          (S.catalogByLua || {})[sel.value];
+        if (!entry) return;
         var profileSelect = document.getElementById("driver-catalog-profile");
-        var profiles = configProfilesFor({ id: chosen.dataset.id, version: chosen.dataset.version });
-        if (profileSelect && profiles.length > 0) {
-          var selectedProfile = profileByValue(profiles, profileSelect.value);
-          driver.config = { profile: selectedProfile.value };
-          if (driver.capabilities.modbus) driver.capabilities.modbus.unit_id = selectedProfile.unitId;
-        }
-        if (protocols.indexOf("http") >= 0) {
-          var hosts = (chosen.dataset.httpHosts || "").split(",").filter(Boolean);
-          driver.capabilities.http = { allowed_hosts: hosts };
-          // Vehicle drivers (e.g. tesla_vehicle) take {ip, vin}, not
-          // {host} or {email,password,serial}. Detect via catalog
-          // capability so existing local-HTTP and cloud branches stay
-          // untouched.
-          var entry = (S.catalogByLua || {})[sel.value] || {
-            capabilities: JSON.parse(chosen.dataset.capabilities || "[]"),
-            read_only: chosen.dataset.readOnly === "true"
-          };
-          var entryCaps = (entry && entry.capabilities) || [];
-          if (entry && entry.read_only && entryCaps.indexOf("battery") >= 0) {
-            // Admit the battery reading without adding the gateway to the
-            // dispatch pool. battery_capacity_wh remains the control opt-in.
-            driver.battery_telemetry_only = true;
-          }
-          var connHost = chosen.dataset.connectionHost || "";
-          if (entryCaps.indexOf("vehicle") >= 0) {
-            driver.config = { ip: "", vin: "" };
-          } else if (connHost) {
-            driver.config = { host: connHost };
-		  } else if (entryCaps.indexOf("apicreds") >= 0 && (chosen.dataset.connPort || "")) {
-            // Local HTTP device with HTTP Basic auth (e.g. NIBE local REST API):
-            // host + username + password + an optional self-signed cert pin. The
-            // backend auto-derives capabilities.http.allowed_hosts from config.host.
-            driver.config = { host: "", username: "", password: "" };
-		  } else if (entryCaps.indexOf("apicreds") >= 0) {
-            // OAuth2 client_credentials drivers (e.g. MyUplink).
-			  driver.config = { client_id: "", client_secret: "" };
-		  } else if (entryCaps.indexOf("meter") >= 0 ||
-                     entryCaps.indexOf("pv") >= 0 ||
-                     entryCaps.indexOf("battery") >= 0 ||
-                     (entryCaps.indexOf("ev") >= 0 && hosts.length === 0)) {
-            // Local-HTTP meter / PV / battery driver without a canned
-            // hostname in connection_defaults (typical for generic
-            // ESPHome / DSMR firmwares — every install picks its own
-            // mDNS name from `name:` in the YAML, so no hard-coded
-            // default would be right). The operator types the IP or
-            // hostname into the Host/IP field; empty config is a
-            // local-HTTP signal, NOT a cloud one.
-			  driver.config = { host: "" };
-          } else {
-            // Account-based cloud service (easee_cloud, etc.). HTTP
-            // capability + no host pre-fill + no meter/pv/battery
-            // capability narrows the field down enough to assume
-            // {email, password, serial} is the right shape.
-            driver.config = { email: "", password: "", serial: "" };
-          }
-        }
+        // The same driver block the setup guide adds, from device-flow.js.
+        var driver = flow().newDriver(entry, { name: name, profile: profileSelect && profileSelect.value });
         var finishAdd = function () {
           config.drivers.push(driver);
           if (S.chargerSetup) S.chargerSetupPending = driver.name;
@@ -2363,17 +2124,7 @@
             outputEl.innerHTML = '<div class="driver-test-empty">Waiting for live values...</div>';
           }
           testBtn.disabled = true;
-          apiFetch("/api/drivers/test", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(driver),
-          }).then(function (r) {
-            return r.json().then(function (j) { return { ok: r.ok, status: r.status, body: j }; });
-          }).then(function (res) {
-            var body = res.body || {};
-            if (!res.ok) {
-              body = { ok: false, error: body.error || ("HTTP " + res.status) };
-            }
+          flow().test(driver, apiFetch).then(function (body) {
             if (statusEl) {
               statusEl.textContent = body.ok ? "Connected" : "Failed";
               statusEl.className = "driver-test-status " + (body.ok ? "ok" : "error");
@@ -2381,6 +2132,9 @@
             if (outputEl) {
               outputEl.hidden = false;
               outputEl.innerHTML = renderProbeOutput(body);
+              // What the driver says to turn on at the device, beside the error.
+              var hint = body.ok ? "" : flow().setupHint(catalogEntryForLua(driver.lua));
+              if (hint) outputEl.innerHTML += '<div class="driver-test-hint">' + escHtml(hint) + '</div>';
             }
           }).catch(function (e) {
             if (statusEl) {
