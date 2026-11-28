@@ -223,8 +223,9 @@ hotfixes or betas. All new Core releases use the new 0.x path. Do not recommend
 3.x beta as an install or intermediate upgrade. Old clients and aliases may
 still offer old releases; that is not a recommendation.
 
-For people and agents, [Install and update FTW](docs/native-beta.md) is the
-single entry point. An owner can switch now with a second SD card/host or a
+[Install FTW](docs/install.md) is the first-install page, and
+[Install and update FTW](docs/native-beta.md) holds every path and command for
+people and agents. An owner can switch now with a second SD card/host or a
 separate Docker project and new data. Guided migration of settings and history
 has not shipped. Keep the old data, verify backup and recovery, and confirm
 that only one Core controls the equipment, including after reboot.

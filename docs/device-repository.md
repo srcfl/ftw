@@ -12,6 +12,36 @@ an expert try one driver ahead of a release. Its release workflow builds an FTW
 artifact for each catalog driver from a reviewed `main` commit, signs one
 manifest and publishes the files through GitHub Releases.
 
+## The bundled pin
+
+**The Core repository holds no driver source.** `drivers/*.lua` is gitignored and
+fetched from `srcfl/device-drivers` at the commit pinned in
+[`drivers/BUNDLED_SOURCE.json`](../drivers/BUNDLED_SOURCE.json):
+
+```bash
+make drivers
+```
+
+The files still ship: they are the release's own drivers and what normally
+runs. Startup is deliberately local — a gateway boots and runs without the
+network, so a remote refresh must never block it — and the image, the release
+tarballs and the tests all read `drivers/`. They are simply fetched rather than committed, which is
+why a driver cannot be edited here at all. There is no file to open a pull
+request against; fix it upstream and move the pin. CI fails if one is
+committed.
+
+Moving the pin is a driver release. `make driver-versions-across-pin` compares
+the drivers at the old pin against the drivers at the new one and fails when a
+file changed without its `DRIVER` version moving — the signed channel refuses to
+publish changed bytes under a version it already published, and a gateway
+offered the same version twice cannot tell them apart.
+
+The pin needs watching in both directions. Every pull request runs
+`--check`, which catches a driver edited here. A daily job runs `--behind`,
+which catches the opposite: the pin left in place while a fix lands upstream.
+It opens one issue and keeps it up to date, and stays quiet unless a bundled
+driver actually changed.
+
 ## Resolution and recovery
 
 A configured driver resolves in this order:

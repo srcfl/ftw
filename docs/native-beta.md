@@ -1,5 +1,8 @@
 # Install and update FTW
 
+New to FTW? [Install FTW](install.md) is the short path. This page holds
+every path and command, for people and agents.
+
 **FTW 2.x and 3.x will receive no further updates. All new development and
 releases use the new 0.x line. Move to it now to follow the latest fixes and
 features. Do not install 3.x beta or use it as an intermediate upgrade.**
@@ -42,9 +45,9 @@ Choose **one** path. These are alternatives, not steps to run in order:
 | The old ready-made FTW Raspberry Pi image | It runs old Docker. Use a second card with Raspberry Pi OS Lite 64-bit; keep the old card. |
 | New 0.x native with launcher/release slots | [Update the native box](#update-a-native-box). Do not reinstall. |
 | New 0.x Docker built from the release package | [Update new Docker](#update-new-docker) with **Update FTW** or `ftw update`, as a native box does. A project made before Docker updated itself first takes the new `Dockerfile` and `compose.yaml`. |
-| FTW (0.x beta) Home Assistant app | Update and back up through Home Assistant. See [the app guide](home-assistant-app.md). |
+| The **FTW (beta)** Home Assistant app, version 0.x (once named **FTW (0.x beta)**) | Update and back up through Home Assistant. See [the app guide](home-assistant-app.md). |
 | Older direct native service without release slots | Identify its unit and data paths first. Use a separate host/card, or a checked migration for that site. The [native migration pilot](self-update.md#pilot-an-older-native-systemd-site) is not a general installer. |
-| Home Assistant app on the old line | Install the **FTW (0.x beta)** app (pilot, [FTW on Home Assistant](home-assistant-app.md)) or run new FTW on another Linux host. Either way, stop the old app and its automatic start/watchdog before new Core controls the equipment. |
+| Home Assistant app on the old line (version 3.x) | Install the **FTW (beta)** app, version 0.x ([FTW on Home Assistant](home-assistant-app.md)), or run new FTW on another Linux host. Either way, stop the old app and its automatic start/watchdog before new Core controls the equipment. |
 | Custom build, manual binary, macOS or Windows | Identify the process and data first. The release install paths here require 64-bit Linux. |
 
 </details>
@@ -58,7 +61,7 @@ install methods.** Save the command and its output, and ask in
 | Message or symptom | What to do |
 |---|---|
 | `Existing FTW installation found` or `--fresh-host` refused | You are on a host/card with FTW data. Keep those files. For a Pi, shut down and use the prepared new card. Some published installers say “try 0.x beside it”; this does not mean Docker is the next step. |
-| `curl: (22)` / `404` | The download failed. Copy the exact tag from Releases and check the URL. Do not run an old `install.sh`, reuse old Compose files or continue to build. |
+| `curl: (22)` / `404` | The download failed. Check the network and the line, or the tag if you gave one. Do not run an old `install.sh`, reuse old Compose files or continue to build. |
 | `ftw-local` already exists | An earlier attempt has left files. Stop and inspect that project before retrying; do not delete its data or overwrite its `.env`. |
 | `requires buildx plugin` | Docker is missing a build tool. Follow the Docker prerequisite below before building. |
 | `checking context: no permission to read .../data/applink.json` | Private FTW data is entering the build. Keep its permissions. The `.dockerignore` step under [Update new Docker](#update-new-docker) fixes the supplied recipe; do not try `chmod` or a build as root to read those files. |
@@ -83,7 +86,7 @@ running Core; inspect containers and their restart rules. A service called
 
 ## Before you start
 
-- A 64-bit Linux host: a Raspberry Pi 4 or 5 with Raspberry Pi OS Lite
+- A 64-bit Linux host: a Raspberry Pi 3 or newer with Raspberry Pi OS Lite
   64-bit (Bookworm or Trixie), Debian 12 or 13, or an x86_64 machine.
 - Running any older FTW already, perhaps from the Raspberry Pi image?
   Read [Coming from an older FTW](#coming-from-an-older-ftw) first.
@@ -161,8 +164,8 @@ its original files and version pin. Restore only the start rules you disabled.
 Each installation keeps its own data.
 
 The native installer refuses an existing site. Do not remove its checks or
-old files to make `--fresh-host` pass. Home Assistant users need another Linux
-host for the new line; the old app is not an intermediate upgrade. Stop its
+old files to make `--fresh-host` pass. Home Assistant users install the
+**FTW (beta)** app, version 0.x; the old app is not an intermediate upgrade. Stop its
 Core, Start on boot and Watchdog before the new site takes control. Keep a
 Home Assistant backup and the old app's data for recovery. The MQTT integration
 with a separate FTW host still works; see [Home Assistant](ha-integration.md).
@@ -173,35 +176,28 @@ with a separate FTW host still works; see [Home Assistant](ha-integration.md).
 return to [the second-card steps](#raspberry-pi-use-a-second-sd-card) first.
 This section does not update or migrate an old installation.
 
-Choose an exact published new 0.x beta from [Releases](https://github.com/srcfl/ftw/releases).
-Check that it includes the Linux package for your architecture and its SHA-256
-file. Do not use `releases/latest`: it still points to the retired 2.x line.
-Copy the tag from the release title; do not retype it. Replace only
-`v0.X.Y-beta.N` in the block below. Paste the **whole block, including `(`
-and `)`**, into SSH on the new host. It stops at the first error and downloads
-that release's installer to a temporary file.
-`--fresh-host` confirms that this host has no existing FTW site, including
-stopped containers or data in a custom directory:
+Run this line in SSH on the new host:
 
 ```bash
-(
-  set -eu
-  tag=v0.X.Y-beta.N
-  if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
-    echo "STOP: copy an exact published new 0.x tag from Releases." >&2
-    exit 1
-  fi
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT
-  curl -fSL "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh" -o "$installer"
-  bash "$installer" --fresh-host --tag "$tag"
-)
+curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
 ```
+
+`https://ftw.energy/install.sh` redirects to
+[`scripts/install.sh`](../scripts/install.sh) on `master`. Without `--tag` it
+installs the newest stable release, or the newest beta while there is no
+stable, and says which. Add `--beta` to take the newest beta when it is newer
+than the newest stable, or `--tag v0.X.Y` for one exact published release. Do
+not pick a release from GitHub `releases/latest`; it is not the newest FTW.
+`--fresh-host` confirms that this host has no existing FTW site, including
+stopped containers or data in a custom directory. A download that stops
+partway runs nothing.
 
 It checks the package's SHA-256, creates the `ftw` user, puts releases in
 `/opt/ftw`, data in `/var/lib/ftw`, the `ftw` command in `/usr/local/bin`
-and starts the `ftw` service. Open `http://<host>:8080/setup` to set up the
-site.
+and starts the `ftw` service. At the end it prints the addresses to open,
+`http://<address>:8080/setup`; set up the site there. If the install stops
+partway, run the same line with `--resume` in place of `--fresh-host`. It
+finishes the same release and keeps any data already saved.
 
 If it reports an error, stop and use [the error table](#if-you-already-got-an-error).
 Do not continue to the Docker instructions.

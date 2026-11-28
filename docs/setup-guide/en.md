@@ -2,13 +2,15 @@
 
 This guide is for you if you've never set up a Raspberry Pi before. Relax — it's easier than it sounds. Just follow the steps, one at a time.
 
-> **2.x and 3.x receive no further updates.** Switch to new 0.x to follow the latest releases. Do not install 3.x beta. Already running FTW? Start with [Install and update FTW](../native-beta.md). Use a **new SD card** and keep the old card and its data.
+> **Have you run FTW before?** [Start here](../before.md) instead.
 
-> **Don't have a Raspberry Pi?** A fresh 64-bit Debian or Ubuntu host can use the same native beta installer. Skip the Pi hardware steps and read **Step 11 — Install FTW**.
+> **Running Home Assistant OS?** You need no Raspberry Pi: [install the FTW app](../install.md#home-assistant) instead.
+
+> **Another Linux computer?** A 64-bit Debian or Ubuntu computer uses the same line. Skip the Pi steps and go to **Step 11 — Install FTW**.
 
 ## What you'll need
 
-- A **Raspberry Pi**
+- A **Raspberry Pi 3 or newer**
 - A **memory card** — included if you bought it as a bundle, otherwise grab a separate microSD card
 - A **power adapter** — included if you bought it as a bundle, otherwise grab a separate one
 - A **case** — optional, unless you bought a RAK wireless or Sourceful gateway (those already come housed)
@@ -33,7 +35,7 @@ The program is called **Raspberry Pi Imager**. Open it.
 
 You'll see three big boxes. Click the top one and select:
 
-- **Raspberry Pi 4** (this is almost always right if you got a Sourceful gateway or RAK wireless)
+- The model you have: **Raspberry Pi 3**, **4** or **5**. Got a Sourceful gateway or RAK wireless? Then it's almost always **Raspberry Pi 4**.
 
 ![](images/pi-imager-step1.png)
 
@@ -52,7 +54,7 @@ This is the base program that makes the Raspberry Pi work — a bit like Windows
 
 ## Step 5 — Put the memory card in your computer
 
-1. Choose a new memory card. Keep the card containing old FTW and its data.
+1. Choose a memory card. Everything on it will be erased.
 2. Slide it into the card reader on your regular computer.
 3. Click the bottom box ("Storage") in the program and select your card.
 
@@ -118,17 +120,34 @@ Well done — you're now "inside" the Raspberry Pi.
 
 ## Step 11 — Install FTW
 
-Follow [Install and update FTW](../native-beta.md#install) and choose an exact published new 0.x beta. You can install now on a fresh 64-bit Pi. If FTW already runs on your Pi, follow [the switch guide](../native-beta.md#coming-from-an-older-ftw) first: use a new card and set up the site again. Guided migration of old settings and history is not ready.
+Copy this line. Paste it into the window from Step 10 and press enter:
+
+```bash
+curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
+```
+
+(In PuTTY, a right click pastes. On a Mac, press `Cmd`+`V`.)
+
+FTW downloads, checks itself and starts. If it asks for a password, type the one you chose in Step 6. Wait until it's done. At the end it shows the address of your FTW, something like this:
+
+```text
+  http://192.168.1.123:8080/setup
+  http://ftw.local:8080/setup
+```
+
+If it shows an error instead, stop there and ask in Discord (the link is at the bottom). Don't try anything else first.
 
 ## After installation
 
-Open the browser on your regular computer and go to the web interface:
+Open the browser on your regular computer or your phone and go to one of those addresses. If one doesn't work, try the other.
 
-```
-http://ftw.local:8080/
-```
+The setup page asks for three things:
 
-If that address doesn't work — try the IP address you wrote down, e.g. `http://192.168.1.123:8080/`.
+- **Your home:** the country, the price zone and the size of your main fuse, for example 16, 20 or 25 A. Your grid contract says it.
+- **Your devices:** FTW looks for them on your network. Pick each one and add it.
+- **A house password:** other devices on your Wi-Fi need it to change settings. Pick something you'll remember.
+
+Check the summary and click **Start FTW**. You'll land on the dashboard. Well done!
 
 ---
 
@@ -138,4 +157,4 @@ If that address doesn't work — try the IP address you wrote down, e.g. `http:/
 - **Can't find the IP address** → restart the router, wait 5 minutes, look again.
 - **SSH says "Connection refused"** → wait a little longer. The first boot takes time.
 - **The page opens, but changing settings shows "remote access to protected API routes is disabled"** → FTW only accepts changes from addresses it recognizes as local. Open the UI through the Pi's IP address, e.g. `http://192.168.1.123:8080`. Why this happens — even at home — is explained in [operations.md](../operations.md#remote-access-to-protected-api-routes-is-disabled).
-- **None of this helps** → drop by our Discord and kindly ask for help: **https://discord.gg/25xcBzQaux**
+- **None of this helps** → drop by our Discord and kindly ask for help: **https://discord.gg/UK2ygPBu8N**

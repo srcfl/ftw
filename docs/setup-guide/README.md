@@ -1,8 +1,11 @@
 # Setup Guide — FTW
 
-**Already running FTW?** Start with [Install and update FTW](../native-beta.md)
-or [Byt till nya FTW](update-sv.md). 2.x and 3.x receive no further updates.
-Use a new card for an existing Pi; keep the old card and its data.
+New to FTW? These guides prepare a Raspberry Pi 3 or newer and install FTW
+with one line. Running Home Assistant OS? You need no Pi:
+[install the FTW app](../install.md#home-assistant).
+
+**Have you run FTW before?** [Start here](../before.md)
+([svenska](update-sv.md)) instead.
 
 Så förbereder du en Raspberry Pi med Raspberry Pi OS för FTW, på flera språk.
 
@@ -15,4 +18,4 @@ languages.
 - Français — [fr.md](fr.md)
 - Español — [es.md](es.md)
 
-After installation, open `http://<host>:8080/setup` on the local network.
+After installation, open the address the installer prints.

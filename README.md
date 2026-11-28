@@ -2,17 +2,41 @@
 
 <img src="web/logo.svg" alt="FTW" width="120" align="right">
 
-> Local-first home energy coordination.
+> Your home's energy, planned to cost less.
 
-FTW is a local-first home energy management system (EMS). It coordinates
-solar, batteries, grid power, EV charging and thermal assets on a Raspberry Pi
-or Linux host. The safety-critical runtime is one Go binary,
-hardware integrations are sandboxed Lua drivers, and a compiled Energyplan
-worker handles long-horizon planning.
+FTW runs on a small computer in your home. It plans your battery, car charging
+and solar around electricity prices and the weather, then runs them. Control
+stays on your home network, so your home keeps running when the internet is
+down.
 
-The control path stays on the local network. Cloud price, weather and device
-integrations degrade independently; they are not required for safe local
-operation.
+## Get started
+
+- **Home Assistant:** [add the FTW repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsrcfl%2Fhome-assistant-addons),
+  then install **FTW (beta)**, start it and choose **Open Web UI**.
+  [Step by step](docs/home-assistant-app.md)
+- **A Linux computer:** run this line on it, then open the address it prints.
+  [Step by step](docs/install.md#a-linux-computer)
+
+  ```bash
+  curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
+  ```
+
+- **Runs on** Home Assistant or any 64-bit Linux computer: a Raspberry Pi 3 or
+  newer, a mini PC, an old laptop.
+- **You need** supported equipment on your home network and a computer that
+  stays on. Look for yours in the [device catalog](https://srcfl.github.io/device-drivers/).
+- **The app:** [FTW Energy for iPhone](https://apps.apple.com/app/ftw-energy/id6822024949)
+  shows your home once FTW runs there. Android is coming.
+
+Have you run FTW before? [Start here](docs/before.md) instead.
+
+![The FTW dashboard: live power between solar, battery, home and grid](docs/images/dashboard.png)
+
+*The dashboard every install gets, here with simulated devices.*
+
+[Website](https://ftw.energy) ·
+[Try the demo](https://app.ftw.energy) ·
+[Discord](https://discord.gg/UK2ygPBu8N)
 
 ## Product direction
 
@@ -43,6 +67,16 @@ activity and anonymous usage totals.
 
 ## Architecture
 
+FTW is a local-first home energy management system (EMS). It coordinates
+solar, batteries, grid power, EV charging and thermal assets on a Raspberry Pi
+or Linux host. The safety-critical runtime is one Go binary,
+hardware integrations are sandboxed Lua drivers, and a compiled Energyplan
+worker handles long-horizon planning.
+
+The control path stays on the local network. Cloud price, weather and device
+integrations degrade independently; they are not required for safe local
+operation.
+
 FTW has three explicit modules:
 
 - **Core** owns configuration, telemetry, state, safety, dispatch, API and UI.
@@ -70,83 +104,10 @@ The local catalog is generated from `DRIVER` metadata. The public
 editable source and FTW's default signed driver channel.
 
 **This repository holds no driver source.** `drivers/*.lua` is gitignored and
-fetched from that repository at the commit pinned in
-[`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json):
-
-```bash
-make drivers
-```
-
-The files still ship: they are the release's own drivers and what normally
-runs. Startup is deliberately local — a gateway boots and runs without the
-network, so a remote refresh must never block it — and the image, the release
-tarballs and the tests all read `drivers/`. They are simply fetched rather than committed, which is
-why a driver cannot be edited here at all. There is no file to open a pull
-request against; fix it upstream and move the pin. CI fails if one is
-committed.
-
-Moving the pin is a driver release. `make driver-versions-across-pin` compares
-the drivers at the old pin against the drivers at the new one and fails when a
-file changed without its `DRIVER` version moving — the signed channel refuses to
-publish changed bytes under a version it already published, and a gateway
-offered the same version twice cannot tell them apart.
-
-The pin needs watching in both directions. Every pull request runs
-`--check`, which catches a driver edited here. A daily job runs `--behind`,
-which catches the opposite: the pin left in place while a fix lands upstream.
-It opens one issue and keeps it up to date, and stays quiet unless a bundled
-driver actually changed.
-
-## Install on Linux
-
-**2.x and 3.x will receive no further updates. New releases use the new 0.x
-line. Switch now to follow the latest fixes and features; do not install
-3.x beta or use it as an intermediate upgrade.**
-
-Start with [Install and update FTW](docs/native-beta.md)
-([Svenska](docs/setup-guide/update-sv.md)). It covers old Docker images,
-Raspberry Pi SD-card images, 1.x/2.x/3.x, older native sites, new native and
-Docker installs, Home Assistant, backup, and recovery.
-
-The new line starts at `v0.131.0-beta.1`; old 0.x releases up to 0.130.x are
-also retired. A lower version number or a saved `beta` channel does not tell
-you which install path you have. Identify it before running commands.
-
-**Old FTW on a Raspberry Pi? Use a second SD card.** Keep the old card,
-prepare the new one and swap cards before running install commands. Follow
-[the card-by-card steps](docs/native-beta.md#raspberry-pi-use-a-second-sd-card).
-Do not try Docker next if the native installer refuses the old card.
-
-Use a fresh 64-bit Raspberry Pi OS, Debian or Ubuntu host for native systemd.
-Docker on the same Linux host is a separate, advanced option: identify and
-stop old Core and its updater, and preserve any MQTT service first. The
-guided migration of settings and history is not ready; preserve the old data
-and get help if those data must move before you switch. Only one Core may
-control the equipment, including after reboot.
-
-Give the FTW host a DHCP reservation in the router so device connections keep
-working. Open `http://<host>:8080/setup` after installation. The optional
-[FTW webapp](https://app.ftw.energy) connects through an encrypted
-session and blind relay; relay loss does not stop local control.
-
-## Install on Home Assistant
-
-**Beta / pilot:** the new **FTW (0.x beta)** Home Assistant app runs new FTW
-directly on Home Assistant OS, for example a Home Assistant Green. Follow
-[FTW on Home Assistant](docs/home-assistant-app.md) step by step
-([svenska](docs/setup-guide/home-assistant-sv.md)).
-
-The older **FTW (beta)** app is on the retired 3.x line and does not follow new
-0.x releases; do not install it to get current FTW. The tested alternative is
-still to run FTW on a separate Linux host and use the
-[MQTT integration](docs/ha-integration.md).
-
-Switching from the old app: follow
-[the switch guide](docs/native-beta.md#coming-from-an-older-ftw), including
-backup and stopping the old app's Core, Start on boot and Watchdog. Report app
-or Supervisor faults in its
-[issue tracker](https://github.com/srcfl/home-assistant-addons/issues), and Core
-faults in this repository.
+fetched with `make drivers` at the commit pinned in
+[`drivers/BUNDLED_SOURCE.json`](drivers/BUNDLED_SOURCE.json). Fix a driver
+upstream and move the pin; see
+[The bundled pin](docs/device-repository.md#the-bundled-pin).
 
 ## Local development
 
@@ -234,6 +195,9 @@ maintainer rules are in the Releases section of [AGENTS.md](AGENTS.md).
 The repository deliberately keeps prose small. Code, types, tests and driver
 metadata are the detailed reference.
 
+- [Install FTW](docs/install.md)
+- [Have you run FTW before?](docs/before.md)
+- [Install and update FTW: every path and command](docs/native-beta.md)
 - [Architecture](docs/architecture.md)
 - [Product roadmap](docs/roadmap.md)
 - [Power sign convention](docs/site-convention.md)
