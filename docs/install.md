@@ -1,119 +1,112 @@
 # Install FTW
 
-For a first install. FTW is in public beta, so expect frequent updates.
-[Svenska](setup-guide/install-sv.md)
+For a first install. [Svenska](setup-guide/install-sv.md)
 
-> **Already running FTW?** To update, see
-> [Update a native box](native-beta.md#update-a-native-box). If you run 2.x,
-> 3.x or the old Raspberry Pi image, follow the
-> [switch guide](native-beta.md#coming-from-an-older-ftw) instead. Do not run
-> the commands on this page on a card or computer that holds an older FTW.
+Have you run FTW before, here or on another computer? Read
+[Have you run FTW before?](before.md) first. Only one FTW may control a home.
 
-## Before you start
+## What you need
 
-- Find your inverter, battery, meter and charger in the
+- A computer that stays on: Home Assistant OS, or any 64-bit Linux computer,
+  such as a Raspberry Pi 3 or newer, a mini PC or an old laptop.
+- Supported equipment. Find your inverter, battery, meter and charger in the
   [device catalog](https://srcfl.github.io/device-drivers/). A charger that
   speaks OCPP needs no driver; see [OCPP chargers](ocpp.md).
-- Put the FTW computer on the same home network as the equipment.
-- FTW controls the battery and charger you add. Keep the equipment's own app
-  at hand so you can take control back.
-- Only one FTW may control a home.
-
-## Choose one
-
-| You have | Use |
-|---|---|
-| Home Assistant OS, for example a Home Assistant Green | [Home Assistant](#home-assistant) |
-| A Raspberry Pi 4 or 5, or a 64-bit Debian or Ubuntu computer | [Raspberry Pi or Linux](#raspberry-pi-or-linux) |
-| Docker on Linux that you manage yourself | [Docker](native-beta.md#docker) |
-
-These are alternatives. Do not run one after another.
+- The FTW computer on the same home network as the equipment.
+- The equipment's own app at hand. FTW controls the battery and charger you
+  add; that app lets you take control back.
 
 ## Home Assistant
 
-FTW runs as an app inside Home Assistant OS (amd64 or aarch64). Home Assistant
-Container and Core have no apps; use a Raspberry Pi or Linux computer instead.
-The app is a beta in its first pilot.
+FTW runs as an app inside Home Assistant OS (amd64 or aarch64), for example on
+a Home Assistant Green, and opens there behind Home Assistant's login. Home
+Assistant Container and Core have no apps; use a
+[Linux computer](#a-linux-computer) instead.
 
 [![Add the FTW repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsrcfl%2Fhome-assistant-addons)
 
 1. Add the repository with the button. Or do it by hand: **Settings → Apps →
    Install app → ⋮ → Repositories**, paste
    `https://github.com/srcfl/home-assistant-addons` and choose **Add**.
-2. Open **FTW (0.x beta)** in the app store and choose **Install**. Home
-   Assistant builds the app on your device. The first build can take several
-   minutes.
-3. Turn on **Start on boot** and **Watchdog**, then choose **Start**.
-4. Choose **Open web UI** and go on to [Set up your home](#set-up-your-home).
+2. Open **FTW (beta)** in the app store (its version starts with `0.`) and
+   choose **Install**. Home Assistant builds the app on your device. The first
+   build can take several minutes.
+3. Turn on **Watchdog**, then choose **Start**. **Start on boot** is on
+   already.
+4. Choose **Open Web UI**. FTW opens inside Home Assistant. Go on to
+   [Set up your home](#set-up-your-home).
 
 Updates, backup and troubleshooting are in
 [FTW on Home Assistant](home-assistant-app.md).
 
-## Raspberry Pi or Linux
+## A Linux computer
 
-You need a Raspberry Pi 4 or 5 with Raspberry Pi OS Lite 64-bit, or a 64-bit
-Debian or Ubuntu computer, with port 8080 free. Never set up a Pi? The
+You need a 64-bit Linux computer that starts with systemd, with port 8080
+free: Raspberry Pi OS Lite (64-bit) on a Raspberry Pi 3 or newer, or Debian or
+Ubuntu on a mini PC or an old laptop. Never set up a Pi? The
 [Pi guide](setup-guide/en.md) shows each step with pictures, from the memory
-card to the first login.
+card to this line.
 
-**1. Copy the version name.** Open
-[Releases](https://github.com/srcfl/ftw/releases) and copy the name of the
-newest release. It starts with `v0.` and ends with `-beta.` and a number.
-
-**2. Paste the block.** Log in to the computer over SSH. Put the version name
-in place of `v0.X.Y-beta.N`, then paste the whole block, including `(` and
-`)`:
+Log in to the computer, over SSH or at its own keyboard, and run:
 
 ```bash
-(
-  set -eu
-  tag=v0.X.Y-beta.N
-  if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
-    echo "STOP: copy an exact published new 0.x tag from Releases." >&2
-    exit 1
-  fi
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT
-  curl -fSL "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh" -o "$installer"
-  bash "$installer" --fresh-host --tag "$tag"
-)
+curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
 ```
 
-The installer checks the download, creates an `ftw` user and starts the `ftw`
-service. If it reports an error, stop there. Do not try another install
-method: look up the message in the
-[error table](native-beta.md#if-you-already-got-an-error) or ask in
-[Discord](https://discord.gg/UK2ygPBu8N).
+The installer takes the newest stable release, or the newest beta while there
+is no stable, and says which. It checks the download, creates an `ftw` user
+and starts the `ftw` service. If sudo asks for a password, type your own. At
+the end it prints the addresses to open, for example:
 
-**3. Open the setup page.** In a browser on the same network, open
-`http://<host>:8080/setup`. `<host>` is the computer's address, for example
-`http://ftw.local:8080/setup` if you named it `ftw`.
+```text
+  http://192.168.1.23:8080/setup
+  http://ftw.local:8080/setup
+```
+
+Open one of them in a browser on the same network.
+
+If it stops with an error, stop there. Do not try another install method: look
+up the message in the [error table](native-beta.md#if-you-already-got-an-error)
+or ask in [Discord](https://discord.gg/UK2ygPBu8N). If the install was cut
+short, the installer tells you to run the same line with `--resume`.
+
+To test betas, add `--beta` at the end of the line. To install one exact
+release, add `--tag` and its name from
+[Releases](https://github.com/srcfl/ftw/releases). Run Docker yourself? Use
+[Docker](native-beta.md#docker) instead.
 
 ## Set up your home
 
 ![The first page of the setup wizard](images/setup-wizard.png)
 
-Choose **Get started**. The wizard asks for the basics of your home, looks for
-devices on the network and helps you pick and set up each one. Check the
-summary and save.
+Choose **Get started**. The setup guide asks for:
 
-Give the FTW computer a fixed address in your router (a DHCP reservation), so
-your devices keep finding it.
+- **Your home:** the country, the price zone and the main fuse from your grid
+  contract, for example 16, 20 or 25 A.
+- **Your devices:** it looks for them on the network. Pick each one and add it.
+- **A house password:** other devices on your Wi-Fi need it to change
+  settings. Live numbers stay visible without it. In Home Assistant, its login
+  does this job, so the guide skips this step.
 
-After setup you land on the dashboard. This one shows simulated devices:
+Check the summary and choose **Start FTW**. The dashboard opens. This one
+shows simulated devices:
 
 ![The dashboard: live power between solar, battery, home and grid](images/dashboard.png)
 
+Give the FTW computer a fixed address in your router (a DHCP reservation), so
+your devices and the app keep finding it.
+
 ## Next
 
-- **Phone:** get the [iPhone beta](https://testflight.apple.com/join/E4Japad7)
-  and [pair it with your box](pairing.md), or try the
-  [webapp](https://app.ftw.energy). Both reach the box through an encrypted
-  session; losing that link does not stop local control.
+- **Phone:** get [FTW Energy for iPhone](https://apps.apple.com/app/ftw-energy/id6822024949)
+  and [pair it with your box](pairing.md). Android is coming. The
+  [webapp](https://app.ftw.energy) works in any browser.
 - **AI assistant:** [connect Claude, ChatGPT or another assistant](https://ftw.energy/#ai).
+- **Home Assistant entities:** FTW publishes its values over
+  [MQTT](ha-integration.md).
 - **Updates:** Home Assistant offers them under **Settings → Updates**. On a
-  Pi or Linux computer, see
-  [Update a native box](native-beta.md#update-a-native-box).
+  Linux computer, open **More → Version → Update FTW**, or run `ftw update`.
+  See [Update a native box](native-beta.md#update-a-native-box).
 - **Backup:** see [Full backup and safe restore](backup-and-restore.md).
 - **Help:** ask in [Discord](https://discord.gg/UK2ygPBu8N), or open an
   [issue](https://github.com/srcfl/ftw/issues) that names your version.

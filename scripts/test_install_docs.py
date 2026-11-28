@@ -1,4 +1,4 @@
-"""Run the copyable install blocks with fake downloads and Docker calls."""
+"""Check the install line and run the copyable Docker blocks with fakes."""
 import os
 from pathlib import Path
 import re
@@ -9,8 +9,39 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 EN = ROOT / 'docs/native-beta.md'
-SV = ROOT / 'docs/setup-guide/update-sv.md'
-FIRST_INSTALL = (ROOT / 'docs/install.md', ROOT / 'docs/setup-guide/install-sv.md')
+
+# The one line every page gives for a first install on Linux. ftw-web serves
+# /install.sh as a redirect to scripts/install.sh on master.
+INSTALL_LINE = 'curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host'
+INSTALL_LINE_PAGES = (
+    'README.md',
+    'docs/install.md',
+    'docs/native-beta.md',
+    'docs/setup-guide/install-sv.md',
+    'docs/setup-guide/update-sv.md',
+    'docs/setup-guide/en.md',
+    'docs/setup-guide/sv.md',
+    'docs/setup-guide/de.md',
+    'docs/setup-guide/fr.md',
+    'docs/setup-guide/es.md',
+)
+
+# A fenced block, also one indented under a list item.
+FENCE = re.compile(r'^([ \t]*)```[^\n]*\n(.*?)\n\1```[ \t]*$', re.M | re.S)
+
+
+def code_blocks(path):
+    """Every fenced block in a page, without the list indent."""
+    blocks = []
+    for indent, body in FENCE.findall(path.read_text()):
+        lines = body.split('\n')
+        blocks.append('\n'.join(line[len(indent):] if line.startswith(indent) else line
+                                for line in lines))
+    return blocks
+
+
+def install_blocks(path):
+    return [block for block in code_blocks(path) if '--fresh-host' in block]
 
 
 def recipe(path, marker):
@@ -61,39 +92,49 @@ printf '%s\\n' 'echo INSTALL >> "$FTW_TEST_LOG"' > "$1"''')
         calls = self.log.read_text() if self.log.exists() else ''
         return result, calls
 
-    def test_translations_use_the_same_native_commands(self):
-        self.assertEqual(recipe(EN, '--fresh-host'), recipe(SV, '--fresh-host'))
+    def test_each_install_page_shows_the_install_line_once(self):
+        for name in INSTALL_LINE_PAGES:
+            with self.subTest(page=name):
+                self.assertEqual(install_blocks(ROOT / name), [INSTALL_LINE])
 
-    def test_first_install_pages_use_the_same_native_commands(self):
-        # The short pages repeat the block; the tests below run the one in EN.
-        for page in FIRST_INSTALL:
-            with self.subTest(page=page.name):
-                self.assertEqual(recipe(EN, '--fresh-host'), recipe(page, '--fresh-host'))
+    def test_no_other_page_shows_an_install_block(self):
+        # A new page with the line joins the list; a page never carries
+        # another way to run --fresh-host.
+        pages = [ROOT / 'README.md', *sorted((ROOT / 'docs').rglob('*.md'))]
+        for page in pages:
+            blocks = install_blocks(page)
+            if not blocks:
+                continue
+            with self.subTest(page=str(page.relative_to(ROOT))):
+                self.assertIn(str(page.relative_to(ROOT)), INSTALL_LINE_PAGES)
+                self.assertEqual(blocks, [INSTALL_LINE])
+
+    def run_line(self, curl_body):
+        self.stub('curl', 'echo "curl $*" >> "$FTW_TEST_LOG"\n' + curl_body)
+        result = subprocess.run(['bash', '-c', INSTALL_LINE], cwd=self.work, env=self.env,
+                                capture_output=True, text=True)
+        calls = self.log.read_text() if self.log.exists() else ''
+        return result, calls
+
+    def test_install_line_runs_the_fetched_installer_with_fresh_host(self):
+        result, calls = self.run_line(
+            """printf '%s\\n' 'echo "INSTALL $*" >> "$FTW_TEST_LOG"'""")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, 'curl -fsSL https://ftw.energy/install.sh\n'
+                                'INSTALL --fresh-host\n')
+
+    def test_install_line_runs_nothing_after_a_failed_download(self):
+        # curl -f prints no error page, so bash gets nothing to run.
+        _, calls = self.run_line('exit 22')
+        self.assertEqual(calls, 'curl -fsSL https://ftw.energy/install.sh\n')
 
     def test_rejects_placeholder_old_line_and_mistyped_tag_before_work(self):
-        for marker in ('--fresh-host', 'compose up'):
-            for tag in ('v0.X.Y-beta.N', 'v3.8.0-beta.1', 'v0.130.0', 'v0.0.138-beta.1'):
-                with self.subTest(marker=marker, tag=tag):
-                    result, calls = self.run_recipe(marker, tag=tag)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(calls, '')
-                    self.assertFalse(self.project.exists())
-
-    def test_native_download_failure_does_not_run_stale_installer(self):
-        (self.work / 'install.sh').write_text('echo STALE >> "$FTW_TEST_LOG"\n')
-        result, calls = self.run_recipe('--fresh-host', 'download')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertNotIn('INSTALL', calls)
-        self.assertNotIn('STALE', calls)
-        download = shlex.split(calls.strip())[-1]
-        self.assertFalse(Path(download).exists())
-
-    def test_native_success_runs_download_and_removes_temp_file(self):
-        result, calls = self.run_recipe('--fresh-host')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('INSTALL\n', calls)
-        download = shlex.split(calls.splitlines()[0])[-1]
-        self.assertFalse(Path(download).exists())
+        for tag in ('v0.X.Y-beta.N', 'v3.8.0-beta.1', 'v0.130.0', 'v0.0.138-beta.1'):
+            with self.subTest(tag=tag):
+                result, calls = self.run_recipe('compose up', tag=tag)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, '')
+                self.assertFalse(self.project.exists())
 
     def test_failed_docker_download_leaves_no_project_and_allows_retry(self):
         for failure in ('download', 'dockerfile'):

@@ -2,6 +2,9 @@
 
 [English](../native-beta.md).
 
+Ny på FTW? [Installera FTW](install-sv.md) är den korta vägen. Den här sidan
+har alla vägar och kommandon, för människor och agenter.
+
 **FTW 2.x och 3.x får inga fler uppdateringar. All fortsatt utveckling går
 till den nya 0.x-serien. Vill du ha de senaste funktionerna och rättningarna
 är det dags att byta nu. Installera inte 3.x-beta, och uppdatera inte en äldre
@@ -43,9 +46,9 @@ Välj **en** av följande vägar. De är alternativ, inte steg efter varandra:
 | SD-kort med den gamla färdiga FTW-imagen | Använd ett nytt kort med Raspberry Pi OS Lite 64-bit. Behåll det gamla kortet. Den gamla imagen innehåller Docker; den är ingen egen uppdateringskanal. | `ftw update` på den nya native-installationen. |
 | Nya 0.x med native launcher och systemd | Uppdatera den befintliga installationen. Kör inte en nyinstallation. | `ftw update`, eller `ftw update --channel beta` för att välja beta. |
 | Nya 0.x i Docker, byggd från releasepaketet | Behåll Compose-projektet och dess datakatalog. Ett projekt från före Docker-uppdateringen hämtar först nya `Dockerfile` och `compose.yaml`. | **Update FTW** på webbsidan eller i appen, eller `docker compose run --rm --entrypoint ftw ftw update`. |
-| Home Assistant-appen FTW (0.x beta) | Uppdatera och ta backup via Home Assistant. | Följ [appguiden](home-assistant-sv.md). Kör inte `ftw update`. |
+| Home Assistant-appen **FTW (beta)**, version 0.x (förut **FTW (0.x beta)**) | Uppdatera och ta backup via Home Assistant. | Följ [appguiden](home-assistant-sv.md). Kör inte `ftw update`. |
 | Äldre native-installation utan release slots | Identifiera tjänsten och datavägarna. Ny installation på separat värd/kort, eller en särskilt kontrollerad flytt. | Det befintliga `migrate-native`-verktyget är en pilot, inte en allmän migrationsguide. |
-| Home Assistant-app på gamla serien | Installera appen **FTW (0.x beta)** (pilot, [FTW på Home Assistant](home-assistant-sv.md)) eller nya FTW på en separat Linux-värd. Stoppa först gamla appens Core, Start on boot och Watchdog. Installera inte 3.x-beta. | Supervisor hanterar den gamla appen. |
+| Home Assistant-app på gamla serien (version 3.x) | Installera appen **FTW (beta)**, version 0.x ([FTW på Home Assistant](home-assistant-sv.md)), eller nya FTW på en separat Linux-värd. Stoppa först gamla appens Core, Start on boot och Watchdog. Installera inte 3.x-beta. | Supervisor hanterar den gamla appen. |
 | Egen build, manuellt startad binär, macOS eller Windows | Identifiera körsättet först. Den dokumenterade nya installationen kräver 64-bitars Linux. | Använd inte Linux-kommandon som om de gällde varje installation. |
 
 `ftw.service` eller en fungerande `ftw status` räcker inte för att skilja
@@ -63,7 +66,7 @@ komma förbi felet.** Spara kommandot och svaret. Be om hjälp i
 | Det du ser | Gör så här |
 |---|---|
 | `Existing FTW installation found` eller nekad `--fresh-host` | Du kör på en maskin eller ett kort med FTW-data. Behåll filerna. På Pi: stäng av och byt till det förberedda nya kortet. Äldre publicerade skript kan säga “try 0.x beside it”; det betyder inte att Docker är nästa steg. |
-| `curl: (22)` eller `404` | Nedladdningen misslyckades. Kopiera den exakta taggen från Releases och kontrollera länken. Kör inte en gammal `install.sh` eller kvarlämnade Docker-filer. |
+| `curl: (22)` eller `404` | Nedladdningen misslyckades. Kontrollera nätet och raden, eller taggen om du angav en. Kör inte en gammal `install.sh` eller kvarlämnade Docker-filer. |
 | `ftw-local` finns redan | Ett tidigare försök har lämnat filer. Kontrollera projektet innan du gör mer. Radera inte data och skriv inte över `.env`. |
 | `requires buildx plugin` | Docker saknar ett byggverktyg. Ordna förkraven i Docker-guiden innan du bygger. |
 | `checking context: no permission to read .../data/applink.json` | Docker försöker läsa privata FTW-data när det bygger. Behåll filernas rättigheter. Se steget med `.dockerignore` under [Docker-uppdatering](#docker-från-det-nya-releasepaketet). Lös inte felet med `chmod` eller genom att bygga som root. |
@@ -166,31 +169,24 @@ därför inget bevis på att bara en FTW körs.
 kortet, gå tillbaka till kortbytet ovan. `--fresh-host` betyder att ingen
 FTW-installation eller dess data finns här, även om den är stoppad.
 
-1. Öppna [Releases](https://github.com/srcfl/ftw/releases) på din vanliga dator.
-   Välj en publicerad **ny 0.x-beta** med Linux-paket och SHA-256-fil för din
-   maskin. Använd inte `releases/latest`; den pekar på gamla 2.x.
-2. Kopiera taggen från releasens rubrik. Skriv inte av den för hand. Byt bara
-   ut `v0.X.Y-beta.N` i blocket nedan mot taggen du kopierade.
-3. Klistra in **hela blocket, inklusive `(` och `)`**, i SSH på nya kortet.
-   Det stannar vid första felet och hämtar skriptet till en tillfällig fil.
+Kör den här raden i SSH på nya kortet:
 
 ```bash
-(
-  set -eu
-  tag=v0.X.Y-beta.N
-  if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
-    echo "STOP: copy an exact published new 0.x tag from Releases." >&2
-    exit 1
-  fi
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT
-  curl -fSL "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh" -o "$installer"
-  bash "$installer" --fresh-host --tag "$tag"
-)
+curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
 ```
 
-Om installationen lyckas, öppna `http://<Pi:ns-IP>:8080/setup` och ställ in
-anläggningen. Om den visar ett fel, stanna och läs [feltabellen](#om-du-redan-har-fått-ett-fel).
+`https://ftw.energy/install.sh` skickar vidare till
+[`scripts/install.sh`](../../scripts/install.sh) på `master`. Utan `--tag`
+installerar den nyaste stabila versionen, eller nyaste betan så länge ingen
+stabil finns, och säger vilken. Lägg till `--beta` för nyaste betan när den är
+nyare än nyaste stabila, eller `--tag v0.X.Y` för en exakt publicerad version.
+Välj inte version via GitHubs `releases/latest`; den är inte nyaste FTW. En
+nedladdning som avbryts halvvägs kör ingenting.
+
+Sist skriver installern ut adresserna att öppna, `http://<adress>:8080/setup`.
+Ställ in anläggningen där. Avbröts installationen, kör samma rad med
+`--resume` i stället för `--fresh-host`; den gör klart samma version och
+behåller sparade data. Om den visar ett fel, stanna och läs [feltabellen](#om-du-redan-har-fått-ett-fel).
 Fortsätt inte med Docker-kommandon.
 
 ## Uppdatera när du redan kör nya FTW

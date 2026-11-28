@@ -2,15 +2,15 @@
 
 Den här guiden är skriven för dig som aldrig har pillat med en Raspberry Pi förut. Lugn — det är lättare än det låter. Följ stegen ett i taget, så går det fint.
 
-> **Kör du redan FTW?** Följ [bytesguiden](update-sv.md) först. Använd ett **nytt SD-kort** och behåll det gamla med dess data.
+> **Har du kört FTW förut?** [Börja här](update-sv.md) i stället.
 
 > **Kör du Home Assistant OS?** Då behöver du ingen Raspberry Pi: [installera FTW-appen](install-sv.md#home-assistant) i stället.
 
-> **En annan Linux-dator?** En ny 64-bitars dator med Debian eller Ubuntu använder samma installer. Hoppa över Pi-stegen och läs **Steg 11 — Installera FTW**.
+> **En annan Linux-dator?** En 64-bitars dator med Debian eller Ubuntu använder samma rad. Hoppa över Pi-stegen och gå till **Steg 11 — Installera FTW**.
 
 ## Vad du behöver
 
-- En **Raspberry Pi**
+- En **Raspberry Pi 3 eller nyare**
 - Ett **minneskort** — medföljer om du köpte den i en bundle, annars behöver du ett separat microSD-kort
 - En **strömadapter** — medföljer om du köpte den i en bundle, annars behöver du en separat
 - Ett **chassi** — valfritt, om du inte har en RAK wireless eller Sourceful gateway (de kommer redan i ett chassi)
@@ -35,7 +35,7 @@ Programmet heter **Raspberry Pi Imager**. Öppna det.
 
 Du ser tre stora rutor. Klicka på den översta och välj:
 
-- **Raspberry Pi 4** (det är nästan alltid rätt om du fått en Sourceful gateway eller RAK wireless)
+- Modellen du har: **Raspberry Pi 3**, **4** eller **5**. Har du fått en Sourceful gateway eller RAK wireless? Då är det nästan alltid **Raspberry Pi 4**.
 
 ![](images/pi-imager-step1.png)
 
@@ -54,7 +54,7 @@ Det här är grundprogrammet som får Raspberry Pin att fungera — ungefär som
 
 ## Steg 5 — Stoppa in minneskortet i din dator
 
-1. Välj ett nytt minneskort. Behåll kortet med gamla FTW och dess data.
+1. Välj ett minneskort. Allt som finns på det raderas.
 2. Stoppa det i kortläsaren på din vanliga dator.
 3. Klicka på den nedersta rutan ("Storage") i programmet och välj ditt kort.
 
@@ -120,17 +120,34 @@ Grattis — du är nu "inne" i Raspberry Pin.
 
 ## Steg 11 — Installera FTW
 
-Följ [Installera FTW](install-sv.md#raspberry-pi-eller-linux): kopiera namnet på den nyaste versionen, klistra in ett block och öppna installationssidan. Kör FTW redan på din Pi, följ [bytesguiden](update-sv.md) först: använd ett nytt kort och ställ in anläggningen på nytt. Den guidade flytten av gamla inställningar och historik är ännu inte klar.
+Kopiera raden nedan. Klistra in den i fönstret från steg 10 och tryck enter:
+
+```bash
+curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
+```
+
+(I PuTTY klistrar du in med högerklick. På Mac trycker du `Cmd`+`V`.)
+
+FTW laddas ner, kontrolleras och startar. Frågar den efter ett lösenord, skriv det du valde i steg 6. Vänta tills den är klar. Sist visar den adressen till din FTW, ungefär så här:
+
+```text
+  http://192.168.1.123:8080/setup
+  http://ftw.local:8080/setup
+```
+
+Visar den ett fel i stället: stanna där och fråga i Discord (länken finns längst ner). Prova inget annat först.
 
 ## Efter installationen
 
-Öppna webbläsaren på din vanliga dator och gå till webb-gränssnittet:
+Öppna webbläsaren på din vanliga dator eller i mobilen och gå till en av adresserna. Fungerar inte den ena, prova den andra.
 
-```
-http://ftw.local:8080/
-```
+Installationssidan frågar efter tre saker:
 
-Fungerar inte den adressen — prova IP-adressen du skrev ner, t.ex. `http://192.168.1.123:8080/`.
+- **Ditt hem:** land, elområde och storleken på din huvudsäkring, till exempel 16, 20 eller 25 A. Den står i ditt elnätsavtal.
+- **Dina enheter:** FTW letar efter dem på nätverket. Välj var och en och lägg till den.
+- **Ett huslösenord:** andra enheter på ditt Wi-Fi behöver det för att ändra inställningar. Välj något du kommer ihåg.
+
+Kontrollera sammanfattningen och klicka på **Start FTW**. Då kommer du till översikten. Bra jobbat!
 
 ---
 

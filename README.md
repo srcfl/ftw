@@ -9,58 +9,34 @@ and solar around electricity prices and the weather, then runs them. Control
 stays on your home network, so your home keeps running when the internet is
 down.
 
+## Get started
+
+- **Home Assistant:** [add the FTW repository](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsrcfl%2Fhome-assistant-addons),
+  then install **FTW (beta)**, start it and choose **Open Web UI**.
+  [Step by step](docs/home-assistant-app.md)
+- **A Linux computer:** run this line on it, then open the address it prints.
+  [Step by step](docs/install.md#a-linux-computer)
+
+  ```bash
+  curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
+  ```
+
+- **Runs on** Home Assistant or any 64-bit Linux computer: a Raspberry Pi 3 or
+  newer, a mini PC, an old laptop.
+- **You need** supported equipment on your home network and a computer that
+  stays on. Look for yours in the [device catalog](https://srcfl.github.io/device-drivers/).
+- **The app:** [FTW Energy for iPhone](https://apps.apple.com/app/ftw-energy/id6822024949)
+  shows your home once FTW runs there. Android is coming.
+
+Have you run FTW before? [Start here](docs/before.md) instead.
+
 ![The FTW dashboard: live power between solar, battery, home and grid](docs/images/dashboard.png)
 
 *The dashboard every install gets, here with simulated devices.*
 
 [Website](https://ftw.energy) ·
 [Try the demo](https://app.ftw.energy) ·
-[Check your equipment](https://srcfl.github.io/device-drivers/) ·
 [Discord](https://discord.gg/UK2ygPBu8N)
-
-## Get started
-
-FTW is in public beta. Pick what you already have.
-
-### Home Assistant
-
-FTW runs as an app inside Home Assistant OS, for example on a Home Assistant
-Green.
-
-[![Add the FTW repository to my Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsrcfl%2Fhome-assistant-addons)
-
-Add the repository, install **FTW (0.x beta)** from the app store, start it
-and choose **Open web UI**.
-[Step by step](docs/home-assistant-app.md) ·
-[svenska](docs/setup-guide/home-assistant-sv.md)
-
-The app is a beta in its first pilot. The longer-tested path is FTW on a
-separate Linux computer, connected to Home Assistant over
-[MQTT](docs/ha-integration.md).
-
-### Raspberry Pi or another Linux computer
-
-1. New to the Raspberry Pi? [Prepare it, with pictures](docs/setup-guide/en.md)
-   ([svenska](docs/setup-guide/sv.md), [Deutsch](docs/setup-guide/de.md),
-   [français](docs/setup-guide/fr.md), [español](docs/setup-guide/es.md)).
-2. [Install FTW](docs/install.md#raspberry-pi-or-linux) with one pasted block
-   ([svenska](docs/setup-guide/install-sv.md#raspberry-pi-eller-linux)).
-3. Open `http://<host>:8080/setup` and add your devices.
-
-### After setup
-
-- **Phone:** get the [iPhone beta](https://testflight.apple.com/join/E4Japad7)
-  and [pair it with your box](docs/pairing.md), or try the
-  [webapp](https://app.ftw.energy).
-- **AI assistant:** [connect Claude, ChatGPT or another assistant](https://ftw.energy/#ai)
-  and ask why the battery is charging.
-- **Home Assistant entities:** FTW publishes its values over
-  [MQTT](docs/ha-integration.md).
-
-**Already running FTW 2.x, 3.x or the old Raspberry Pi image?** Those lines
-get no more updates. Follow the
-[switch guide](docs/native-beta.md#coming-from-an-older-ftw) first, and do not
-run the installer on the old card or host.
 
 ## Product direction
 
@@ -220,7 +196,8 @@ The repository deliberately keeps prose small. Code, types, tests and driver
 metadata are the detailed reference.
 
 - [Install FTW](docs/install.md)
-- [Switch from an older FTW, update and recover](docs/native-beta.md)
+- [Have you run FTW before?](docs/before.md)
+- [Install and update FTW: every path and command](docs/native-beta.md)
 - [Architecture](docs/architecture.md)
 - [Product roadmap](docs/roadmap.md)
 - [Power sign convention](docs/site-convention.md)

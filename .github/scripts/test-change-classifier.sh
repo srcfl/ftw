@@ -67,4 +67,10 @@ for path in deploy/docker/.dockerignore deploy/balena/docker-compose.yml deploy/
     'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
 done
 
+# Pages that carry the install line run the install-docs test.
+for path in README.md docs/install.md docs/setup-guide/install-sv.md docs/setup-guide/en.md docs/setup-guide/es.md; do
+  assert_paths "$path" \
+    'core=false' 'optimizer=false' 'web=false' 'drivers=false' 'compose=true'
+done
+
 echo "test workflow path classifier contract passed"

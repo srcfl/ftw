@@ -1,119 +1,116 @@
 # Installera FTW
 
-För en första installation. FTW är i öppen beta, så räkna med täta
-uppdateringar. [English](../install.md)
+För en första installation. [English](../install.md)
 
-> **Kör du redan FTW?** För att uppdatera, se
-> [Uppdatera när du redan kör nya FTW](update-sv.md#uppdatera-när-du-redan-kör-nya-ftw).
-> Kör du 2.x, 3.x eller den gamla Raspberry Pi-avbilden: följ
-> [bytesguiden](update-sv.md) i stället. Kör inte kommandona på den här sidan
-> på ett kort eller en dator som har en äldre FTW.
+Har du kört FTW förut, här eller på en annan dator? Läs
+[Byt till nya FTW](update-sv.md) först. Bara en FTW får styra ett hem.
 
-## Innan du börjar
+## Det här behöver du
 
-- Leta upp din växelriktare, ditt batteri, din elmätare och din laddbox i
+- En dator som alltid är på: Home Assistant OS, eller en 64-bitars
+  Linux-dator, till exempel en Raspberry Pi 3 eller nyare, en minidator eller
+  en gammal laptop.
+- Utrustning som FTW stöder. Leta upp din växelriktare, ditt batteri, din
+  elmätare och din laddbox i
   [enhetskatalogen](https://srcfl.github.io/device-drivers/). En laddbox som
   talar OCPP behöver ingen drivrutin; se [OCPP-laddare](../ocpp.md).
-- Sätt FTW-datorn på samma hemnätverk som utrustningen.
-- FTW styr det batteri och den laddbox du lägger till. Ha utrustningens egen
-  app till hands, så att du kan ta tillbaka styrningen.
-- Bara en FTW får styra ett hem.
-
-## Välj en väg
-
-| Du har | Använd |
-|---|---|
-| Home Assistant OS, till exempel en Home Assistant Green | [Home Assistant](#home-assistant) |
-| En Raspberry Pi 4 eller 5, eller en 64-bitars dator med Debian eller Ubuntu | [Raspberry Pi eller Linux](#raspberry-pi-eller-linux) |
-| Docker på Linux som du sköter själv | [Docker](../native-beta.md#docker) |
-
-Vägarna är alternativ. Kör inte en efter en annan.
+- FTW-datorn på samma hemnätverk som utrustningen.
+- Utrustningens egen app till hands. FTW styr det batteri och den laddbox du
+  lägger till; med den appen tar du tillbaka styrningen.
 
 ## Home Assistant
 
-FTW körs som en app inne i Home Assistant OS (amd64 eller aarch64). Home
-Assistant Container och Core har inga appar; använd en Raspberry Pi eller en
-Linux-dator i stället. Appen är en beta i sin första pilot.
+FTW körs som en app inne i Home Assistant OS (amd64 eller aarch64), till
+exempel på en Home Assistant Green, och öppnas där bakom Home Assistants
+inloggning. Home Assistant Container och Core har inga appar; använd en
+[Linux-dator](#en-linux-dator) i stället.
 
 [![Lägg till FTW:s arkiv i min Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fsrcfl%2Fhome-assistant-addons)
 
 1. Lägg till arkivet med knappen. Eller för hand: **Inställningar → Appar →
    Installera app → ⋮ → Git-arkiv**, klistra in
    `https://github.com/srcfl/home-assistant-addons` och välj **Lägg till**.
-2. Öppna **FTW (0.x beta)** i appbutiken och välj **Installera**. Home
-   Assistant bygger appen på din enhet. Första bygget kan ta flera minuter.
-3. Slå på **Starta vid uppstart** och **Watchdog**, och välj sedan **Starta**.
-4. Välj **Öppna webbgränssnittet** och gå vidare till
-   [Ställ in ditt hem](#ställ-in-ditt-hem).
+2. Öppna **FTW (beta)** i appbutiken (versionen börjar med `0.`) och välj
+   **Installera**. Home Assistant bygger appen på din enhet. Första bygget kan
+   ta flera minuter.
+3. Slå på **Watchdog** och välj sedan **Starta**. **Starta vid uppstart** är
+   redan på.
+4. Välj **Öppna webbgränssnittet**. FTW öppnas inne i Home Assistant. Gå
+   vidare till [Ställ in ditt hem](#ställ-in-ditt-hem).
 
 Uppdateringar, backup och felsökning finns i
 [FTW på Home Assistant](home-assistant-sv.md).
 
-## Raspberry Pi eller Linux
+## En Linux-dator
 
-Du behöver en Raspberry Pi 4 eller 5 med Raspberry Pi OS Lite 64-bit, eller en
-64-bitars dator med Debian eller Ubuntu, med port 8080 ledig. Har du aldrig
+Du behöver en 64-bitars Linux-dator som startar med systemd, med port 8080
+ledig: Raspberry Pi OS Lite (64-bit) på en Raspberry Pi 3 eller nyare, eller
+Debian eller Ubuntu på en minidator eller en gammal laptop. Har du aldrig
 ställt in en Pi? [Pi-guiden](sv.md) visar varje steg med bilder, från
-minneskortet till första inloggningen.
+minneskortet till den här raden.
 
-**1. Kopiera versionsnamnet.** Öppna
-[Releases](https://github.com/srcfl/ftw/releases) och kopiera namnet på den
-nyaste versionen. Det börjar med `v0.` och slutar med `-beta.` och en siffra.
-
-**2. Klistra in blocket.** Logga in på datorn över SSH. Sätt versionsnamnet i
-stället för `v0.X.Y-beta.N` och klistra sedan in hela blocket, med `(` och
-`)`:
+Logga in på datorn, över SSH eller vid dess eget tangentbord, och kör:
 
 ```bash
-(
-  set -eu
-  tag=v0.X.Y-beta.N
-  if [[ ! "$tag" =~ ^v0\.([0-9]+)\.[0-9]+(-beta\.[0-9]+)?$ ]] || (( 10#${BASH_REMATCH[1]} < 131 )); then
-    echo "STOP: copy an exact published new 0.x tag from Releases." >&2
-    exit 1
-  fi
-  installer=$(mktemp)
-  trap 'rm -f "$installer"' EXIT
-  curl -fSL "https://raw.githubusercontent.com/srcfl/ftw/${tag}/scripts/install.sh" -o "$installer"
-  bash "$installer" --fresh-host --tag "$tag"
-)
+curl -fsSL https://ftw.energy/install.sh | bash -s -- --fresh-host
 ```
 
-Installern kontrollerar nedladdningen, skapar användaren `ftw` och startar
-tjänsten `ftw`. Om den visar ett fel: stanna där. Prova inte ett annat sätt
-att installera. Leta upp felet i
-[feltabellen](update-sv.md#om-du-redan-har-fått-ett-fel) eller fråga i
-[Discord](https://discord.gg/25xcBzQaux).
+Installern tar den nyaste stabila versionen, eller den nyaste betan så länge
+ingen stabil finns, och säger vilken. Den kontrollerar nedladdningen, skapar
+användaren `ftw` och startar tjänsten `ftw`. Frågar sudo efter ett lösenord,
+skriv ditt eget. Sist skriver den ut adresserna att öppna, till exempel:
 
-**3. Öppna installationssidan.** Öppna `http://<värd>:8080/setup` i en
-webbläsare på samma nätverk. `<värd>` är datorns adress, till exempel
-`http://ftw.local:8080/setup` om du gav den namnet `ftw`.
+```text
+  http://192.168.1.23:8080/setup
+  http://ftw.local:8080/setup
+```
+
+Öppna en av dem i en webbläsare på samma nätverk.
+
+Om den stannar med ett fel: stanna där. Prova inte ett annat sätt att
+installera. Leta upp felet i
+[feltabellen](update-sv.md#om-du-redan-har-fått-ett-fel) eller fråga i
+[Discord](https://discord.gg/25xcBzQaux). Avbröts installationen säger
+installern att du ska köra samma rad med `--resume`.
+
+Vill du prova betor, lägg till `--beta` sist på raden. För en exakt version,
+lägg till `--tag` och dess namn från
+[Releases](https://github.com/srcfl/ftw/releases). Kör du Docker själv? Använd
+[Docker](../native-beta.md#docker) i stället.
 
 ## Ställ in ditt hem
 
 ![Första sidan i installationsguiden](../images/setup-wizard.png)
 
-Välj **Get started**. Guiden frågar efter grunderna om ditt hem, letar efter
-enheter på nätverket och hjälper dig att välja och ställa in var och en.
-Kontrollera sammanfattningen och spara.
+Välj **Get started**. Guiden frågar efter:
+
+- **Ditt hem:** land, elområde och huvudsäkringen i ditt elnätsavtal, till
+  exempel 16, 20 eller 25 A.
+- **Dina enheter:** den letar efter dem på nätverket. Välj var och en och lägg
+  till den.
+- **Ett huslösenord:** andra enheter på ditt Wi-Fi behöver det för att ändra
+  inställningar. Värdena just nu syns utan det. I Home Assistant gör dess
+  inloggning det jobbet, så guiden hoppar över steget.
+
+Kontrollera sammanfattningen och välj **Start FTW**. Översikten öppnas. Den här
+visar simulerade enheter:
+
+![Översikten: effekten just nu mellan sol, batteri, hem och nät](../images/dashboard.png)
 
 Ge FTW-datorn en fast adress i routern (en DHCP-reservation), så att dina
-enheter fortsätter att hitta den.
-
-Efter inställningen kommer du till instrumentpanelen. Den här visar simulerade
-enheter:
-
-![Instrumentpanelen: effekten just nu mellan sol, batteri, hem och nät](../images/dashboard.png)
+enheter och appen fortsätter att hitta den.
 
 ## Sedan
 
-- **Telefon:** hämta [iPhone-betan](https://testflight.apple.com/join/E4Japad7)
-  och [parkoppla den med din box](../pairing.md), eller prova
-  [webappen](https://app.ftw.energy). Båda når boxen genom en krypterad
-  session; tappas den länken fortsätter den lokala styrningen.
+- **Telefon:** hämta [FTW Energy för iPhone](https://apps.apple.com/app/ftw-energy/id6822024949)
+  och [parkoppla den med din box](../pairing.md). Android kommer. Med
+  [webappen](https://app.ftw.energy) går det i vilken webbläsare som helst.
 - **AI-assistent:** [koppla Claude, ChatGPT eller en annan assistent](https://ftw.energy/#ai).
+- **Home Assistant-entiteter:** FTW publicerar sina värden över
+  [MQTT](../ha-integration.md).
 - **Uppdateringar:** Home Assistant visar dem under **Inställningar →
-  Uppdateringar**. På en Pi eller Linux-dator, se
+  Uppdateringar**. På en Linux-dator, öppna **More → Version → Update FTW**,
+  eller kör `ftw update`. Se
   [Uppdatera när du redan kör nya FTW](update-sv.md#uppdatera-när-du-redan-kör-nya-ftw).
 - **Backup:** se [Full backup och säker återställning](../backup-and-restore.md).
 - **Hjälp:** fråga i [Discord](https://discord.gg/25xcBzQaux), eller öppna ett
