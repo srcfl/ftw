@@ -235,7 +235,7 @@ import {
     // Right after a start the control loop takes the new plan on its next
     // tick, so a stale mark then is seconds old; look again soon for both.
     const settling = !hasPlan() ||
-      (isStarting() && ((state.status && state.status.plan_stale) || !learningSettled));
+      (isEarly() && ((state.status && state.status.plan_stale) || !learningSettled));
     if (state.enabled.mpc && settling) watchForFirstPlan();
     else firstPlanSince = 0;
   }
@@ -270,7 +270,7 @@ import {
     ['cold_start', 'learning', 'ready'].includes(model.learning && model.learning.status));
   async function refreshLearning() {
     if (Date.now() < learningNextAt) return;
-    learningNextAt = Date.now() + (isStarting() ? FIRST_PLAN_REFRESH_MS : LEARNING_RETRY_MS);
+    learningNextAt = Date.now() + (isEarly() ? FIRST_PLAN_REFRESH_MS : LEARNING_RETRY_MS);
     const read = (path) => apiFetch(path).then(r => r.ok ? r.json() : null).catch(() => null);
     const [pv, load] = await Promise.all([read('/api/pvmodel'), read('/api/loadmodel')]);
     state.learning = forecastStillLearning(pv, load);
@@ -360,6 +360,13 @@ import {
     setText('plan-next-time', brief.next.time);
     setText('plan-main-reason', brief.reason);
     setText('plan-constraint', brief.constraint);
+    // No reason, no Why row; and no row at all when nothing limits the plan.
+    const reasonEl = document.getElementById('plan-main-reason');
+    if (reasonEl && reasonEl.parentElement) {
+      reasonEl.parentElement.hidden = !brief.reason;
+      const row = reasonEl.parentElement.parentElement;
+      if (row) row.hidden = !brief.reason && !brief.constraint && !brief.warningDetails;
+    }
     renderPlanWarningDetails(brief);
     setText('plan-forecast-state', brief.forecast.label);
     setText('plan-forecast-detail', brief.forecast.detail);
@@ -1524,6 +1531,13 @@ import {
   function isStarting() {
     return startedAt > 0 && Date.now() - startedAt < STARTING_MS;
   }
+  // The first minutes on this page, or after a start from it. A new box
+  // that started its planner by itself is often opened in this time, so the
+  // card looks again soon for the plan to be taken and the learning stage.
+  const pageLoadedAt = Date.now();
+  function isEarly() {
+    return isStarting() || Date.now() - pageLoadedAt < STARTING_MS;
+  }
   function cardMode() {
     return state.mode || (state.status && state.status.mode) || '';
   }
@@ -1568,7 +1582,7 @@ import {
     if (usePlan) {
       usePlan.disabled = useBusy || !view.useEnabled;
       usePlan.title = view.useEnabled
-        ? 'Hand the battery to the plan'
+        ? 'Hand the house to the plan'
         : unavailablePlannerCopy(state.enabled && state.enabled.mpcReason).detail;
     }
     showStrategyBox();

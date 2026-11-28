@@ -212,6 +212,28 @@ describe("plan brief normalization", () => {
     assert.equal(kept.warningDetails, "");
   });
 
+  it("does not warn about the missing margin while FTW still learns the home", () => {
+    // A first plan on a new box: caution takes its margin from priors and
+    // its alternative fails replay, so the box runs the valid point plan.
+    const caution = "Forecast caution could not retain the point plan's limits and departure goals; using the point forecast: forecast caution requires extra house load to obey site policy: slot 8 violates mode passive_arbitrage: baseline_grid_w=1720.5 grid_w=-204.5 battery_w=-1925";
+    const charger = 'Charger "Easee": charging steps above the 11000 W limit were reduced to 11000 W.';
+    const brief = derivePlanBrief({
+      enabled: true,
+      plan: { actions: [slot(-7)], caution_off: true, solver: {} },
+      planning: { warnings: [caution, charger] },
+      status: { mode: "planner_passive_arbitrage" },
+      learning: true,
+      now,
+    });
+    assert.equal(brief.state.key, "active");
+    assert.equal(brief.forecast.label, "Published prices");
+    assert.doesNotMatch(brief.forecast.detail, /extra margin/);
+    assert.equal(brief.forecast.learning, "FTW learns your home over the first days.");
+    assert.doesNotMatch(brief.constraint, /margin|Forecast caution|baseline_grid_w/);
+    assert.match(brief.constraint, /Easee.*11000 W/);
+    assert.equal(brief.warningDetails, "");
+  });
+
   it("keeps charger limits and live safety adjustments visible beside forecast details", () => {
     const caution = "Forecast caution could not retain the point plan's limits and departure goals; using the point forecast: slot 2 violates mode passive_arbitrage: baseline_grid_w=1250.331892180 grid_w=-437.616126263 battery_w=-1687.948054443";
     const charger = 'Charger "Easee": charging steps above the 11000 W limit were reduced to 11000 W.';
@@ -481,6 +503,13 @@ describe("plan brief for a home without a battery", () => {
     assert.equal(brief.next.action, "No change planned");
     assert.equal(brief.soc, null);
     assert.equal(batteryPresent({ drivers: { p1: { meter_w: 850 } } }, plan), false);
+  });
+
+  it("has no reason to give for a quiet step, and no battery to blame", () => {
+    const brief = derivePlanBrief({ enabled: true, plan, now, status: { mode: "planner_passive_arbitrage" } });
+    assert.equal(brief.reason, "");
+    const off = derivePlanBrief({ enabled: false, unavailableReason: "planner-disabled", now, status: { mode: "self_consumption" } });
+    assert.doesNotMatch(off.reason, /battery/);
   });
 
   it("keeps the battery when one reports, whatever the plan says", () => {

@@ -181,7 +181,7 @@ function manualBrief(status, hasBattery) {
       action: "Manual control is active",
       time: "Use the plan to create a schedule",
     },
-    reason: "Planning is not controlling the battery",
+    reason: hasBattery ? "Planning is not controlling the battery" : "The planner is off",
     constraint: "FTW safety limits still apply to manual control",
     forecast: {
       label: "No plan forecast",
@@ -316,8 +316,17 @@ export function derivePlanBrief({
   const stale = Boolean(status.plan_stale) && !taking;
   // The household asked for forecast caution and this plan uses the point
   // forecast instead. The planning warnings say why.
-  const cautionOff = Boolean(plan.caution_off);
-  const cautionWarnings = cautionOff
+  //
+  // While the box still learns the home it has no measured forecast errors,
+  // so caution takes its margin from wide priors. On a first plan the
+  // cautious alternative then often fails replay (it covers load that the
+  // point forecast does not expect with battery energy that would be sold),
+  // and the box keeps the valid point plan. That is no fault of the plan
+  // that runs, and the learning line already says the forecast is new, so
+  // the card does not raise it as a warning then.
+  const cautionQuiet = Boolean(plan.caution_off) && learning;
+  const cautionOff = Boolean(plan.caution_off) && !cautionQuiet;
+  const cautionWarnings = plan.caution_off
     ? warningList.filter((warning) => /^Forecast caution\b/.test(warning))
     : [];
   const visibleWarnings = warningList.filter((warning) => !cautionWarnings.includes(warning)).join(' ');
@@ -425,9 +434,12 @@ export function derivePlanBrief({
               : `At ${formatClock(next.slot_start_ms)}`
             : "No action inside the current horizon",
         },
-    reason: offPlan ? [offPlan.why, offPlan.then].filter(Boolean).join(" ") : readableReason(next && next.reason),
+    // A home without a battery has nothing to explain about a quiet step.
+    reason: offPlan
+      ? [offPlan.why, offPlan.then].filter(Boolean).join(" ")
+      : (!hasBattery && next && !meaningful(next) ? "" : readableReason(next && next.reason)),
     constraint,
-    warningDetails: cautionWarnings.join('\n\n'),
+    warningDetails: cautionOff ? cautionWarnings.join('\n\n') : '',
     forecast,
     soc,
     planner: {

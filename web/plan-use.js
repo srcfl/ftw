@@ -23,18 +23,20 @@ function isPlannerMode(mode) {
 //            on in Settings and starts at the next restart
 //   hasPlan     a plan with steps exists
 //   hasBattery  the home has a battery the plan can use
-// Choices about a plan wait for the first plan; selling from the battery is
-// no question for a home without one. Manual modes stay in reach when one
-// other than the default drives, so its button is on screen.
+// Choices about a plan wait for the first plan. The planning style, battery
+// export and manual modes are all about a battery, so a home without one
+// gets none of them. A manual mode other than the default stays in reach
+// while it drives, so its button is on screen.
 export function planCardView({ mode = "", running = false, reason = "", hasPlan = false, hasBattery = true } = {}) {
   const plannerMode = isPlannerMode(mode);
   const canStart = running || !BLOCKED.has(reason);
+  const chosenManual = Boolean(mode) && !plannerMode && mode !== "self_consumption";
   return {
     useVisible: Boolean(mode) && (!plannerMode || (!running && canStart)),
     useEnabled: canStart,
-    styleVisible: hasPlan,
+    styleVisible: hasPlan && hasBattery,
     exportVisible: hasPlan && hasBattery,
-    manualVisible: hasPlan || (Boolean(mode) && !plannerMode && mode !== "self_consumption"),
+    manualVisible: (hasPlan && hasBattery) || chosenManual,
   };
 }
 

@@ -66,10 +66,13 @@ describe("Plan card view", () => {
     assert.equal(planned.manualVisible, true);
   });
 
-  it("does not ask a home without a battery whether the battery may sell", () => {
+  it("offers a home without a battery no battery choices", () => {
     const view = planCardView({ mode: "planner_passive_arbitrage", running: true, hasPlan: true, hasBattery: false });
+    assert.equal(view.styleVisible, false);
     assert.equal(view.exportVisible, false);
-    assert.equal(view.styleVisible, true);
+    assert.equal(view.manualVisible, false);
+    // A manual mode someone picked still shows, so it can be changed back.
+    assert.equal(planCardView({ mode: "idle", hasPlan: true, hasBattery: false }).manualVisible, true);
   });
 
   it("keeps a chosen manual mode's buttons in reach", () => {

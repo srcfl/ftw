@@ -1499,7 +1499,8 @@ body.ftw-app .plan-use-status.is-error {
 }
 /* The card hides what does not apply yet (plan-use.js planCardView). Rows
    here set their own display, which would otherwise win over [hidden]. */
-body.ftw-app .plan-strategy [hidden] {
+body.ftw-app .plan-strategy [hidden],
+body.ftw-app .plan-now [hidden] {
   display: none;
 }
 body.ftw-app .engine-details {
