@@ -29,6 +29,10 @@ Choose one way to connect:
 The page also shows the box address beside the QR: the address this page
 uses.
 
+Inside the Home Assistant app, the page offers the QR and the pairing link
+only. Both go through FTW Cloud. The box address and the short code need
+the box's own port, which Home Assistant keeps closed.
+
 The pairing buttons work while the app link runs, which it does on a new
 box. If the page shows **Let the FTW app connect to this box**, the link is
 off: turn it on, choose **Save and restart FTW** and wait for the page to

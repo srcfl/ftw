@@ -92,7 +92,7 @@ const IDS = [
 // /api/cloud, which has nothing to accept.
 const POLICY = { cloud_scopes: ["live.read", "history.read"], cloud_policy: "ftw-cloud-2026-10-v3" };
 
-function load({ devices = [], pairing = null, spoken = null, refuse = null, saveConfig = async () => ({ restart_required: false }), confirmRestart = true, resume = false, shellRestart = false, cloud = null, grant = null, saved = true, running = true } = {}) {
+function load({ devices = [], pairing = null, spoken = null, refuse = null, saveConfig = async () => ({ restart_required: false }), confirmRestart = true, resume = false, shellRestart = false, cloud = null, grant = null, saved = true, running = true, ha = false } = {}) {
   const byId = new Map();
   for (const id of IDS) {
     byId.set(id, element(id.startsWith("app-link-devices") || id.endsWith("slot") ? "div" : "button"));
@@ -168,6 +168,9 @@ function load({ devices = [], pairing = null, spoken = null, refuse = null, save
     String,
     console,
   };
+  // home-assistant.js sets this flag on pages Core serves through Home
+  // Assistant's ingress.
+  if (ha) sandbox.window.FTWHomeAssistant = true;
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(source, sandbox);
@@ -743,5 +746,42 @@ describe("the app link switch", () => {
     const stopping = load({ saved: false, running: true });
     await settle();
     assert.equal(stopping.el("app-link-switch").hidden, false);
+  });
+});
+
+// Inside Home Assistant the page's origin is Home Assistant's ingress URL
+// and the box's own port is closed. An address there would point nowhere,
+// and a short code is traded at that address, so both stay off the page.
+// The QR and the link go through FTW Cloud and work in both places.
+describe("pairing inside Home Assistant", () => {
+  const qr = { url: "https://app.ftw.energy/p#v3.a.b.c.d.e", expires_at_ms: Date.now() + 600000 };
+
+  it("shows the QR and link without an address or a short code", async () => {
+    const { el, html } = load({ ha: true, pairing: qr });
+    await settle();
+    assert.match(html, /id="app-link-code" disabled hidden>/, "the short-code button is offered in Home Assistant");
+    assert.doesNotMatch(html, /choose Use a pairing code/);
+
+    el("app-link-pair").click();
+    await settle();
+    const slot = el("app-link-slot");
+    assert.doesNotMatch(slot.words(), /Box address/, "an address that cannot work from Home Assistant");
+    const labels = slot.buttons().map((b) => b.textContent);
+    assert.ok(!labels.some((l) => /read a code out/i.test(l)), `a short code is offered: ${labels.join(", ")}`);
+    assert.ok(labels.includes("Copy pairing link"), "the link is missing");
+    assert.ok(slot.children.some((c) => c.tagName === "a" && c.href === qr.url), "the open link is missing");
+  });
+
+  it("keeps the address and the short code outside Home Assistant", async () => {
+    const { el, html } = load({ pairing: qr });
+    await settle();
+    assert.match(html, /id="app-link-code" disabled>/);
+    assert.match(html, /choose Use a pairing code/);
+
+    el("app-link-pair").click();
+    await settle();
+    const slot = el("app-link-slot");
+    assert.match(slot.words(), /Box address: http:\/\/ftw\.local:8080/);
+    assert.ok(slot.buttons().some((b) => /read a code out/i.test(b.textContent)));
   });
 });

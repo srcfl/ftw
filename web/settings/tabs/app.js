@@ -370,7 +370,17 @@
   // The address the app asks for beside a pairing code: this page's own,
   // which demonstrably works from inside the house. The QR carries it too,
   // so it is shown there as well, and nobody has to look in the router.
+  //
+  // Not inside Home Assistant: there the page's origin is Home Assistant's
+  // ingress URL, and the box's own port is closed, so neither that address
+  // nor a short code (which the app trades at that address) can work. The
+  // QR and the link go through FTW Cloud and work there as anywhere.
+  function inHomeAssistant() {
+    return !!window.FTWHomeAssistant;
+  }
+
   function boxAddress() {
+    if (inHomeAssistant()) return "";
     return (window.location && window.location.origin) || "";
   }
 
@@ -424,7 +434,7 @@
       slot.appendChild(open);
       copyButton(slot, "Copy pairing link", pairing.url);
     }
-    slot.appendChild(spokenFallback(pairing.role));
+    if (!inHomeAssistant()) slot.appendChild(spokenFallback(pairing.role));
 
     // Loaded on demand: this tab is opened once per phone, and every other
     // page would otherwise carry the encoder for nothing.
@@ -441,7 +451,9 @@
       .catch(function () {
         var err = document.createElement("p");
         err.className = "hint app-link-error";
-        err.textContent = "Could not draw the code here — read one out instead.";
+        err.textContent = inHomeAssistant()
+          ? "Could not draw the code here. Open or copy the pairing link instead."
+          : "Could not draw the code here — read one out instead.";
         picture.appendChild(err);
         if (slot.scrollIntoView) slot.scrollIntoView({ block: "nearest" });
       });
@@ -600,6 +612,7 @@
     render: function (ctx) {
       if (!ctx.config.app_link) ctx.config.app_link = { enabled: true };
       var enabled = !!ctx.config.app_link.enabled;
+      var ha = inHomeAssistant();
       pairingCtx = ctx;
 
       // Wired after this string becomes the DOM.
@@ -658,7 +671,7 @@
         '<div id="app-link-devices"></div>' +
         '<div class="app-link-actions">' +
         '<button type="button" class="btn-ghost" id="app-link-pair" disabled>Show pairing code</button>' +
-        '<button type="button" class="btn-ghost" id="app-link-code" disabled>Use a pairing code</button>' +
+        '<button type="button" class="btn-ghost" id="app-link-code" disabled' + (ha ? " hidden" : "") + ">Use a pairing code</button>" +
         '<button type="button" class="btn-ghost" id="app-link-share" hidden>Let someone see this home</button>' +
         "</div>" +
         '<p id="app-link-terms" class="hint" hidden>The app reaches this box through FTW Cloud, ' +
@@ -676,9 +689,10 @@
         "once and expires in a few minutes, so ask for a new one when you need it. " +
         "Everything the app needs is in the code itself, which is why the app can " +
         "be sure it is talking to this box.</p>" +
-        '<p class="hint">Only one phone? Open the pairing link on this phone, ' +
-        "or choose Use a pairing code and enter it in the FTW app while on your home Wi-Fi. " +
-        "If you set a house password, the app asks for it too. You can also choose a screenshot " +
+        '<p class="hint">Only one phone? Open the pairing link on this phone' +
+        (ha ? ". " : ", or choose Use a pairing code and enter it in the FTW app while on your home Wi-Fi. " +
+          "If you set a house password, the app asks for it too. ") +
+        "You can also choose a screenshot " +
         "of the QR in the FTW app. Only one code works at a time; making a new code cancels the last one.</p>" +
         '<p id="app-link-off-row" class="app-link-off" hidden>' +
         '<button type="button" class="btn-link" id="app-link-off">Turn off the app link…</button>' +
