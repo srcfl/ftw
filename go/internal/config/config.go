@@ -33,6 +33,7 @@ type Config struct {
 	Price            *Price             `yaml:"price,omitempty" json:"price,omitempty"`
 	Weather          *Weather           `yaml:"weather,omitempty" json:"weather,omitempty"`
 	Planner          *Planner           `yaml:"planner,omitempty" json:"planner,omitempty"`
+	Heat             *Heat              `yaml:"heat,omitempty" json:"heat,omitempty"`
 	Batteries        map[string]Battery `yaml:"batteries,omitempty" json:"batteries,omitempty"`
 	EVCharger        *EVCharger         `yaml:"ev_charger,omitempty" json:"ev_charger,omitempty"`
 	Loadpoints       []Loadpoint        `yaml:"loadpoints,omitempty" json:"loadpoints,omitempty"`
@@ -1970,6 +1971,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if err := c.FleetPing.Validate(); err != nil {
+		return err
+	}
+	if err := c.Heat.Validate(); err != nil {
 		return err
 	}
 	if err := c.validateModbusProxy(); err != nil {

@@ -424,6 +424,29 @@ Fredrik answered on comfort that follows the day's price on 15 November 2026:
   the day's mean against the owner's fixed levels. Whether a longer
   reference, such as the month, serves better is open until it has run in
   more than one house.
+- **A least saving, as the owner's own number.** Decision 9 did not take
+  one, on the evidence that in the one house that ran it the plans saved
+  0.1–4.9 kr a day against a limit of 5 kr and the limit never opened. That
+  figure was one room's saving read against a limit that is the household's.
+  Summed over the three rooms, as the limit is, the same house's log reached
+  5 kr on 15 and 16 November and held it open for 84 % and 41 % of the
+  time. Part of that was a room model that overstated what a preheat saves;
+  with the model corrected the sum is 2–4 kr a day and the limit is mostly
+  closed, which is the effect decision 9 describes. The question left is what
+  the limit is for. Proposed: not a switch that turns the planner off, but the
+  owner's own answer to "what must a day's saving be worth to me before I
+  accept a change of comfort or a write to my devices". It is off at zero,
+  has no default, and the shadow run's saving per day is what the owner sets
+  it against. `heatplan.SavingsGate` carries the rule so the owner's number
+  has somewhere to go if the decision is revisited; nothing calls it yet.
+- **Sitting out a short price peak.** The same house keeps a second rule of
+  its own: a slot is a peak when it costs at least 200 öre and three times
+  the lowest price of the next 12 hours, and a zone may sit at the bottom of
+  its band for at most 3 hours of one. On a dear but flat day nothing is a
+  peak and the rule does nothing, which is why it cannot replace the
+  planner. `heatplan.PeakRelief` carries it as the owner's numbers, with no
+  default, applied to a zone's target after `PriceComfort`; the band is not
+  moved.
 - **Holding off a reheat needs a control.** Many heat pumps start a
   hot-water charge by themselves at their own start temperature. The planner
   can only delay a reheat on a device whose driver declares a control that
